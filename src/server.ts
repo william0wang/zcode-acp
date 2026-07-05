@@ -43,6 +43,8 @@ export class ZcodeAcpServer {
   clientCapabilities: ClientCapabilities = {};
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
+  /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
+  readonly lastMode = new Map<string, string>();
   /** Per-session ProjectionDiffers (persists across turns). */
   readonly differs = new Map<
     string,

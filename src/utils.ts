@@ -30,14 +30,34 @@ export const ZCODE_CREDS_PATH = path.join(
  * that the server forwards when the user types the command.
  */
 export const SLASH_COMMANDS = [
-  { name: "/compact", description: "Compact conversation history" },
-  { name: "/goal", description: "Set or show the session goal" },
-  { name: "/fork", description: "Fork the session at the latest checkpoint" },
-  { name: "/rewind", description: "Rewind to a checkpoint" },
-  { name: "/steer", description: "Inject steering context mid-turn" },
-  { name: "/model", description: "Switch the active model" },
-  { name: "/mode", description: "Switch the session mode (plan/build/edit/yolo)" },
-  { name: "/thought", description: "Set the thought level (max/high/nothink)" },
+  { name: "compact", description: "Compress conversation context (free up tokens)" },
+  {
+    name: "goal",
+    description: "Set or show the session goal",
+    input: { hint: "goal description" },
+  },
+  { name: "fork", description: "Fork the session at the latest checkpoint" },
+  { name: "rewind", description: "Rewind workspace files to the latest checkpoint" },
+  {
+    name: "steer",
+    description: "Append an instruction to a running turn",
+    input: { hint: "content" },
+  },
+  {
+    name: "mode",
+    description: "Switch permission mode (plan/build/edit/yolo)",
+    input: { hint: "plan|build|edit|yolo" },
+  },
+  {
+    name: "model",
+    description: "Switch the session model",
+    input: { hint: "GLM-5.2|GLM-5-Turbo" },
+  },
+  {
+    name: "thought",
+    description: "Set the reasoning effort",
+    input: { hint: "max|high|nothink" },
+  },
 ] as const;
 
 /** Static metadata for the configOptions selects (model/mode/thought). */

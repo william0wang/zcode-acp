@@ -35,15 +35,29 @@ export function sendTextChunk(
   });
 }
 
+/** Shape of a slash command entry (matches ACP's AvailableCommand). */
+interface SlashCommandEntry {
+  name: string;
+  description: string;
+  input?: { hint: string };
+}
+
 /** Send an `available_commands_update` notification listing our slash commands. */
 export function sendAvailableCommands(
   cx: acp.AgentContext,
   sessionId: string,
-  commands: ReadonlyArray<{ name: string; description: string }>,
+  commands: ReadonlyArray<SlashCommandEntry>,
 ): Promise<void> {
   return sendSessionUpdate(cx, sessionId, {
     sessionUpdate: "available_commands_update",
-    availableCommands: commands.map((c) => ({ name: c.name, description: c.description })),
+    availableCommands: commands.map((c) => {
+      const out: { name: string; description: string; input?: { hint: string } } = {
+        name: c.name,
+        description: c.description,
+      };
+      if (c.input) out.input = c.input;
+      return out;
+    }),
   });
 }
 
@@ -57,7 +71,7 @@ export function sendAvailableCommands(
 export function sendAvailableCommandsDeferred(
   cx: acp.AgentContext,
   sessionId: string,
-  commands: ReadonlyArray<{ name: string; description: string }>,
+  commands: ReadonlyArray<SlashCommandEntry>,
 ): void {
   const t = setTimeout(() => {
     void sendAvailableCommands(cx, sessionId, commands);

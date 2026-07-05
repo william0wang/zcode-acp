@@ -53,6 +53,8 @@ export class ZcodeBackend {
   private readonly serverRequests: ServerRequest[] = [];
   private readonly listeners = new Map<string, EventListener>();
   private readerDead = false;
+  /** Watchdog process that kills the zcode group if this bridge dies (SIGKILL). */
+  private watchdog: ChildProcess | null = null;
 
   constructor(argv: string[], env: NodeJS.ProcessEnv) {
     this.proc = spawn(argv[0]!, argv.slice(1), {
@@ -61,7 +63,53 @@ export class ZcodeBackend {
       detached: true, // own process group → kill(-pid) reaps the whole tree
     });
     this.startReader();
+    this.startWatchdog();
     log(`backend: started zcode app-server (pid=${this.proc.pid})`);
+  }
+
+  /**
+   * Spawn a tiny detached watchdog that kills the zcode process group if this
+   * bridge process disappears.
+   *
+   * The detached/kill(-pid) cleanup in `close()` only runs when the bridge
+   * exits cleanly enough for the signal handlers to fire (SIGTERM/SIGINT/etc).
+   * If the bridge is SIGKILLed (Zed force-kill on reconnect, crash, OOM), the
+   * handler never runs and the zcode subprocess group is orphaned. The
+   * watchdog closes that gap: it polls the bridge pid every 2s and, once the
+   * bridge is gone, sends SIGKILL to the zcode process group, then exits.
+   *
+   * The watchdog is its own process-group leader (detached) and `unref`'d, so
+   * it never holds the event loop open and is not part of the zcode group it
+   * kills. It self-terminates as soon as the zcode process exits, so a normal
+   * shutdown leaves no lingering watchdog.
+   */
+  private startWatchdog(): void {
+    const bridgePid = process.pid;
+    const zcodePid = this.proc.pid;
+    if (!bridgePid || !zcodePid) return;
+    // Inline script: poll bridge liveness, kill zcode group on bridge death.
+    const script = `
+      const bridgePid = ${bridgePid};
+      const zcodePid = ${zcodePid};
+      const tick = () => {
+        // Bridge gone? → reap the whole zcode process group, then exit.
+        try { process.kill(bridgePid, 0); }
+        catch {
+          try { process.kill(-zcodePid, 'SIGKILL'); } catch {}
+          process.exit(0);
+        }
+        // zcode already exited? → watchdog has no job left.
+        try { process.kill(-zcodePid, 0); }
+        catch { process.exit(0); }
+      };
+      setInterval(tick, 2000);
+      tick();
+    `;
+    this.watchdog = spawn(process.execPath, ["-e", script], {
+      stdio: "ignore",
+      detached: true, // own process group, not part of the zcode group
+    });
+    this.watchdog.unref();
   }
 
   // ---------- read loop ----------
@@ -246,28 +294,48 @@ export class ZcodeBackend {
   async close(): Promise<void> {
     const proc = this.proc;
     if (!proc.pid) return;
-    // Already exited?
-    if (proc.exitCode !== null || proc.signalCode) return;
     try {
-      process.kill(-proc.pid, "SIGTERM");
-    } catch {
-      return; // group already gone
+      // Already exited?
+      if (proc.exitCode !== null || proc.signalCode) return;
+      try {
+        process.kill(-proc.pid, "SIGTERM");
+      } catch {
+        return; // group already gone
+      }
+      // Wait up to 3s for a clean exit.
+      const exited = await new Promise<boolean>((resolve) => {
+        const done = () => resolve(true);
+        proc.once("exit", done);
+        setTimeout(() => {
+          proc.removeListener("exit", done);
+          resolve(false);
+        }, 3000);
+      });
+      if (exited) return;
+      // Still alive → SIGKILL the whole group.
+      try {
+        if (proc.pid && proc.exitCode === null) process.kill(-proc.pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    } finally {
+      // Stop the watchdog — it would self-exit on its next tick once the zcode
+      // group is gone, but killing it here avoids the up-to-2s delay.
+      this.killWatchdog();
     }
-    // Wait up to 3s for a clean exit.
-    const exited = await new Promise<boolean>((resolve) => {
-      const done = () => resolve(true);
-      proc.once("exit", done);
-      setTimeout(() => {
-        proc.removeListener("exit", done);
-        resolve(false);
-      }, 3000);
-    });
-    if (exited) return;
-    // Still alive → SIGKILL the whole group.
-    try {
-      if (proc.pid && proc.exitCode === null) process.kill(-proc.pid, "SIGKILL");
-    } catch {
-      // already gone
+  }
+
+  /** Terminate the watchdog process if it is still running. */
+  private killWatchdog(): void {
+    const wd = this.watchdog;
+    if (!wd) return;
+    this.watchdog = null;
+    if (wd.pid && wd.exitCode === null) {
+      try {
+        process.kill(wd.pid, "SIGTERM");
+      } catch {
+        // already gone
+      }
     }
   }
 
