@@ -85,9 +85,11 @@ export async function newSession(
     traceId: session.traceId,
   });
 
+  const modes = await buildModes(server, sid);
+  server.lastMode.set(sid, modes.currentModeId);
   return {
     sessionId: sid,
-    modes: await buildModes(server, sid),
+    modes,
     configOptions: await buildConfigOptions(server, sid),
   };
 }
@@ -145,8 +147,10 @@ export async function resumeSession(
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
+  const modes = await buildModes(server, targetSid);
+  server.lastMode.set(targetSid, modes.currentModeId);
   return {
-    modes: await buildModes(server, targetSid),
+    modes,
     configOptions: await buildConfigOptions(server, targetSid),
   };
 }
@@ -248,8 +252,10 @@ export async function loadSession(
   // Initial usage_update so the editor shows the context bar immediately.
   await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
 
+  const modes = await buildModes(server, targetSid);
+  server.lastMode.set(targetSid, modes.currentModeId);
   return {
-    modes: await buildModes(server, targetSid),
+    modes,
     configOptions: await buildConfigOptions(server, targetSid),
   };
 }
@@ -308,7 +314,12 @@ export async function prompt(
       { sessionId: zcodeSid, content: text },
       15000,
     );
-    if (sendResp.error) throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
+    if (sendResp.error) {
+      // send failed/timeout — but backend may have started the turn anyway.
+      // Stop it and probe to avoid leaking the prompt lock.
+      await ensureTurnStopped(server, zcodeSid);
+      throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
+    }
     const accepted = (sendResp.result ?? {}) as { accepted?: boolean };
     if (!accepted.accepted) throw new Error("zcode send not accepted");
 
@@ -388,6 +399,69 @@ export async function cancel(
     }
   }
   log(`session/cancel → ${zcodeSid}`);
+}
+
+/**
+ * Send `session/stop` and probe until the prompt lock is confirmed released.
+ *
+ * `session/stop` is fire-and-forget, but ZCode has a startup delay: when stop
+ * arrives before the turn truly holds the lock, the backend ignores it and the
+ * turn runs on, leaking the lock — the next `session/send` then fails with
+ * "A prompt is already running". Mirrors the `expectLock:true` strategy from
+ * `waitForTurnIdle` (extensions.ts) but adapted for the cancel path.
+ *
+ * Strategy:
+ *  1. send `session/stop`
+ *  2. poll `session/goal show`; first REQUIRE seeing "prompt is running" once
+ *     (proves the turn started), then wait for it to clear
+ *  3. if the grace window (8s) elapses without ever seeing the lock, the turn
+ *     never started (stop caught it in time) or already ended → treat as released
+ *  4. hard timeout 30s
+ *
+ * Best-effort: never throws (failures only log) so it can't break the cancel
+ * path. Returns true if released, false on timeout.
+ */
+async function ensureTurnStopped(server: ZcodeAcpServer, zcodeSid: string): Promise<boolean> {
+  const backend = server.ensureBackend();
+  backend.notify("session/stop", { sessionId: zcodeSid });
+  const t0 = Date.now();
+  const GRACE_MS = 8_000;
+  const HARD_TIMEOUT_MS = 30_000;
+  let lockSeen = false;
+  while (Date.now() - t0 < HARD_TIMEOUT_MS) {
+    const resp = await backend.request(
+      server.nextId(),
+      "session/goal",
+      { sessionId: zcodeSid, action: "show" },
+      10000,
+    );
+    const errMsg = resp.error?.message ?? "";
+    if (errMsg.includes("prompt is running")) {
+      lockSeen = true;
+      await sleep(2000);
+      continue;
+    }
+    if (errMsg.toLowerCase().includes("timeout")) {
+      await sleep(2000);
+      continue;
+    }
+    // Non-lock error or success.
+    if (lockSeen) {
+      log(`  [stop] prompt lock released`);
+      return true;
+    }
+    // Haven't seen the lock yet — give the turn a grace window to start.
+    if (Date.now() - t0 < GRACE_MS) {
+      await sleep(500);
+      continue;
+    }
+    // Grace window expired without ever seeing the lock: turn never started
+    // (stop caught it in time) or already ended. Safe to treat as released.
+    log(`  [stop] no lock observed within grace window, treating as released`);
+    return true;
+  }
+  log(`  [stop] lock wait timed out (30s), lock may still be held`);
+  return false;
 }
 
 // ---------- internals ----------
@@ -475,7 +549,7 @@ async function runEventTurn(
     }
 
     if (turn.cancelled) {
-      backend.notify("session/stop", { sessionId: turn.zcodeSid });
+      await ensureTurnStopped(server, turn.zcodeSid);
       return { stopReason: "cancelled" };
     }
 
@@ -497,7 +571,7 @@ async function runEventTurn(
               await sendTextChunk(cx, acpSid, reply, chunkMsgId);
             } else if (!emittedOutput) {
               // No text and no output → suspected failure.
-              backend.notify("session/stop", { sessionId: turn.zcodeSid });
+              await ensureTurnStopped(server, turn.zcodeSid);
               throw new RequestError(-32603, "turn produced no output");
             }
           }
@@ -516,6 +590,10 @@ async function runEventTurn(
     for (const iev of internalEvents) {
       if (iev.kind === "TextDelta") emittedText = true;
       if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
+      // Sync usage to the differ so the turn-completion diff doesn't re-emit a
+      // UsageDelta for the same value (the differ's lastUsage baseline is
+      // otherwise only set by its own diff / emitInitialUsage).
+      if (iev.kind === "UsageDelta") differ.setLastUsage(iev.used);
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
 
@@ -555,11 +633,11 @@ async function runEventTurn(
     if (translator.turnDone) {
       // Cancel signalled via turn.completed(resultType:"cancelled").
       if (translator.turnResultType === "cancelled") {
-        backend.notify("session/stop", { sessionId: turn.zcodeSid });
+        await ensureTurnStopped(server, turn.zcodeSid);
         return { stopReason: "cancelled" };
       }
       if (translator.turnFailed) {
-        backend.notify("session/stop", { sessionId: turn.zcodeSid });
+        await ensureTurnStopped(server, turn.zcodeSid);
         throw new RequestError(-32603, formatTurnError(translator.turnError));
       }
       // Fallback: if no text streamed, surface the last assistant reply.
@@ -568,20 +646,34 @@ async function runEventTurn(
         if (reply) await sendTextChunk(cx, acpSid, reply, chunkMsgId);
       }
       // Turn-completion diff: emits PlanUpdate (todos) + final usage_update,
-      // reconciles any snapshot-only events. Text/tools are deduped by
-      // seenMessageIds / markToolSeen so they aren't re-emitted.
+      // reconciles any snapshot-only tool events.
+      //
+      // TextDelta and ReasoningDelta are deliberately filtered out here: the
+      // event path already streamed the assistant reply and reasoning via
+      // model.streaming (chunkMsgId). The differ's seenMessageIds dedup cannot
+      // bridge the two paths because they use different id spaces — the
+      // streaming path uses a client-generated chunkMsgId while the differ
+      // keys on the backend's message info.id. Without this filter the whole
+      // reply and reasoning are dispatched a second time. `fetchLastReply`
+      // above already covers the case where the event path delivered no text.
       const snapshot = await buildSnapshot(server, turn.zcodeSid);
       const completionEvents = differ.diff(snapshot);
       for (const iev of completionEvents) {
-        if (iev.kind === "TextDelta") emittedText = true;
+        if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") continue;
         await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
+      // Mode reconciliation: an in-turn tool (EnterPlanMode/ExitPlanMode) can
+      // switch the session mode without the bridge intermediating, so no
+      // session/setMode notification fires. Re-read the authoritative mode and
+      // push current_mode_update + config_option_update when it changed since
+      // the last value advertised to the client.
+      await emitModeIfChanged(server, cx, acpSid, turn.zcodeSid);
       return { stopReason: "end_turn" };
     }
   }
 
   // 120s no progress: abandon.
-  backend.notify("session/stop", { sessionId: turn.zcodeSid });
+  await ensureTurnStopped(server, turn.zcodeSid);
   return { stopReason: "max_turn_requests" };
 }
 
@@ -653,6 +745,40 @@ async function buildSnapshot(server: ZcodeAcpServer, zcodeSid: string): Promise<
   };
   const todos = flattenTodos(read.todos, read.todoGroups);
   return { projection: read.projection, messages: msgs, todos };
+}
+
+/**
+ * Re-read the authoritative session mode and, if it changed since the last
+ * value advertised to the client, emit `current_mode_update` +
+ * `config_option_update`. Covers in-turn mode switches performed by internal
+ * tools (EnterPlanMode/ExitPlanMode) that bypass `session/setMode` and thus
+ * emit no notification of their own. Best-effort: failures are logged and
+ * swallowed so they never break the turn-completion path.
+ */
+async function emitModeIfChanged(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  try {
+    const modes = await buildModes(server, zcodeSid);
+    const last = server.lastMode.get(acpSid);
+    if (last === modes.currentModeId) return;
+    server.lastMode.set(acpSid, modes.currentModeId);
+    const options = await buildConfigOptions(server, zcodeSid);
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "config_option_update",
+      configOptions: options,
+    });
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: modes.currentModeId,
+    });
+    log(`session/prompt: mode changed → ${modes.currentModeId}`);
+  } catch (e) {
+    log(`emitModeIfChanged failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**

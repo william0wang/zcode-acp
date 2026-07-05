@@ -15,6 +15,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
+import { emitConfigOptionUpdate } from "../config/options.js";
 import { CONFIG_DISPATCH } from "../utils.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -97,6 +98,12 @@ export async function handleSlashCommand(
             15000,
           );
         if (resp.error) throw new RequestError(-32603, `${cmd} failed: ${resp.error.message}`);
+        // Notify the editor UI: emit config_option_update (+ current_mode_update
+        // for mode). Without this the dropdown / mode indicator never reflects
+        // the change — slash commands return end_turn and bypass the turn-
+        // completion reconciliation in prompt().
+        await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, cmd);
+        if (cmd === "mode") server.lastMode.set(acpSid, arg);
         return ok(`✓ ${cmd} = ${arg}`);
       }
       default:

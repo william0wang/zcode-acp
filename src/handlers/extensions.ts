@@ -264,6 +264,9 @@ export async function setMode(
     sessionUpdate: "current_mode_update",
     currentModeId: modes.currentModeId,
   });
+  // Record the advertised mode so the turn-completion reconciliation knows the
+  // client has already been told about this value.
+  server.lastMode.set(acpSid, modes.currentModeId);
   return (resp.result ?? {}) as Result;
 }
 
