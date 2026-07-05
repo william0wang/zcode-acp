@@ -47,26 +47,27 @@ node dist/index.js
 ```
 
 Then manually send an ACP JSON-RPC request:
+
 ```json
 { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": 1 } }
 ```
 
 ### Method 2: Connect via Zed
 
-Add the following to `~/.config/zed/settings.json`:
+Add the following to `~/.config/zed/settings.json` (see the README for the
+full `ZCODE_BIN` per-platform paths):
 
 ```json
 {
-  "acp": {
-    "agents": [
-      {
-        "name": "zcode",
-        "command": {
-          "path": "node",
-          "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"]
-        }
+  "agent_servers": {
+    "ZCode": {
+      "type": "custom",
+      "command": "node",
+      "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"],
+      "env": {
+        "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
       }
-    ]
+    }
   }
 }
 ```
@@ -78,15 +79,12 @@ Restart Zed and pick **ZCode** from the agent dropdown.
 See `tests/backend.test.ts` for how to mock `ZcodeBackend`:
 
 ```typescript
-import { describe, it, expect, vi } from 'vitest';
-import { ZcodeBackend } from '../src/backend/client.js';
+import { describe, it, expect, vi } from "vitest";
+import { ZcodeBackend } from "../src/backend/client.js";
 
-describe('backend', () => {
-  it('should handle request/response', async () => {
-    const backend = new ZcodeBackend(
-      ['node', 'mock-zcode.js'],
-      { ...process.env }
-    );
+describe("backend", () => {
+  it("should handle request/response", async () => {
+    const backend = new ZcodeBackend(["node", "mock-zcode.js"], { ...process.env });
     // test logic
   });
 });
@@ -144,12 +142,7 @@ export async function customAction(
   const zcodeSid = resolveSidOrThrow(server, params);
   const resp = await server
     .ensureBackend()
-    .request(
-      server.nextId(),
-      "session/customAction",
-      { sessionId: zcodeSid, ...params },
-      15000,
-    );
+    .request(server.nextId(), "session/customAction", { sessionId: zcodeSid, ...params }, 15000);
   if (resp.error) throw new Error(`customAction failed: ${resp.error.message}`);
   log("session/customAction -> ok");
   return (resp.result ?? {}) as Result;

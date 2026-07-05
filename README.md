@@ -35,35 +35,57 @@ The compiled entry point is `dist/index.js` (also exposed as the
 
 ## Configure Zed
 
-Add the server to Zed as an external agent. In `~/.config/zed/settings.json`:
+Add the server to Zed as a custom agent server. In `~/.config/zed/settings.json`
+(`%APPDATA%\Zed\settings.json` on Windows):
 
 ```jsonc
 {
-  "assistant": {
-    "entitled": true
+  "agent_servers": {
+    "ZCode": {
+      "type": "custom",
+      "command": "node",
+      "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"],
+      "env": {
+        // Point at the ZCode CLI bundled inside the desktop app (not on PATH by default).
+        // See the platform-specific path below.
+        "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      },
+    },
   },
-  "acp": {
-    "agents": [
-      {
-        "name": "zcode",
-        "command": { "path": "node", "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"] }
-      }
-    ]
-  }
 }
 ```
 
 Restart Zed and pick **ZCode** from the agent dropdown.
 
+### `ZCODE_BIN` per platform
+
+The ZCode CLI ships inside the desktop app and is not added to `PATH`
+automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
+
+| Platform    | `ZCODE_BIN` path                                                            |
+| ----------- | --------------------------------------------------------------------------- |
+| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`                  |
+| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`                     |
+| **Linux**   | Inside the extracted app directory: `<install-dir>/resources/glm/zcode.cjs` |
+
+> If the path doesn't match your install, locate it with:
+>
+> ```bash
+> # macOS / Linux
+> find / -name zcode.cjs -path '*resources/glm*' 2>/dev/null
+> # Windows (PowerShell)
+> Get-ChildItem -Path $env:LOCALAPPDATA,$env:APPDATA,'C:\Program Files' -Recurse -Filter zcode.cjs -ErrorAction SilentlyContinue
+> ```
+
 ## Environment variables
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `ZCODE_BIN` | `zcode` | Path to the ZCode CLI binary or its `.cjs` entry |
-| `ZCODE_NODE` | _(discovered)_ | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`) |
-| `ZCODE_MODEL` | _(from config)_ | Override the active model id |
-| `ZCODE_BASE_URL` | _(from config)_ | Override the provider base URL |
-| `ZCODE_ACP_DEBUG` | _(unset)_ | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
+| Variable          | Default         | Purpose                                                                                                                                                                                                                                                                                                      |
+| ----------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ZCODE_BIN`       | `zcode`         | Path to the ZCode CLI binary or its `.cjs` entry                                                                                                                                                                                                                                                             |
+| `ZCODE_NODE`      | _(discovered)_  | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`)                                                                                                                                                                                                                                    |
+| `ZCODE_MODEL`     | _(from config)_ | Override the active model id                                                                                                                                                                                                                                                                                 |
+| `ZCODE_BASE_URL`  | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                               |
+| `ZCODE_ACP_DEBUG` | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
 
 ## Develop
 
@@ -100,11 +122,11 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 
 ## Version Compatibility
 
-| ZCode CLI version | Support | Notes |
-|:-----------------:|:-------:|------|
-| **>= 0.15.0** | Full | All extension methods available |
-| **>= 0.14.8** | Full | Event-stream push, all extension methods |
-| **< 0.14.8** | Incompatible | Event-stream subscription unavailable |
+| ZCode CLI version |   Support    | Notes                                    |
+| :---------------: | :----------: | ---------------------------------------- |
+|   **>= 0.15.0**   |     Full     | All extension methods available          |
+|   **>= 0.14.8**   |     Full     | Event-stream push, all extension methods |
+|   **< 0.14.8**    | Incompatible | Event-stream subscription unavailable    |
 
 ## Documentation
 

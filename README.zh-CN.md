@@ -34,35 +34,57 @@ ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你
 
 ## 在 Zed 中配置
 
-将本服务端作为外部 agent 添加到 Zed。在 `~/.config/zed/settings.json` 中：
+将本服务端作为自定义 agent server 添加到 Zed。在 `~/.config/zed/settings.json`
+（Windows 上为 `%APPDATA%\Zed\settings.json`）中：
 
 ```jsonc
 {
-  "assistant": {
-    "entitled": true
+  "agent_servers": {
+    "ZCode": {
+      "type": "custom",
+      "command": "node",
+      "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"],
+      "env": {
+        // 指向桌面应用内置的 ZCode CLI（默认不在 PATH 上）。
+        // 各平台路径见下方表格。
+        "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+      },
+    },
   },
-  "acp": {
-    "agents": [
-      {
-        "name": "zcode",
-        "command": { "path": "node", "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"] }
-      }
-    ]
-  }
 }
 ```
 
 重启 Zed，然后从 agent 下拉菜单中选择 **ZCode**。
 
+### 各平台的 `ZCODE_BIN` 路径
+
+ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN` 指向内置的
+`zcode.cjs`：
+
+| 平台        | `ZCODE_BIN` 路径                                           |
+| ----------- | ---------------------------------------------------------- |
+| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` |
+| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`    |
+| **Linux**   | 解压后的应用目录内：`<安装目录>/resources/glm/zcode.cjs`   |
+
+> 如果路径与实际安装不符，可用以下命令定位：
+>
+> ```bash
+> # macOS / Linux
+> find / -name zcode.cjs -path '*resources/glm*' 2>/dev/null
+> # Windows (PowerShell)
+> Get-ChildItem -Path $env:LOCALAPPDATA,$env:APPDATA,'C:\Program Files' -Recurse -Filter zcode.cjs -ErrorAction SilentlyContinue
+> ```
+
 ## 环境变量
 
-| 变量 | 默认值 | 用途 |
-|----------|---------|---------|
-| `ZCODE_BIN` | `zcode` | ZCode CLI 二进制文件路径或其 `.cjs` 入口 |
-| `ZCODE_NODE` | _（自动发现）_ | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）|
-| `ZCODE_MODEL` | _（来自 config）| 覆盖当前使用的模型 id |
-| `ZCODE_BASE_URL` | _（来自 config）| 覆盖 provider 的 base URL |
-| `ZCODE_ACP_DEBUG` | _（未设置）| 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
+| 变量              | 默认值           | 用途                                                                                                                                                                                                  |
+| ----------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZCODE_BIN`       | `zcode`          | ZCode CLI 二进制文件路径或其 `.cjs` 入口                                                                                                                                                              |
+| `ZCODE_NODE`      | _（自动发现）_   | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）                                                                                                                                     |
+| `ZCODE_MODEL`     | _（来自 config） | 覆盖当前使用的模型 id                                                                                                                                                                                 |
+| `ZCODE_BASE_URL`  | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                             |
+| `ZCODE_ACP_DEBUG` | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
 
 ## 开发
 
@@ -98,11 +120,11 @@ CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` �
 
 ## 版本兼容性
 
-| ZCode CLI 版本 | 支持 | 说明 |
-|:-----------------:|:-------:|------|
-| **>= 0.15.0** | 完整 | 所有扩展方法可用 |
-| **>= 0.14.8** | 完整 | 事件流推送、所有扩展方法 |
-| **< 0.14.8** | 不兼容 | 无事件流订阅能力 |
+| ZCode CLI 版本 |  支持  | 说明                     |
+| :------------: | :----: | ------------------------ |
+| **>= 0.15.0**  |  完整  | 所有扩展方法可用         |
+| **>= 0.14.8**  |  完整  | 事件流推送、所有扩展方法 |
+|  **< 0.14.8**  | 不兼容 | 无事件流订阅能力         |
 
 ## 文档
 
