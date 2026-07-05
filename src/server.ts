@@ -39,6 +39,12 @@ export class ZcodeAcpServer {
   readonly sessionMap = new Map<string, string>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();
+  /**
+   * Per-session (zcodeSid) preempt lock: a promise chain that serializes the
+   * "register self + preempt others" critical section in prompt(). Prevents
+   * concurrent prompts from both missing each other and registering at once.
+   */
+  readonly preemptLocks = new Map<string, Promise<void>>();
   /** Capabilities advertised by the connected client (Zed, JetBrains, ...). */
   clientCapabilities: ClientCapabilities = {};
   /** Session titles already set, to enforce set-once (acp_sid → title). */

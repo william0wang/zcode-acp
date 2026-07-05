@@ -304,9 +304,13 @@ export class ZcodeBackend {
       }
       // Wait up to 3s for a clean exit.
       const exited = await new Promise<boolean>((resolve) => {
-        const done = () => resolve(true);
+        let timer: ReturnType<typeof setTimeout>;
+        const done = () => {
+          clearTimeout(timer); // don't let the timeout keep the event loop alive
+          resolve(true);
+        };
         proc.once("exit", done);
-        setTimeout(() => {
+        timer = setTimeout(() => {
           proc.removeListener("exit", done);
           resolve(false);
         }, 3000);

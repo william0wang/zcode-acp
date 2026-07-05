@@ -281,19 +281,20 @@ export async function prompt(
   const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
   if (intercepted) return intercepted;
 
-  // Preempt: if another turn is still running for this session (client sent a
-  // new prompt without cancelling), stop it and wait for it to fully exit
-  // before we subscribe/send. Without this, session/send hits the backend
-  // prompt-lock and the error path kills the old turn but loses the new msg.
-  await preemptInFlightTurn(server, zcodeSid, requestId);
-
-  // Register the pending turn. This same object is mutated by cancel(); the
-  // turn loop checks `.cancelled` on the SAME reference, so cancel propagates.
+  // Register self + preempt others under a per-session lock. The lock
+  // serializes the critical section so that two concurrent prompts (B, C) for
+  // the same session can't both miss each other and register at once: C waits
+  // for B's section, by which point B is in pendingTurns, so C's preempt finds
+  // and cancels B. Registering INSIDE the lock is what makes the new turn
+  // visible to the next prompt's preempt scan.
   const turn: PendingTurn = {
     zcodeSid,
     cancelled: false,
   };
-  server.pendingTurns.set(requestId, turn);
+  await withPreemptLock(server, zcodeSid, () => {
+    server.pendingTurns.set(requestId, turn);
+    return preemptInFlightTurn(server, zcodeSid, requestId);
+  });
 
   const listener = new EventStreamListener(backend, zcodeSid);
   const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -427,12 +428,47 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
 }
 
 /**
- * If another prompt() is already running for this zcodeSid, treat the new
- * prompt as an implicit cancel: stop the in-flight turn and wait for it to
- * fully exit (lock released + listener unregistered + pendingTurns cleaned)
- * before the new prompt subscribes and sends.
+ * Serialize a per-session critical section. Each section awaits the previous
+ * one's promise before running, so concurrent prompts for the same session
+ * execute register+preempt strictly one after another.
  *
- * Why wait for the map entry to disappear (not just the lock): registering
+ * Used by prompt() to wrap "register self in pendingTurns + preempt others":
+ * the registration must land before the section releases, so the next prompt
+ * entering its section sees this turn in its preempt scan. Without this lock,
+ * two near-simultaneous prompts could both scan before either registers.
+ *
+ * The body may be async and long-running (preempt waits up to 35s for the old
+ * turn to exit); that is acceptable because the turn loop itself runs OUTSIDE
+ * this lock — only registration + preempt-in-wait are serialized.
+ */
+function withPreemptLock(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  body: () => Promise<void>,
+): Promise<void> {
+  const prev = server.preemptLocks.get(zcodeSid) ?? Promise.resolve();
+  const next = prev.then(body, body); // run body regardless of prior rejection
+  server.preemptLocks.set(zcodeSid, next);
+  // Clean up the entry once settled so a later idle session doesn't retain a
+  // dangling promise. Only delete if still ours (a newer section may have
+  // chained on top of us).
+  next.finally(() => {
+    if (server.preemptLocks.get(zcodeSid) === next) {
+      server.preemptLocks.delete(zcodeSid);
+    }
+  });
+  return next;
+}
+
+/**
+ * Cancel any other in-flight turn for this zcodeSid and wait for it to fully
+ * exit (listener unregistered + pendingTurns cleaned) before returning.
+ *
+ * Must be called from inside a preempt lock section (the caller has already
+ * registered itself in pendingTurns), so a concurrent prompt entering its own
+ * section is guaranteed to see this caller's turn and cancel it.
+ *
+ * Why wait for the map entry to disappear (not just fire stop): registering
  * a second EventStreamListener overwrites the first (Map.set in client.ts),
  * so the old turn loop must have run its finally block before we subscribe.
  * The map cleanup in that finally block is the synchronization point.
