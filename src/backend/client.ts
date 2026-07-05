@@ -65,6 +65,14 @@ export class ZcodeBackend {
       env,
       detached: true, // own process group → kill(-pid) reaps the whole tree
     });
+    // Node stream write errors (EPIPE on a closed stdin) are emitted as async
+    // 'error' events, NOT thrown synchronously — without a listener the process
+    // crashes with an unhandled 'error' event. Catch them here and mark the
+    // reader dead so the rest of the bridge stops talking to a gone backend.
+    this.proc.stdin?.on("error", (err) => {
+      this.readerDead = true;
+      log(`backend: stdin error: ${err.message}`);
+    });
     this.startReader();
     this.startWatchdog();
     log(`backend: started zcode app-server (pid=${this.proc.pid})`);
@@ -216,17 +224,10 @@ export class ZcodeBackend {
       log("backend: sendReply dropped (stdin closed)");
       return;
     }
-    try {
-      stdin.write(JSON.stringify({ id, result }) + "\n");
-    } catch (e) {
-      // Broken pipe: backend is gone. Mark reader dead so the rest of the
-      // bridge stops trying to talk to it; otherwise zcode reannounces would
-      // keep hitting a dead pipe and the dedup cache would spin forever.
-      this.readerDead = true;
-      log(
-        `backend: sendReply write failed (marked dead): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    // Write errors (EPIPE) are delivered via the stdin 'error' listener
+    // installed in the constructor (synchronous try/catch cannot catch them);
+    // no try/catch needed here.
+    stdin.write(JSON.stringify({ id, result }) + "\n");
   }
 
   /** Reply to a zcode server→client request with an error. */
@@ -236,14 +237,7 @@ export class ZcodeBackend {
       log("backend: sendError dropped (stdin closed)");
       return;
     }
-    try {
-      stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
-    } catch (e) {
-      this.readerDead = true;
-      log(
-        `backend: sendError write failed (marked dead): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
   }
 
   // ---------- send / request ----------

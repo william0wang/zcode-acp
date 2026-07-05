@@ -452,12 +452,18 @@ function withPreemptLock(
   server.preemptLocks.set(zcodeSid, next);
   // Clean up the entry once settled so a later idle session doesn't retain a
   // dangling promise. Only delete if still ours (a newer section may have
-  // chained on top of us).
-  next.finally(() => {
-    if (server.preemptLocks.get(zcodeSid) === next) {
-      server.preemptLocks.delete(zcodeSid);
-    }
-  });
+  // chained on top of us). The `.catch` swallows any rejection propagated by
+  // `finally` (it returns a new promise that rejects if `next` rejected) —
+  // otherwise Node would raise an UnhandledPromiseRejection and crash.
+  next
+    .finally(() => {
+      if (server.preemptLocks.get(zcodeSid) === next) {
+        server.preemptLocks.delete(zcodeSid);
+      }
+    })
+    .catch(() => {
+      /* body rejection already surfaced by the returned `next`; swallow here */
+    });
   return next;
 }
 
