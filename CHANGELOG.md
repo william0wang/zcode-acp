@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - Process watchdog (`backend/client.ts`): a detached child polls the bridge
   pid every 2s and SIGKILLs the zcode process group if the bridge disappears
   without running its signal handlers (Zed force-kill on reconnect, crash,
@@ -17,8 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `server.lastMode` map recording the mode value advertised to the client,
   used by the new mode reconciliation.
 - `.node-version` pinning node 22 for fnm.
+- ACP Registry compatibility: `initialize` now advertises an agent-type
+  `authMethods` entry (`zcode-credentials`) declaring that the bridge reads
+  the GLM API key itself from `~/.zcode/v2/config.json` — no editor-side
+  credentials are required. The registry CI rejects empty `authMethods`, so
+  this is required for submission. Submission assets live under
+  `registry/zcode-acp-server/` (`agent.json` + `icon.svg`).
 
 ### Fixed
+
 - `/mode` and `/thought` slash commands now emit `current_mode_update` and
   `config_option_update`. Previously they switched the backend mode but never
   notified the editor UI, because slash commands return `end_turn` and bypass
@@ -33,10 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turn completion (`emitModeIfChanged`), since they bypass `session/setMode`.
 
 ### Changed
+
 - `SLASH_COMMANDS` rewritten: command names dropped the `/` prefix,
   descriptions reworded.
 - `package.json` no longer declares `packageManager`; pnpm is managed via the
   local environment (corepack/fnm).
+- Removed the empty `agentCapabilities.auth: {}` from the `initialize`
+  response; the auth story is now carried by the new `authMethods` entry.
 
 ## [0.1.0] - 2026-07-04
 
@@ -44,6 +55,7 @@ Initial release: a standalone TypeScript ACP server bridging the headless
 ZCode app-server to ACP-compatible editors (Zed, JetBrains).
 
 ### Added
+
 - ZCode subprocess client with reader-loop multiplexing and process-group
   isolation.
 - Event-stream listener (`session/subscribe` + `session/event`).
@@ -73,6 +85,7 @@ ZCode app-server to ACP-compatible editors (Zed, JetBrains).
   Development, Troubleshooting).
 
 ### Fixed
+
 - `buildSnapshot` flattens `todoGroups` as a **list** (it was read as a single
   object); the plan list is no longer empty on `session/load` and
   `PlanUpdate` is correctly emitted at turn completion.
@@ -89,6 +102,7 @@ ZCode app-server to ACP-compatible editors (Zed, JetBrains).
 - Stable plan signatures (sorted keys) prevent spurious `PlanUpdate`.
 
 ### Changed
+
 - `engines.node` is `>=22.0.0` (the bridge requires `node:sqlite`).
 - `package.json` declares `files`, `repository`, `keywords`, `types`,
   `packageManager`.

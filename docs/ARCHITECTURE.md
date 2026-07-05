@@ -25,6 +25,32 @@ zcode-acp-server (stdio JSON-RPC ACP)
 zcode app-server --stdio (line-delimited JSON)
 ```
 
+## ACP Handshake
+
+The `initialize` request (`server.ts`) negotiates the protocol version and
+declares the agent's shape to the editor:
+
+- **`protocolVersion`** — pinned to `PROTOCOL_VERSION` (currently 1).
+- **`agentInfo`** — name/title/version from `AGENT_INFO` in `utils.ts`.
+- **`agentCapabilities`** — `loadSession`, plus `sessionCapabilities.list /
+resume / fork`. The prompt capabilities (image/audio/embeddedContext) and
+  MCP capabilities are all off.
+- **`authMethods`** — a single agent-type entry (`zcode-credentials`). The
+  bridge reads the GLM API key itself from `~/.zcode/v2/config.json` and
+  forwards it to the ZCode subprocess via `ANTHROPIC_API_KEY`; the editor
+  never supplies credentials. Omitting the `type` field defaults to `"agent"`,
+  which the ACP registry's auth-check accepts as "agent self-handles auth".
+
+`initialize` does **not** spawn the backend. The backend is lazily created on
+the first `session/new` (via `ensureBackend()`), so the handshake succeeds
+even in an environment without `~/.zcode/v2/config.json` (e.g. the registry
+CI runs `initialize` with an isolated `HOME`).
+
+Client capabilities advertised at `initialize` are recorded on the server
+(`clientCapabilities`) and drive later behaviour: `supportsElicitationForm()`
+gates form-based elicitation, and `supportsTerminalOutput()` gates Zed's Bash
+terminal UI.
+
 ## Core Data Flow
 
 ### 1. Session lifecycle
@@ -52,11 +78,13 @@ pollEvent() consumes → EventTranslator.translate()
 ### 3. Dual-path event handling
 
 #### Real-time path (EventTranslator)
+
 - Listens to zcode `session/event` pushes
 - Translates each event to an ACP `session/update` in real time
 - Maintains `seenToolIds` to avoid duplicates
 
 #### Snapshot path (ProjectionDiffer)
+
 - On turn completion, builds a snapshot from `session/messages` + `session/read`
 - Diffs two snapshots to produce new events (PlanUpdate / TextDelta / ToolCallNew, etc.)
 - Used for turn-completion triage and stall recovery
@@ -82,6 +110,7 @@ Key: **`seenToolIds` synchronization**
 
 In `session.ts:629`, after the event path finishes processing, the state is
 synced to the differ:
+
 ```typescript
 for (const seenId of translator.seenToolIds) {
   differ.markToolSeen(seenId);
@@ -96,45 +125,45 @@ content-less ToolCallNew.
 
 ### `backend/` — ZCode process communication
 
-| File | Responsibility |
-|------|------|
-| `client.ts` | Spawn/manage the zcode subprocess, reader-loop, request/response multiplexing, process watchdog |
-| `listener.ts` | EventStreamListener (subscribe/consume the event stream) and TurnMonitor (snapshot polling) |
-| `types.ts` | ZCode JSON-RPC message type definitions |
+| File          | Responsibility                                                                                  |
+| ------------- | ----------------------------------------------------------------------------------------------- |
+| `client.ts`   | Spawn/manage the zcode subprocess, reader-loop, request/response multiplexing, process watchdog |
+| `listener.ts` | EventStreamListener (subscribe/consume the event stream) and TurnMonitor (snapshot polling)     |
+| `types.ts`    | ZCode JSON-RPC message type definitions                                                         |
 
 ### `translators/` — Event translation
 
-| File | Responsibility |
-|------|------|
-| `event-translator.ts` | Translate zcode events to InternalEvent (real-time path) |
-| `projection-differ.ts` | Diff two snapshots to produce InternalEvent (snapshot path) |
-| `tool-helpers.ts` | Tool-related pure functions: title generation, output rendering, diff parsing, location extraction |
-| `types.ts` | InternalEvent union type and plan entry builders |
+| File                   | Responsibility                                                                                     |
+| ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `event-translator.ts`  | Translate zcode events to InternalEvent (real-time path)                                           |
+| `projection-differ.ts` | Diff two snapshots to produce InternalEvent (snapshot path)                                        |
+| `tool-helpers.ts`      | Tool-related pure functions: title generation, output rendering, diff parsing, location extraction |
+| `types.ts`             | InternalEvent union type and plan entry builders                                                   |
 
 ### `handlers/` — ACP method handling
 
-| File | Responsibility |
-|------|------|
-| `session.ts` | session/new/list/resume/load/prompt/set_config_option/cancel |
-| `extensions.ts` | fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask/setModel/setMode/setThoughtLevel |
-| `dispatch.ts` | dispatchEvent single exit point: InternalEvent → ACP session/update |
+| File                 | Responsibility                                                                                               |
+| -------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `session.ts`         | session/new/list/resume/load/prompt/set_config_option/cancel                                                 |
+| `extensions.ts`      | fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask/setModel/setMode/setThoughtLevel           |
+| `dispatch.ts`        | dispatchEvent single exit point: InternalEvent → ACP session/update                                          |
 | `server-requests.ts` | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing |
-| `io.ts` | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification) |
-| `slash.ts` | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought) |
+| `io.ts`              | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                   |
+| `slash.ts`           | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought)            |
 
 ### `interaction/` — Interaction bridging
 
-| File | Responsibility |
-|------|------|
+| File         | Responsibility                                                                                   |
+| ------------ | ------------------------------------------------------------------------------------------------ |
 | `adapter.ts` | Conversion adapter from zcode interaction requests to ACP (requestPermission + elicitation form) |
 
 ### `config/` — Configuration management
 
-| File | Responsibility |
-|------|------|
-| `options.ts` | configOptions / modes construction, set_config_option dispatch |
-| `runtime-model.ts` | runtimeModel overlay construction and application |
-| `model-cache.ts` | Model ID cache and usage initialization |
+| File               | Responsibility                                                 |
+| ------------------ | -------------------------------------------------------------- |
+| `options.ts`       | configOptions / modes construction, set_config_option dispatch |
+| `runtime-model.ts` | runtimeModel overlay construction and application              |
+| `model-cache.ts`   | Model ID cache and usage initialization                        |
 
 ## Key State Machines
 
@@ -222,12 +251,12 @@ mirroring the Python bridge's `_pending_post_notifs` queue +
 The session mode can change through four entry points, all of which must
 notify the editor UI:
 
-| Trigger | Path | Notifies UI |
-|------|------|:---:|
-| `session/setMode` request | `extensions.ts:setMode` | yes |
-| `session/set_config_option` (mode) | `session.ts:setConfigOptionHandler` → `emitConfigOptionUpdate` | yes |
-| `/mode` slash command | `slash.ts` → `emitConfigOptionUpdate` | yes |
-| In-turn `EnterPlanMode`/`ExitPlanMode` | reconciled at turn completion | yes |
+| Trigger                                | Path                                                           | Notifies UI |
+| -------------------------------------- | -------------------------------------------------------------- | :---------: |
+| `session/setMode` request              | `extensions.ts:setMode`                                        |     yes     |
+| `session/set_config_option` (mode)     | `session.ts:setConfigOptionHandler` → `emitConfigOptionUpdate` |     yes     |
+| `/mode` slash command                  | `slash.ts` → `emitConfigOptionUpdate`                          |     yes     |
+| In-turn `EnterPlanMode`/`ExitPlanMode` | reconciled at turn completion                                  |     yes     |
 
 The in-turn path bypasses the bridge entirely, so `prompt()` runs
 `emitModeIfChanged` (`session.ts`) at turn completion: it re-reads the
@@ -277,12 +306,12 @@ zcode process exits, so a normal shutdown leaves no lingering watchdog.
 
 ### Why a dual path?
 
-| Scenario | Real-time path | Snapshot path |
-|------|---------|----------|
-| Normal streaming | Low latency | Must wait for turn end |
-| Lost events | Loses data | Recovers from snapshot |
-| Deduplication | seenToolIds | seenMessageIds + markToolSeen() |
-| Turn-completion triage | Not triggered | PlanUpdate / usage_update |
+| Scenario               | Real-time path | Snapshot path                   |
+| ---------------------- | -------------- | ------------------------------- |
+| Normal streaming       | Low latency    | Must wait for turn end          |
+| Lost events            | Loses data     | Recovers from snapshot          |
+| Deduplication          | seenToolIds    | seenMessageIds + markToolSeen() |
+| Turn-completion triage | Not triggered  | PlanUpdate / usage_update       |
 
 ### Why no polling fallback?
 

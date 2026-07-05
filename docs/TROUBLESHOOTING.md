@@ -5,6 +5,7 @@
 ### Backend fails to start
 
 **Symptom:**
+
 ```
 [zcode-acp] backend: started zcode app-server (pid=12345)
 [zcode-acp] backend: reader exited (stdout closed)
@@ -13,12 +14,14 @@
 **Troubleshooting steps:**
 
 1. Check the ZCode CLI version:
+
    ```bash
    zcode --version
    ```
    - Must be >= 0.14.8
 
 2. Check whether `zcode` is on PATH:
+
    ```bash
    which zcode
    ```
@@ -31,9 +34,30 @@
    - Confirm a `provider` is enabled
    - Confirm `models` are defined
 
+### Authentication / credential errors (401, provider auth failed)
+
+**Symptom:** turns fail with authentication errors (e.g. `401`, `provider auth failed`, `invalid api key`), or `~/.zcode/v2/config.json` is missing.
+
+**Why:** This bridge advertises agent-managed auth — it reads the GLM API key from `~/.zcode/v2/config.json` and forwards it to the ZCode subprocess. No editor-side API key or environment variable is involved. If the credentials file is absent, empty, or carries an expired/invalid key, every turn will fail at the first model call.
+
+**Troubleshooting steps:**
+
+1. Confirm the credentials file exists and has an enabled provider:
+
+   ```bash
+   cat ~/.zcode/v2/config.json
+   ```
+   - There must be a `provider` entry with `"enabled": true`
+   - Its `options.apiKey` must be present and non-empty
+
+2. If the file is missing or the key is stale, **install and log into the ZCode desktop app** — it writes a fresh `config.json` with a valid enabled provider. There is no manual API-key configuration in the editor.
+
+3. If you need to override the key/base URL without touching `config.json`, set `ZCODE_BASE_URL` and provide the key via the provider config (see `src/backend/credentials.ts` for the merge order).
+
 ### session/subscribe fails
 
 **Symptom:**
+
 ```
 session/subscribe failed (ZCode CLI 0.14.8+ required)
 ```
@@ -41,12 +65,14 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 **Troubleshooting steps:**
 
 1. Confirm ZCode CLI >= 0.14.8:
+
    ```bash
    zcode --version
    ```
 
 2. If the version is correct but it still fails, check whether the zcode
    app-server supports subscribe:
+
    ```bash
    cd /path/to/project
    zcode app-server --stdio
@@ -67,6 +93,7 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 **Troubleshooting steps:**
 
 1. Confirm the client declares `terminal_output`:
+
    ```typescript
    // should be present in clientCapabilities:
    { "_meta": { "terminal_output": true } }
@@ -87,9 +114,11 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 **Troubleshooting steps:**
 
 1. Check whether `EventStreamListener` subscribed successfully:
+
    ```
    [zcode-acp] backend: started zcode app-server (pid=12345)
    ```
+
    If this log is missing, the backend did not start.
 
 2. Check whether `session/event` pushes arrive:
@@ -106,6 +135,7 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 **Troubleshooting steps:**
 
 1. Check whether zcode sent an interaction request:
+
    ```
    [zcode-acp]   -> interaction/requestPermission (zcode_id=100)
    ```
@@ -147,6 +177,7 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
    - backend reader death
 
 2. Manually inspect zombie processes:
+
    ```bash
    ps aux | grep zcode
    killall -9 zcode  # cleanup
@@ -197,6 +228,7 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 
 2. If the lock is still stuck on an older bridge, the zcode subprocess must be
    killed manually:
+
    ```bash
    ps aux | grep zcode
    killall -9 zcode  # caution: kills all zcode processes
@@ -239,13 +271,13 @@ export function log(msg: string): void {
 
 ### Common log patterns
 
-| Log | Meaning |
-|------|------|
-| `backend: started zcode app-server (pid=...)` | Backend started successfully |
-| `backend: reader exited (...)` | Backend reader exited (backend may have crashed) |
-| `session/new -> sess_xxx` | New session created successfully |
-| `[event] turn.started` | Turn started |
-| `[event] turn.completed (resultType=...)` | Turn completed |
-| `-> interaction/... (zcode_id=...)` | Interaction request received |
-| `<- replied to zcode (N request(s))` | Interaction request replied |
-| `⚠ ...` | Warning / error |
+| Log                                           | Meaning                                          |
+| --------------------------------------------- | ------------------------------------------------ |
+| `backend: started zcode app-server (pid=...)` | Backend started successfully                     |
+| `backend: reader exited (...)`                | Backend reader exited (backend may have crashed) |
+| `session/new -> sess_xxx`                     | New session created successfully                 |
+| `[event] turn.started`                        | Turn started                                     |
+| `[event] turn.completed (resultType=...)`     | Turn completed                                   |
+| `-> interaction/... (zcode_id=...)`           | Interaction request received                     |
+| `<- replied to zcode (N request(s))`          | Interaction request replied                      |
+| `⚠ ...`                                       | Warning / error                                  |

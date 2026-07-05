@@ -117,6 +117,11 @@ cat ~/.zcode/v2/config.json
 # confirm a provider is enabled and has models
 ```
 
+The bridge reads the GLM API key from this file and forwards it to the ZCode
+subprocess — no editor-side API key or environment variable is required. If
+`config.json` is missing or no provider is enabled, install and log into the
+ZCode desktop app so it writes a valid file.
+
 ### Test session/subscribe
 
 ```bash
