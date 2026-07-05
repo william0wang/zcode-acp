@@ -3,6 +3,8 @@
 [![CI](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
+English | **[简体中文](README.zh-CN.md)**
+
 A standalone [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) server that bridges the headless **ZCode** app-server to ACP-compatible editors such as [Zed](https://zed.dev) and JetBrains IDEs.
 
 The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ZCode's interaction channel to ACP — preferring `elicitation/create` when the client supports it, and falling back to `session/request_permission` otherwise — so an editor gets a first-class, native coding-agent experience.
@@ -75,6 +77,11 @@ pnpm format      # prettier on src/
 
 CI runs `typecheck`, `lint`, `build`, and `test` on every push and pull
 request — run them locally before pushing (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+> **Tip (Node version)**: this repo pins Node 22 via a root `.node-version`
+> file. Pair it with [fnm](https://github.com/Schniz/fnm) or
+> [nvm](https://github.com/nvm-sh/nvm) to auto-switch on `cd`. pnpm itself is
+> managed by your local environment (corepack).
 
 ## Architecture
 

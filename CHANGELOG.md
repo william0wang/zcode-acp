@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- Process watchdog (`backend/client.ts`): a detached child polls the bridge
+  pid every 2s and SIGKILLs the zcode process group if the bridge disappears
+  without running its signal handlers (Zed force-kill on reconnect, crash,
+  OOM). Closes the orphan-zcode gap that `close()` cannot cover on SIGKILL.
+- Per-command `input.hint` on `available_commands_update`, so editors can
+  pre-fill the slash command input.
+- `server.lastMode` map recording the mode value advertised to the client,
+  used by the new mode reconciliation.
+- `.node-version` pinning node 22 for fnm.
+
+### Fixed
+- `/mode` and `/thought` slash commands now emit `current_mode_update` and
+  `config_option_update`. Previously they switched the backend mode but never
+  notified the editor UI, because slash commands return `end_turn` and bypass
+  the turn-completion reconciliation.
+- Prompt-lock leak after stop. `session/stop` is fire-and-forget and ZCode has
+  a startup delay: when stop arrived before the turn truly held the lock the
+  backend ignored it, the turn ran on, and the next `session/send` failed with
+  "A prompt is already running". `ensureTurnStopped` now probes
+  `session/goal show` until the lock is confirmed released (expectLock strategy
+  with an 8s grace window). The `session/send` error path is also covered.
+- In-turn `EnterPlanMode`/`ExitPlanMode` now trigger mode reconciliation at
+  turn completion (`emitModeIfChanged`), since they bypass `session/setMode`.
+
+### Changed
+- `SLASH_COMMANDS` rewritten: command names dropped the `/` prefix,
+  descriptions reworded.
+- `package.json` no longer declares `packageManager`; pnpm is managed via the
+  local environment (corepack/fnm).
 
 ## [0.1.0] - 2026-07-04
 

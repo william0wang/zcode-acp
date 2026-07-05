@@ -163,17 +163,48 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
 
 **Troubleshooting steps:**
 
-1. Check whether `setConfigOption` dispatched the request correctly:
-   - model → `runtimeModel` (runtime-model.ts)
-   - mode → `session/setMode`
-   - thought → `session/setThoughtLevel`
+1. Check whether the switch went through the right path. There are four entry
+   points, and each must notify the editor:
+   - `session/setMode` request → `extensions.ts:setMode`
+   - `session/set_config_option` (configId `mode`/`model`/`thought`) →
+     `session.ts:setConfigOptionHandler` → `emitConfigOptionUpdate`
+   - `/mode` or `/thought` slash command → `slash.ts` (also calls
+     `emitConfigOptionUpdate` since the fix; previously this path was silent)
+   - In-turn `EnterPlanMode`/`ExitPlanMode` → reconciled by `emitModeIfChanged`
+     at turn completion (`session.ts`)
 
-2. Check whether `emitConfigOptionUpdate` sent the `config_option_update` notification:
+2. Check whether `emitConfigOptionUpdate` sent the `config_option_update`
+   notification:
    - mode also needs a `current_mode_update`
+   - the mode value advertised to the client is recorded in `server.lastMode`
+     so the turn-completion reconciliation does not re-emit it
 
 3. Check whether `buildConfigOptions` reads the current value from `session/read`:
    - Not `projection.mode` (that is a stale value)
    - But `settings.mode.current`
+
+### "A prompt is already running" after stop
+
+**Symptom:** Pressing stop and then sending a new message fails with
+`zcode send failed: A prompt is already running for this session`.
+
+**Troubleshooting steps:**
+
+1. Confirm the bridge version includes `ensureTurnStopped` (`session.ts`). It
+   sends `session/stop` and then probes `session/goal show` until the lock is
+   released, covering the startup-delay race where stop arrives before the
+   turn holds the lock.
+
+2. If the lock is still stuck on an older bridge, the zcode subprocess must be
+   killed manually:
+   ```bash
+   ps aux | grep zcode
+   killall -9 zcode  # caution: kills all zcode processes
+   ```
+
+3. If the lock leaks again, check whether the watchdog (`backend/client.ts`)
+   is present — it reaps the zcode process group when the bridge is SIGKILLed,
+   so a reconnect starts from a clean state.
 
 ### Tasks-index sync failure
 

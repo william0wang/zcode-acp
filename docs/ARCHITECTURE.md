@@ -80,7 +80,7 @@ ProjectionDiffer (snapshot path)
 
 Key: **`seenToolIds` synchronization**
 
-In `session.ts:550`, after the event path finishes processing, the state is
+In `session.ts:629`, after the event path finishes processing, the state is
 synced to the differ:
 ```typescript
 for (const seenId of translator.seenToolIds) {
@@ -98,7 +98,7 @@ content-less ToolCallNew.
 
 | File | Responsibility |
 |------|------|
-| `client.ts` | Spawn/manage the zcode subprocess, reader-loop, request/response multiplexing |
+| `client.ts` | Spawn/manage the zcode subprocess, reader-loop, request/response multiplexing, process watchdog |
 | `listener.ts` | EventStreamListener (subscribe/consume the event stream) and TurnMonitor (snapshot polling) |
 | `types.ts` | ZCode JSON-RPC message type definitions |
 
@@ -216,6 +216,62 @@ session/new|resume|load handler
 `sendAvailableCommandsDeferred` (`io.ts`) encapsulates the 50ms delay logic,
 mirroring the Python bridge's `_pending_post_notifs` queue +
 `_drain_post_notifs` mechanism.
+
+## Mode Reconciliation
+
+The session mode can change through four entry points, all of which must
+notify the editor UI:
+
+| Trigger | Path | Notifies UI |
+|------|------|:---:|
+| `session/setMode` request | `extensions.ts:setMode` | yes |
+| `session/set_config_option` (mode) | `session.ts:setConfigOptionHandler` → `emitConfigOptionUpdate` | yes |
+| `/mode` slash command | `slash.ts` → `emitConfigOptionUpdate` | yes |
+| In-turn `EnterPlanMode`/`ExitPlanMode` | reconciled at turn completion | yes |
+
+The in-turn path bypasses the bridge entirely, so `prompt()` runs
+`emitModeIfChanged` (`session.ts`) at turn completion: it re-reads the
+authoritative mode via `buildModes`, compares against `server.lastMode`
+(the value last advertised to the client), and emits
+`current_mode_update` + `config_option_update` when they differ. Failures are
+swallowed so they cannot break the turn-completion path.
+
+## Prompt-Lock Release on Stop
+
+`session/stop` is fire-and-forget, but ZCode has a startup delay: when stop
+arrives before the turn truly holds the lock the backend ignores it, the turn
+runs on, and the lock leaks (next `session/send` fails with
+"A prompt is already running").
+
+`ensureTurnStopped` (`session.ts`) closes this gap. It mirrors the
+`expectLock:true` strategy from `waitForTurnIdle` (`extensions.ts`):
+
+1. send `session/stop`
+2. poll `session/goal show`; first REQUIRE seeing "prompt is running" once
+   (proves the turn started), then wait for it to clear
+3. if an 8s grace window elapses without ever seeing the lock, the turn never
+   started (stop caught it in time) or already ended → treat as released
+4. hard timeout 30s
+
+It is used at every stop site: the cancel check, the stall no-output path,
+the turn cancelled/failed result, the 120s no-progress timeout, and the
+`session/send` error path. Never throws (failures only log) so it cannot
+break the cancel path.
+
+## Process Watchdog
+
+`close()` reaps the zcode process group via `process.kill(-pid)`, but only
+when the bridge exits cleanly enough for its signal handlers to fire
+(SIGTERM/SIGINT). If the bridge is SIGKILLed (Zed force-kill on reconnect,
+crash, OOM), the handler never runs and the zcode subprocess group is
+orphaned.
+
+The watchdog (`backend/client.ts:startWatchdog`) closes that gap. It is a tiny
+detached child that polls the bridge pid every 2s and, once the bridge is
+gone, sends SIGKILL to the zcode process group, then exits. It is its own
+process-group leader and `unref`'d, so it never holds the event loop open and
+is not part of the zcode group it kills. It self-terminates as soon as the
+zcode process exits, so a normal shutdown leaves no lingering watchdog.
 
 ## Design Decisions
 

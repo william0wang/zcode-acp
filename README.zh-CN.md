@@ -1,0 +1,120 @@
+# zcode-acp-server
+
+[![CI](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/zcode-org/zcode-acp-server/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+**[English](README.md)** | 简体中文
+
+一个独立的 [Agent Client Protocol](https://agentclientprotocol.com/)（ACP）服务端，将无头模式的 **ZCode** app-server 桥接到支持 ACP 的编辑器，例如 [Zed](https://zed.dev) 和 JetBrains IDE。
+
+本服务端以子进程方式启动 ZCode 无头 app-server（`zcode app-server --stdio`），将其内部事件流翻译为 ACP `session/update` 通知，并把 ZCode 的交互通道桥接到 ACP —— 当客户端支持时优先使用 `elicitation/create`，否则回退到 `session/request_permission` —— 从而让编辑器获得原生的、一流的编码助手体验。
+
+## 状态
+
+早期开发中。核心框架已就绪，功能正在陆续加入。进度请看项目看板。
+
+## 环境要求
+
+- **Node.js ≥ 22**（桥接层用 `node:sqlite` 同步 tasks-index；ZCode CLI
+  运行时也要求 Node ≥ 22）
+- 已安装 `zcode` CLI 并位于 `PATH` 上（或通过 `ZCODE_BIN` 指定）
+- ZCode 凭证位于 `~/.zcode/v2/config.json`（由 ZCode App 创建）
+
+## 安装
+
+```bash
+git clone <repo-url>
+cd zcode-acp-server
+pnpm install
+pnpm build
+```
+
+编译产物入口为 `dist/index.js`（同时作为 `zcode-acp-server` bin 暴露）。在你的
+ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你的编辑器的 ACP 文档。
+
+## 在 Zed 中配置
+
+将本服务端作为外部 agent 添加到 Zed。在 `~/.config/zed/settings.json` 中：
+
+```jsonc
+{
+  "assistant": {
+    "entitled": true
+  },
+  "acp": {
+    "agents": [
+      {
+        "name": "zcode",
+        "command": { "path": "node", "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"] }
+      }
+    ]
+  }
+}
+```
+
+重启 Zed，然后从 agent 下拉菜单中选择 **ZCode**。
+
+## 环境变量
+
+| 变量 | 默认值 | 用途 |
+|----------|---------|---------|
+| `ZCODE_BIN` | `zcode` | ZCode CLI 二进制文件路径或其 `.cjs` 入口 |
+| `ZCODE_NODE` | _（自动发现）_ | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）|
+| `ZCODE_MODEL` | _（来自 config）| 覆盖当前使用的模型 id |
+| `ZCODE_BASE_URL` | _（来自 config）| 覆盖 provider 的 base URL |
+
+## 开发
+
+```bash
+pnpm install
+pnpm build       # tsc → dist/
+pnpm typecheck   # tsc --noEmit
+pnpm lint        # eslint（警告为建议性质；错误会导致 CI 失败）
+pnpm test        # vitest
+pnpm format      # prettier on src/
+```
+
+CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` 和
+`test` —— 推送前请在本地跑一遍（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
+
+> **提示（Node 版本管理）**：本项目通过根目录的 `.node-version` 锁定 Node 22，
+> 推荐配合 [fnm](https://github.com/Schniz/fnm) 或 [nvm](https://github.com/nvm-sh/nvm)
+> 使用 —— 进入目录即自动切换到 Node 22。pnpm 的版本由本地环境（corepack）管理。
+
+## 架构
+
+服务端按 ACP 协议分层组织：
+
+- `backend/` —— ZCode 子进程客户端：spawn、reader-loop 多路复用、事件流监听、同步请求/响应
+- `translators/` —— 将 ZCode 事件转为 ACP `session/update` 通知（事件流 + 快照 diff）
+- `interaction/` —— 将 ZCode `interaction/*` 服务端请求桥接到 ACP，优先 `elicitation/create`，回退 `session/request_permission`（工具授权、ExitPlanMode、AskUserQuestion）
+- `handlers/` —— ACP 方法处理器（`session/new`、`session/prompt` 等）和 turn 引擎
+- `config/` —— model / mode / thought-level 的 configOptions 和运行时模型切换
+- `server.ts` —— 共享状态和处理器注册
+- `index.ts` —— 通过 ACP SDK 的 stdio 连接
+
+完整架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## 版本兼容性
+
+| ZCode CLI 版本 | 支持 | 说明 |
+|:-----------------:|:-------:|------|
+| **>= 0.15.0** | 完整 | 所有扩展方法可用 |
+| **>= 0.14.8** | 完整 | 事件流推送、所有扩展方法 |
+| **< 0.14.8** | 不兼容 | 无事件流订阅能力 |
+
+## 文档
+
+- [架构](docs/ARCHITECTURE.md) —— 事件流、双路径去重、模块职责
+- [协议](docs/PROTOCOL.md) —— ZCode JSON-RPC 协议细节
+- [开发](docs/DEVELOPMENT.md) —— 本地开发、调试、新增扩展方法
+- [故障排查](docs/TROUBLESHOOTING.md) —— 常见问题排查
+
+## 贡献
+
+欢迎贡献！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解环境搭建、代码风格、
+commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+Apache-2.0。本项目沿用上游 ACP 规范的同一许可证。
