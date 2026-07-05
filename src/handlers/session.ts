@@ -321,9 +321,9 @@ export async function prompt(
       15000,
     );
     if (sendResp.error) {
-      // send failed/timeout — but backend may have started the turn anyway.
-      // Stop it and probe to avoid leaking the prompt lock.
-      await ensureTurnStopped(server, zcodeSid);
+      // send failed/timeout. Don't fire stop here: a send failure usually
+      // means the turn never started (no lock to leak). Mirrors Python which
+      // just returns the error without stopping.
       throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
     }
     const accepted = (sendResp.result ?? {}) as { accepted?: boolean };
@@ -408,66 +408,22 @@ export async function cancel(
 }
 
 /**
- * Send `session/stop` and probe until the prompt lock is confirmed released.
+ * Fire-and-forget `session/stop` to the backend. Mirrors Python's
+ * `_cancel_backend_turn`: send stop, never wait, never throw.
  *
- * `session/stop` is fire-and-forget, but ZCode has a startup delay: when stop
- * arrives before the turn truly holds the lock, the backend ignores it and the
- * turn runs on, leaking the lock — the next `session/send` then fails with
- * "A prompt is already running". Mirrors the `expectLock:true` strategy from
- * `waitForTurnIdle` (extensions.ts) but adapted for the cancel path.
- *
- * Strategy:
- *  1. send `session/stop`
- *  2. poll `session/goal show`; first REQUIRE seeing "prompt is running" once
- *     (proves the turn started), then wait for it to clear
- *  3. if the grace window (8s) elapses without ever seeing the lock, the turn
- *     never started (stop caught it in time) or already ended → treat as released
- *  4. hard timeout 30s
- *
- * Best-effort: never throws (failures only log) so it can't break the cancel
- * path. Returns true if released, false on timeout.
+ * The backend's turn loop will emit turn.completed(cancelled) on its own;
+ * the ACP turn loop observes that event and exits. No probing needed on the
+ * prompt path — an earlier ensureTurnStopped probed session/goal show for 30s
+ * but returned inconsistent values and caused severe stalls.
  */
-async function ensureTurnStopped(server: ZcodeAcpServer, zcodeSid: string): Promise<boolean> {
-  const backend = server.ensureBackend();
-  backend.notify("session/stop", { sessionId: zcodeSid });
-  const t0 = Date.now();
-  const GRACE_MS = 8_000;
-  const HARD_TIMEOUT_MS = 30_000;
-  let lockSeen = false;
-  while (Date.now() - t0 < HARD_TIMEOUT_MS) {
-    const resp = await backend.request(
-      server.nextId(),
-      "session/goal",
-      { sessionId: zcodeSid, action: "show" },
-      10000,
+function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
+  try {
+    server.ensureBackend().notify("session/stop", { sessionId: zcodeSid });
+  } catch (e) {
+    log(
+      `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
     );
-    const errMsg = resp.error?.message ?? "";
-    if (errMsg.includes("prompt is running")) {
-      lockSeen = true;
-      await sleep(2000);
-      continue;
-    }
-    if (errMsg.toLowerCase().includes("timeout")) {
-      await sleep(2000);
-      continue;
-    }
-    // Non-lock error or success.
-    if (lockSeen) {
-      log(`  [stop] prompt lock released`);
-      return true;
-    }
-    // Haven't seen the lock yet — give the turn a grace window to start.
-    if (Date.now() - t0 < GRACE_MS) {
-      await sleep(500);
-      continue;
-    }
-    // Grace window expired without ever seeing the lock: turn never started
-    // (stop caught it in time) or already ended. Safe to treat as released.
-    log(`  [stop] no lock observed within grace window, treating as released`);
-    return true;
   }
-  log(`  [stop] lock wait timed out (30s), lock may still be held`);
-  return false;
 }
 
 /**
@@ -501,13 +457,15 @@ async function preemptInFlightTurn(
   if (oldRequestId === undefined) return; // no in-flight turn, proceed
 
   log(`  [preempt] in-flight turn ${oldRequestId} found, stopping it`);
-  // Stop the backend turn and wait for the prompt lock to release.
-  await ensureTurnStopped(server, zcodeSid);
+  // Fire-and-forget stop (mirrors Python's _cancel_backend_turn). The old
+  // turn loop will receive turn.completed(cancelled) and exit on its own.
+  stopBackendTurn(server, zcodeSid);
 
   // Wait for the old turn's prompt() to fully exit (its finally block deletes
   // the pendingTurns entry). This is the synchronization point that guarantees
-  // its listener is unregistered before we register ours.
-  const PREEMPT_TIMEOUT_MS = 35_000; // slightly longer than ensureTurnStopped's 30s
+  // both lock release (backend turn ended) and listener unregistration before
+  // we subscribe/send. More reliable than probing session/goal show.
+  const PREEMPT_TIMEOUT_MS = 35_000;
   const t0 = Date.now();
   while (server.pendingTurns.has(oldRequestId)) {
     if (Date.now() - t0 > PREEMPT_TIMEOUT_MS) {
@@ -604,7 +562,7 @@ async function runEventTurn(
     }
 
     if (turn.cancelled) {
-      await ensureTurnStopped(server, turn.zcodeSid);
+      stopBackendTurn(server, turn.zcodeSid);
       return { stopReason: "cancelled" };
     }
 
@@ -626,7 +584,7 @@ async function runEventTurn(
               await sendTextChunk(cx, acpSid, reply, chunkMsgId);
             } else if (!emittedOutput) {
               // No text and no output → suspected failure.
-              await ensureTurnStopped(server, turn.zcodeSid);
+              stopBackendTurn(server, turn.zcodeSid);
               throw new RequestError(-32603, "turn produced no output");
             }
           }
@@ -686,13 +644,14 @@ async function runEventTurn(
     }
 
     if (translator.turnDone) {
-      // Cancel signalled via turn.completed(resultType:"cancelled").
+      // Cancel signalled via turn.completed(resultType:"cancelled"). The
+      // backend turn has already ended and released the lock — no stop needed.
       if (translator.turnResultType === "cancelled") {
-        await ensureTurnStopped(server, turn.zcodeSid);
         return { stopReason: "cancelled" };
       }
       if (translator.turnFailed) {
-        await ensureTurnStopped(server, turn.zcodeSid);
+        // Best-effort stop in case the failed turn left a residual lock.
+        stopBackendTurn(server, turn.zcodeSid);
         throw new RequestError(-32603, formatTurnError(translator.turnError));
       }
       // Fallback: if no text streamed, surface the last assistant reply.
@@ -728,7 +687,7 @@ async function runEventTurn(
   }
 
   // 120s no progress: abandon.
-  await ensureTurnStopped(server, turn.zcodeSid);
+  stopBackendTurn(server, turn.zcodeSid);
   return { stopReason: "max_turn_requests" };
 }
 
