@@ -17,7 +17,7 @@ import { emitInitialUsage } from "../config/model-cache.js";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { ProjectionDiffer } from "../translators/projection-differ.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 
@@ -112,9 +112,11 @@ export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Pro
     // timeout is in MILLISECONDS here (Date.now()-based), not seconds — Python's
     // timeout=60 becomes 60000. A bare 60 would expire on the first probe.
     const released = await waitForTurnIdle(server, zcodeSid, 60_000, "session/goal", false);
-    log(
-      `session/goal action=${action} → ok (${released ? "lock released" : "⚠ lock wait timeout"})`,
-    );
+    if (released) {
+      log(`session/goal action=${action} → ok (lock released)`);
+    } else {
+      warn(`session/goal action=${action} → ⚠ lock wait timeout`);
+    }
   } else {
     log(`session/goal action=${action} → ok`);
   }
@@ -139,7 +141,11 @@ export async function compact(
   // timeout=300 becomes 300000. A bare 300 expires on the first probe sleep,
   // making compact return "✓" while the internal turn lock is still held.
   const released = await waitForTurnIdle(server, zcodeSid, 300_000, "session/goal", true);
-  log(`session/compact → ok (${released ? "lock released" : "⚠ lock wait timeout"})`);
+  if (released) {
+    log("session/compact → ok (lock released)");
+  } else {
+    warn("session/compact → ⚠ lock wait timeout (backend may still be compacting)");
+  }
   if (released) {
     // Refresh usage so the UI reflects the reduced contextUsed post-compact.
     // Ensure a differ exists (compact may be the first action on a fresh session)

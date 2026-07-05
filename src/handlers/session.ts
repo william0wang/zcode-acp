@@ -31,7 +31,7 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
@@ -512,7 +512,7 @@ async function preemptInFlightTurn(
   const t0 = Date.now();
   while (server.pendingTurns.has(oldRequestId)) {
     if (Date.now() - t0 > PREEMPT_TIMEOUT_MS) {
-      log(`  [preempt] timed out waiting for old turn ${oldRequestId} to exit`);
+      warn(`  [preempt] timed out waiting for old turn ${oldRequestId} to exit`);
       return; // best-effort: continue anyway, session/send may fail
     }
     await sleep(200);
@@ -834,7 +834,7 @@ async function emitModeIfChanged(
     });
     log(`session/prompt: mode changed → ${modes.currentModeId}`);
   } catch (e) {
-    log(`emitModeIfChanged failed: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`emitModeIfChanged failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

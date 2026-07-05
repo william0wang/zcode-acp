@@ -18,7 +18,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { ZCODE_CREDS_PATH, log } from "../utils.js";
+import { ZCODE_CREDS_PATH, log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 
 interface ProviderConfig {
@@ -118,7 +118,7 @@ export async function applyModelSwitch(
     15000,
   );
   if (resp.error) {
-    log(`runtime-model: switch failed: ${resp.error.message}`);
+    warn(`runtime-model: switch failed: ${resp.error.message}`);
     return false;
   }
   invalidateModelCache(server, zcodeSid);

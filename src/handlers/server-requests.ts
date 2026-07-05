@@ -39,7 +39,7 @@ import {
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 
@@ -101,7 +101,7 @@ async function handleOne(
   const epm = isExitPlanMode(params);
 
   if (!perm && !(isUserInputRequestUnchecked(method) && (epm || ask))) {
-    log(`  ⚠ unhandled server→client request: ${method} (id=${zcodeReqId})`);
+    warn(`  ⚠ unhandled server→client request: ${method} (id=${zcodeReqId})`);
     sendZcodeError(backend, zcodeReqId, `bridge unsupported: ${method}`);
     return;
   }
@@ -246,7 +246,7 @@ async function handleAskUserQuestion(
 ): Promise<ZcodeInteractionResponse> {
   const qs = splitAskUserQuestions(params);
   if (qs === null) {
-    log("  ⚠ AskUserQuestion: no valid questions, declining");
+    warn("  ⚠ AskUserQuestion: no valid questions, declining");
     return { action: "decline", reason: "no valid questions" };
   }
   const toolCallId = params.toolCallId ?? "";
@@ -270,7 +270,7 @@ async function handleAskUserQuestion(
       const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, q.question, turn);
       const selected = parseAskUserResponse(resp);
       if (selected === null) {
-        log(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel/timeout, declining`);
+        warn(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel/timeout, declining`);
         return { action: "decline", reason: "skipped or cancelled" };
       }
       answers[q.question] = selected;
@@ -334,7 +334,9 @@ async function handleAskUserViaElicitation(
     _meta: { claudeCode: { toolName } },
   });
   const formParams = buildAskUserElicitationForm(params, acpSid, toolCallId || undefined);
-  log(`  ⟳ AskUserQuestion forwarding elicitation/create (form, ${Object.keys(formParams.requestedSchema.properties).length} fields)`);
+  log(
+    `  ⟳ AskUserQuestion forwarding elicitation/create (form, ${Object.keys(formParams.requestedSchema.properties).length} fields)`,
+  );
   const acpResp = await requestWithTimeout(
     cx,
     "elicitation/create",
@@ -348,7 +350,7 @@ async function handleAskUserViaElicitation(
   }
   const answers = parseAskUserElicitationResponse(acpResp, params);
   if (answers === null) {
-    log("  ⚠ AskUserQuestion elicitation declined/cancelled");
+    warn("  ⚠ AskUserQuestion elicitation declined/cancelled");
     return { action: "decline", reason: "declined or cancelled" };
   }
   log(`  ✓ AskUserQuestion elicitation answered (${Object.keys(answers).length})`);
@@ -439,13 +441,13 @@ async function requestWithTimeout(
   let cancelTimer: ReturnType<typeof setInterval> | undefined;
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
-      log(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
+      warn(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
       resolve(null);
     }, timeoutMs);
   });
   const racers: Array<Promise<unknown>> = [
     cx.request(method, params as never).catch((e: unknown) => {
-      log(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
+      warn(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }),
     timeout,
@@ -458,7 +460,7 @@ async function requestWithTimeout(
       new Promise<null>((resolve) => {
         cancelTimer = setInterval(() => {
           if (turn.cancelled) {
-            log(`  ⚠ ${label} aborted (turn cancelled)`);
+            warn(`  ⚠ ${label} aborted (turn cancelled)`);
             resolve(null);
           }
         }, 100);

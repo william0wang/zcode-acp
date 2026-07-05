@@ -16,8 +16,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
-import { CONFIG_DISPATCH } from "../utils.js";
-import { log } from "../utils.js";
+import { CONFIG_DISPATCH, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 import { compact, fork, rewind, steer } from "./extensions.js";
@@ -120,7 +119,7 @@ export async function handleSlashCommand(
         return null;
     }
   } catch (e) {
-    log(`  /${cmd} failed: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`  /${cmd} failed: ${e instanceof Error ? e.message : String(e)}`);
     throw e;
   }
 }

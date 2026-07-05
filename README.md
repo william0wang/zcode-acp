@@ -63,6 +63,7 @@ Restart Zed and pick **ZCode** from the agent dropdown.
 | `ZCODE_NODE` | _(discovered)_ | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`) |
 | `ZCODE_MODEL` | _(from config)_ | Override the active model id |
 | `ZCODE_BASE_URL` | _(from config)_ | Override the provider base URL |
+| `ZCODE_ACP_DEBUG` | _(unset)_ | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
 
 ## Develop
 

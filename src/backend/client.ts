@@ -19,7 +19,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import process from "node:process";
 
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import type {
   ZcodeEvent,
   ZcodeInbound,
@@ -71,7 +71,7 @@ export class ZcodeBackend {
     // reader dead so the rest of the bridge stops talking to a gone backend.
     this.proc.stdin?.on("error", (err) => {
       this.readerDead = true;
-      log(`backend: stdin error: ${err.message}`);
+      warn(`backend: stdin error: ${err.message}`);
     });
     this.startReader();
     this.startWatchdog();
@@ -190,7 +190,7 @@ export class ZcodeBackend {
   private markReaderDead(reason: string): void {
     if (this.readerDead) return;
     this.readerDead = true;
-    log(`backend: reader exited (${reason})`);
+    warn(`backend: reader exited (${reason})`);
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.resolve({
@@ -221,7 +221,7 @@ export class ZcodeBackend {
   sendReply(id: number, result: unknown): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
-      log("backend: sendReply dropped (stdin closed)");
+      warn("backend: sendReply dropped (stdin closed)");
       return;
     }
     // Write errors (EPIPE) are delivered via the stdin 'error' listener
@@ -234,7 +234,7 @@ export class ZcodeBackend {
   sendError(id: number, code: number, message: string): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
-      log("backend: sendError dropped (stdin closed)");
+      warn("backend: sendError dropped (stdin closed)");
       return;
     }
     stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
@@ -246,7 +246,7 @@ export class ZcodeBackend {
   notify(method: string, params?: Record<string, unknown>): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
-      log("backend: notify dropped (stdin closed)");
+      warn("backend: notify dropped (stdin closed)");
       return;
     }
     stdin.write(JSON.stringify({ method, params }) + "\n");
@@ -262,7 +262,7 @@ export class ZcodeBackend {
   send(method: string, params?: Record<string, unknown>): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
-      log("backend: send dropped (stdin closed)");
+      warn("backend: send dropped (stdin closed)");
       return;
     }
     const id = this.sendIdCounter++;

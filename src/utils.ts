@@ -95,9 +95,30 @@ export const CONFIG_DISPATCH: Record<string, { method: string; paramKey: string 
 };
 
 /**
- * Log a message to stderr with a stable prefix. Never use console.log —
- * stdout is reserved for the ACP JSON-RPC stream.
+ * Logging. Two levels, both write to stderr (stdout is reserved for the ACP
+ * JSON-RPC stream):
+ *   - `warn(msg)`: always emitted — failures the user can perceive (fatal
+ *     exit, broken backend pipe, command/permission failures, etc.).
+ *   - `log(msg)`: verbose diagnostic detail — only emitted when
+ *     `ZCODE_ACP_DEBUG=1` is set. Default (unset) keeps the log quiet so
+ *     a stable bridge doesn't spam `Zed.log`.
+ *
+ * Never use `console.log` — it would corrupt the stdout protocol stream.
  */
+
+/** True when the user opted into verbose diagnostics.
+ *  Read at call time so tests can flip it without re-importing the module. */
+function isDebug(): boolean {
+  return process.env.ZCODE_ACP_DEBUG === "1";
+}
+
+/** Verbose diagnostic log. Only emitted when `ZCODE_ACP_DEBUG=1`. */
 export function log(msg: string): void {
+  if (!isDebug()) return;
+  process.stderr.write(`[zcode-acp] ${msg}\n`);
+}
+
+/** Warning — always emitted. For perceivable failures. */
+export function warn(msg: string): void {
   process.stderr.write(`[zcode-acp] ${msg}\n`);
 }

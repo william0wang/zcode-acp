@@ -62,6 +62,7 @@ ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你
 | `ZCODE_NODE` | _（自动发现）_ | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）|
 | `ZCODE_MODEL` | _（来自 config）| 覆盖当前使用的模型 id |
 | `ZCODE_BASE_URL` | _（来自 config）| 覆盖 provider 的 base URL |
+| `ZCODE_ACP_DEBUG` | _（未设置）| 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
 
 ## 开发
 

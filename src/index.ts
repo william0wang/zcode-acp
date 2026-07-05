@@ -38,7 +38,7 @@ import {
 } from "./handlers/extensions.js";
 import { sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { ZcodeAcpServer } from "./server.js";
-import { AGENT_INFO, SLASH_COMMANDS, log } from "./utils.js";
+import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 async function main(): Promise<void> {
   // stdout is the outbound channel to the client; stdin is inbound.
@@ -123,6 +123,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
   process.exit(1);
 });

@@ -12,7 +12,7 @@
  * it when `scheduled` arrives without input.
  */
 
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import {
   buildResultContent,
   extractLocations,
@@ -74,7 +74,7 @@ export class EventTranslator {
       this.turnError = (payload["error"] as Record<string, unknown>) ?? {};
       this.turnResultType = (payload["resultType"] as string) ?? "error";
       const err = this.turnError;
-      log(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
+      warn(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
     }
     return results;
   }
