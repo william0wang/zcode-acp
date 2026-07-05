@@ -118,6 +118,21 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
 code style, commit conventions, and the PR checklist. Notable changes are
 recorded in [CHANGELOG.md](CHANGELOG.md).
 
+## Related Projects
+
+- [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) — a community Python implementation that bridges ZCode to the MCP/ACP ecosystem. The design of this server references its bridge architecture and several handling strategies.
+
+## Acknowledgements
+
+- [Agent Client Protocol](https://agentclientprotocol.com/) (Apache-2.0) — the ACP specification
+- [ZCode](https://zcode.z.ai) / [Zhipu Z.AI](https://z.ai) — the GLM model and ZCode CLI
+- [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) — reference implementation that informed this server's design
+
 ## License
 
 Apache-2.0. This project follows the same license as the upstream ACP specification.
+
+## Disclaimer
+
+This is an independent community project and is not affiliated with, endorsed
+by, or sponsored by Zhipu Z.AI. ZCode is a product of Zhipu Z.AI.

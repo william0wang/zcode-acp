@@ -115,6 +115,20 @@ CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` �
 欢迎贡献！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解环境搭建、代码风格、
 commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELOG.md)。
 
+## 相关项目
+
+- [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) —— 一个社区 Python 实现，将 ZCode 接入 MCP/ACP 生态。本项目参考了它的桥接架构和若干处理策略。
+
+## 致谢
+
+- [Agent Client Protocol](https://agentclientprotocol.com/)（Apache 2.0）—— ACP 协议规范
+- [ZCode](https://zcode.z.ai) / [智谱 Z.AI](https://z.ai) —— GLM 模型与 ZCode CLI
+- [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) —— 参考实现，本项目的设计借鉴了它的桥接架构
+
 ## 许可证
 
 Apache-2.0。本项目沿用上游 ACP 规范的同一许可证。
+
+## 免责声明
+
+本项目为独立的社区项目，与智谱 Z.AI 官方无任何隶属、认可或赞助关系。ZCode 是智谱 Z.AI 的产品。
