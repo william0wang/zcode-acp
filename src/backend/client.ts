@@ -53,6 +53,9 @@ export class ZcodeBackend {
   private readonly serverRequests: ServerRequest[] = [];
   private readonly listeners = new Map<string, EventListener>();
   private readerDead = false;
+  /** Monotonic id for fire-and-forget sends (send()). Uses a high range to
+   *  avoid collisions with the server's request ids (low range). */
+  private sendIdCounter = 1_000_000_000;
   /** Watchdog process that kills the zcode group if this bridge dies (SIGKILL). */
   private watchdog: ChildProcess | null = null;
 
@@ -213,7 +216,17 @@ export class ZcodeBackend {
       log("backend: sendReply dropped (stdin closed)");
       return;
     }
-    stdin.write(JSON.stringify({ id, result }) + "\n");
+    try {
+      stdin.write(JSON.stringify({ id, result }) + "\n");
+    } catch (e) {
+      // Broken pipe: backend is gone. Mark reader dead so the rest of the
+      // bridge stops trying to talk to it; otherwise zcode reannounces would
+      // keep hitting a dead pipe and the dedup cache would spin forever.
+      this.readerDead = true;
+      log(
+        `backend: sendReply write failed (marked dead): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /** Reply to a zcode server→client request with an error. */
@@ -223,7 +236,14 @@ export class ZcodeBackend {
       log("backend: sendError dropped (stdin closed)");
       return;
     }
-    stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
+    try {
+      stdin.write(JSON.stringify({ id, error: { code, message } }) + "\n");
+    } catch (e) {
+      this.readerDead = true;
+      log(
+        `backend: sendError write failed (marked dead): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   // ---------- send / request ----------
@@ -236,6 +256,23 @@ export class ZcodeBackend {
       return;
     }
     stdin.write(JSON.stringify({ method, params }) + "\n");
+  }
+
+  /**
+   * Send a message with an id but WITHOUT registering a pending response
+   * (fire-and-forget). Mirrors Python's `_backend.send({"id": ..., ...})` for
+   * `session/stop`: some backends route by id presence, so carrying an id is
+   * more robust than a bare notify. If the backend replies, the reader's
+   * `resolvePending` finds no pending entry and safely discards it.
+   */
+  send(method: string, params?: Record<string, unknown>): void {
+    const stdin = this.proc.stdin;
+    if (!stdin || stdin.destroyed) {
+      log("backend: send dropped (stdin closed)");
+      return;
+    }
+    const id = this.sendIdCounter++;
+    stdin.write(JSON.stringify({ id, method, params: params ?? {} }) + "\n");
   }
 
   /**

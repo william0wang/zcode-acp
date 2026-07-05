@@ -203,11 +203,11 @@ export class EventTranslator {
 
   private translateTurnDone(payload: Record<string, unknown>): InternalEvent[] {
     const usage = (payload["usage"] as Record<string, unknown>) ?? {};
-    const used = (usage["totalTokens"] as number) ?? (payload["tokenCount"] as number) ?? undefined;
-    const size = (usage["contextWindow"] as number) ?? 0;
-    if (typeof used === "number") {
-      return [{ kind: "UsageDelta", used, size }];
-    }
-    return [];
+    // Use || (not ??) to match Python's `or` semantics: a falsy totalTokens
+    // (0 / undefined) falls back to tokenCount, then to 0. With ?? a 0 would
+    // be kept as-is and never fall back, diverging from the Python reference.
+    const used = (usage["totalTokens"] as number) || (payload["tokenCount"] as number) || 0;
+    const size = (usage["contextWindow"] as number) || 0;
+    return [{ kind: "UsageDelta", used, size }];
   }
 }

@@ -410,7 +410,8 @@ export async function cancel(
 
 /**
  * Fire-and-forget `session/stop` to the backend. Mirrors Python's
- * `_cancel_backend_turn`: send stop, never wait, never throw.
+ * `_cancel_backend_turn`: send stop with an id (some backends route by id
+ * presence), never wait for a response, never throw.
  *
  * The backend's turn loop will emit turn.completed(cancelled) on its own;
  * the ACP turn loop observes that event and exits. No probing needed on the
@@ -419,7 +420,7 @@ export async function cancel(
  */
 function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
   try {
-    server.ensureBackend().notify("session/stop", { sessionId: zcodeSid });
+    server.ensureBackend().send("session/stop", { sessionId: zcodeSid });
   } catch (e) {
     log(
       `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
