@@ -50,7 +50,16 @@ export async function handleSlashCommand(
   try {
     switch (cmd) {
       case "compact": {
-        await compact(server, { sessionId: acpSid }, cx);
+        const result = (await compact(server, { sessionId: acpSid }, cx)) as {
+          __lockTimeout?: boolean;
+        };
+        if (result.__lockTimeout) {
+          // 300s elapsed but the lock never released — the backend may still be
+          // compacting; the next prompt will hit "a prompt is already running".
+          return ok(
+            "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
+          );
+        }
         return ok("✓ compacted conversation context");
       }
       case "goal": {

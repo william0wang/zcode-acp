@@ -109,7 +109,9 @@ export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Pro
   if (resp.error) throw new Error(`goal failed: ${resp.error.message}`);
   // set/replace start an internal AI turn → wait for the prompt lock to release.
   if (action === "set" || action === "replace") {
-    const released = await waitForTurnIdle(server, zcodeSid, 60, "session/goal", false);
+    // timeout is in MILLISECONDS here (Date.now()-based), not seconds — Python's
+    // timeout=60 becomes 60000. A bare 60 would expire on the first probe.
+    const released = await waitForTurnIdle(server, zcodeSid, 60_000, "session/goal", false);
     log(
       `session/goal action=${action} → ok (${released ? "lock released" : "⚠ lock wait timeout"})`,
     );
@@ -133,7 +135,10 @@ export async function compact(
   if (resp.error) throw new Error(`compact failed: ${resp.error.message}`);
   // compact's internal AI turn (read history → LLM compress → write back) can
   // take minutes; expectLock=true avoids the startup-delay false-success window.
-  const released = await waitForTurnIdle(server, zcodeSid, 300, "session/goal", true);
+  // timeout is in MILLISECONDS (Date.now()-based), not seconds — Python's
+  // timeout=300 becomes 300000. A bare 300 expires on the first probe sleep,
+  // making compact return "✓" while the internal turn lock is still held.
+  const released = await waitForTurnIdle(server, zcodeSid, 300_000, "session/goal", true);
   log(`session/compact → ok (${released ? "lock released" : "⚠ lock wait timeout"})`);
   if (released) {
     // Refresh usage so the UI reflects the reduced contextUsed post-compact.
@@ -146,7 +151,10 @@ export async function compact(
     }
     await emitInitialUsage(server, cx, acpSid, zcodeSid, differ);
   }
-  return (resp.result ?? {}) as Result;
+  // Surface the lock-timeout to the slash-command path so it can warn the user
+  // (the ACP method path ignores this non-standard flag). Mirrors Python's
+  // "⚠ 压缩超时" branch in _handle_slash_command.
+  return { ...((resp.result ?? {}) as Result), __lockTimeout: !released };
 }
 
 /** session/steer → zcode session/steer: append instructions to a running turn. */
@@ -294,7 +302,13 @@ async function waitForTurnIdle(
   const backend = server.ensureBackend();
   const t0 = Date.now();
   let lockSeen = !expectLock;
+  let probeCount = 0;
+  log(
+    `  [probe] start waitForTurnIdle timeout=${Math.round(timeoutMs / 1000)}s expectLock=${expectLock} probeMethod=${probeMethod}`,
+  );
   while (Date.now() - t0 < timeoutMs) {
+    probeCount++;
+    const elapsed = Math.round((Date.now() - t0) / 100) / 10;
     const resp = await backend.request(
       server.nextId(),
       probeMethod,
@@ -303,26 +317,38 @@ async function waitForTurnIdle(
     );
     const errMsg = resp.error?.message ?? "";
     if (errMsg.includes("prompt is running")) {
+      log(
+        `  [probe] #${probeCount} @${elapsed}s: LOCK HELD ("${errMsg.slice(0, 60)}") → lockSeen=true`,
+      );
       lockSeen = true;
       await sleep(2000);
       continue;
     }
     if (errMsg.toLowerCase().includes("timeout")) {
+      log(`  [probe] #${probeCount} @${elapsed}s: probe timeout, continue`);
       await sleep(2000);
       continue;
     }
     if (resp.error) {
       if (lockSeen) {
-        log(`  [probe] lock released (non-lock error treated as released: ${errMsg.slice(0, 40)})`);
+        log(
+          `  [probe] #${probeCount} @${elapsed}s: NON-LOCK error after lock → released (err="${errMsg.slice(0, 50)}")`,
+        );
         return true;
       }
+      log(
+        `  [probe] #${probeCount} @${elapsed}s: NON-LOCK error, lockSeen=false → wait for lock (err="${errMsg.slice(0, 50)}")`,
+      );
       await sleep(500);
       continue;
     }
     if (lockSeen) {
-      log(`  [probe] lock released (elapsed ${Math.round((Date.now() - t0) / 1000)}s)`);
+      log(`  [probe] #${probeCount} @${elapsed}s: probe success after lock → released`);
       return true;
     }
+    log(
+      `  [probe] #${probeCount} @${elapsed}s: probe success, lockSeen=false → wait for lock (still in startup window)`,
+    );
     await sleep(500);
   }
   log(`  [probe] wait timed out (${Math.round(timeoutMs / 1000)}s), lock may still be held`);
