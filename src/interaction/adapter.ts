@@ -48,6 +48,36 @@ export function isAskUserQuestion(method: string, params: unknown): boolean {
 
 // ---------- zcode permission → ACP requestPermission ----------
 
+/**
+ * Normalize a zcode permission-option `kind` to one of the 4 ACP-legal values
+ * (`allow_once` | `allow_always` | `reject_once` | `reject_always`).
+ *
+ * zcode's backend emits a wider/legacy enum that includes `deny`, `allow`,
+ * `reject`, etc. The ACP schema (and Zed's deserializer) only accepts the four
+ * canonical values — anything else makes the *whole* `requestPermission` fail
+ * at the client with "unknown variant", so the popup never renders and the
+ * request defaults to decline. `optionId` is free text and stays untouched.
+ *
+ * Fail-safe: any unrecognized kind maps to `reject_once` (never auto-allow).
+ */
+function normalizeKind(kind: string | undefined): PermissionOption["kind"] {
+  switch (kind) {
+    case "allow_once":
+    case "allow_always":
+    case "reject_once":
+    case "reject_always":
+      return kind;
+    case "allow":
+    case "allow_project":
+      return "allow_always";
+    case "reject":
+    case "deny":
+      return "reject_once";
+    default:
+      return "reject_once";
+  }
+}
+
 /** Convert a zcode tool-permission request into ACP requestPermission params. */
 export function zcodePermissionToAcp(
   params: ZcodeInteractionPermissionParams,
@@ -61,7 +91,7 @@ export function zcodePermissionToAcp(
   for (const opt of params.options ?? []) {
     options.push({
       optionId: opt.optionId ?? "",
-      kind: (opt.kind as PermissionOption["kind"]) ?? "allow_once",
+      kind: normalizeKind(opt.kind),
       name: opt.name ?? opt.optionId ?? "",
     });
   }
@@ -73,6 +103,14 @@ export function zcodePermissionToAcp(
   };
 }
 
+/**
+ * Allow-class optionIds that zcode's backend emits. The response mapper must
+ * recognize ALL of them — selecting "Allow once" (optionId "allow_once") in
+ * the popup otherwise gets reported back as a rejection. optionId is free
+ * text defined by the backend, so this set mirrors the backend's naming.
+ * Any optionId not in this set is treated as deny (fail-safe). */
+const ALLOW_OPTION_IDS = new Set(["allow", "allow_once", "allow_always", "allow_project"]);
+
 /** Convert an ACP requestPermission response → zcode {decision, reason?}. */
 export function acpPermissionResponseToZcode(
   acpResp: unknown,
@@ -83,7 +121,7 @@ export function acpPermissionResponseToZcode(
   const outcome = (acpResp as { outcome?: { outcome?: string; optionId?: string } }).outcome ?? {};
   if (outcome.outcome === "cancelled") return { decision: "deny", reason: "cancelled by user" };
   const optionId = outcome.optionId ?? "";
-  if (optionId === "allow" || optionId === "allow_always") return { decision: "allow" };
+  if (ALLOW_OPTION_IDS.has(optionId)) return { decision: "allow" };
   return { decision: "deny", reason: `rejected (${optionId})` };
 }
 
@@ -246,7 +284,7 @@ export function buildAskUserElicitationForm(
     required: string[];
   };
 } {
-  const questions = params.questions?.length ? params.questions : params.input?.questions ?? [];
+  const questions = params.questions?.length ? params.questions : (params.input?.questions ?? []);
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
   for (let i = 0; i < questions.length; i++) {
@@ -317,7 +355,7 @@ export function parseAskUserElicitationResponse(
   if (!acpResp || typeof acpResp !== "object") return null;
   const resp = acpResp as { action?: string; content?: Record<string, unknown> | null };
   if (resp.action !== "accept" || !resp.content) return null;
-  const questions = params.questions?.length ? params.questions : params.input?.questions ?? [];
+  const questions = params.questions?.length ? params.questions : (params.input?.questions ?? []);
   const answers: Record<string, string> = {};
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
@@ -362,9 +400,7 @@ export function buildExitPlanModeElicitationForm(
     params.input && typeof params.input === "object"
       ? ((params.input as { plan?: string }).plan ?? "")
       : "";
-  const message = planText
-    ? `Ready to code?\n\n${planText}`
-    : "Ready to code?";
+  const message = planText ? `Ready to code?\n\n${planText}` : "Ready to code?";
   const form: {
     mode: "form";
     sessionId: string;
@@ -397,9 +433,10 @@ export function buildExitPlanModeElicitationForm(
 }
 
 /** Parse an ExitPlanMode elicitation response → zcode accept/decline. */
-export function parseExitPlanModeElicitationResponse(
-  acpResp: unknown,
-): { action: "accept" | "decline"; reason?: string } {
+export function parseExitPlanModeElicitationResponse(acpResp: unknown): {
+  action: "accept" | "decline";
+  reason?: string;
+} {
   if (!acpResp || typeof acpResp !== "object") {
     return { action: "decline", reason: "invalid client response" };
   }

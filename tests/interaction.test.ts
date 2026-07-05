@@ -76,6 +76,45 @@ describe("zcode permission → ACP", () => {
   it("returns null when no valid options", () => {
     expect(zcodePermissionToAcp({ toolCallId: "t", options: [] } as never, "acp_1")).toBeNull();
   });
+
+  // Regression: zcode backend emits `kind: "deny"` (and other non-ACP values)
+  // which Zed rejects at schema deserialization ("unknown variant `deny`"),
+  // making every permission popup fail instantly without user action.
+  // The adapter MUST normalize kinds to the 4 ACP-legal values. optionId is
+  // free text and must be preserved verbatim (zcode identifies the choice by it).
+  it("normalizes non-ACP kinds (deny → reject_once), preserves optionId", () => {
+    // Real payload observed from zcode backend (Zed.log deserialization error).
+    const params = {
+      requestId: "r1",
+      toolCallId: "tc_1",
+      toolName: "Bash",
+      input: { command: "ls" },
+      options: [
+        { optionId: "allow_once", kind: "allow_once", name: "Allow once" },
+        { optionId: "allow_project", kind: "allow_always", name: "Always allow in this project" },
+        { optionId: "deny", kind: "deny", name: "Deny" },
+      ],
+    };
+    const acp = zcodePermissionToAcp(params, "acp_1");
+    expect(acp).not.toBeNull();
+    expect(acp!.options.map((o) => o.kind)).toEqual(["allow_once", "allow_always", "reject_once"]);
+    // optionId untouched so the response mapping still recognizes the choice.
+    expect(acp!.options.map((o) => o.optionId)).toEqual(["allow_once", "allow_project", "deny"]);
+  });
+
+  it("maps legacy allow/reject/unknown kinds to ACP-legal values", () => {
+    const params = {
+      toolCallId: "tc",
+      options: [
+        { optionId: "a", kind: "allow", name: "a" },
+        { optionId: "r", kind: "reject", name: "r" },
+        { optionId: "u", kind: "something_weird", name: "u" },
+      ],
+    };
+    const acp = zcodePermissionToAcp(params, "acp_1");
+    // allow→allow_always; reject/unknown→reject_once (fail-safe, never auto-allow)
+    expect(acp!.options.map((o) => o.kind)).toEqual(["allow_always", "reject_once", "reject_once"]);
+  });
 });
 
 describe("ACP response → zcode permission", () => {
@@ -95,6 +134,27 @@ describe("ACP response → zcode permission", () => {
     expect(acpPermissionResponseToZcode({ outcome: { outcome: "cancelled" } }).decision).toBe(
       "deny",
     );
+  });
+
+  // Regression: zcode backend's allow-class options carry optionId "allow_once"
+  // / "allow_project" (not "allow"/"allow_always"). The response mapper must
+  // recognize these as allow, otherwise selecting "Allow once" in the popup
+  // is reported back to zcode as a rejection.
+  it("allow_once / allow_project optionId → decision allow", () => {
+    expect(
+      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "allow_once" } })
+        .decision,
+    ).toBe("allow");
+    expect(
+      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "allow_project" } })
+        .decision,
+    ).toBe("allow");
+  });
+
+  it("deny optionId → decision deny", () => {
+    expect(
+      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "deny" } }).decision,
+    ).toBe("deny");
   });
 });
 
