@@ -87,6 +87,12 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 | `ZCODE_BASE_URL`  | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                               |
 | `ZCODE_ACP_DEBUG` | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
 
+## ACP Registry
+
+This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.
+
+The registry submission assets live under [`registry/zcode-acp-server/`](registry/zcode-acp-server/) (`agent.json` + `icon.svg`). Once the package is published to npm, copy that directory into a fork of [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) and open a PR — the CI validates the `agent.json` schema, icon, and that `initialize` returns a non-empty `authMethods`.
+
 ## Develop
 
 ```bash

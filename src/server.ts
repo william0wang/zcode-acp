@@ -114,9 +114,19 @@ export class ZcodeAcpServer {
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         mcpCapabilities: { http: false, sse: false },
         sessionCapabilities: { list: {}, resume: {}, fork: {} },
-        auth: {},
       },
-      authMethods: [],
+      // The GLM API key is read from ~/.zcode/v2/config.json by the ZCode
+      // backend subprocess; the editor never needs to supply credentials.
+      // Declared as AuthMethodAgent (no `type` field → defaults to "agent"),
+      // which the ACP registry CI accepts as "agent self-handles auth".
+      authMethods: [
+        {
+          id: "zcode-credentials",
+          name: "ZCode built-in credentials",
+          description:
+            "Reads the GLM API key from ~/.zcode/v2/config.json managed by the ZCode desktop app. No editor-side credentials required.",
+        },
+      ],
     };
   }
 }

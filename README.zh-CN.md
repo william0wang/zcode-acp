@@ -86,6 +86,12 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_BASE_URL`  | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                             |
 | `ZCODE_ACP_DEBUG` | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
 
+## ACP Registry
+
+本服务端兼容 [ACP Registry](https://agentclientprotocol.com/get-started/registry)。它在 `initialize` 时声明一个 `agent` 类型的认证方法——GLM API key 由 ZCode 后端从 `~/.zcode/v2/config.json` 读取，**编辑器侧无需配置任何凭据**。
+
+Registry 提交资产位于 [`registry/zcode-acp-server/`](registry/zcode-acp-server/)（`agent.json` + `icon.svg`）。包发布到 npm 后，将该目录复制到 [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) 的 fork 中并提 PR——CI 会校验 `agent.json` schema、图标，以及 `initialize` 返回的 `authMethods` 非空。
+
 ## 开发
 
 ```bash
