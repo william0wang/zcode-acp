@@ -281,6 +281,12 @@ export async function prompt(
   const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
   if (intercepted) return intercepted;
 
+  // Preempt: if another turn is still running for this session (client sent a
+  // new prompt without cancelling), stop it and wait for it to fully exit
+  // before we subscribe/send. Without this, session/send hits the backend
+  // prompt-lock and the error path kills the old turn but loses the new msg.
+  await preemptInFlightTurn(server, zcodeSid, requestId);
+
   // Register the pending turn. This same object is mutated by cancel(); the
   // turn loop checks `.cancelled` on the SAME reference, so cancel propagates.
   const turn: PendingTurn = {
@@ -462,6 +468,55 @@ async function ensureTurnStopped(server: ZcodeAcpServer, zcodeSid: string): Prom
   }
   log(`  [stop] lock wait timed out (30s), lock may still be held`);
   return false;
+}
+
+/**
+ * If another prompt() is already running for this zcodeSid, treat the new
+ * prompt as an implicit cancel: stop the in-flight turn and wait for it to
+ * fully exit (lock released + listener unregistered + pendingTurns cleaned)
+ * before the new prompt subscribes and sends.
+ *
+ * Why wait for the map entry to disappear (not just the lock): registering
+ * a second EventStreamListener overwrites the first (Map.set in client.ts),
+ * so the old turn loop must have run its finally block before we subscribe.
+ * The map cleanup in that finally block is the synchronization point.
+ *
+ * Best-effort: never throws. On timeout, continues anyway — session/send
+ * will then hit the lock and take the existing error path.
+ */
+async function preemptInFlightTurn(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  selfRequestId: number,
+): Promise<void> {
+  // Find any in-flight turn for this session that isn't this request.
+  let oldRequestId: number | undefined;
+  for (const [reqId, turn] of server.pendingTurns) {
+    if (turn.zcodeSid === zcodeSid && reqId !== selfRequestId) {
+      oldRequestId = reqId;
+      turn.cancelled = true; // signal the old turn loop to exit
+      break;
+    }
+  }
+  if (oldRequestId === undefined) return; // no in-flight turn, proceed
+
+  log(`  [preempt] in-flight turn ${oldRequestId} found, stopping it`);
+  // Stop the backend turn and wait for the prompt lock to release.
+  await ensureTurnStopped(server, zcodeSid);
+
+  // Wait for the old turn's prompt() to fully exit (its finally block deletes
+  // the pendingTurns entry). This is the synchronization point that guarantees
+  // its listener is unregistered before we register ours.
+  const PREEMPT_TIMEOUT_MS = 35_000; // slightly longer than ensureTurnStopped's 30s
+  const t0 = Date.now();
+  while (server.pendingTurns.has(oldRequestId)) {
+    if (Date.now() - t0 > PREEMPT_TIMEOUT_MS) {
+      log(`  [preempt] timed out waiting for old turn ${oldRequestId} to exit`);
+      return; // best-effort: continue anyway, session/send may fail
+    }
+    await sleep(200);
+  }
+  log(`  [preempt] old turn ${oldRequestId} exited, proceeding`);
 }
 
 // ---------- internals ----------
