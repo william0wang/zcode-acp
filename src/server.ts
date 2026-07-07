@@ -49,6 +49,13 @@ export class ZcodeAcpServer {
   clientCapabilities: ClientCapabilities = {};
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
+  /**
+   * Sessions eligible for auto-title on first end_turn. Only `session/new`
+   * populates this — resumed/loaded sessions already carry a title, so their
+   * first post-load message must NOT overwrite it. (sessionTitles alone can't
+   * distinguish "freshly created" from "resumed but not yet titled in-process".)
+   */
+  readonly titleEligibleSessions = new Set<string>();
   /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
   readonly lastMode = new Map<string, string>();
   /** Per-session ProjectionDiffers (persists across turns). */

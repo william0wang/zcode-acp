@@ -73,6 +73,9 @@ export async function newSession(
   if (!sid) throw new Error("zcode create returned no sessionId");
 
   server.sessionMap.set(sid, sid);
+  // Only freshly-created sessions are eligible for auto-title on first
+  // end_turn; resumed/loaded sessions already have a title and must keep it.
+  server.titleEligibleSessions.add(sid);
   log(`session/new → ${sid}`);
 
   // Sync to the App's tasks-index.sqlite so the App UI shows this session.
@@ -342,10 +345,16 @@ export async function prompt(
       turn,
     );
 
-    // Session title: set once on the first end_turn of this session. The title
-    // is the first prompt text (truncated). Subsequent turns never overwrite it
-    // (set-once gate), and the App's title_overridden flag always wins.
-    if (result.stopReason === "end_turn" && !server.sessionTitles.has(params.sessionId)) {
+    // Session title: set once on the first end_turn, but ONLY for freshly
+    // created sessions. Resumed/loaded sessions already carry a title from
+    // their history and must not be overwritten by the first post-load message.
+    // sessionTitles enforces set-once within a session; titleEligibleSessions
+    // gates which sessions are titled at all.
+    if (
+      result.stopReason === "end_turn" &&
+      server.titleEligibleSessions.has(params.sessionId) &&
+      !server.sessionTitles.has(params.sessionId)
+    ) {
       const title = text.slice(0, 80);
       server.sessionTitles.set(params.sessionId, title);
       const { updateSessionTitle } = await import("../tasks-index.js");
