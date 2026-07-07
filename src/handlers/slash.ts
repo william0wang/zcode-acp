@@ -6,6 +6,9 @@
  * feedback `agent_message_chunk`, and return `end_turn` — never reaching the
  * normal turn loop. Unknown `/x` falls through to the model (extensibility).
  *
+ * `/quota` is the exception: it does not call ZCode at all — it queries the
+ * GLM Coding Plan usage API directly and renders the result.
+ *
  * Returns the PromptResponse when intercepted, or null to let the caller run a
  * normal turn.
  */
@@ -16,6 +19,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
+import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
@@ -48,6 +52,13 @@ export async function handleSlashCommand(
 
   try {
     switch (cmd) {
+      case "quota": {
+        // Does not touch ZCode — queries the GLM usage API directly. Always
+        // returns a status line (success card or an error fallback), so this
+        // never throws into the catch below under normal conditions.
+        const result = await queryQuota();
+        return ok(formatQuota(result));
+      }
       case "compact": {
         const result = (await compact(server, { sessionId: acpSid }, cx)) as {
           __lockTimeout?: boolean;

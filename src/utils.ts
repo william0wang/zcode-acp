@@ -58,6 +58,7 @@ export const SLASH_COMMANDS = [
     description: "Set the reasoning effort",
     input: { hint: "max|high|nothink" },
   },
+  { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
 ] as const;
 
 /** Static metadata for the configOptions selects (model/mode/thought). */
