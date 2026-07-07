@@ -10,6 +10,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Mock the credentials loader so queryQuota orchestration tests don't depend
+// on a real ~/.zcode/v2/config.json (absent in CI → "no apiKey" → unavailable).
+// resolveQuotaHost is a pure function unaffected by this mock.
+vi.mock("../src/backend/credentials.js", () => ({
+  loadZcodeCredentials: () => ({
+    ANTHROPIC_API_KEY: "test-key",
+    ZCODE_BASE_URL: "https://open.bigmodel.cn",
+  }),
+}));
+
 import { clearCache, getCached, setCached, setClock } from "../src/quota/cache.js";
 import { formatQuota, renderBar } from "../src/quota/format.js";
 import { parseLimit, parseQuotaEnvelope } from "../src/quota/parse.js";
