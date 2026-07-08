@@ -85,8 +85,10 @@ export async function handleSlashCommand(
         return ok(`✓ goal set: ${arg}`);
       }
       case "fork": {
-        const result = (await fork(server, { sessionId: acpSid })) as { sessionId?: string };
-        return ok(`✓ forked new session: ${result.sessionId ?? "?"}`);
+        const result = (await fork(server, { sessionId: acpSid })) as {
+          forkedSessionId?: string;
+        };
+        return ok(`✓ forked new session: ${result.forkedSessionId ?? "?"}`);
       }
       case "rewind": {
         await rewind(server, { sessionId: acpSid });

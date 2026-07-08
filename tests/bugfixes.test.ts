@@ -88,7 +88,7 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
 
   it("uses lowercase mode option names", () => {
     const names = CONFIG_META.mode.options.map((o) => o.name);
-    expect(names).toEqual(["plan", "build", "edit", "yolo"]);
+    expect(names).toEqual(["plan", "build", "edit", "yolo", "auto"]);
   });
 });
 

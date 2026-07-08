@@ -53,9 +53,13 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
     15000,
   );
   if (resp.error) throw new Error(`fork failed: ${resp.error.message}`);
-  const result = (resp.result ?? {}) as { sessionId?: string };
-  if (result.sessionId) server.sessionMap.set(result.sessionId, result.sessionId);
-  log(`session/fork → ${result.sessionId ?? "?"}`);
+  // 3.3.0 returns `forkedSessionId` (not `sessionId`) for the new session id.
+  // Register it so subsequent ACP calls targeting the fork can resolve the sid.
+  const result = (resp.result ?? {}) as { forkedSessionId?: string };
+  if (result.forkedSessionId) {
+    server.sessionMap.set(result.forkedSessionId, result.forkedSessionId);
+  }
+  log(`session/fork → ${result.forkedSessionId ?? "?"}`);
   return result;
 }
 
@@ -206,16 +210,13 @@ export async function setThoughtLevel(
   params: ExtensionParams,
 ): Promise<Result> {
   const zcodeSid = resolveSidOrThrow(server, params);
-  const thoughtLevel = params.thoughtLevel;
-  if (!thoughtLevel) throw new Error("setThoughtLevel requires thoughtLevel");
+  // 3.3.0 marks thoughtLevel optional (omitting it resets to the model's
+  // default). Forward it only when present so a reset call isn't rejected.
+  const zcParams: Record<string, unknown> = { sessionId: zcodeSid };
+  if (params.thoughtLevel !== undefined) zcParams.thoughtLevel = params.thoughtLevel;
   const resp = await server
     .ensureBackend()
-    .request(
-      server.nextId(),
-      "session/setThoughtLevel",
-      { sessionId: zcodeSid, thoughtLevel },
-      15000,
-    );
+    .request(server.nextId(), "session/setThoughtLevel", zcParams, 15000);
   if (resp.error) throw new Error(`setThoughtLevel failed: ${resp.error.message}`);
   log("session/setThoughtLevel → ok");
   return (resp.result ?? {}) as Result;

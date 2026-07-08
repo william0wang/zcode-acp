@@ -355,10 +355,18 @@ export async function prompt(
       server.titleEligibleSessions.has(params.sessionId) &&
       !server.sessionTitles.has(params.sessionId)
     ) {
-      const title = text.slice(0, 80);
+      // Title = first non-empty line of the prompt, truncated to 80 chars.
+      // Multi-line prompts must not leak newlines into the session title.
+      // Split on any line break (\r\n, \n, \r) so all platforms are covered.
+      const title =
+        text
+          .split(/\r\n|\r|\n/)
+          .map((l) => l.trim())
+          .find((l) => l.length > 0)
+          ?.slice(0, 80) ?? text.slice(0, 80);
       server.sessionTitles.set(params.sessionId, title);
       const { updateSessionTitle } = await import("../tasks-index.js");
-      void updateSessionTitle(zcodeSid, title);
+      void updateSessionTitle(zcodeSid, title, text);
       await sendSessionUpdate(cx, params.sessionId, {
         sessionUpdate: "session_info_update",
         title,

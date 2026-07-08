@@ -76,6 +76,7 @@ export const CONFIG_META = {
       { value: "build", name: "build" },
       { value: "edit", name: "edit" },
       { value: "yolo", name: "yolo" },
+      { value: "auto", name: "auto" },
     ],
   },
   thought: {

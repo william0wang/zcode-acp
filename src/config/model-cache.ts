@@ -40,6 +40,13 @@ export async function currentModelCached(
  * Emit an initial usage_update after resume/load so the editor shows the
  * context bar. Skips when there's no token data (resume before any turn → 0).
  * Also syncs the differ's usage baseline so the first turn won't re-emit it.
+ *
+ * Note: the backend's `projection.contextUsed` is 0 after resume — it only
+ * updates after a new turn completes. So a resumed session with history won't
+ * show a context bar until the first post-resume message. That's acceptable:
+ * we don't have a reliable way to estimate the pre-resume context size, and
+ * guessing wrong (e.g. from per-turn token totals that include re-sent history)
+ * is worse than showing nothing.
  */
 export async function emitInitialUsage(
   server: ZcodeAcpServer,

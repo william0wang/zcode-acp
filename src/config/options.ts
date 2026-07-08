@@ -71,7 +71,13 @@ export async function buildModes(
   }
   return {
     currentModeId: currentMode,
-    availableModes: ["plan", "build", "edit", "yolo"].map((m) => ({ id: m, name: capitalize(m) })),
+    // ZCode 3.3.0 mode enum: plan/build/edit/yolo/auto. settings.mode only
+    // carries `current` (no `available` list, unlike thoughtLevel), so the full
+    // enum is advertised here.
+    availableModes: ["plan", "build", "edit", "yolo", "auto"].map((m) => ({
+      id: m,
+      name: capitalize(m),
+    })),
   };
 }
 

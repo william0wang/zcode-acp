@@ -21,52 +21,58 @@ import path from "node:path";
 
 import { log, ZCODE_CREDS_PATH } from "./utils.js";
 
+// Precise DatabaseSync constructor type from @types/node, captured without a
+// runtime import (type position only). node:sqlite's API is prepared-statement
+// based: con.prepare(sql) → StatementSync with .run(...)/.get(...); the
+// DatabaseSync instance itself has NO .run/.get methods.
+type DatabaseSyncCtor = (typeof import("node:sqlite"))["DatabaseSync"];
+
 /**
  * Dynamically load `node:sqlite` (Node ≥ 22). On older Node the import fails;
  * callers degrade gracefully (tasks-index sync is best-effort). We cache the
  * loaded class so repeated calls don't re-import.
  */
-let DatabaseSyncCtor:
-  | ((
-      path: string,
-      options?: { timeout?: number },
-    ) => {
-      run: (...args: unknown[]) => void;
-      get: (...args: unknown[]) => unknown;
-      close: () => void;
-    })
-  | null
-  | undefined;
+let DatabaseSync: DatabaseSyncCtor | null | undefined;
 
-async function loadSqlite() {
-  if (DatabaseSyncCtor !== undefined) return DatabaseSyncCtor;
+async function loadSqlite(): Promise<DatabaseSyncCtor | null> {
+  if (DatabaseSync !== undefined) return DatabaseSync;
   try {
-    // node:sqlite ships with Node ≥ 22. Cast through unknown so this compiles
-    // even if @types/node lags behind the runtime module.
-    const mod = (await import("node:sqlite")) as unknown as {
-      DatabaseSync: unknown;
+    // node:sqlite ships with Node ≥ 22 (experimental on 22.x — may need
+    // --experimental-sqlite on some builds; the catch below covers that).
+    const mod = (await import("node:sqlite")) as {
+      DatabaseSync: DatabaseSyncCtor;
     };
-    DatabaseSyncCtor = mod.DatabaseSync as never;
+    DatabaseSync = mod.DatabaseSync;
   } catch {
-    DatabaseSyncCtor = null; // Node < 22 or sqlite unavailable
+    DatabaseSync = null; // Node < 22, sqlite unavailable, or flag missing
   }
-  return DatabaseSyncCtor;
+  return DatabaseSync;
 }
 
 /** tasks-index.sqlite sits next to config.json under ~/.zcode/v2/. */
 const TASKS_INDEX_PATH = path.join(path.dirname(ZCODE_CREDS_PATH), "tasks-index.sqlite");
 
-/** Read provider id + model id from config.json (display-only fields). */
+/**
+ * Read provider id + model ref from config.json.
+ *
+ * The App stores `model` as the full `providerKey/modelId` path (e.g.
+ * `builtin:bigmodel-coding-plan/GLM-5.2`) — the provider map's KEY is the
+ * provider id, not the short label. We mirror that format so App-side
+ * filtering/grouping by model treats bridge-created rows identically.
+ *
+ * `providerId` stays the short label (`glm`) — that's what every row uses
+ * regardless of source.
+ */
 function resolveProviderModel(): { providerId: string; modelRef: string } {
   try {
     const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
       provider?: Record<string, { enabled?: boolean; models?: Record<string, unknown> }>;
     };
-    for (const [, p] of Object.entries(cfg.provider ?? {})) {
+    for (const [providerKey, p] of Object.entries(cfg.provider ?? {})) {
       if (p?.enabled) {
         const models = p.models ?? {};
         const modelId = Object.keys(models)[0] ?? "GLM-5.2";
-        return { providerId: "glm", modelRef: modelId };
+        return { providerId: "glm", modelRef: `${providerKey}/${modelId}` };
       }
     }
   } catch {
@@ -91,8 +97,8 @@ export async function upsertSessionTask(opts: {
   status?: string;
 }): Promise<boolean> {
   if (!existsSync(TASKS_INDEX_PATH)) return false; // App never installed → no index.
-  const DatabaseSync = await loadSqlite();
-  if (!DatabaseSync) return false; // node:sqlite unavailable (Node < 22)
+  const Sqlite = await loadSqlite();
+  if (!Sqlite) return false; // node:sqlite unavailable (Node < 22)
   const nowMs = Date.now();
   const { providerId, modelRef } = resolveProviderModel();
   const model = opts.model ?? modelRef;
@@ -118,27 +124,30 @@ export async function upsertSessionTask(opts: {
     return false;
   }
   try {
-    const con = DatabaseSync(TASKS_INDEX_PATH, { timeout: 5000 });
+    const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
     try {
-      con.run(
-        "INSERT OR IGNORE INTO tasks " +
-          "(workspace_key, workspace_path, workspace_identity, task_id, " +
-          " title, task_status, provider, mode, model, " +
-          " created_at, updated_at, unread_at, pinned, archived, deleted, " +
-          " title_overridden, meta_json, searchable_text) " +
-          "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
-        opts.workspaceKey,
-        opts.workspaceKey,
-        opts.taskId,
-        opts.title,
-        status,
-        providerId,
-        model,
-        nowMs,
-        nowMs,
-        metaJson,
-        opts.title,
-      );
+      con
+        .prepare(
+          "INSERT OR IGNORE INTO tasks " +
+            "(workspace_key, workspace_path, workspace_identity, task_id, " +
+            " title, task_status, provider, mode, model, " +
+            " created_at, updated_at, unread_at, pinned, archived, deleted, " +
+            " title_overridden, meta_json, searchable_text) " +
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
+        )
+        .run(
+          opts.workspaceKey,
+          opts.workspaceKey,
+          opts.taskId,
+          opts.title,
+          status,
+          providerId,
+          model,
+          nowMs,
+          nowMs,
+          metaJson,
+          opts.title,
+        );
     } finally {
       con.close();
     }
@@ -150,30 +159,50 @@ export async function upsertSessionTask(opts: {
 }
 
 /**
- * Update a session's title after the first turn. session/create leaves title
- * empty; once the first prompt completes, set a meaningful title. Respects
- * title_overridden: if the user already renamed in the App, their title wins.
+ * Update a session's title + searchable_text after the first turn.
+ *
+ * session/create leaves title empty; once the first prompt completes, set a
+ * meaningful title. Respects title_overridden: if the user already renamed in
+ * the App, their title wins (but searchable_text is still refreshed — it's not
+ * user-controlled).
+ *
+ * `searchableText` feeds the App's full-text search (the App builds it via
+ * `buildSearchableTextFromMessages`: each message's content trimmed + joined
+ * by newlines, capped at 200k chars). We pass the first user prompt here; the
+ * App later overwrites it with the full conversation when it reindexes, but
+ * having it non-empty from the start means the row shows up in search and
+ * matches the shape of App-created rows.
  */
-export async function updateSessionTitle(taskId: string, title: string): Promise<boolean> {
+export async function updateSessionTitle(
+  taskId: string,
+  title: string,
+  searchableText?: string,
+): Promise<boolean> {
   if (!existsSync(TASKS_INDEX_PATH) || !title) return false;
-  const DatabaseSync = await loadSqlite();
-  if (!DatabaseSync) return false;
+  const Sqlite = await loadSqlite();
+  if (!Sqlite) return false;
   const trimmed = title.trim().slice(0, 80);
   if (!trimmed) return false;
+  // Cap searchable_text at the App's limit (aD = 2e5 = 200000 chars).
+  const search = (searchableText ?? trimmed).trim().slice(0, 200_000);
   try {
-    const con = DatabaseSync(TASKS_INDEX_PATH, { timeout: 5000 });
+    const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
     try {
-      const row = con.get("SELECT title_overridden FROM tasks WHERE task_id=?", taskId) as
+      const row = con.prepare("SELECT title_overridden FROM tasks WHERE task_id=?").get(taskId) as
         { title_overridden: number } | undefined;
       if (!row) return false;
-      if (row.title_overridden === 1) return true; // user overrode → respect it
-      con.run(
-        "UPDATE tasks SET title=?, updated_at=?, searchable_text=? WHERE task_id=? AND title_overridden=0",
-        trimmed,
-        Date.now(),
-        trimmed,
-        taskId,
-      );
+      if (row.title_overridden === 1) {
+        // User overrode the title → respect it, but still refresh searchable_text.
+        con
+          .prepare("UPDATE tasks SET updated_at=?, searchable_text=? WHERE task_id=?")
+          .run(Date.now(), search, taskId);
+        return true;
+      }
+      con
+        .prepare(
+          "UPDATE tasks SET title=?, updated_at=?, searchable_text=? WHERE task_id=? AND title_overridden=0",
+        )
+        .run(trimmed, Date.now(), search, taskId);
     } finally {
       con.close();
     }
