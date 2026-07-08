@@ -169,24 +169,24 @@ describe("renderBar", () => {
   });
 
   it("100% → all full cells", () => {
-    expect(renderBar(100)).toBe("█".repeat(10));
+    expect(renderBar(100)).toBe("▓".repeat(10));
   });
 
   it("50% → 5 full + 5 empty", () => {
-    expect(renderBar(50)).toBe("█".repeat(5) + "░".repeat(5));
+    expect(renderBar(50)).toBe("▓".repeat(5) + "░".repeat(5));
   });
 
   it("rounds to the nearest cell (each cell = 10%)", () => {
     // 24% of 10 = 2.4 → rounds to 2 full.
-    expect(renderBar(24)).toBe("██" + "░".repeat(8));
+    expect(renderBar(24)).toBe("▓▓" + "░".repeat(8));
     // 5% of 10 = 0.5 → rounds to 1 full.
-    expect(renderBar(5)).toBe("█" + "░".repeat(9));
+    expect(renderBar(5)).toBe("▓" + "░".repeat(9));
     // 21% of 10 = 2.1 → rounds to 2 full.
-    expect(renderBar(21)).toBe("██" + "░".repeat(8));
+    expect(renderBar(21)).toBe("▓▓" + "░".repeat(8));
   });
 
   it("clamps inputs outside [0, 100]", () => {
-    expect(renderBar(150)).toBe("█".repeat(10));
+    expect(renderBar(150)).toBe("▓".repeat(10));
     expect(renderBar(-10)).toBe("░".repeat(10));
   });
 });

@@ -2,10 +2,13 @@
  * Quota result formatting — renders a {@link QuotaResult} as a multi-line
  * plain-text card for the `agent_message_chunk` feedback.
  *
- * The progress bar uses two block characters at {@link BAR_WIDTH}-cell width
+ * The progress bar uses two shade characters at {@link BAR_WIDTH}-cell width
  * for a clean, precise fill (each cell = 10%):
- *   █ (U+2588, full)   — used portion
- *   ░ (U+2591, light)  — remaining portion
+ *   ▓ (U+2593, dark shade)  — used portion
+ *   ░ (U+2591, light shade) — remaining portion
+ * The two shades are a natural pair (≈75% / ≈25% density), keeping the visual
+ * contrast between used and remaining portions even, instead of the lopsided
+ * look a full block (U+2588) next to a light shade produces.
  */
 
 import type { QuotaItem, QuotaResult } from "./types.js";
@@ -14,7 +17,7 @@ import type { QuotaItem, QuotaResult } from "./types.js";
 const BAR_WIDTH = 10;
 
 /** Filled / empty cell characters. */
-const CHAR_FULL = "█";
+const CHAR_FULL = "▓";
 const CHAR_EMPTY = "░";
 
 /** Pad a percent number to 2 chars (right-aligned). */
@@ -120,7 +123,7 @@ export function formatQuota(result: QuotaResult): string {
   }
 
   const header = `GLM Coding Plan${result.level ? ` · ${capitalise(result.level)}` : ""}`;
-  const divider = "─".repeat(50);
+  const divider = "─".repeat(24);
   const body = result.items.flatMap(formatItem);
   return [header, divider, ...body].join("\n");
 }
