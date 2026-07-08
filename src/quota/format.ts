@@ -1,23 +1,30 @@
 /**
  * Quota result formatting — renders a {@link QuotaResult} as a multi-line
- * plain-text card for the `agent_message_chunk` feedback.
+ * plain-text card inside a ```text fenced block.
  *
- * The progress bar uses two shade characters at {@link BAR_WIDTH}-cell width
- * for a clean, precise fill (each cell = 10%):
- *   ▓ (U+2593, dark shade)  — used portion
+ * The whole card is wrapped in a fenced code block so the editor renders it in
+ * a monospace, bordered, copy-able frame. Monospace also normalises the block
+ * element widths (▓/░ are NOT marked East-Asian-Wide, but some proportional
+ * chat fonts stretch them; a code frame guarantees 1-cell-per-bar).
+ *
+ * The progress bar uses two block characters at {@link BAR_WIDTH}-cell width
+ * for a clean, precise fill (each cell = 5%):
+ *   █ (U+2588, full block) — used portion
  *   ░ (U+2591, light shade) — remaining portion
- * The two shades are a natural pair (≈75% / ≈25% density), keeping the visual
- * contrast between used and remaining portions even, instead of the lopsided
- * look a full block (U+2588) next to a light shade produces.
+ * Inside a monospace code block the full-block reads as a solid, high-impact
+ * fill for used quota, with the light shade marking the remainder.
  */
 
 import type { QuotaItem, QuotaResult } from "./types.js";
 
-/** Progress-bar cell count. Compact to fit chat-frame width without wrapping. */
-const BAR_WIDTH = 10;
+/**
+ * Progress-bar cell count. 20 cells = 5% granularity, fine enough to read
+ * real usage at a glance while still fitting a code-block frame on one line.
+ */
+const BAR_WIDTH = 20;
 
 /** Filled / empty cell characters. */
-const CHAR_FULL = "▓";
+const CHAR_FULL = "█";
 const CHAR_EMPTY = "░";
 
 /** Pad a percent number to 2 chars (right-aligned). */
@@ -111,11 +118,17 @@ const STATUS_MESSAGES: Record<Exclude<QuotaResult["kind"], "success">, string> =
 };
 
 /**
- * Render a {@link QuotaResult} as a multi-line plain-text card.
+ * Render a {@link QuotaResult} as a multi-line plain-text card wrapped in a
+ * ```text fenced block.
+ *
+ * The fence makes the editor render the card in a monospace, bordered, copy-
+ * able frame — without it the proportional chat font mangles block-element
+ * widths (▓/░ render at different glyph advances and can look stretched), and
+ * the divider/bars lose their alignment.
  *
  * Success → header line + divider + one progress-bar line per item (plus
  * indented per-model detail where present). Non-success kinds → a single
- * explanatory line.
+ * explanatory line, unfenced (they are short prose, not a card).
  */
 export function formatQuota(result: QuotaResult): string {
   if (result.kind !== "success") {
@@ -123,7 +136,9 @@ export function formatQuota(result: QuotaResult): string {
   }
 
   const header = `GLM Coding Plan${result.level ? ` · ${capitalise(result.level)}` : ""}`;
-  const divider = "─".repeat(24);
+  // Divider spans the longest line so the frame looks balanced; 34 ≈ label(5)
+  // + space(1) + bar(20) + spaces(2) + "NN%"(3) + trailing-room(3).
+  const divider = "─".repeat(34);
   const body = result.items.flatMap(formatItem);
-  return [header, divider, ...body].join("\n");
+  return ["```text", header, divider, ...body, "```"].join("\n");
 }

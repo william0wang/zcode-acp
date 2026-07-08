@@ -165,29 +165,29 @@ describe("parseQuotaEnvelope", () => {
 
 describe("renderBar", () => {
   it("0% → all empty cells", () => {
-    expect(renderBar(0)).toBe("░".repeat(10));
+    expect(renderBar(0)).toBe("░".repeat(20));
   });
 
   it("100% → all full cells", () => {
-    expect(renderBar(100)).toBe("▓".repeat(10));
+    expect(renderBar(100)).toBe("█".repeat(20));
   });
 
-  it("50% → 5 full + 5 empty", () => {
-    expect(renderBar(50)).toBe("▓".repeat(5) + "░".repeat(5));
+  it("50% → 10 full + 10 empty", () => {
+    expect(renderBar(50)).toBe("█".repeat(10) + "░".repeat(10));
   });
 
-  it("rounds to the nearest cell (each cell = 10%)", () => {
-    // 24% of 10 = 2.4 → rounds to 2 full.
-    expect(renderBar(24)).toBe("▓▓" + "░".repeat(8));
-    // 5% of 10 = 0.5 → rounds to 1 full.
-    expect(renderBar(5)).toBe("▓" + "░".repeat(9));
-    // 21% of 10 = 2.1 → rounds to 2 full.
-    expect(renderBar(21)).toBe("▓▓" + "░".repeat(8));
+  it("rounds to the nearest cell (each cell = 5%)", () => {
+    // 24% of 20 = 4.8 → rounds to 5 full.
+    expect(renderBar(24)).toBe("█".repeat(5) + "░".repeat(15));
+    // 5% of 20 = 1 → 1 full.
+    expect(renderBar(5)).toBe("█" + "░".repeat(19));
+    // 21% of 20 = 4.2 → rounds to 4 full.
+    expect(renderBar(21)).toBe("█".repeat(4) + "░".repeat(16));
   });
 
   it("clamps inputs outside [0, 100]", () => {
-    expect(renderBar(150)).toBe("▓".repeat(10));
-    expect(renderBar(-10)).toBe("░".repeat(10));
+    expect(renderBar(150)).toBe("█".repeat(20));
+    expect(renderBar(-10)).toBe("░".repeat(20));
   });
 });
 
@@ -221,21 +221,25 @@ describe("formatQuota", () => {
     };
     const out = formatQuota(result);
     const lines = out.split("\n");
-    expect(lines[0]).toBe("GLM Coding Plan · Pro");
-    expect(lines[1]).toMatch(/^─+$/);
+    // The whole card is wrapped in a ```text fenced block so the editor
+    // renders it in a bordered, monospace, copy-able frame.
+    expect(lines[0]).toBe("```text");
+    expect(lines[1]).toBe("GLM Coding Plan · Pro");
+    expect(lines[2]).toMatch(/^─+$/);
     // 5h line: percent + reset time, no "resets" word, no absolute counts.
-    expect(lines[2]).toContain("5h");
-    expect(lines[2]).toContain("5%");
-    expect(lines[2]).not.toContain("resets");
-    expect(lines[2]).not.toMatch(/\(\d+\/\d+\)/);
-    // MCP line: percent + absolute counts + reset time.
-    expect(lines[3]).toContain("MCP");
-    expect(lines[3]).toContain("24%");
-    expect(lines[3]).toContain("(237/1000)");
+    expect(lines[3]).toContain("5h");
+    expect(lines[3]).toContain("5%");
     expect(lines[3]).not.toContain("resets");
+    expect(lines[3]).not.toMatch(/\(\d+\/\d+\)/);
+    // MCP line: percent + absolute counts + reset time.
+    expect(lines[4]).toContain("MCP");
+    expect(lines[4]).toContain("24%");
+    expect(lines[4]).toContain("(237/1000)");
+    expect(lines[4]).not.toContain("resets");
     // Detail branches (now padded model codes).
-    expect(lines[4]).toMatch(/├ search-prime\s+\d+/);
-    expect(lines[5]).toMatch(/└ web-reader\s+\d+/);
+    expect(lines[5]).toMatch(/├ search-prime\s+\d+/);
+    expect(lines[6]).toMatch(/└ web-reader\s+\d+/);
+    expect(lines[lines.length - 1]).toBe("```");
   });
 
   it("omits absolute counts when the limit carries no counters (5h)", () => {
