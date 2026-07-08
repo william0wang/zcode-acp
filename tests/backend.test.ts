@@ -105,4 +105,26 @@ describe("ZcodeBackend reader routing (unit)", () => {
     expect(resp2.error?.message).toMatch(/reader exited/);
     b.close();
   });
+
+  it("requeueServerRequests prepends so re-drained requests keep their order", () => {
+    const b = makeRoutingSubject();
+    b.route({
+      id: 5001,
+      method: "interaction/requestPermission",
+      params: { requestId: "r1", toolCallId: "t1", sessionId: "sess_a" },
+    });
+    b.route({
+      id: 5002,
+      method: "interaction/requestPermission",
+      params: { requestId: "r2", toolCallId: "t2", sessionId: "sess_b" },
+    });
+    // Drain both, then requeue the second (simulating a session filter put-back).
+    const all = b.pollServerRequests();
+    expect(all).toHaveLength(2);
+    b.requeueServerRequests([all[1]!]);
+    const remaining = b.pollServerRequests();
+    expect(remaining).toHaveLength(1);
+    expect((remaining[0]!.params as { sessionId: string }).sessionId).toBe("sess_b");
+    b.close();
+  });
 });

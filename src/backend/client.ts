@@ -217,6 +217,16 @@ export class ZcodeBackend {
     return this.serverRequests.splice(0, this.serverRequests.length);
   }
 
+  /**
+   * Re-queue server→client requests that belong to a different session (prepended
+   * to preserve arrival order). Used by `handleServerRequests` to put back
+   * requests it popped but doesn't own.
+   */
+  requeueServerRequests(reqs: ServerRequest[]): void {
+    if (reqs.length === 0) return;
+    this.serverRequests.unshift(...reqs);
+  }
+
   /** Reply to a zcode server→client request with a result (id + result). */
   sendReply(id: number, result: unknown): void {
     const stdin = this.proc.stdin;

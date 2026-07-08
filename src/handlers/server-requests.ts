@@ -61,8 +61,17 @@ export function getPendingInteractions(server: ZcodeAcpServer): Map<string, Dedu
 }
 
 /**
- * Drain and handle all pending zcode server→client requests. Returns true if
- * any were handled (used by the turn loop to refresh the no-progress timer).
+ * Drain and handle pending zcode server→client requests for THIS session only.
+ * Returns true if any were handled (used by the turn loop to refresh the
+ * no-progress timer).
+ *
+ * The backend's `serverRequests` queue is shared across all sessions (a single
+ * subprocess serves them all). Without filtering, session A's turn loop could
+ * pop session B's permission request and forward it to A's client — the popup
+ * lands in the wrong session. When `turn` is available we filter by
+ * `params.sessionId` so each turn loop only consumes its own requests; others
+ * are re-queued for their owner. Without `turn` (tests / non-turn callers) we
+ * process everything (legacy behaviour).
  */
 export async function handleServerRequests(
   server: ZcodeAcpServer,
@@ -73,12 +82,37 @@ export async function handleServerRequests(
 ): Promise<boolean> {
   const pending = getPendingInteractions(server);
   let handled = false;
+  const mySid = turn?.zcodeSid;
 
   for (;;) {
-    const req = backend.pollServerRequests().shift() ?? null;
-    if (!req) return handled;
+    const all = backend.pollServerRequests();
+    if (all.length === 0) return handled;
+    // Without a session filter (no turn), process everything — legacy path.
+    if (mySid === undefined) {
+      for (const req of all) {
+        handled = true;
+        await handleOne(server, backend, cx, acpSid, req, pending, turn);
+      }
+      continue;
+    }
+    // Pick the first request belonging to this session; put the rest back.
+    // Requests without a sessionId field are unrouteable — claim them here
+    // so they don't sit in the queue forever.
+    let mine: ServerRequest | undefined;
+    const others: ServerRequest[] = [];
+    for (const r of all) {
+      const sid = (r.params as { sessionId?: string }).sessionId;
+      if (!mine && (sid === undefined || sid === mySid)) {
+        mine = r;
+      } else {
+        others.push(r);
+      }
+    }
+    // Re-queue the ones that don't belong to this session (prepend to preserve order).
+    if (others.length > 0) backend.requeueServerRequests(others);
+    if (!mine) return handled;
     handled = true;
-    await handleOne(server, backend, cx, acpSid, req, pending, turn);
+    await handleOne(server, backend, cx, acpSid, mine, pending, turn);
   }
 }
 
