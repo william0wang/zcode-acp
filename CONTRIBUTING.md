@@ -80,7 +80,7 @@ Examples:
 
 ## Reporting Bugs
 
-Open a [GitHub Issue](https://github.com/zcode-org/zcode-acp-server/issues) with:
+Open a [GitHub Issue](https://github.com/william0wang/zcode-acp/issues) with:
 - ZCode CLI version (`zcode --version`)
 - Editor + version (Zed, JetBrains, ...)
 - Node.js version (`node --version`)

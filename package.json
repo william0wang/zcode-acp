@@ -7,11 +7,11 @@
   "author": "ZCode ACP Server Contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/zcode-org/zcode-acp-server.git"
+    "url": "https://github.com/william0wang/zcode-acp.git"
   },
-  "homepage": "https://github.com/zcode-org/zcode-acp-server#readme",
+  "homepage": "https://github.com/william0wang/zcode-acp#readme",
   "bugs": {
-    "url": "https://github.com/zcode-org/zcode-acp-server/issues"
+    "url": "https://github.com/william0wang/zcode-acp/issues"
   },
   "keywords": [
     "acp",
