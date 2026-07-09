@@ -40,8 +40,8 @@ export async function queryQuota(): Promise<QuotaResult> {
   return result;
 }
 
-// Re-exports for consumers (slash handler + tests).
-export { formatQuota } from "./format.js";
+// Re-exports for consumers (slash handler + CLI + tests).
+export { formatQuota, formatQuotaPlain } from "./format.js";
 export { parseLimit, parseQuotaEnvelope } from "./parse.js";
 export { renderBar } from "./format.js";
 export type { QuotaItem, QuotaResult, RawLimit } from "./types.js";

@@ -142,3 +142,16 @@ export function formatQuota(result: QuotaResult): string {
   const body = result.items.flatMap(formatItem);
   return ["```text", header, divider, ...body, "```"].join("\n");
 }
+
+/**
+ * {@link formatQuota} without the ```text fence — for raw terminal output.
+ *
+ * The fence is only useful inside an editor chat frame (where it triggers a
+ * bordered, copy-able code block). A real terminal renders the fence as
+ * literal ```` ``` ```` characters, so the standalone CLI strips it.
+ * Non-success kinds are already unfenced short prose, returned unchanged.
+ */
+export function formatQuotaPlain(result: QuotaResult): string {
+  const card = formatQuota(result);
+  return result.kind === "success" ? card.replace(/^```text\n/, "").replace(/\n```$/, "") : card;
+}

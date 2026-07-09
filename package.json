@@ -23,7 +23,8 @@
     "zcode"
   ],
   "bin": {
-    "zcode-acp-server": "dist/index.js"
+    "zcode-acp-server": "dist/index.js",
+    "zcode-quota": "dist/bin/quota.js"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

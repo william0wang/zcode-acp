@@ -87,6 +87,34 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 | `ZCODE_BASE_URL`  | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                               |
 | `ZCODE_ACP_DEBUG` | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
 
+## Standalone Quota CLI
+
+Besides the ACP server, the package ships a `zcode-quota` bin that queries
+your GLM Coding Plan usage **from the terminal** — no editor or running server
+needed. It reads the same `~/.zcode/v2/config.json` for credentials.
+
+```bash
+# One-shot: print the card and exit
+zcode-quota
+
+# Live monitor: clear the screen and refresh every 30s (default)
+zcode-quota -w
+
+# Refresh at a custom interval (seconds; minimum 10)
+zcode-quota --watch --interval 60
+```
+
+The watch mode clears and redraws the card in place, like `top`/`htop`. Press
+`Ctrl-C` to exit. The 10s minimum exists because the quota API is cached for
+10s internally — a shorter interval would just keep returning the stale cached
+value.
+
+When the package isn't globally installed, run the built file directly:
+
+```bash
+node dist/bin/quota.js -w
+```
+
 ## ACP Registry
 
 This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.

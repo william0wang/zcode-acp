@@ -21,7 +21,7 @@ vi.mock("../src/backend/credentials.js", () => ({
 }));
 
 import { clearCache, getCached, setCached, setClock } from "../src/quota/cache.js";
-import { formatQuota, renderBar } from "../src/quota/format.js";
+import { formatQuota, formatQuotaPlain, renderBar } from "../src/quota/format.js";
 import { parseLimit, parseQuotaEnvelope } from "../src/quota/parse.js";
 import type { QuotaResult } from "../src/quota/types.js";
 import { resolveQuotaHost } from "../src/quota/client.js";
@@ -255,6 +255,27 @@ describe("formatQuota", () => {
     expect(formatQuota({ kind: "auth_error" })).toMatch(/auth expired/i);
     expect(formatQuota({ kind: "rate_limited" })).toMatch(/busy/i);
     expect(formatQuota({ kind: "unavailable" })).toMatch(/unavailable/i);
+  });
+});
+
+describe("formatQuotaPlain", () => {
+  it("strips the ```text fence from a success card", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [{ key: "token_5h", label: "5h", usedPercent: 18, leftPercent: 82 }],
+    };
+    const plain = formatQuotaPlain(result);
+    expect(plain.startsWith("```")).toBe(false);
+    expect(plain.endsWith("```")).toBe(false);
+    expect(plain).toContain("GLM Coding Plan · Pro");
+    expect(plain).toContain("18%");
+  });
+
+  it("returns non-success fallbacks unchanged (already unfenced)", () => {
+    const unavailable = formatQuotaPlain({ kind: "unavailable" });
+    expect(unavailable).toBe(formatQuota({ kind: "unavailable" }));
+    expect(unavailable).not.toContain("```");
   });
 });
 
