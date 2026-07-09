@@ -185,6 +185,23 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 - [ZCode](https://zcode.z.ai) / [Zhipu Z.AI](https://z.ai) — the GLM model and ZCode CLI
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) — reference implementation that informed this server's design
 
+## Privacy
+
+**No telemetry or tracking** — the server reports nothing to anyone. The only
+runtime dependency beyond the ACP SDK is `zod`.
+
+Your prompts, code, and file contents are relayed between the editor and the
+ZCode backend over **local pipes**; that data reaches the GLM cloud API only
+because the ZCode backend itself sends it there for inference — this server
+adds no extra destinations.
+
+| Concern | What & why |
+| ------- | ---------- |
+| Network | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content |
+| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess |
+| Disk | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
+| Logging | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged |
+
 ## License
 
 Apache-2.0. This project follows the same license as the upstream ACP specification.

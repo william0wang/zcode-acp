@@ -121,6 +121,20 @@ This ensures the snapshot diff does not re-emit tools already handled by the
 event path, preventing Bash terminal output from being overwritten by a
 content-less ToolCallNew.
 
+## Data & Privacy
+
+**No telemetry, no analytics, no third-party network calls.** The server is a
+local relay: prompts, code, and tool outputs pass through process memory on
+their way between the editor and the ZCode subprocess, but reach the GLM cloud
+API only because the ZCode backend itself sends them for inference.
+
+| Concern | Detail |
+| ------- | ------ |
+| Network | One outbound request in the whole codebase — `src/quota/client.ts` GET to the quota API, Bearer token only, no body |
+| Credentials | API key from `~/.zcode/v2/config.json` (authenticates the subprocess + quota request), never logged. OAuth handled by the ZCode subprocess, not this server |
+| Disk | No new files. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — syncs sessions into the ZCode app's history & search (session title + first prompt) |
+| Logging | `log()`/`warn()` → stderr only for troubleshooting; even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are logged |
+
 ## Module Responsibilities
 
 ### `backend/` — ZCode process communication

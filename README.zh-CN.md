@@ -181,6 +181,21 @@ commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELO
 - [ZCode](https://zcode.z.ai) / [智谱 Z.AI](https://z.ai) —— GLM 模型与 ZCode CLI
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) —— 参考实现，本项目的设计借鉴了它的桥接架构
 
+## 隐私
+
+**无遥测、无追踪** —— 本服务端不向任何方上报任何信息。除 ACP SDK 外唯一运行时依赖是
+`zod`。
+
+你的提示词、代码、文件内容通过**本地管道**在编辑器与 ZCode 后端之间中转；这些数据会到达
+GLM 云端 API，仅因 ZCode 后端本身为推理而发送——本服务端不增加任何额外去向。
+
+| 方面 | 做什么 & 为什么 |
+| ---- | --------------- |
+| 网络 | 全代码库仅一处对外请求：配额 GET（`open.bigmodel.cn` / `api.z.ai`），只带 API key —— 为查询用量数字，不发送用户内容 |
+| 凭据 | API key 从 `~/.zcode/v2/config.json` 读取，用于认证 ZCode 子进程和配额请求。从不记录日志、从不写入别处。OAuth 完全由 ZCode 子进程处理 |
+| 磁盘 | 不创建任何新文件。只写入已存在的 `~/.zcode/v2/tasks-index.sqlite` —— 这是**将会话同步到 ZCode App**，使其出现在历史列表和全文搜索中（存会话标题和首条提示词） |
+| 日志 | 诊断信息输出到 stderr，用于排查桥接问题。即使开启 `ZCODE_ACP_DEBUG=1`，也绝不记录提示词/代码/密钥 |
+
 ## 许可证
 
 Apache-2.0。本项目沿用上游 ACP 规范的同一许可证。
