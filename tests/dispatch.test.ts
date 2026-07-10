@@ -101,7 +101,35 @@ describe("dispatchEvent", () => {
     expect((sent[0] as { status?: string }).status).toBeUndefined();
   });
 
-  it("Bash completed emits 2 notifications: terminal_output + terminal_exit", async () => {
+  it("Bash progress emits only the delta between cumulative stdout snapshots", async () => {
+    // zcode sends stdoutTail as a CUMULATIVE tail snapshot on every progress
+    // event. terminal_output.data is append semantics, so the bridge must diff
+    // consecutive snapshots and emit only the suffix — otherwise long-running
+    // commands show their output N times.
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const base: Partial<Extract<InternalEvent, { kind: "ToolCallUpdate" }>> = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "in_progress",
+    };
+    await dispatchEvent(server, cx, SID, { ...base, rawOutput: "line1\n" }, CHUNK);
+    await dispatchEvent(server, cx, SID, { ...base, rawOutput: "line1\nline2\n" }, CHUNK);
+    await dispatchEvent(server, cx, SID, { ...base, rawOutput: "line1\nline2\nline3\n" }, CHUNK);
+    expect(sent).toHaveLength(3);
+    expect(sent[0]).toMatchObject({
+      _meta: { terminal_output: { terminal_id: "c1", data: "line1\n" } },
+    });
+    expect(sent[1]).toMatchObject({
+      _meta: { terminal_output: { terminal_id: "c1", data: "line2\n" } },
+    });
+    expect(sent[2]).toMatchObject({
+      _meta: { terminal_output: { terminal_id: "c1", data: "line3\n" } },
+    });
+  });
+
+  it("Bash completed emits 2 notifications: terminal_output delta + terminal_exit", async () => {
     const { cx, sent } = mockContext();
     const server = makeServer(true);
     const ev: InternalEvent = {
@@ -131,6 +159,47 @@ describe("dispatchEvent", () => {
       },
       rawOutput: "done",
     });
+  });
+
+  it("Bash result after streamed progress emits only the unsent tail", async () => {
+    // Progress already streamed "line1\nline2\n"; the result carries the full
+    // "line1\nline2\nline3\n". Only "line3\n" should be appended.
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const base: Partial<Extract<InternalEvent, { kind: "ToolCallUpdate" }>> = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+    };
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      { ...base, status: "in_progress", rawOutput: "line1\nline2\n" },
+      CHUNK,
+    );
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      {
+        ...base,
+        status: "completed",
+        rawOutput: "line1\nline2\nline3\n",
+        output: "line1\nline2\nline3\n",
+        rawResult: { success: true, content: "line1\nline2\nline3\n", perf: { exitCode: 0 } },
+      },
+      CHUNK,
+    );
+    // progress (1) + terminal_output delta (1) + terminal_exit (1)
+    expect(sent).toHaveLength(3);
+    expect(sent[0]).toMatchObject({
+      _meta: { terminal_output: { data: "line1\nline2\n" } },
+    });
+    expect(sent[1]).toMatchObject({
+      _meta: { terminal_output: { data: "line3\n" } },
+    });
+    expect(sent[2]).toMatchObject({ status: "completed" });
   });
 
   it("Bash failed extracts exit code 1 when no perf.exitCode", async () => {

@@ -132,31 +132,46 @@ function dispatchToolCallUpdate(
  * and the Python bridge's _dispatch_event). Zed correlates by terminal_id, so
  * the two notifications MUST be separate:
  *   ① terminal_output — pure data, no status/content. Sent on BOTH progress and
- *      result states (whenever there's data) so live output streams.
+ *      result states (whenever there's NEW data) so live output streams.
  *   ② terminal_exit — terminal state only: status + content[type:terminal] +
  *      _meta.terminal_exit (with exitCode) + rawOutput text fallback. Sent ONLY
  *      on completed/failed.
  *
  * Merging them into one notification causes Zed to clear the content once the
  * turn completes (the original bug); splitting keeps the output visible.
+ *
+ * DELTA DEDUP: zcode's `stdoutTail`/result `content` is a *snapshot* of the
+ * accumulated stdout tail, but ACP `terminal_output.data` is *append* semantics
+ * — each value is written to the terminal as new bytes. Without dedup, every
+ * progress event replays the whole tail, and the result event replays it again,
+ * so long-running commands show their output N times. We track the last-sent
+ * snapshot per callId and emit only the suffix beyond it.
  */
 async function dispatchTerminalUpdate(
-  _server: ZcodeAcpServer,
+  server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   ev: Extract<InternalEvent, { kind: "ToolCallUpdate" }>,
   toolName: string,
 ): Promise<void> {
-  // ① terminal_output (pure data) — progress and result both emit it.
+  // ① terminal_output (pure data, append semantics) — progress and result both
+  //    emit it, but only the delta beyond the last-sent snapshot.
   let termData: unknown = ev.rawOutput ?? ev.rawResult;
   if (termData && typeof termData === "object" && !Array.isArray(termData)) {
     termData = (termData as Record<string, unknown>)["content"] ?? "";
   }
-  if (termData) {
+  const full = termData ? String(termData) : "";
+  const lastSent = server.terminalSentData.get(ev.callId) ?? "";
+  // Only the suffix past the previously-sent snapshot is new output. Guard
+  // against a non-monotonic snapshot (tail rotated) by falling back to the full
+  // value when the previous snapshot isn't a prefix of the current one.
+  const delta = lastSent && full.startsWith(lastSent) ? full.slice(lastSent.length) : full;
+  if (delta) {
+    server.terminalSentData.set(ev.callId, full);
     await sendSessionUpdate(cx, acpSid, {
       sessionUpdate: "tool_call_update",
       toolCallId: ev.callId,
-      _meta: { terminal_output: { terminal_id: ev.callId, data: String(termData) } },
+      _meta: { terminal_output: { terminal_id: ev.callId, data: delta } },
     });
   }
 
@@ -174,8 +189,14 @@ async function dispatchTerminalUpdate(
       },
     };
     // rawOutput gives Zed a text fallback outside the terminal render path.
+    // This carries the FULL output (not the delta) so a non-terminal render
+    // fallback shows everything once; the terminal_output stream already
+    // appended it above via the dedup delta.
     if (ev.output !== undefined) exitUpdate.rawOutput = ev.output;
     await sendSessionUpdate(cx, acpSid, exitUpdate);
+    // Terminal session ended — clear the snapshot so a future tool reusing this
+    // callId (shouldn't happen, but defensively) starts fresh.
+    server.terminalSentData.delete(ev.callId);
   }
 }
 
