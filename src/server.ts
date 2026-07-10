@@ -66,11 +66,12 @@ export class ZcodeAcpServer {
   /** Per-session model cache for configOptions model dropdown. */
   readonly modelCache = new Map<string, string>();
   /**
-   * Per-Bash-callId cumulative stdout snapshot already streamed via
-   * terminal_output. zcode's `stdoutTail` is a *snapshot* of the tail of the
-   * accumulated stdout, but ACP `terminal_output.data` is *append* semantics —
-   * so we must diff each new snapshot against the last-sent one and emit only
-   * the suffix to avoid replaying the whole output on every progress event.
+   * Per-Bash-callId stdout snapshot already streamed via terminal_output. Used
+   * by dispatchTerminalUpdate for two dedup guards:
+   *   - progress: diff cumulative stdoutTail snapshots, emit only the suffix.
+   *   - result:   if present, the output was already streamed → skip replay.
+   * Presence of a key also signals "progress fired for this call" (absent =
+   * short command with no progress, so the result emits output once).
    */
   readonly terminalSentData = new Map<string, string>();
   /** Monotonic id counter; base 10_000_000 to avoid collisions with zcode-originated ids. */

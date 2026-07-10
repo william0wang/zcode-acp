@@ -147,7 +147,9 @@ describe("dispatchEvent", () => {
     expect(sent[0]).toMatchObject({
       _meta: { terminal_output: { terminal_id: "c1", data: "done" } },
     });
-    // ② terminal_exit (terminal state)
+    // ② terminal_exit (terminal state) — no rawOutput: the output was already
+    //    streamed via terminal_output, and including rawOutput makes Zed render
+    //    it a second time (the duplication bug).
     expect(sent[1]).toMatchObject({
       sessionUpdate: "tool_call_update",
       toolCallId: "c1",
@@ -157,13 +159,13 @@ describe("dispatchEvent", () => {
         claudeCode: { toolName: "Bash" },
         terminal_exit: { terminal_id: "c1", exit_code: 0, signal: null },
       },
-      rawOutput: "done",
     });
+    expect((sent[1] as { rawOutput?: string }).rawOutput).toBeUndefined();
   });
 
-  it("Bash result after streamed progress emits only the unsent tail", async () => {
-    // Progress already streamed "line1\nline2\n"; the result carries the full
-    // "line1\nline2\nline3\n". Only "line3\n" should be appended.
+  it("Bash result after streamed progress skips terminal_output (no replay)", async () => {
+    // Progress already streamed the full output; zcode's result re-sends the
+    // complete tail. terminal_output must NOT fire again — only terminal_exit.
     const { cx, sent } = mockContext();
     const server = makeServer(true);
     const base: Partial<Extract<InternalEvent, { kind: "ToolCallUpdate" }>> = {
@@ -175,7 +177,7 @@ describe("dispatchEvent", () => {
       server,
       cx,
       SID,
-      { ...base, status: "in_progress", rawOutput: "line1\nline2\n" },
+      { ...base, status: "in_progress", rawOutput: "line1\nline2\nline3\n" },
       CHUNK,
     );
     await dispatchEvent(
@@ -191,15 +193,34 @@ describe("dispatchEvent", () => {
       },
       CHUNK,
     );
-    // progress (1) + terminal_output delta (1) + terminal_exit (1)
-    expect(sent).toHaveLength(3);
+    // progress terminal_output (1) + result terminal_exit (1). No second data.
+    expect(sent).toHaveLength(2);
     expect(sent[0]).toMatchObject({
-      _meta: { terminal_output: { data: "line1\nline2\n" } },
+      _meta: { terminal_output: { data: "line1\nline2\nline3\n" } },
     });
-    expect(sent[1]).toMatchObject({
-      _meta: { terminal_output: { data: "line3\n" } },
+    expect(sent[1]).toMatchObject({ status: "completed" });
+  });
+
+  it("Bash result with no prior progress emits full output once", async () => {
+    // Short command: scheduled → result, no progress event. Nothing was streamed
+    // yet, so the result must emit terminal_output once so output is visible.
+    const { cx, sent } = mockContext();
+    const server = makeServer(true);
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "completed",
+      rawOutput: "quick result\n",
+      output: "quick result\n",
+      rawResult: { success: true, content: "quick result\n", perf: { exitCode: 0 } },
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      _meta: { terminal_output: { data: "quick result\n" } },
     });
-    expect(sent[2]).toMatchObject({ status: "completed" });
+    expect(sent[1]).toMatchObject({ status: "completed" });
   });
 
   it("Bash failed extracts exit code 1 when no perf.exitCode", async () => {
