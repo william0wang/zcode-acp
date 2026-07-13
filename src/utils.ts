@@ -28,6 +28,11 @@ export const ZCODE_CREDS_PATH = path.join(
 /**
  * Slash commands surfaced to the editor. Each maps to a ZCode session method
  * that the server forwards when the user types the command.
+ *
+ * Commands handled by the bridge (compact/goal/fork/rewind/steer/model/mode/
+ * thought/quota) are intercepted in `handleSlashCommand`. Commands handled by
+ * the ZCode backend (skill/init) and plugin commands (code-review etc.) pass
+ * through to `session/send` — the backend resolves them before the model.
  */
 export const SLASH_COMMANDS = [
   { name: "compact", description: "Compress conversation context (free up tokens)" },
@@ -59,6 +64,12 @@ export const SLASH_COMMANDS = [
     input: { hint: "max|high|nothink" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
+  {
+    name: "skill",
+    description: "List skills, or force-load one for the next prompt",
+    input: { hint: "[skill-name] [task]" },
+  },
+  { name: "init", description: "Create or update workspace AGENTS.md instructions" },
 ] as const;
 
 /** Static metadata for the configOptions selects (model/mode/thought). */

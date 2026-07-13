@@ -6,6 +6,14 @@
  * feedback `agent_message_chunk`, and return `end_turn` — never reaching the
  * normal turn loop. Unknown `/x` falls through to the model (extensibility).
  *
+ * Commands handled by the ZCode backend (skill/init/code-review and other
+ * plugin commands) are NOT intercepted here — they pass through to
+ * `session/send` and the backend resolves them before the model sees them.
+ *
+ * Commands that require the ZCode TUI (mcp/plugins/login/logout/new/resume/
+ * locale/expert/workflow/workflows/effort/help) return a friendly error
+ * instead of passing raw text to the model (which would confuse it).
+ *
  * `/quota` is the exception: it does not call ZCode at all — it queries the
  * GLM Coding Plan usage API directly and renders the result.
  *
@@ -24,6 +32,40 @@ import { CONFIG_DISPATCH, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 import { compact, fork, rewind, steer } from "./extensions.js";
+
+/**
+ * ZCode built-in commands that require the TUI command center or interactive
+ * UI (selection panels, login flows, etc.). They cannot work in app-server
+ * mode, so we return a friendly error instead of passing raw `/cmd` text to
+ * the model (which would produce confusing output).
+ */
+const UNSUPPORTED_TUI_COMMANDS = new Set([
+  "mcp",
+  "plugins",
+  "login",
+  "logout",
+  "new",
+  "resume",
+  "locale",
+  "expert",
+  "workflow",
+  "workflows",
+  "effort",
+  "help",
+]);
+
+/**
+ * Commands resolved by the ZCode backend's `customCommandPromptResolver` or
+ * `executeTurn` before the model sees them. They pass through to
+ * `session/send` as-is. Used to decide whether to intercept or pass through.
+ */
+const PASSTHROUGH_COMMANDS = new Set([
+  "skill",
+  "init",
+  // Plugin commands (code-review, android-dev, etc.) are also passthrough,
+  // but since they're dynamic we don't list them here — unknown commands
+  // fall through to return null (passthrough) by default.
+]);
 
 /** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
 export async function handleSlashCommand(
@@ -128,7 +170,17 @@ export async function handleSlashCommand(
         return ok(`✓ ${cmd} = ${arg}`);
       }
       default:
-        // Unknown /x → don't intercept, send to the model as normal text.
+        // Known passthrough commands (skill/init/plugin commands) → let the
+        // ZCode backend resolve them via customCommandPromptResolver or
+        // executeTurn. Don't intercept.
+        if (PASSTHROUGH_COMMANDS.has(cmd)) return null;
+        // TUI-only commands → return a friendly error instead of passing
+        // raw text to the model (which would confuse it).
+        if (UNSUPPORTED_TUI_COMMANDS.has(cmd)) {
+          return ok(`⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`);
+        }
+        // Truly unknown /x → don't intercept, send to the model as normal
+        // text (extensibility — plugin commands or future commands).
         return null;
     }
   } catch (e) {
