@@ -8,14 +8,14 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import process from "node:process";
 
-import { log } from "../utils.js";
+import { compareVersions, log } from "../utils.js";
 
 /** Path to the ZCode CLI config (plugins, skills, mcp). */
 const CLI_CONFIG_PATH = path.join(
-  process.env.HOME || process.env.USERPROFILE || "~",
+  homedir(),
   ".zcode",
   "cli",
   "config.json",
@@ -23,7 +23,7 @@ const CLI_CONFIG_PATH = path.join(
 
 /** Root of the plugin cache directory. */
 const PLUGIN_CACHE_DIR = path.join(
-  process.env.HOME || process.env.USERPROFILE || "~",
+  homedir(),
   ".zcode",
   "cli",
   "plugins",
@@ -97,7 +97,7 @@ export function loadPluginCommands(): PluginCommandEntry[] {
       let latestVersion = "";
       for (const entry of readdirSync(pluginDir)) {
         const vDir = path.join(pluginDir, entry);
-        if (statSync(vDir).isDirectory() && entry > latestVersion) {
+        if (statSync(vDir).isDirectory() && compareVersions(entry, latestVersion) > 0) {
           latestVersion = entry;
         }
       }

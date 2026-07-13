@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 
-import { log, warn } from "../src/utils.js";
+import { compareVersions, log, warn } from "../src/utils.js";
 
 describe("logging", () => {
   const prevDebug = process.env.ZCODE_ACP_DEBUG;
@@ -46,5 +46,31 @@ describe("logging", () => {
     process.env.ZCODE_ACP_DEBUG = "0";
     log("still silenced");
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("compareVersions", () => {
+  it("treats 10.0.0 as greater than 2.0.0 (not lexicographic)", () => {
+    expect(compareVersions("10.0.0", "2.0.0")).toBeGreaterThan(0);
+    expect(compareVersions("2.0.0", "10.0.0")).toBeLessThan(0);
+  });
+
+  it("treats 1.10.0 as greater than 1.2.0", () => {
+    expect(compareVersions("1.10.0", "1.2.0")).toBeGreaterThan(0);
+  });
+
+  it("returns 0 for equal versions", () => {
+    expect(compareVersions("1.0.0", "1.0.0")).toBe(0);
+  });
+
+  it("sorts empty string before any version (sentinel for discovery loops)", () => {
+    expect(compareVersions("0.0.0", "")).toBeGreaterThan(0);
+    expect(compareVersions("", "0.0.0")).toBeLessThan(0);
+    expect(compareVersions("", "")).toBe(0);
+  });
+
+  it("handles different segment counts", () => {
+    expect(compareVersions("1.2", "1.2.0")).toBe(0);
+    expect(compareVersions("1.2.1", "1.2")).toBeGreaterThan(0);
   });
 });

@@ -12,10 +12,10 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
-import process from "node:process";
 
-import { log } from "../utils.js";
+import { compareVersions, log } from "../utils.js";
 
 /** Information about a discovered MCP server. */
 export interface McpServerInfo {
@@ -43,7 +43,7 @@ interface McpServerConfig {
   url?: string;
 }
 
-const HOME = process.env.HOME || process.env.USERPROFILE || "~";
+const HOME = homedir();
 const CLI_CONFIG_PATH = path.join(HOME, ".zcode", "cli", "config.json");
 const PLUGIN_CACHE_DIR = path.join(HOME, ".zcode", "cli", "plugins", "cache");
 
@@ -95,7 +95,7 @@ export function loadMcpServers(): McpServerInfo[] {
     try {
       for (const entry of readdirSync(pluginDir)) {
         const vDir = path.join(pluginDir, entry);
-        if (statSync(vDir).isDirectory() && entry > latestVersion) {
+        if (statSync(vDir).isDirectory() && compareVersions(entry, latestVersion) > 0) {
           latestVersion = entry;
         }
       }

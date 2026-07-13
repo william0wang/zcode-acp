@@ -10,6 +10,8 @@
  * returning null (passthrough).
  */
 
+import { homedir } from "node:os";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -99,7 +101,7 @@ describe("loadPluginCommands", () => {
   it("loads enabled plugin commands with description and argument-hint", () => {
     resetMocks();
 
-    const home = process.env.HOME || "~";
+    const home = homedir();
     const configPath = `${home}/.zcode/cli/config.json`;
     const cacheDir = `${home}/.zcode/cli/plugins/cache`;
 
@@ -139,7 +141,7 @@ describe("loadPluginCommands", () => {
   it("skips disabled plugins", () => {
     resetMocks();
 
-    const home = process.env.HOME || "~";
+    const home = homedir();
     mockFiles.set(
       `${home}/.zcode/cli/config.json`,
       JSON.stringify({
@@ -157,7 +159,7 @@ describe("loadPluginCommands", () => {
   it("skips plugins without commands directory", () => {
     resetMocks();
 
-    const home = process.env.HOME || "~";
+    const home = homedir();
     const cacheDir = `${home}/.zcode/cli/plugins/cache`;
 
     mockFiles.set(
@@ -183,7 +185,7 @@ describe("loadPluginCommands", () => {
   it("skips command .md files without description", () => {
     resetMocks();
 
-    const home = process.env.HOME || "~";
+    const home = homedir();
     const cacheDir = `${home}/.zcode/cli/plugins/cache`;
 
     mockFiles.set(
@@ -214,7 +216,7 @@ describe("loadPluginCommands", () => {
   it("uses the latest version directory", () => {
     resetMocks();
 
-    const home = process.env.HOME || "~";
+    const home = homedir();
     const cacheDir = `${home}/.zcode/cli/plugins/cache`;
 
     mockFiles.set(
@@ -249,6 +251,46 @@ describe("loadPluginCommands", () => {
     expect(commands).toHaveLength(1);
     expect(commands[0]!.name).toBe("new-cmd");
     expect(commands[0]!.description).toBe("New version command");
+  });
+
+  it("uses semver comparison for multi-digit versions (10.0.0 > 2.0.0)", () => {
+    resetMocks();
+
+    const home = homedir();
+    const cacheDir = `${home}/.zcode/cli/plugins/cache`;
+
+    mockFiles.set(
+      `${home}/.zcode/cli/config.json`,
+      JSON.stringify({
+        plugins: {
+          enabledPlugins: {
+            "test-plugin@claude-plugins-official": true,
+          },
+        },
+      }),
+    );
+
+    mockDirs.add(cacheDir);
+    mockDirs.add(`${cacheDir}/claude-plugins-official`);
+    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin`);
+    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0`);
+    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands`);
+    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/10.0.0`);
+    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/10.0.0/commands`);
+
+    mockFiles.set(
+      `${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands/old-cmd.md`,
+      `---\ndescription: Version 2\n---\n`,
+    );
+    mockFiles.set(
+      `${cacheDir}/claude-plugins-official/test-plugin/10.0.0/commands/new-cmd.md`,
+      `---\ndescription: Version 10\n---\n`,
+    );
+
+    const commands = loadPluginCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands[0]!.name).toBe("new-cmd");
+    expect(commands[0]!.description).toBe("Version 10");
   });
 });
 

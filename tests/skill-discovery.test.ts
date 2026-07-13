@@ -6,6 +6,9 @@
  * Uses the same node:fs mocking pattern as plugin-commands.test.ts.
  */
 
+import { homedir } from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // --- mock fs ---
@@ -54,7 +57,7 @@ function resetMocks(): void {
   mockDirs.clear();
 }
 
-const HOME = process.env.HOME || "~";
+const HOME = homedir();
 
 /** Helper: set up a SKILL.md file with frontmatter. */
 function setSkill(dir: string, name: string, description: string, extra = ""): void {
@@ -110,8 +113,6 @@ describe("loadSkillCommands", () => {
     mockDirs.add(skillDir);
     const skillMd = `${skillDir}/SKILL.md`;
     mockFiles.set(skillMd, `---\nname: my-skill\ndescription: A skill.\n---\n`);
-    // Also need the resolved path — path.resolve(skillMd)
-    const path = require("node:path");
     const resolved = path.resolve(skillMd);
 
     mockFiles.set(

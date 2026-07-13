@@ -6,6 +6,8 @@
  * Also verifies the /mcp slash command no longer returns "not available".
  */
 
+import { homedir } from "node:os";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -58,7 +60,7 @@ function resetMocks(): void {
   mockDirs.clear();
 }
 
-const HOME = process.env.HOME || "~";
+const HOME = homedir();
 
 afterEach(() => {
   resetMocks();

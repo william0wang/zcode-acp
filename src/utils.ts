@@ -135,3 +135,31 @@ export function log(msg: string): void {
 export function warn(msg: string): void {
   process.stderr.write(`[zcode-acp] ${msg}\n`);
 }
+
+/**
+ * Compare two semver-like version strings numerically (e.g. "10.0.0" > "2.0.0").
+ * Falls back to lexicographic comparison for non-numeric segments. Used by
+ * plugin/skill/MCP discovery to find the latest cached version directory.
+ *
+ * Returns positive if a > b, negative if a < b, 0 if equal.
+ */
+export function compareVersions(a: string, b: string): number {
+  // Empty string sorts before any version (so the first candidate always wins
+  // against the initial "" sentinel used by discovery loops).
+  if (!a && !b) return 0;
+  if (!a) return -1;
+  if (!b) return 1;
+  const pa = a.split(".");
+  const pb = b.split(".");
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = Number(pa[i] ?? "0");
+    const nb = Number(pb[i] ?? "0");
+    if (Number.isNaN(na) || Number.isNaN(nb)) {
+      // Non-numeric segment — fall back to lexicographic.
+      return (pa[i] ?? "").localeCompare(pb[i] ?? "");
+    }
+    if (na !== nb) return na - nb;
+  }
+  return 0;
+}
