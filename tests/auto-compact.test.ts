@@ -23,11 +23,18 @@ vi.mock("../src/handlers/extensions.js", () => ({
 // Import AFTER mocks are registered.
 import { autoCompactThreshold, maybeAutoCompact } from "../src/config/auto-compact.js";
 
-/** Mock AgentContext that records notify calls (compact's emitInitialUsage uses it). */
-function mockContext(): acp.AgentContext {
+/** Mock AgentContext that records notify calls (sendTextChunk + emitInitialUsage). */
+function mockContext(notifySpy?: ReturnType<typeof vi.fn>): acp.AgentContext {
   return {
-    notify: vi.fn().mockResolvedValue(undefined),
+    notify: notifySpy ?? vi.fn().mockResolvedValue(undefined),
   } as unknown as acp.AgentContext;
+}
+
+/** Extract text payloads from all agent_message_chunk notifies. */
+function chunkTexts(notifySpy: ReturnType<typeof vi.fn>): string[] {
+  return notifySpy.mock.calls
+    .filter(([, p]) => p?.update?.sessionUpdate === "agent_message_chunk")
+    .map(([, p]) => p.update.content.text as string);
 }
 
 /** A fake backend whose `request` returns canned responses by method. */
@@ -171,5 +178,50 @@ describe("maybeAutoCompact", () => {
     const { server, compactCalls } = makeServerWithProjection(null);
     await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
     expect(compactCalls).not.toHaveBeenCalled();
+  });
+
+  it("sends progress notifications (start + done) to the client", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    const notifySpy = vi.fn().mockResolvedValue(undefined);
+    await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
+    const texts = chunkTexts(notifySpy);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain("🔄 auto-compact");
+    expect(texts[0]).toContain("150,000");
+    expect(texts[1]).toContain("✓ auto-compact");
+  });
+
+  it("sends a timeout warning when __lockTimeout is true", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockResolvedValueOnce({ __lockTimeout: true });
+    const notifySpy = vi.fn().mockResolvedValue(undefined);
+    await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
+    const texts = chunkTexts(notifySpy);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain("🔄 auto-compact");
+    expect(texts[1]).toContain("⚠ auto-compact timed out");
+  });
+
+  it("sends an error notification when compact throws", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockRejectedValueOnce(new Error("compact failed: backend error"));
+    const notifySpy = vi.fn().mockResolvedValue(undefined);
+    await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
+    const texts = chunkTexts(notifySpy);
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain("🔄 auto-compact");
+    expect(texts[1]).toContain("⚠ auto-compact failed");
+    expect(texts[1]).toContain("compact failed: backend error");
+  });
+
+  it("does not send any chunk when usage is below threshold", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(50_000);
+    const notifySpy = vi.fn().mockResolvedValue(undefined);
+    await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
+    expect(chunkTexts(notifySpy)).toHaveLength(0);
   });
 });

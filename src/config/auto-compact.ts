@@ -11,11 +11,14 @@
  * the prompt response.
  */
 
+import { randomUUID } from "node:crypto";
+
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { compact } from "../handlers/extensions.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
+import { sendTextChunk } from "../handlers/io.js";
 
 /** ENV: `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` — absolute token count (0 = disabled). */
 export function autoCompactThreshold(): number {
@@ -58,12 +61,37 @@ export async function maybeAutoCompact(
   if (used < threshold) return;
 
   log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
+  const msgId = randomUUID();
+  await sendTextChunk(
+    cx,
+    acpSid,
+    `🔄 auto-compact: context usage ${used.toLocaleString()} ≥ threshold ${threshold.toLocaleString()}, compressing…`,
+    msgId,
+  );
   try {
     // compact() handles: session/compact → waitForTurnIdle → emitInitialUsage.
-    await compact(server, { sessionId: acpSid }, cx);
+    const result = (await compact(server, { sessionId: acpSid }, cx)) as {
+      __lockTimeout?: boolean;
+    };
+    if (result.__lockTimeout) {
+      await sendTextChunk(
+        cx,
+        acpSid,
+        "⚠ auto-compact timed out (300s) — backend may still be processing",
+        msgId,
+      );
+    } else {
+      await sendTextChunk(cx, acpSid, "✓ auto-compact: context compressed", msgId);
+    }
     log("auto-compact: done");
   } catch (e) {
     warn(`auto-compact: compact failed (${e instanceof Error ? e.message : String(e)})`);
+    await sendTextChunk(
+      cx,
+      acpSid,
+      `⚠ auto-compact failed: ${e instanceof Error ? e.message : String(e)}`,
+      msgId,
+    );
     // Best-effort: never break the prompt response.
   }
 }
