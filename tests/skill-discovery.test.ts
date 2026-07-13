@@ -43,8 +43,7 @@ vi.mock("node:fs", async () => {
       return entries;
     },
     statSync: (p: string) => {
-      if (mockDirs.has(p))
-        return { isDirectory: () => true } as ReturnType<typeof actual.statSync>;
+      if (mockDirs.has(p)) return { isDirectory: () => true } as ReturnType<typeof actual.statSync>;
       return actual.statSync(p);
     },
   };
@@ -132,10 +131,7 @@ describe("loadSkillCommands", () => {
     resetMocks();
     setSkill(`${HOME}/.zcode/skills`, "enabled-skill", "An enabled skill.");
     // Config exists but doesn't mention this skill
-    mockFiles.set(
-      `${HOME}/.zcode/cli/config.json`,
-      JSON.stringify({ skills: {} }),
-    );
+    mockFiles.set(`${HOME}/.zcode/cli/config.json`, JSON.stringify({ skills: {} }));
     const skills = loadSkillCommands();
     expect(skills).toHaveLength(1);
     expect(skills[0]!.name).toBe("$enabled-skill");
@@ -227,11 +223,7 @@ describe("loadSkillCommands", () => {
     mockDirs.add(`${cacheDir}/zcode-plugins-official/doc-skills`);
     mockDirs.add(`${cacheDir}/zcode-plugins-official/doc-skills/1.0.0`);
     mockDirs.add(`${cacheDir}/zcode-plugins-official/doc-skills/1.0.0/skills`);
-    setSkill(
-      `${cacheDir}/zcode-plugins-official/doc-skills/1.0.0/skills`,
-      "docx",
-      "DOCX skill.",
-    );
+    setSkill(`${cacheDir}/zcode-plugins-official/doc-skills/1.0.0/skills`, "docx", "DOCX skill.");
 
     const skills = loadSkillCommands();
     expect(skills).toHaveLength(0);
@@ -260,5 +252,26 @@ describe("loadSkillCommands", () => {
     const skills = loadSkillCommands();
     expect(skills).toHaveLength(1);
     expect(skills[0]!.name).toBe("$unnamed");
+  });
+
+  it("omits input.hint when skill has no argument-hint (sends immediately)", () => {
+    resetMocks();
+    setSkill(`${HOME}/.zcode/skills`, "tdd", "Test-driven development.");
+    const skills = loadSkillCommands();
+    expect(skills).toHaveLength(1);
+    expect(skills[0]!.input).toBeUndefined();
+  });
+
+  it("sets input.hint from argument-hint frontmatter (waits for input)", () => {
+    resetMocks();
+    setSkill(
+      `${HOME}/.zcode/skills`,
+      "handoff",
+      "Compress conversation into a handoff document.",
+      '\nargument-hint: "What is the next session for?"',
+    );
+    const skills = loadSkillCommands();
+    expect(skills).toHaveLength(1);
+    expect(skills[0]!.input).toEqual({ hint: "What is the next session for?" });
   });
 });

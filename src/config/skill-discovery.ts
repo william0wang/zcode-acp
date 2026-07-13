@@ -29,6 +29,7 @@ import { compareVersions, log } from "../utils.js";
 export interface SkillEntry {
   name: string;
   description: string;
+  input?: { hint: string };
 }
 
 interface CliConfig {
@@ -63,10 +64,7 @@ function parseFrontmatter(content: string): Record<string, string> {
     if (idx <= 0) continue;
     const key = line.slice(0, idx).trim();
     let val = line.slice(idx + 1).trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
     if (key) fm[key] = val;
@@ -132,7 +130,17 @@ function scanSkillDir(
     const cmdName = `$${name}`;
     if (seen.has(cmdName)) continue;
     seen.add(cmdName);
-    results.push({ name: cmdName, description: truncateDesc(description) });
+    const skillEntry: SkillEntry = {
+      name: cmdName,
+      description: truncateDesc(description),
+    };
+    // Only request follow-up input when the skill author explicitly declares
+    // an argument-hint — matching plugin-commands.ts behaviour. Skills without
+    // argument-hint (e.g. $tdd, $setup-matt-pocock-skills) send immediately on
+    // selection; skills with one (e.g. $handoff, $teach) wait for user input.
+    const hint = fm["argument-hint"];
+    if (hint) skillEntry.input = { hint };
+    results.push(skillEntry);
   }
 }
 
@@ -190,21 +198,11 @@ export function loadSkillCommands(): SkillEntry[] {
     }
     if (!latestVersion) continue;
 
-    scanSkillDir(
-      path.join(pluginDir, latestVersion, "skills"),
-      disabledPaths,
-      results,
-      seen,
-    );
+    scanSkillDir(path.join(pluginDir, latestVersion, "skills"), disabledPaths, results, seen);
   }
 
   // 4. Project-level .agents/skills/ (if exists).
-  scanSkillDir(
-    path.join(process.cwd(), ".agents", "skills"),
-    disabledPaths,
-    results,
-    seen,
-  );
+  scanSkillDir(path.join(process.cwd(), ".agents", "skills"), disabledPaths, results, seen);
 
   log(`skill-discovery: loaded ${results.length} skill(s)`);
   return results;
