@@ -1,10 +1,107 @@
 # Agent Instructions
 
+## Project overview
+
+**zcode-acp-server** — a Node.js bridge that connects the ZCode agent backend
+(`zcode app-server --stdio`) to any ACP-compatible editor (Zed, JetBrains, …)
+via JSON-RPC over stdio. Translates ACP protocol requests into ZCode session
+methods and streams events back as ACP `session/update` notifications.
+
+## Commands
+
+| Task | Command |
+|------|---------|
+| Build | `pnpm build` |
+| Typecheck | `pnpm typecheck` |
+| Test (all) | `pnpm test` |
+| Test (single file) | `npx vitest run tests/<file>.test.ts` |
+| Lint | `pnpm lint` |
+| Format (changed files only) | `pnpm prettier --write <path>` |
+| Smoke test | `pnpm smoke` |
+
+**Package manager**: pnpm. **Node**: >=22. **Module system**: ESM (`"type": "module"`).
+
+## Architecture
+
+```
+src/
+├── index.ts              Entry point — wires server to stdio ACP stream
+├── server.ts             ZcodeAcpServer — shared state + handler registration
+├── backend/              ZCode subprocess client (JSON-RPC over stdio)
+│   ├── client.ts         Spawns + communicates with zcode app-server
+│   ├── credentials.ts    Reads ~/.zcode/v2/config.json for GLM API key
+│   ├── listener.ts       EventStreamListener — subscribes to session/events
+│   └── types.ts          ZCode protocol types
+├── handlers/             ACP method handlers
+│   ├── session.ts        session/new, session/prompt (turn loop), load, resume
+│   ├── slash.ts          Slash-command interception (/compact, /mcp, etc.)
+│   ├── extensions.ts     ZCode extensions (fork, rewind, compact, steer, …)
+│   ├── dispatch.ts       InternalEvent → ACP session/update dispatch
+│   ├── io.ts             Client notification helpers
+│   └── server-requests.ts  Server→client requests (permission, elicitation)
+├── config/               Discovery + runtime config
+│   ├── plugin-commands.ts  Load plugin commands from ~/.zcode/cli/
+│   ├── skill-discovery.ts  Discover Skills from filesystem
+│   ├── mcp-discovery.ts    Discover MCP servers from config + plugins
+│   ├── auto-compact.ts     Threshold-based auto-compaction
+│   ├── options.ts          Config options (model/mode/thought dropdowns)
+│   └── runtime-model.ts    Model switching overlay
+├── translators/          ZCode event → ACP translation
+│   ├── event-translator.ts  Stream event → InternalEvent
+│   ├── projection-differ.ts  Snapshot diff for turn-completion reconciliation
+│   └── tool-helpers.ts       Diff builder, location extractor
+├── interaction/          Permission, ExitPlanMode, AskUserQuestion handling
+├── quota/                GLM Coding Plan usage API client (/quota command)
+└── bin/quota.ts          Standalone zcode-quota CLI
+```
+
+**Key boundary**: `backend/` talks to the ZCode subprocess. `handlers/` talks to
+the ACP client (editor). `translators/` bridges the two event models. Never mix
+ZCode protocol types into ACP notifications directly — always translate.
+
+## Conventions
+
+- **Logging**: use `log()` / `warn()` from `src/utils.ts`. Both write to stderr.
+  **Never use `console.log`** — stdout is the ACP JSON-RPC stream and any stray
+  output corrupts the protocol.
+- **Debug logs**: `log()` is gated behind `ZCODE_ACP_DEBUG=1`. Use it for
+  verbose diagnostics. `warn()` is always emitted.
+- **Formatting**: double quotes, semicolons, trailing commas, 100 char width.
+- **Imports**: use `.js` extensions in relative imports (NodeNext resolution).
+  Sort imports alphabetically (ESLint `sort-imports` rule).
+- **Error handling**: best-effort in event handlers — failures are logged via
+  `warn()`, never thrown into the event loop (would crash the bridge).
+- **Tests**: mock `node:fs` with `vi.mock` and Map/Set-based fake filesystem.
+  See `tests/plugin-commands.test.ts` for the pattern.
+
+## Gotchas
+
+- **ZCode backend version drift**: the backend may change event payloads between
+  releases. When diff display or event handling breaks, check the raw backend
+  event with `ZCODE_ACP_DEBUG=1` before changing translator code.
+- **`session/prompt` ordering**: subscribe to events BEFORE calling `session/send`
+  — short turns can complete before a late subscribe catches them.
+- **Preempt lock**: concurrent prompts for the same session are serialized via
+  `withPreemptLock`. Don't bypass it — two simultaneous turns corrupt the listener.
+- **AGENTS.md is workspace-scoped**: the global `~/.zcode/AGENTS.md` also exists;
+  this file takes precedence for this repo.
+
+## Docs to read before sensitive changes
+
+- `docs/ARCHITECTURE.md` — full architecture writeup
+- `docs/PROTOCOL.md` — ACP + ZCode protocol mapping
+- `docs/DEVELOPMENT.md` — dev setup and debugging guide
+- `docs/TROUBLESHOOTING.md` — common issues and diagnostics
+
 ## Agent skills
 
 ### Issue tracker
 
 GitHub Issues (`gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
