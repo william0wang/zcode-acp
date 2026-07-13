@@ -680,19 +680,17 @@ async function runEventTurn(
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
 
-    // Edit/Write diff eager dispatch: on tool.updated result for Edit/Write,
-    // grab the structured patch from session/messages immediately (don't wait
-    // for turn completion — model rate-limiting could delay it indefinitely).
+    // Edit/Write diff eager dispatch: on tool.updated result, grab the
+    // structured patch from session/messages immediately (don't wait for turn
+    // completion — model rate-limiting could delay it indefinitely).
+    //
+    // Newer ZCode backends omit toolName on "result" events (only "scheduled"
+    // and "started" carry it), so we no longer filter by tool name here —
+    // dispatchEditDiff itself checks the tool part's display and skips
+    // non-file-diff tools harmlessly.
     if (ev.type === "tool.updated") {
-      const payload = ev.payload as { kind?: string; toolCallId?: string; toolName?: string };
-      if (
-        payload.kind === "result" &&
-        payload.toolCallId &&
-        (payload.toolName === "Edit" ||
-          payload.toolName === "Write" ||
-          payload.toolName === "edit" ||
-          payload.toolName === "write")
-      ) {
+      const payload = ev.payload as { kind?: string; toolCallId?: string };
+      if (payload.kind === "result" && payload.toolCallId) {
         await dispatchEditDiff(
           server,
           cx,
