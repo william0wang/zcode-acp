@@ -98,30 +98,34 @@ function makeStatement(sql: string) {
       },
     };
   }
-  // SELECT title_overridden FROM tasks WHERE task_id=?
+  // SELECT title_overridden, meta_json FROM tasks WHERE task_id=?
   if (/^SELECT title_overridden/i.test(sql)) {
     return {
       get(taskId: string) {
         for (const r of rows.values()) {
           if (r.task_id === taskId) {
-            return { title_overridden: r.title_overridden } as const;
+            return {
+              title_overridden: r.title_overridden,
+              meta_json: r.meta_json,
+            } as const;
           }
         }
         return undefined;
       },
     };
   }
-  // UPDATE tasks SET title=?, updated_at=?, searchable_text=?
+  // UPDATE tasks SET title=?, updated_at=?, searchable_text=?, meta_json=?
   // WHERE task_id=? AND title_overridden=0
   if (/^UPDATE tasks SET title/i.test(sql)) {
     return {
-      run(title: string, updatedAt: number, searchable: string, taskId: string) {
+      run(title: string, updatedAt: number, searchable: string, metaJson: string, taskId: string) {
         let changes = 0;
         for (const r of rows.values()) {
           if (r.task_id === taskId && r.title_overridden === 0) {
             r.title = title;
             r.updated_at = updatedAt;
             r.searchable_text = searchable;
+            r.meta_json = metaJson;
             changes++;
           }
         }
@@ -129,16 +133,17 @@ function makeStatement(sql: string) {
       },
     };
   }
-  // UPDATE tasks SET updated_at=?, searchable_text=? WHERE task_id=?
+  // UPDATE tasks SET updated_at=?, searchable_text=?, meta_json=? WHERE task_id=?
   // (title_overridden=1 branch: keep user title, still refresh searchable_text)
   if (/^UPDATE tasks SET updated_at=\?, searchable_text/i.test(sql)) {
     return {
-      run(updatedAt: number, searchable: string, taskId: string) {
+      run(updatedAt: number, searchable: string, metaJson: string, taskId: string) {
         let changes = 0;
         for (const r of rows.values()) {
           if (r.task_id === taskId) {
             r.updated_at = updatedAt;
             r.searchable_text = searchable;
+            r.meta_json = metaJson;
             changes++;
           }
         }
@@ -250,7 +255,7 @@ describe("tasks-index session sync", () => {
   });
 
   describe("updateSessionTitle", () => {
-    it("updates title + searchable_text when title_overridden=0", async () => {
+    it("updates title + searchable_text + meta_json when title_overridden=0", async () => {
       await upsertSessionTask({
         workspaceKey: "/ws",
         taskId: "sess_4",
@@ -262,6 +267,8 @@ describe("tasks-index session sync", () => {
       expect(r.title).toBe("new title");
       expect(r.searchable_text).toBe("new title");
       expect(r.title_overridden).toBe(0);
+      // The App reads title from meta_json first — must be in sync.
+      expect(JSON.parse(r.meta_json).title).toBe("new title");
     });
 
     it("uses the full prompt text as searchable_text when provided", async () => {
@@ -303,7 +310,7 @@ describe("tasks-index session sync", () => {
       expect(r.searchable_text.length).toBe(80);
     });
 
-    it("respects user title override but still refreshes searchable_text", async () => {
+    it("respects user title override but still refreshes searchable_text + meta_json", async () => {
       await upsertSessionTask({
         workspaceKey: "/ws",
         taskId: "sess_6",
@@ -320,12 +327,38 @@ describe("tasks-index session sync", () => {
       expect(r.title).toBe("user kept name");
       // But searchable_text is still updated (not user-controlled).
       expect(r.searchable_text).toBe("search body");
+      // meta_json.title is synced to the auto title for consistency (the App
+      // reads meta_json first, but with title_overridden=1 the column wins).
+      expect(JSON.parse(r.meta_json).title).toBe("auto title");
     });
 
     it("returns false when the session row does not exist", async () => {
       const ok = await updateSessionTitle("never_created", "title");
       expect(ok).toBe(false);
       expect(rows.size).toBe(0);
+    });
+
+    it("regression: meta_json.title is updated so the App shows the new title", async () => {
+      // The ZCode App reads title from meta_json first, falling back to the
+      // title column only when meta_json is unparseable. At session/create the
+      // meta_json.title is "" (empty). Without patching meta_json on title
+      // update, the App keeps showing the empty title even though the column
+      // was updated.
+      await upsertSessionTask({
+        workspaceKey: "/ws",
+        taskId: "sess_meta",
+        title: "",
+      });
+      const before = JSON.parse(rows.get("/ws\u0000sess_meta")!.meta_json);
+      expect(before.title).toBe(""); // empty at create time
+
+      await updateSessionTitle("sess_meta", "fix the login bug");
+      const after = JSON.parse(rows.get("/ws\u0000sess_meta")!.meta_json);
+      // App reads this → must reflect the new title.
+      expect(after.title).toBe("fix the login bug");
+      // Other meta fields must survive the patch.
+      expect(after.taskId).toBe("sess_meta");
+      expect(after.mode).toBe("build");
     });
   });
 });

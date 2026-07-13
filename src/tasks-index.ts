@@ -188,21 +188,40 @@ export async function updateSessionTitle(
   try {
     const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
     try {
-      const row = con.prepare("SELECT title_overridden FROM tasks WHERE task_id=?").get(taskId) as
-        { title_overridden: number } | undefined;
+      const row = con
+        .prepare("SELECT title_overridden, meta_json FROM tasks WHERE task_id=?")
+        .get(taskId) as { title_overridden: number; meta_json: string } | undefined;
       if (!row) return false;
+
+      // The ZCode App reads title from meta_json first (falling back to the
+      // title column only when meta_json fails to parse). If we update only the
+      // column, the App keeps showing the stale meta_json title (empty at create
+      // time). So we patch meta_json.title in both branches below.
+      let metaJson: string;
+      try {
+        const meta = JSON.parse(row.meta_json ?? "{}") as Record<string, unknown>;
+        meta["title"] = trimmed;
+        metaJson = JSON.stringify(meta);
+      } catch {
+        // meta_json corrupt/unparseable — the App will fall back to the title
+        // column anyway, so skip the meta_json write rather than guessing.
+        metaJson = row.meta_json ?? "{}";
+      }
+
       if (row.title_overridden === 1) {
-        // User overrode the title → respect it, but still refresh searchable_text.
+        // User overrode the title → respect the column value, but still refresh
+        // searchable_text and sync meta_json.title for consistency.
         con
-          .prepare("UPDATE tasks SET updated_at=?, searchable_text=? WHERE task_id=?")
-          .run(Date.now(), search, taskId);
+          .prepare("UPDATE tasks SET updated_at=?, searchable_text=?, meta_json=? WHERE task_id=?")
+          .run(Date.now(), search, metaJson, taskId);
         return true;
       }
       con
         .prepare(
-          "UPDATE tasks SET title=?, updated_at=?, searchable_text=? WHERE task_id=? AND title_overridden=0",
+          "UPDATE tasks SET title=?, updated_at=?, searchable_text=?, meta_json=? " +
+            "WHERE task_id=? AND title_overridden=0",
         )
-        .run(trimmed, Date.now(), search, taskId);
+        .run(trimmed, Date.now(), search, metaJson, taskId);
     } finally {
       con.close();
     }
