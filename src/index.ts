@@ -38,16 +38,30 @@ import {
 } from "./handlers/extensions.js";
 import { sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
+import { loadSkillCommands } from "./config/skill-discovery.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 /**
  * Build the full slash-command list: static bridge commands + dynamic plugin
- * commands. Called once at startup (plugin commands don't change mid-session).
+ * commands + discovered skills. Called once at startup (nothing changes
+ * mid-session). Deduplicates by name — static commands take priority, then
+ * plugins, then skills.
  */
 function buildAllCommands() {
   const pluginCommands = loadPluginCommands();
-  return [...SLASH_COMMANDS, ...pluginCommands];
+  const skillCommands = loadSkillCommands();
+  const seen = new Set<string>(SLASH_COMMANDS.map((c) => c.name));
+  const merged: Array<{ name: string; description: string; input?: { hint: string } }> = [
+    ...SLASH_COMMANDS,
+  ];
+  for (const c of [...pluginCommands, ...skillCommands]) {
+    if (!seen.has(c.name)) {
+      seen.add(c.name);
+      merged.push(c);
+    }
+  }
+  return merged;
 }
 
 async function main(): Promise<void> {
@@ -58,7 +72,7 @@ async function main(): Promise<void> {
   const stream = acp.ndJsonStream(outbound, inbound);
   const server = new ZcodeAcpServer();
 
-  // Load plugin commands once at startup (they don't change mid-session).
+  // Load all commands once at startup (they don't change mid-session).
   const allCommands = buildAllCommands();
 
   /** Passthrough params parser for the ZCode-specific extension methods. */

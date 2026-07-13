@@ -10,9 +10,12 @@
  * plugin commands) are NOT intercepted here — they pass through to
  * `session/send` and the backend resolves them before the model sees them.
  *
- * Commands that require the ZCode TUI (mcp/plugins/login/logout/new/resume/
+ * Commands that require the ZCode TUI (plugins/login/logout/new/resume/
  * locale/expert/workflow/workflows/effort/help) return a friendly error
  * instead of passing raw text to the model (which would confuse it).
+ *
+ * `/mcp` lists all configured MCP servers (from config.json + plugins),
+ * showing the user exactly what's available without needing the TUI.
  *
  * `/quota` is the exception: it does not call ZCode at all — it queries the
  * GLM Coding Plan usage API directly and renders the result.
@@ -27,6 +30,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
+import { formatMcpServers, loadMcpServers } from "../config/mcp-discovery.js";
 import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -40,7 +44,6 @@ import { compact, fork, rewind, steer } from "./extensions.js";
  * the model (which would produce confusing output).
  */
 const UNSUPPORTED_TUI_COMMANDS = new Set([
-  "mcp",
   "plugins",
   "login",
   "logout",
@@ -100,6 +103,11 @@ export async function handleSlashCommand(
         // never throws into the catch below under normal conditions.
         const result = await queryQuota();
         return ok(formatQuota(result));
+      }
+      case "mcp": {
+        // Lists all configured MCP servers (from config.json + enabled plugins).
+        // Does not touch ZCode — reads the same config the backend auto-loads.
+        return ok(formatMcpServers(loadMcpServers()));
       }
       case "compact": {
         const result = (await compact(server, { sessionId: acpSid }, cx)) as {
@@ -179,6 +187,10 @@ export async function handleSlashCommand(
         if (UNSUPPORTED_TUI_COMMANDS.has(cmd)) {
           return ok(`⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`);
         }
+        // $-prefixed commands are discovered Skills (e.g. /$tdd). The $ is a
+        // visual grouping marker for the editor's completion menu. Pass through
+        // as-is — the model sees /$name and resolves it via the Skill tool.
+        if (cmd.startsWith("$")) return null;
         // Truly unknown /x → don't intercept, send to the model as normal
         // text (extensibility — plugin commands or future commands).
         return null;

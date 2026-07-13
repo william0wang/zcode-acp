@@ -253,20 +253,6 @@ describe("loadPluginCommands", () => {
 });
 
 describe("handleSlashCommand — unsupported TUI commands", () => {
-  it("returns friendly error for /mcp", async () => {
-    const { cx, sent } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/mcp");
-    expect(result).not.toBeNull();
-    expect(result?.stopReason).toBe("end_turn");
-    // The feedback message should mention "not available in ACP mode"
-    const textChunk = sent.find(
-      (s) => (s as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk",
-    ) as { content?: { text?: string } } | undefined;
-    expect(textChunk?.content?.text).toContain("not available in ACP mode");
-    expect(textChunk?.content?.text).toContain("/mcp");
-  });
-
   it("returns friendly error for /plugins", async () => {
     const { cx } = mockContext();
     const server = makeServer();
@@ -335,6 +321,21 @@ describe("handleSlashCommand — passthrough commands", () => {
     const { cx } = mockContext();
     const server = makeServer();
     const result = await handleSlashCommand(server, cx, SID, SID, "/code-review");
+    expect(result).toBeNull();
+  });
+
+  it("returns null for $-prefixed skill commands (passthrough)", async () => {
+    const { cx } = mockContext();
+    const server = makeServer();
+    // $-prefixed commands are discovered skills — pass through to the model.
+    const result = await handleSlashCommand(server, cx, SID, SID, "/$tdd fix the bug");
+    expect(result).toBeNull();
+  });
+
+  it("returns null for $-prefixed skill without args", async () => {
+    const { cx } = mockContext();
+    const server = makeServer();
+    const result = await handleSlashCommand(server, cx, SID, SID, "/$arco-design");
     expect(result).toBeNull();
   });
 });

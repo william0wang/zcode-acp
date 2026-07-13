@@ -30,9 +30,13 @@ export const ZCODE_CREDS_PATH = path.join(
  * that the server forwards when the user types the command.
  *
  * Commands handled by the bridge (compact/goal/fork/rewind/steer/model/mode/
- * thought/quota) are intercepted in `handleSlashCommand`. Commands handled by
- * the ZCode backend (skill/init) and plugin commands (code-review etc.) pass
+ * thought/quota/mcp) are intercepted in `handleSlashCommand`. Commands handled
+ * by the ZCode backend (init) and plugin commands (code-review etc.) pass
  * through to `session/send` — the backend resolves them before the model.
+ *
+ * Discovered Skills (arco-design, tdd, etc.) are also appended to the command
+ * list at startup via `buildAllCommands()` — they pass through as normal text
+ * and the model resolves them via its `Skill` tool.
  */
 export const SLASH_COMMANDS = [
   { name: "compact", description: "Compress conversation context (free up tokens)" },
@@ -64,11 +68,7 @@ export const SLASH_COMMANDS = [
     input: { hint: "max|high|nothink" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
-  {
-    name: "skill",
-    description: "List skills, or force-load one for the next prompt",
-    input: { hint: "[skill-name] [task]" },
-  },
+  { name: "mcp", description: "List available MCP servers" },
   { name: "init", description: "Create or update workspace AGENTS.md instructions" },
 ] as const;
 
