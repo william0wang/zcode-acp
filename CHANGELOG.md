@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Auto-compact (`src/config/auto-compact.ts`): when context usage exceeds the
+  `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` env var (absolute token count, e.g.
+  `240000`), the server automatically invokes `session/compact` after each
+  successful `end_turn` to free up context before the next prompt. Disabled by
+  default (0/unset). Best-effort — failures are logged but never break the
+  prompt response.
 - Process watchdog (`backend/client.ts`): a detached child polls the bridge
   pid every 2s and SIGKILLs the zcode process group if the bridge disappears
   without running its signal handlers (Zed force-kill on reconnect, crash,

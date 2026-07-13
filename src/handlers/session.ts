@@ -374,6 +374,16 @@ export async function prompt(
       });
     }
 
+    // Auto-compact: if context usage exceeds the threshold, compact before
+    // returning so the next prompt has room. Configured via
+    // ZCODE_ACP_AUTO_COMPACT_THRESHOLD (absolute token count; 0/unset = disabled).
+    // Only on end_turn — cancelled/max_turn_requests skips compaction.
+    // Best-effort: failures are logged inside maybeAutoCompact, never thrown.
+    if (result.stopReason === "end_turn") {
+      const { maybeAutoCompact } = await import("../config/auto-compact.js");
+      await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
+    }
+
     return result;
   } finally {
     backend.unregisterEventListener(zcodeSid);

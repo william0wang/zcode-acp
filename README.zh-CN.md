@@ -84,6 +84,7 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_NODE`      | _（自动发现）_   | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）                                                                                                                                     |
 | `ZCODE_MODEL`     | _（来自 config） | 覆盖当前使用的模型 id                                                                                                                                                                                 |
 | `ZCODE_BASE_URL`  | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                             |
+| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _（未设置）  | 触发自动压缩的绝对 token 阈值。每次回合成功完成后（`end_turn`），若 `contextUsed >= 阈值`，服务端会自动调用 `session/compact` 压缩上下文，为下一个 prompt 腾出空间。设为 `0` 或不设置则禁用（默认）。例如 `240000` 表示上下文达 24 万 token 时触发压缩。压缩目标由 ZCode 后端决定。 |
 | `ZCODE_ACP_DEBUG` | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
 
 ## 独立配额查询 CLI（zcode-quota）
