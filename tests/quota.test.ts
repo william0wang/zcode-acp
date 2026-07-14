@@ -256,6 +256,50 @@ describe("formatQuota", () => {
     expect(formatQuota({ kind: "rate_limited" })).toMatch(/busy/i);
     expect(formatQuota({ kind: "unavailable" })).toMatch(/unavailable/i);
   });
+
+  it("omits detail sub-lines when detail option is false", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [
+            { modelCode: "search-prime", usage: 169 },
+            { modelCode: "web-reader", usage: 68 },
+          ],
+        },
+      ],
+    };
+    const compact = formatQuota(result, { detail: false });
+    expect(compact).toContain("MCP");
+    expect(compact).toContain("24%");
+    expect(compact).not.toContain("search-prime");
+    expect(compact).not.toContain("web-reader");
+    expect(compact).not.toMatch(/[├└]/);
+  });
+
+  it("shows detail sub-lines by default (detail option unspecified)", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [{ modelCode: "search-prime", usage: 169 }],
+        },
+      ],
+    };
+    const out = formatQuota(result);
+    expect(out).toContain("search-prime");
+    expect(out).toMatch(/[├└]/);
+  });
 });
 
 describe("formatQuotaPlain", () => {

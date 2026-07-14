@@ -91,15 +91,31 @@ function formatTrailing(item: QuotaItem): string {
 /** Right-pad a model code for aligned detail sub-lines. */
 const DETAIL_LABEL_WIDTH = 14;
 
+/**
+ * Options controlling which sections of the card are rendered.
+ *
+ * - `detail` (default `true`): show per-model usage breakdown sub-lines
+ *   (`├ search-prime …`). Set to `false` for compact terminal output where the
+ *   aggregate bar is enough.
+ */
+export interface FormatOptions {
+  detail?: boolean;
+}
+
+/** Resolve partial options into a complete flag. */
+function resolveOptions(opts?: FormatOptions): { detail: boolean } {
+  return { detail: opts?.detail ?? true };
+}
+
 /** Render one quota item line (+ indented detail sub-lines if present). */
-function formatItem(item: QuotaItem): string[] {
+function formatItem(item: QuotaItem, showDetail: boolean): string[] {
   const lines: string[] = [];
   const bar = renderBar(item.usedPercent);
   lines.push(
     `${item.label.padEnd(5)} ${bar}  ${padPercent(item.usedPercent)}%${formatTrailing(item)}`,
   );
 
-  if (item.detail && item.detail.length > 0) {
+  if (showDetail && item.detail && item.detail.length > 0) {
     const last = item.detail.length - 1;
     item.detail.forEach((d, i) => {
       const branch = i === last ? "└" : "├";
@@ -130,16 +146,17 @@ const STATUS_MESSAGES: Record<Exclude<QuotaResult["kind"], "success">, string> =
  * indented per-model detail where present). Non-success kinds → a single
  * explanatory line, unfenced (they are short prose, not a card).
  */
-export function formatQuota(result: QuotaResult): string {
+export function formatQuota(result: QuotaResult, opts?: FormatOptions): string {
   if (result.kind !== "success") {
     return STATUS_MESSAGES[result.kind];
   }
 
+  const { detail } = resolveOptions(opts);
   const header = `GLM Coding Plan${result.level ? ` · ${capitalise(result.level)}` : ""}`;
   // Divider spans the longest line so the frame looks balanced; 34 ≈ label(5)
   // + space(1) + bar(20) + spaces(2) + "NN%"(3) + trailing-room(3).
   const divider = "─".repeat(34);
-  const body = result.items.flatMap(formatItem);
+  const body = result.items.flatMap((item) => formatItem(item, detail));
   return ["```text", header, divider, ...body, "```"].join("\n");
 }
 
@@ -151,7 +168,7 @@ export function formatQuota(result: QuotaResult): string {
  * literal ```` ``` ```` characters, so the standalone CLI strips it.
  * Non-success kinds are already unfenced short prose, returned unchanged.
  */
-export function formatQuotaPlain(result: QuotaResult): string {
-  const card = formatQuota(result);
+export function formatQuotaPlain(result: QuotaResult, opts?: FormatOptions): string {
+  const card = formatQuota(result, opts);
   return result.kind === "success" ? card.replace(/^```text\n/, "").replace(/\n```$/, "") : card;
 }

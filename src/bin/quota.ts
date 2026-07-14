@@ -11,6 +11,7 @@
  *   zcode-quota                  one-shot: print the card and exit
  *   zcode-quota -w               watch mode (default 30s refresh)
  *   zcode-quota -w -i 60         watch with a 60s interval
+ *   zcode-quota -d               show per-model MCP detail sub-lines
  *   zcode-quota --watch --interval 15
  *   zcode-quota -h | --help      show help
  *
@@ -42,6 +43,8 @@ export interface CliOptions {
   intervalMs: number;
   /** True when the user-supplied interval was below the 10s floor and raised. */
   intervalClamped: boolean;
+  /** True when the user wants per-model MCP detail sub-lines shown. */
+  detail: boolean;
   help: boolean;
 }
 
@@ -54,12 +57,14 @@ Query GLM Coding Plan usage from the terminal. Reads credentials from
 Options:
   -w, --watch              Watch mode: clear the screen and refresh periodically.
   -i, --interval <seconds> Refresh interval for watch mode (default 30, min 10).
+  -d, --detail             Show per-model MCP usage detail sub-lines.
   -h, --help               Show this help and exit.
 
 Examples:
   zcode-quota                 # print once and exit
   zcode-quota -w              # live monitor, refresh every 30s
-  zcode-quota -w -i 60        # refresh every 60s`;
+  zcode-quota -w -i 60        # refresh every 60s
+  zcode-quota -d              # include per-model MCP breakdown`;
 
 /**
  * Clamp a raw interval (seconds, optional) to a valid ms value. Returns the
@@ -83,6 +88,7 @@ export function resolveIntervalMs(seconds: number | undefined): { ms: number; cl
 export function parseArgs(argv: readonly string[]): CliOptions {
   let watch = false;
   let help = false;
+  let detail = false;
   let interval: number | undefined;
 
   for (let i = 0; i < argv.length; i++) {
@@ -91,6 +97,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
       case "-w":
       case "--watch":
         watch = true;
+        break;
+      case "-d":
+      case "--detail":
+        detail = true;
         break;
       case "-h":
       case "--help":
@@ -120,7 +130,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   }
 
   const resolved = resolveIntervalMs(interval);
-  return { watch, help, intervalMs: resolved.ms, intervalClamped: resolved.clamped };
+  return { watch, detail, help, intervalMs: resolved.ms, intervalClamped: resolved.clamped };
 }
 
 /** Format the current wall-clock as `HH:MM:SS` for the watch freshness stamp. */
@@ -175,7 +185,7 @@ function renderFrame(plain: string, updatedAt: string, intervalSec: number): str
  * itself never throws — it degrades to `unavailable` — so this is defence in
  * depth).
  */
-async function runWatch(intervalMs: number): Promise<void> {
+async function runWatch(intervalMs: number, detail: boolean): Promise<void> {
   const intervalSec = Math.round(intervalMs / 1000);
   const controller = new AbortController();
   const restore = (): void => {
@@ -197,7 +207,9 @@ async function runWatch(intervalMs: number): Promise<void> {
       const result = await queryQuota();
       const updatedAt = timestamp();
       // Full redraw of the whole frame (card + footer counting down from max).
-      process.stdout.write(renderFrame(formatQuotaPlain(result), updatedAt, intervalSec));
+      process.stdout.write(
+        renderFrame(formatQuotaPlain(result, { detail }), updatedAt, intervalSec),
+      );
       // Countdown: each second rewrite only the footer line, leaving the card
       // untouched. \r returns to column 0; \x1B[2K clears the line.
       for (let remaining = intervalSec - 1; remaining > 0; remaining--) {
@@ -213,13 +225,13 @@ async function runWatch(intervalMs: number): Promise<void> {
 }
 
 /** Print the card once and exit. Non-success → stderr + exit 1. */
-async function runOnce(): Promise<void> {
+async function runOnce(detail: boolean): Promise<void> {
   const result = await queryQuota();
   if (result.kind !== "success") {
-    process.stderr.write(formatQuotaPlain(result) + "\n");
+    process.stderr.write(formatQuotaPlain(result, { detail }) + "\n");
     process.exit(1);
   }
-  process.stdout.write(formatQuotaPlain(result) + "\n");
+  process.stdout.write(formatQuotaPlain(result, { detail }) + "\n");
 }
 
 async function main(): Promise<void> {
@@ -235,9 +247,9 @@ async function main(): Promise<void> {
   }
 
   if (opts.watch) {
-    await runWatch(opts.intervalMs);
+    await runWatch(opts.intervalMs, opts.detail);
   } else {
-    await runOnce();
+    await runOnce(opts.detail);
   }
 }
 

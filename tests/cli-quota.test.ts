@@ -44,6 +44,11 @@ describe("parseArgs", () => {
     expect(opts.intervalClamped).toBe(false);
   });
 
+  it("empty argv → detail defaults to false (no MCP sub-lines)", () => {
+    expect(parseArgs([]).detail).toBe(false);
+    expect(parseArgs(["-w"]).detail).toBe(false);
+  });
+
   it("-w enables watch", () => {
     expect(parseArgs(["-w"]).watch).toBe(true);
     expect(parseArgs(["--watch"]).watch).toBe(true);
@@ -52,6 +57,11 @@ describe("parseArgs", () => {
   it("-h / --help enables help", () => {
     expect(parseArgs(["-h"]).help).toBe(true);
     expect(parseArgs(["--help"]).help).toBe(true);
+  });
+
+  it("-d / --detail enables MCP detail sub-lines", () => {
+    expect(parseArgs(["-d"]).detail).toBe(true);
+    expect(parseArgs(["--detail"]).detail).toBe(true);
   });
 
   it("-i <n> sets the interval (space form)", () => {
