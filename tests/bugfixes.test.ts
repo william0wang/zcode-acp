@@ -78,6 +78,42 @@ describe("Bug I: stableStringify / plan signature stability", () => {
   });
 });
 
+describe("diffPlan: standalone plan detection (mid-turn TODO sync)", () => {
+  it("emits PlanUpdate on first call (baseline)", () => {
+    const d = new ProjectionDiffer();
+    const events = d.diffPlan([{ content: "task A", status: "pending", priority: "high" }]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "PlanUpdate" });
+  });
+
+  it("does not re-emit when todos are unchanged", () => {
+    const d = new ProjectionDiffer();
+    d.diffPlan([{ content: "task A", status: "pending", priority: "high" }]);
+    const events = d.diffPlan([{ content: "task A", status: "pending", priority: "high" }]);
+    expect(events).toHaveLength(0);
+  });
+
+  it("emits when a todo status changes (pending → completed)", () => {
+    const d = new ProjectionDiffer();
+    d.diffPlan([{ content: "task A", status: "pending", priority: "high" }]);
+    const events = d.diffPlan([{ content: "task A", status: "completed", priority: "high" }]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: "PlanUpdate",
+      entries: [{ content: "task A", status: "completed", priority: "high" }],
+    });
+  });
+
+  it("shares state with diff() so turn-completion does not re-emit", () => {
+    const d = new ProjectionDiffer();
+    const todos = [{ content: "task A", status: "pending", priority: "medium" }];
+    d.diffPlan(todos);
+    // Turn completion calls full diff() with the same todos — should NOT re-emit plan.
+    const events = d.diff({ projection: {}, messages: [], todos });
+    expect(events.filter((e) => e.kind === "PlanUpdate")).toHaveLength(0);
+  });
+});
+
 describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses thought_level category, Thought Level name, lowercase option names", () => {
     expect(CONFIG_META.thought.category).toBe("thought_level");
@@ -114,10 +150,10 @@ describe("Bug #4: flattenTodos flattens todoGroups list (not single object)", ()
   });
 
   it("flattens todoGroups[].entries when top-level todos is empty", () => {
-    const out = flattenTodos([], [
-      { entries: [{ content: "a" }, { content: "b" }] },
-      { entries: [{ content: "c" }] },
-    ]);
+    const out = flattenTodos(
+      [],
+      [{ entries: [{ content: "a" }, { content: "b" }] }, { entries: [{ content: "c" }] }],
+    );
     expect(out).toEqual([{ content: "a" }, { content: "b" }, { content: "c" }]);
   });
 

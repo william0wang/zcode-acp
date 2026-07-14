@@ -132,20 +132,30 @@ export class ProjectionDiffer {
     }
 
     // 3. plan (todos) — including clearing to empty.
-    const todos = (curSnapshot?.todos ?? []) as Array<Record<string, unknown>>;
-    const sig = stableStringify(todos);
-    if (sig !== this.lastPlanSig) {
-      this.lastPlanSig = sig;
-      const entries = todos.map((t) =>
-        makePlanEntry(
-          String(t["content"] ?? ""),
-          String(t["status"] ?? "pending"),
-          String(t["priority"] ?? "medium"),
-        ),
-      );
-      events.push({ kind: "PlanUpdate", entries });
-    }
+    events.push(...this.diffPlan(curSnapshot?.todos));
     return events;
+  }
+
+  /**
+   * Detect a todos signature change and return a PlanUpdate event if it changed
+   * (including clearing to empty — the initial `_lastPlanSig = "__none__"` makes
+   * the first empty list also emit). Exposed so callers can run plan detection
+   * mid-turn (e.g. right after a TodoWrite tool completes) without a full diff,
+   * avoiding the lag of waiting until turn completion.
+   */
+  diffPlan(todos: unknown[] | undefined): InternalEvent[] {
+    const list = (todos ?? []) as Array<Record<string, unknown>>;
+    const sig = stableStringify(list);
+    if (sig === this.lastPlanSig) return [];
+    this.lastPlanSig = sig;
+    const entries = list.map((t) =>
+      makePlanEntry(
+        String(t["content"] ?? ""),
+        String(t["status"] ?? "pending"),
+        String(t["priority"] ?? "medium"),
+      ),
+    );
+    return [{ kind: "PlanUpdate", entries }];
   }
 
   private diffToolPart(p: ZcodeMessagePart & Record<string, unknown>): InternalEvent[] {

@@ -691,15 +691,24 @@ async function runEventTurn(
     if (ev.type === "tool.updated") {
       const payload = ev.payload as { kind?: string; toolCallId?: string };
       if (payload.kind === "result" && payload.toolCallId) {
-        await dispatchEditDiff(
-          server,
-          cx,
-          acpSid,
-          turn.zcodeSid,
-          payload.toolCallId,
-          differ,
-          chunkMsgId,
-        );
+        // Fire edit-diff and plan-sync in parallel — they hit independent
+        // backend methods (session/messages vs session/read) so there's no
+        // ordering dependency between them.
+        await Promise.all([
+          dispatchEditDiff(
+            server,
+            cx,
+            acpSid,
+            turn.zcodeSid,
+            payload.toolCallId,
+            differ,
+            chunkMsgId,
+          ),
+          // Push plan (TODO list) updates immediately on tool completion so the
+          // editor doesn't lag behind — without this, TODO changes only surface at
+          // turn completion, which can be delayed by the model's remaining output.
+          dispatchPlanIfChanged(server, cx, acpSid, turn.zcodeSid, differ, chunkMsgId),
+        ]);
       }
     }
 
@@ -905,6 +914,46 @@ async function dispatchEditDiff(
     }
   }
   differ.markToolSeen(callId);
+}
+
+/**
+ * Read the authoritative todos from `session/read` and push a PlanUpdate if the
+ * signature changed since the last check. Called mid-turn (right after each
+ * tool completes) so the editor sees TODO updates immediately instead of
+ * waiting for turn completion — the turn-completion diff would otherwise lag
+ * behind by the rest of the model's output.
+ *
+ * Uses a lightweight `session/read` (no session/messages fetch). Failures are
+ * logged and swallowed: plan staleness is cosmetic, not worth crashing the turn.
+ */
+async function dispatchPlanIfChanged(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+  differ: ProjectionDiffer,
+  chunkMsgId: string,
+): Promise<void> {
+  try {
+    const backend = server.ensureBackend();
+    const readResp = await backend.request(
+      server.nextId(),
+      "session/read",
+      { sessionId: zcodeSid },
+      8000,
+    );
+    const read = (readResp.result ?? {}) as {
+      todos?: unknown[];
+      todoGroups?: Array<{ entries?: unknown[]; todos?: unknown[] }>;
+    };
+    const todos = flattenTodos(read.todos, read.todoGroups);
+    const events = differ.diffPlan(todos);
+    for (const iev of events) {
+      await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
+    }
+  } catch (e) {
+    log(`dispatchPlanIfChanged: skipped (${e instanceof Error ? e.message : String(e)})`);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
