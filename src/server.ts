@@ -119,7 +119,8 @@ export class ZcodeAcpServer {
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +
         `, client=${clientInfo?.name ?? "unknown"}` +
-        `, version=${clientInfo?.version ?? "unknown"}`,
+        `, version=${clientInfo?.version ?? "unknown"}` +
+        `, elicitation.form=${this.clientCapabilities.elicitation?.form == null ? "no" : "yes"}`,
     );
 
     return {

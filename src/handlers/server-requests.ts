@@ -271,7 +271,7 @@ async function handleSinglePermission(
  * Single-select: one popup per question; Skip/cancel/timeout → overall decline.
  * Multi-select: one Include/Skip popup per option; Include picks comma-joined.
  */
-async function handleAskUserQuestion(
+export async function handleAskUserQuestion(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
@@ -302,6 +302,10 @@ async function handleAskUserQuestion(
       const acpParams = buildAskUserAcpParams(params, acpSid, q.options);
       acpParams.toolCall.toolCallId = `${toolCallId}_${idx}`;
       const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, q.question, turn);
+      if (turn?.cancelled) {
+        warn(`  ⚠ AskUserQuestion [${idx + 1}] aborted (turn cancelled), declining`);
+        return { action: "decline", reason: "turn cancelled" };
+      }
       const selected = parseAskUserResponse(resp);
       if (selected === null) {
         warn(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel/timeout, declining`);
@@ -326,6 +330,14 @@ async function handleAskUserQuestion(
         const acpParams = buildAskUserAcpParams(params, acpSid, pair);
         acpParams.toolCall.toolCallId = `${toolCallId}_${idx}_${sub}`;
         const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, label, turn);
+        // Abort the whole multi-select if the turn was cancelled (user sent a
+        // new prompt) or the popup timed out — otherwise the remaining options
+        // keep popping up and block the new task. Mirrors the single-select
+        // path's null → decline behaviour.
+        if (turn?.cancelled || resp === null) {
+          warn(`  ⚠ AskUserQuestion [${idx + 1}] multi aborted (cancel/timeout), declining`);
+          return { action: "decline", reason: "cancelled or timed out" };
+        }
         if (parseAskUserResponse(resp) === "yes") {
           picked.push(label);
           log(`  ✓ AskUserQuestion [${idx + 1}] multi picked: ${label}`);
