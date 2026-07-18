@@ -45,6 +45,13 @@ interface FakeRow {
 /** A single shared in-memory `tasks` table, keyed by PK (workspace_key, task_id). */
 let rows: Map<string, FakeRow>;
 
+/**
+ * How many times the next `new DatabaseSync(...)` calls should throw a busy
+ * error before letting the write through. Set by tests; the fake decrements on
+ * each instantiation. Mirrors SQLITE_BUSY contention with the App.
+ */
+let busyTimes: number;
+
 /** Build the StatementSync-shaped object returned by DatabaseSync.prepare(). */
 function makeStatement(sql: string) {
   // INSERT OR IGNORE INTO tasks (...) VALUES (..., 'build', ..., NULL, 0, 0, 0, 0, ?, ?)
@@ -157,7 +164,12 @@ function makeStatement(sql: string) {
 vi.mock("node:sqlite", () => {
   class DatabaseSync {
     constructor(_path: string, _options?: { timeout?: number }) {
-      // no-op: tests use the shared in-memory `rows` map.
+      // Simulate SQLITE_BUSY contention: the first `busyTimes` connections
+      // throw before a connection opens. Decremented here so retries recover.
+      if (busyTimes > 0) {
+        busyTimes--;
+        throw new TypeError("database is busy");
+      }
     }
     prepare(sql: string) {
       return makeStatement(sql);
@@ -190,6 +202,7 @@ import { upsertSessionTask, updateSessionTitle } from "../src/tasks-index.js";
 describe("tasks-index session sync", () => {
   beforeEach(() => {
     rows = new Map();
+    busyTimes = 0;
   });
 
   describe("upsertSessionTask", () => {
@@ -251,6 +264,55 @@ describe("tasks-index session sync", () => {
       // The App-managed row must be untouched.
       expect(rows.get("/ws\u0000sess_3")!.title).toBe("app renamed");
       expect(rows.get("/ws\u0000sess_3")!.title_overridden).toBe(1);
+    });
+
+    it("retries on SQLITE_BUSY and writes once contention clears", async () => {
+      // The App's Electron host also writes to tasks-index.sqlite; a contended
+      // write surfaces as SQLITE_BUSY even with `timeout: 5000`. Two short
+      // backoffs must let the write through on the third attempt.
+      busyTimes = 2;
+      vi.useFakeTimers();
+      try {
+        const p = upsertSessionTask({
+          workspaceKey: "/ws",
+          taskId: "sess_busy",
+          title: "after contention",
+        });
+        // Advance through both backoffs (200ms, 400ms) plus connection retries.
+        await vi.advanceTimersByTimeAsync(1000);
+        const ok = await p;
+        expect(ok).toBe(true);
+        expect(rows.size).toBe(1);
+        expect(rows.get("/ws\u0000sess_busy")!.title).toBe("after contention");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives up and returns false when busy persists past retries", async () => {
+      // All 3 attempts hit busy → surface as a visible failure (warn), but
+      // never throw into session/create.
+      busyTimes = 99;
+      vi.useFakeTimers();
+      const warnSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const p = upsertSessionTask({
+          workspaceKey: "/ws",
+          taskId: "sess_busy_forever",
+          title: "never lands",
+        });
+        await vi.advanceTimersByTimeAsync(2000);
+        const ok = await p;
+        expect(ok).toBe(false);
+        expect(rows.size).toBe(0);
+        // warn() writes to stderr — the skipped message must be visible so the
+        // failure is diagnosable (it was previously hidden behind ZCODE_ACP_DEBUG).
+        const out = warnSpy.mock.calls.map((c) => String(c[0])).join("");
+        expect(out).toMatch(/tasks-index sync skipped/i);
+      } finally {
+        warnSpy.mockRestore();
+        vi.useRealTimers();
+      }
     });
   });
 

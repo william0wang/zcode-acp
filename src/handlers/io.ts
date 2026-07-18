@@ -11,6 +11,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import type { ZcodeAcpServer } from "../server.js";
+import { warn } from "../utils.js";
 
 /** Send a `session/update` notification to the client. */
 export function sendSessionUpdate(
@@ -65,19 +66,31 @@ export function sendAvailableCommands(
  * Send `available_commands_update` after a short delay so it lands after the
  * session response. ACP clients initialize their session state machine on the
  * response; a notification arriving earlier can be dropped, leaving the `/`
- * completion menu empty. Mirrors the Python bridge's deferred-notification
- * queue + 50ms drain. Fire-and-forget (returns void).
+ * completion menu empty.
+ *
+ * The notification is fired three times (50ms / 300ms / 1000ms) to cover slow
+ * client warm-up: on a fresh Zed tab the session view may still be initialising
+ * at the 50ms mark, dropping the first notification. `available_commands_update`
+ * is overwrite-semantics (not additive), so repeats are harmless — the client
+ * keeps the latest snapshot. Fire-and-forget (returns void).
  */
 export function sendAvailableCommandsDeferred(
   cx: acp.AgentContext,
   sessionId: string,
   commands: ReadonlyArray<SlashCommandEntry>,
 ): void {
-  const t = setTimeout(() => {
-    void sendAvailableCommands(cx, sessionId, commands);
-  }, 50);
-  // unref so shutdown is not held up by this deferred notification.
-  t.unref?.();
+  for (const delay of [50, 300, 1000]) {
+    const t = setTimeout(() => {
+      sendAvailableCommands(cx, sessionId, commands).catch((e) => {
+        warn(
+          `available_commands_update failed (sid=${sessionId}, delay=${delay}): ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+    }, delay);
+    // unref so shutdown is not held up by this deferred notification.
+    t.unref?.();
+  }
 }
 
 /** Throw a JSON-RPC error from a handler (the SDK converts it to an error response). */

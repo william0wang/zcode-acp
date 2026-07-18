@@ -19,7 +19,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { log, ZCODE_CREDS_PATH } from "./utils.js";
+import { warn, ZCODE_CREDS_PATH } from "./utils.js";
 
 // Precise DatabaseSync constructor type from @types/node, captured without a
 // runtime import (type position only). node:sqlite's API is prepared-statement
@@ -51,6 +51,22 @@ async function loadSqlite(): Promise<DatabaseSyncCtor | null> {
 
 /** tasks-index.sqlite sits next to config.json under ~/.zcode/v2/. */
 const TASKS_INDEX_PATH = path.join(path.dirname(ZCODE_CREDS_PATH), "tasks-index.sqlite");
+
+/**
+ * Detect a SQLite "database is locked" / "busy" error. node:sqlite surfaces
+ * SQLITE_BUSY (code 5) and SQLITE_LOCKED (code 6) as a TypeError whose message
+ * contains "busy" or "locked"; we match on the message so we don't have to
+ * reach into the (unstable) error code property.
+ */
+function isBusyError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /\b(busy|locked)\b/i.test(msg);
+}
+
+/** Promise-based sleep (best-effort retry backoff). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 /**
  * Read provider id + model ref from config.json.
@@ -123,39 +139,52 @@ export async function upsertSessionTask(opts: {
   } catch {
     return false;
   }
-  try {
-    const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
+  // Retry on SQLITE_BUSY: the App's Electron host also writes to this DB, so
+  // even with `timeout: 5000` a contended write can surface as busy. Two short
+  // backoffs (200ms, 400ms) let the App's transaction commit. Best-effort —
+  // terminal failure is logged and swallowed so it never breaks session/create.
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      con
-        .prepare(
-          "INSERT OR IGNORE INTO tasks " +
-            "(workspace_key, workspace_path, workspace_identity, task_id, " +
-            " title, task_status, provider, mode, model, " +
-            " created_at, updated_at, unread_at, pinned, archived, deleted, " +
-            " title_overridden, meta_json, searchable_text) " +
-            "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
-        )
-        .run(
-          opts.workspaceKey,
-          opts.workspaceKey,
-          opts.taskId,
-          opts.title,
-          status,
-          providerId,
-          model,
-          nowMs,
-          nowMs,
-          metaJson,
-          opts.title,
-        );
-    } finally {
-      con.close();
+      const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
+      try {
+        con
+          .prepare(
+            "INSERT OR IGNORE INTO tasks " +
+              "(workspace_key, workspace_path, workspace_identity, task_id, " +
+              " title, task_status, provider, mode, model, " +
+              " created_at, updated_at, unread_at, pinned, archived, deleted, " +
+              " title_overridden, meta_json, searchable_text) " +
+              "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
+          )
+          .run(
+            opts.workspaceKey,
+            opts.workspaceKey,
+            opts.taskId,
+            opts.title,
+            status,
+            providerId,
+            model,
+            nowMs,
+            nowMs,
+            metaJson,
+            opts.title,
+          );
+      } finally {
+        con.close();
+      }
+      return true;
+    } catch (e) {
+      if (attempt < 2 && isBusyError(e)) {
+        await sleep(200 * (attempt + 1)); // 200ms, 400ms
+        continue;
+      }
+      // Visible failure: a missing App-UI row is user-perceivable, so warn()
+      // (stderr, always emitted) rather than the quiet log() default.
+      warn(`tasks-index sync skipped: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
     }
-    return true;
-  } catch (e) {
-    log(`tasks-index sync skipped: ${e instanceof Error ? e.message : String(e)}`);
-    return false;
   }
+  return false;
 }
 
 /**
@@ -227,7 +256,7 @@ export async function updateSessionTitle(
     }
     return true;
   } catch (e) {
-    log(`tasks-index title update skipped: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`tasks-index title update skipped: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
 }
