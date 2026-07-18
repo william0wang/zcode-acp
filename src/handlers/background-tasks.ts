@@ -83,6 +83,16 @@ interface TrackedTask {
    * on completion so Zed's terminal UI closes cleanly.
    */
   reusesLaunchCard: boolean;
+  /**
+   * Cumulative output snapshot this listener has already streamed via
+   * terminal_output for a reused launch card. Tracked SEPARATELY from
+   * `server.terminalSentData` (which holds the launch acknowledgement text
+   * written by the dispatcher) because the launch text and the real command
+   * output are unrelated streams — they're not prefix-related, so diffing
+   * against the launch text would drop or duplicate the real output. Only
+   * `outputTail`/`stdoutTail` from `session.updated` events feeds this.
+   */
+  streamedOutput?: string;
 }
 
 /** Map a zcode background task status string to an ACP ToolCallStatus. */
@@ -260,21 +270,24 @@ export class BackgroundTaskListener implements EventListener {
     // diff guard mirrors dispatchTerminalUpdate (only emit the suffix beyond
     // what was already streamed; for a background launch the launch text was
     // already sent, so outputTail here is the real command output).
-    if (task.reusesLaunchCard && isTerminal && task.sourceToolCallId) {
+    if (task.reusesLaunchCard && task.sourceToolCallId) {
+      // Stream any new command output via terminal_output. The output is
+      // tracked on `task.streamedOutput` (NOT server.terminalSentData) because
+      // terminalSentData holds the launch acknowledgement text written by the
+      // dispatcher, which is unrelated to the command's actual stdout — they
+      // aren't prefix-related, so diffing against the launch text would drop
+      // the real output entirely. Each session.updated carries a CUMULATIVE
+      // outputTail snapshot, so we diff against what we last streamed and emit
+      // only the suffix (mirrors dispatchTerminalUpdate's progress diffing).
       const finalOutput = p.outputTail ?? p.stdoutTail ?? "";
-      const lastSent = this.server.terminalSentData.get(task.sourceToolCallId) ?? "";
-      // Only skip terminal_output when launch text was actually streamed
-      // (lastSent non-empty). An empty marker ("") just flags "this is a
-      // tracked background launch card" — no content was streamed, so the
-      // final output must be emitted.
-      const alreadyStreamed = lastSent.length > 0;
-      if (finalOutput && !alreadyStreamed) {
+      const lastSent = task.streamedOutput ?? "";
+      if (finalOutput) {
         const delta =
           lastSent && finalOutput.startsWith(lastSent)
             ? finalOutput.slice(lastSent.length)
             : finalOutput;
         if (delta) {
-          this.server.terminalSentData.set(task.sourceToolCallId, finalOutput);
+          task.streamedOutput = finalOutput;
           await this.server.notifyByZcodeSid(this.zcodeSid, {
             sessionUpdate: "tool_call_update",
             toolCallId: task.sourceToolCallId,
@@ -282,8 +295,21 @@ export class BackgroundTaskListener implements EventListener {
           });
         }
       }
-      // terminal_exit closes the terminal card. exit_code inferred: failed
-      // status → 1, else 0 (background Bash carries no perf.exitCode here).
+      // terminal_exit only fires on a terminal status. A non-terminal (running)
+      // update has streamed its progress above; also push an in_progress status
+      // update with backgroundTask metadata so the card reflects "running in
+      // background" on first sighting (the launch card was left in_progress by
+      // the dispatcher, but we still advertise the status to attach taskId).
+      if (!isTerminal) {
+        await this.server.notifyByZcodeSid(this.zcodeSid, {
+          sessionUpdate: "tool_call_update",
+          toolCallId: task.sourceToolCallId,
+          status: acpStatus,
+          _meta: meta,
+        });
+        task.lastStatus = acpStatus;
+        return;
+      }
       const exitCode = acpStatus === "failed" ? 1 : 0;
       (meta.backgroundTask as Record<string, unknown>)["completed"] = true;
       await this.server.notifyByZcodeSid(this.zcodeSid, {

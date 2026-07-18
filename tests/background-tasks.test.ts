@@ -237,7 +237,12 @@ describe("BackgroundTaskListener: background Bash reuses launch card", () => {
     expect(server.calls.some((c) => c.update["sessionUpdate"] === "tool_call")).toBe(false);
   });
 
-  it("emits terminal_output + terminal_exit on completion and clears terminalSentData", async () => {
+  it("streams the real command output on completion even when launch text was already streamed", async () => {
+    // Regression: launch acknowledgement text ("Command running in background
+    // with ID: …") is written to terminalSentData by the dispatcher, but it is
+    // NOT the command's actual output. The real output (outputTail) must still
+    // be streamed via terminal_output on completion, or the user never sees
+    // what the background command printed.
     const server = makeServer();
     server.terminalSentData.set("call_bash2", "Command running in background with ID: exec_y\n");
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
@@ -249,9 +254,6 @@ describe("BackgroundTaskListener: background Bash reuses launch card", () => {
       }),
     );
     await Promise.resolve();
-    // Task completes with real output. Since the launch text was already
-    // streamed (terminalSentData key present = alreadyStreamed), terminal_output
-    // must be SKIPPED (matches dispatchTerminalUpdate's result-replay guard).
     l.handleEvent(
       zcodeEvent("session.updated", {
         taskId: "exec_y",
@@ -260,10 +262,18 @@ describe("BackgroundTaskListener: background Bash reuses launch card", () => {
         outputTail: "done\n",
       }),
     );
-    await Promise.resolve();
-    // Exactly two updates: in_progress + terminal_exit (no terminal_output).
-    expect(server.calls).toHaveLength(2);
-    const exitCall = server.calls[1]!.update;
+    // onTaskStatus awaits multiple notifyByZcodeSid calls; flush enough
+    // microtasks for the whole async chain (including terminalSentData.delete)
+    // to settle.
+    for (let i = 0; i < 4; i++) await Promise.resolve();
+    // Exactly three updates: in_progress + terminal_output + terminal_exit.
+    expect(server.calls).toHaveLength(3);
+    const outputCall = server.calls[1]!.update;
+    expect(outputCall["sessionUpdate"]).toBe("tool_call_update");
+    expect(
+      (outputCall["_meta"] as { terminal_output: { data: string } }).terminal_output.data,
+    ).toBe("done\n");
+    const exitCall = server.calls[2]!.update;
     expect(exitCall["status"]).toBe("completed");
     expect(exitCall["content"]).toEqual([{ type: "terminal", terminalId: "call_bash2" }]);
     const meta = exitCall["_meta"] as {
@@ -306,6 +316,50 @@ describe("BackgroundTaskListener: background Bash reuses launch card", () => {
     const termOutput = server.calls[1]!.update;
     const termMeta = termOutput["_meta"] as { terminal_output: { data: string } };
     expect(termMeta.terminal_output.data).toBe("result\n");
+  });
+
+  it("diffs cumulative outputTail snapshots during running progress (no duplication)", async () => {
+    // The backend pushes session.updated multiple times during a long-running
+    // background task, each carrying a CUMULATIVE outputTail snapshot. Only the
+    // suffix beyond what we last streamed must be emitted.
+    const server = makeServer();
+    server.terminalSentData.set("call_bash5", "");
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("session.updated", {
+        taskId: "exec_progress",
+        toolCallId: "call_bash5",
+        status: "running",
+        outputTail: "line1\n",
+      }),
+    );
+    await Promise.resolve();
+    l.handleEvent(
+      zcodeEvent("session.updated", {
+        taskId: "exec_progress",
+        toolCallId: "call_bash5",
+        status: "running",
+        outputTail: "line1\nline2\n",
+      }),
+    );
+    await Promise.resolve();
+    l.handleEvent(
+      zcodeEvent("session.updated", {
+        taskId: "exec_progress",
+        toolCallId: "call_bash5",
+        status: "completed",
+        outputTail: "line1\nline2\nline3\n",
+      }),
+    );
+    await Promise.resolve();
+    // running(status update) + terminal_output(line1) + terminal_output(line2)
+    // + terminal_output(line3) + terminal_exit.
+    const outputs = server.calls
+      .filter((c) => (c.update["_meta"] as { terminal_output?: unknown }).terminal_output)
+      .map(
+        (c) => (c.update["_meta"] as { terminal_output: { data: string } }).terminal_output.data,
+      );
+    expect(outputs).toEqual(["line1\n", "line2\n", "line3\n"]);
   });
 
   it("falls back to a fresh bg_* card when toolCallId is absent (sub-agent case)", async () => {
