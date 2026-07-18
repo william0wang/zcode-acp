@@ -552,24 +552,52 @@ async function preemptInFlightTurn(
 
 // ---------- internals ----------
 
-/** Concatenate text from ACP ContentBlocks into a prompt string. */
-function extractPromptText(blocks: acp.ContentBlock[] | undefined): string {
+/** Concatenate text from ACP ContentBlock[] into a prompt string.
+ *  Exported for unit testing (the resource_link path is easy to break). */
+export function extractPromptText(blocks: acp.ContentBlock[] | undefined): string {
   const parts: string[] = [];
   for (const block of blocks ?? []) {
+    // ACP ContentBlock is a discriminated union on `type`. The resource_link
+    // variant carries `name` + `uri` flat on the block itself (NOT nested under
+    // a `resource_link` key — see ACP schema $defs.ResourceLink). Accessing
+    // `block.resource_link` silently dropped every dragged-file attachment.
     const b = block as {
       type?: string;
       text?: string;
-      resource_link?: { name?: string; uri?: string };
+      name?: string;
+      uri?: string;
+      resource?: { text?: string; uri?: string };
     };
     if (b.type === "text" && b.text) {
       parts.push(b.text);
-    } else if (b.type === "resource_link" && b.resource_link) {
-      parts.push(
-        `[related resource: ${b.resource_link.name ?? b.resource_link.uri ?? ""}](${b.resource_link.uri ?? ""})`,
-      );
+    } else if (b.type === "resource_link" && b.uri) {
+      // Convert file:// URIs to absolute paths so the model treats them as
+      // readable filesystem locations rather than opaque hyperlinks. Fall
+      // back to the path when name is missing OR empty — the ACP schema
+      // requires `name`, but a non-compliant client still deserves useful
+      // prompt text rather than `[related resource: ](/path)`.
+      const path = b.uri.startsWith("file://") ? fileUriToPath(b.uri) : b.uri;
+      const label = b.name || path;
+      parts.push(`[related resource: ${label}](${path})`);
+    } else if (b.type === "resource" && b.resource) {
+      // Embedded resource (TextResourceContents). We don't advertise
+      // embeddedContext, but accept text payloads defensively in case a client
+      // sends them anyway.
+      const text = b.resource.text;
+      if (text) parts.push(text);
     }
   }
   return parts.join("\n").trim();
+}
+
+/** Convert a file:// URI to an absolute filesystem path. */
+function fileUriToPath(uri: string): string {
+  try {
+    return decodeURIComponent(new URL(uri).pathname);
+  } catch {
+    // Not a valid URL — return as-is (best-effort).
+    return uri;
+  }
 }
 
 /** Fetch session/messages from zcode. */

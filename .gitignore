@@ -24,4 +24,4 @@ coverage/
 
 # npm pack output
 *.tgz
-.zcode/plans/
+.zcode
