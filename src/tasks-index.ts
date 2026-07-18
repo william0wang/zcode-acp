@@ -54,18 +54,58 @@ const TASKS_INDEX_PATH = path.join(path.dirname(ZCODE_CREDS_PATH), "tasks-index.
 
 /**
  * Detect a SQLite "database is locked" / "busy" error. node:sqlite surfaces
- * SQLITE_BUSY (code 5) and SQLITE_LOCKED (code 6) as a TypeError whose message
- * contains "busy" or "locked"; we match on the message so we don't have to
- * reach into the (unstable) error code property.
+ * SQLITE_BUSY (code 5) and SQLITE_LOCKED (code 6) as an Error whose message is
+ * SQLite's standard phrase — verified against a real node:sqlite v22 throw:
+ *   `Error: database is locked`, code `ERR_SQLITE_ERROR`.
+ * We match the full phrase rather than the bare word "busy" / "locked" so a
+ * filesystem path that happens to contain those words (e.g. `/Users/busy_bee/`)
+ * inside a different error message can't trigger a false-positive retry.
  */
 function isBusyError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
-  return /\b(busy|locked)\b/i.test(msg);
+  return /database is (busy|locked)/i.test(msg);
 }
 
 /** Promise-based sleep (best-effort retry backoff). */
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Open a connection to tasks-index.sqlite and run `fn` against it, retrying on
+ * SQLITE_BUSY contention from the App's Electron host. Two short backoffs
+ * (200ms, 400ms) give the App's transaction time to commit. The connection is
+ * always closed in `finally` so a thrown error never leaks a handle.
+ *
+ * Returns whatever `fn` returns, or `null` when node:sqlite is unavailable.
+ * Rethrows non-busy errors (or busy errors that exhausted retries) so the
+ * caller can classify and log them consistently.
+ */
+async function withSqliteRetry<T>(
+  fn: (con: InstanceType<DatabaseSyncCtor>) => T,
+): Promise<T | null> {
+  const Sqlite = await loadSqlite();
+  if (!Sqlite) return null; // node:sqlite unavailable (Node < 22)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // `con` is declared outside try so the finally can close it even when the
+    // constructor itself throws (SQLITE_BUSY can surface at open time).
+    let con: InstanceType<DatabaseSyncCtor> | null = null;
+    try {
+      con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
+      return fn(con);
+    } catch (e) {
+      // Retry only on transient busy/locked; surface everything else.
+      if (attempt < 2 && isBusyError(e)) {
+        await sleep(200 * (attempt + 1)); // 200ms, 400ms
+        continue;
+      }
+      throw e;
+    } finally {
+      con?.close();
+    }
+  }
+  // Unreachable — the loop either returns or throws — but satisfies TS.
+  throw new Error("withSqliteRetry: exhausted retries without resolution");
 }
 
 /**
@@ -113,8 +153,6 @@ export async function upsertSessionTask(opts: {
   status?: string;
 }): Promise<boolean> {
   if (!existsSync(TASKS_INDEX_PATH)) return false; // App never installed → no index.
-  const Sqlite = await loadSqlite();
-  if (!Sqlite) return false; // node:sqlite unavailable (Node < 22)
   const nowMs = Date.now();
   const { providerId, modelRef } = resolveProviderModel();
   const model = opts.model ?? modelRef;
@@ -139,52 +177,40 @@ export async function upsertSessionTask(opts: {
   } catch {
     return false;
   }
-  // Retry on SQLITE_BUSY: the App's Electron host also writes to this DB, so
-  // even with `timeout: 5000` a contended write can surface as busy. Two short
-  // backoffs (200ms, 400ms) let the App's transaction commit. Best-effort —
-  // terminal failure is logged and swallowed so it never breaks session/create.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
-      try {
-        con
-          .prepare(
-            "INSERT OR IGNORE INTO tasks " +
-              "(workspace_key, workspace_path, workspace_identity, task_id, " +
-              " title, task_status, provider, mode, model, " +
-              " created_at, updated_at, unread_at, pinned, archived, deleted, " +
-              " title_overridden, meta_json, searchable_text) " +
-              "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
-          )
-          .run(
-            opts.workspaceKey,
-            opts.workspaceKey,
-            opts.taskId,
-            opts.title,
-            status,
-            providerId,
-            model,
-            nowMs,
-            nowMs,
-            metaJson,
-            opts.title,
-          );
-      } finally {
-        con.close();
-      }
+  // withSqliteRetry handles SQLITE_BUSY contention with the App's Electron
+  // host. Visible failure: a missing App-UI row is user-perceivable, so warn()
+  // (stderr, always emitted) rather than the quiet log() default.
+  try {
+    const result = await withSqliteRetry((con) => {
+      con
+        .prepare(
+          "INSERT OR IGNORE INTO tasks " +
+            "(workspace_key, workspace_path, workspace_identity, task_id, " +
+            " title, task_status, provider, mode, model, " +
+            " created_at, updated_at, unread_at, pinned, archived, deleted, " +
+            " title_overridden, meta_json, searchable_text) " +
+            "VALUES (?, ?, NULL, ?, ?, ?, ?, 'build', ?, ?, ?, NULL, 0, 0, 0, 0, ?, ?)",
+        )
+        .run(
+          opts.workspaceKey,
+          opts.workspaceKey,
+          opts.taskId,
+          opts.title,
+          status,
+          providerId,
+          model,
+          nowMs,
+          nowMs,
+          metaJson,
+          opts.title,
+        );
       return true;
-    } catch (e) {
-      if (attempt < 2 && isBusyError(e)) {
-        await sleep(200 * (attempt + 1)); // 200ms, 400ms
-        continue;
-      }
-      // Visible failure: a missing App-UI row is user-perceivable, so warn()
-      // (stderr, always emitted) rather than the quiet log() default.
-      warn(`tasks-index sync skipped: ${e instanceof Error ? e.message : String(e)}`);
-      return false;
-    }
+    });
+    return result ?? false;
+  } catch (e) {
+    warn(`tasks-index sync skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
-  return false;
 }
 
 /**
@@ -208,15 +234,15 @@ export async function updateSessionTitle(
   searchableText?: string,
 ): Promise<boolean> {
   if (!existsSync(TASKS_INDEX_PATH) || !title) return false;
-  const Sqlite = await loadSqlite();
-  if (!Sqlite) return false;
   const trimmed = title.trim().slice(0, 80);
   if (!trimmed) return false;
   // Cap searchable_text at the App's limit (aD = 2e5 = 200000 chars).
   const search = (searchableText ?? trimmed).trim().slice(0, 200_000);
+  // Title updates also write to tasks-index.sqlite and are equally exposed to
+  // SQLITE_BUSY contention with the App's Electron host — go through the same
+  // withSqliteRetry path as upsertSessionTask for consistent retry behaviour.
   try {
-    const con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
-    try {
+    const result = await withSqliteRetry((con) => {
       const row = con
         .prepare("SELECT title_overridden, meta_json FROM tasks WHERE task_id=?")
         .get(taskId) as { title_overridden: number; meta_json: string } | undefined;
@@ -251,10 +277,9 @@ export async function updateSessionTitle(
             "WHERE task_id=? AND title_overridden=0",
         )
         .run(trimmed, Date.now(), search, metaJson, taskId);
-    } finally {
-      con.close();
-    }
-    return true;
+      return true;
+    });
+    return result ?? false;
   } catch (e) {
     warn(`tasks-index title update skipped: ${e instanceof Error ? e.message : String(e)}`);
     return false;

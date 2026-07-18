@@ -422,5 +422,31 @@ describe("tasks-index session sync", () => {
       expect(after.taskId).toBe("sess_meta");
       expect(after.mode).toBe("build");
     });
+
+    it("retries on SQLITE_BUSY and updates the title once contention clears", async () => {
+      // Title updates also write to tasks-index.sqlite → equally exposed to
+      // SQLITE_BUSY contention with the App's Electron host. Goes through the
+      // same withSqliteRetry path as upsertSessionTask.
+      await upsertSessionTask({
+        workspaceKey: "/ws",
+        taskId: "sess_title_busy",
+        title: "",
+      });
+      busyTimes = 2;
+      vi.useFakeTimers();
+      try {
+        const p = updateSessionTitle("sess_title_busy", "after contention");
+        await vi.advanceTimersByTimeAsync(1000);
+        const ok = await p;
+        expect(ok).toBe(true);
+        expect(rows.get("/ws\u0000sess_title_busy")!.title).toBe("after contention");
+        // meta_json.title must also reflect the retry (App reads it first).
+        expect(JSON.parse(rows.get("/ws\u0000sess_title_busy")!.meta_json).title).toBe(
+          "after contention",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
