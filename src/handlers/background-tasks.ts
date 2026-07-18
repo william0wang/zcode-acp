@@ -129,6 +129,10 @@ export class BackgroundTaskListener implements EventListener {
         if (event.type === "turn.completed" || event.type === "turn.failed") {
           log(`  [bg] background notification turn ended (${event.type})`);
           this.activeNotifyTurnId = null;
+          // Reset the result messageId so the NEXT background task in this
+          // session gets its own — otherwise the editor would merge/overwrite
+          // distinct tasks' outputs under one shared messageId.
+          this.firstMessageId = null;
           return;
         }
       }

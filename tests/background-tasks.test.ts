@@ -137,6 +137,32 @@ describe("BackgroundTaskListener", () => {
     expect(chunks[0]!.update["messageId"]).toBe(chunks[1]!.update["messageId"]);
   });
 
+  it("allocates a fresh messageId per background task (no cross-task reuse)", async () => {
+    // Regression guard: firstMessageId must be reset when a background
+    // notification turn ends, else two tasks in the same session share one
+    // messageId and the editor merges/overwrites their output.
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    // Task 1's notification turn.
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task", turnId: "t1" }));
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task1 result" }));
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }));
+    await Promise.resolve();
+    // Task 2's notification turn (same session, same listener instance).
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task", turnId: "t2" }));
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task2 result" }));
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }));
+    await Promise.resolve();
+    const chunks = server.calls.filter((c) => c.update["sessionUpdate"] === "agent_message_chunk");
+    expect(chunks).toHaveLength(2);
+    // Distinct messageIds — the second task does NOT reuse the first's id.
+    expect(chunks[0]!.update["messageId"]).not.toBe(chunks[1]!.update["messageId"]);
+  });
+
   it("does NOT forward a normal (non-background) turn's text_delta", async () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");

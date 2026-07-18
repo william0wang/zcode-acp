@@ -152,11 +152,6 @@ async function main(): Promise<void> {
   // session/update notifications outside of request handlers (e.g. when a
   // background task completes after session/prompt has returned).
   server.acpClient = connection.client;
-
-  // Capture the connection-scoped AgentContext so background listeners can push
-  // session/update notifications outside of request handlers (e.g. when a
-  // background task completes after session/prompt has returned).
-  server.acpClient = connection.client;
 }
 
 main().catch((err) => {
