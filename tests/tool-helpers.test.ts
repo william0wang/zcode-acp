@@ -9,6 +9,7 @@ import {
   buildDiffContent,
   extractExitCode,
   extractLocations,
+  parseSubagentMetadata,
   renderToolOutput,
 } from "../src/translators/tool-helpers.js";
 
@@ -132,5 +133,51 @@ describe("extractLocations", () => {
 
   it("returns [] without a file_diff display for unknown tools", () => {
     expect(extractLocations("Unknown", {})).toEqual([]);
+  });
+});
+
+describe("parseSubagentMetadata", () => {
+  it("parses agentId and usage from a synchronous sub-agent result string", () => {
+    const content =
+      "The deps are minimal...\nagentId: agent_73c7c63d-94e9-4c1f-9855-da189151c323 (use SendMessage ...)\n<usage>subagent_tokens: 40904\ntool_uses: 1\nduration_ms: 10559</usage>";
+    const meta = parseSubagentMetadata(content);
+    expect(meta).not.toBeNull();
+    expect(meta!.agentId).toBe("agent_73c7c63d-94e9-4c1f-9855-da189151c323");
+    expect(meta!.tokens).toBe(40904);
+    expect(meta!.toolUses).toBe(1);
+    expect(meta!.durationMs).toBe(10559);
+    expect(meta!.background).toBeUndefined();
+  });
+
+  it("flags background launches (async_launched content)", () => {
+    const content =
+      "Async agent launched.\nagentId: agent_61f207dd-3818-435b-b9e9-b995ec45cdb1 (...)\nThe agent is working in the background.\noutput_file: /tmp/o.txt";
+    const meta = parseSubagentMetadata(content);
+    expect(meta).not.toBeNull();
+    expect(meta!.agentId).toBe("agent_61f207dd-3818-435b-b9e9-b995ec45cdb1");
+    expect(meta!.background).toBe(true);
+  });
+
+  it("parses the {content: string} object shape too (backend result envelope)", () => {
+    const meta = parseSubagentMetadata({
+      success: true,
+      content: "done\nagentId: agent_xyz (use SendMessage)\n<usage>subagent_tokens: 100\ntool_uses: 2\nduration_ms: 50</usage>",
+    });
+    expect(meta).not.toBeNull();
+    expect(meta!.agentId).toBe("agent_xyz");
+    expect(meta!.tokens).toBe(100);
+  });
+
+  it("returns null for non-Agent results (no markers)", () => {
+    expect(parseSubagentMetadata("just some bash output")).toBeNull();
+    expect(parseSubagentMetadata({ content: "no markers here" })).toBeNull();
+    expect(parseSubagentMetadata(null)).toBeNull();
+    expect(parseSubagentMetadata(undefined)).toBeNull();
+  });
+
+  it("returns null when only a partial marker is present", () => {
+    // agentId keyword but not the agent_xxx id shape → still matched by regex,
+    // but here only the usage keyword with a malformed body → no match.
+    expect(parseSubagentMetadata("agentId: something_else")).toBeNull();
   });
 });

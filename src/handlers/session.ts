@@ -72,11 +72,12 @@ export async function newSession(
   const sid = session.sessionId;
   if (!sid) throw new Error("zcode create returned no sessionId");
 
-  server.sessionMap.set(sid, sid);
+  server.registerSession(sid, sid);
   // Only freshly-created sessions are eligible for auto-title on first
   // end_turn; resumed/loaded sessions already have a title and must keep it.
   server.titleEligibleSessions.add(sid);
   log(`session/new → ${sid}`);
+  server.ensureBackgroundListener(sid);
 
   // Sync to the App's tasks-index.sqlite so the App UI shows this session.
   // Best-effort; failures are logged inside upsertSessionTask and swallowed.
@@ -145,8 +146,9 @@ export async function resumeSession(
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
 
-  server.sessionMap.set(targetSid, targetSid);
+  server.registerSession(targetSid, targetSid);
   log(`session/resume -> ${targetSid}`);
+  server.ensureBackgroundListener(targetSid);
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
@@ -180,8 +182,9 @@ export async function loadSession(
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
-  server.sessionMap.set(targetSid, targetSid);
+  server.registerSession(targetSid, targetSid);
   log(`session/load → ${targetSid}`);
+  server.ensureBackgroundListener(targetSid);
 
   const messages = await fetchMessages(server, targetSid);
   let replayed = 0;
@@ -386,7 +389,7 @@ export async function prompt(
 
     return result;
   } finally {
-    backend.unregisterEventListener(zcodeSid);
+    backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
   }
 }

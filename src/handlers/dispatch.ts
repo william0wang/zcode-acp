@@ -13,7 +13,11 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { currentModelCached } from "../config/model-cache.js";
 import { modelContextWindow } from "../config/options.js";
-import { extractExitCode, TOOL_KIND_MAP } from "../translators/tool-helpers.js";
+import {
+  extractExitCode,
+  parseSubagentMetadata,
+  TOOL_KIND_MAP,
+} from "../translators/tool-helpers.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -72,6 +76,8 @@ function dispatchToolCallNew(
     server.supportsTerminalOutput() && (ev.tool === "Bash" || ev.tool === "bash");
   const meta: Record<string, unknown> = { claudeCode: { toolName: ev.tool } };
   if (termSupported) meta["terminal_info"] = { terminal_id: ev.callId };
+  // Mark sub-agent dispatch cards so editors can badge them from creation.
+  if (ev.tool === "Agent" || ev.tool === "Task") meta["subagent"] = true;
 
   const update: acp.SessionUpdate = {
     sessionUpdate: "tool_call",
@@ -116,6 +122,16 @@ function dispatchToolCallUpdate(
   };
   const meta: Record<string, unknown> = {};
   if (toolName) meta["claudeCode"] = { toolName };
+  // Sub-agent (Agent/Task tool) result: surface structured metadata so editors
+  // can badge the card (agentId, background flag, token/tool/time usage). The
+  // raw result text is left in `content` for the user-facing view.
+  if (
+    (toolName === "Agent" || toolName === "Task") &&
+    (ev.status === "completed" || ev.status === "failed")
+  ) {
+    const sub = parseSubagentMetadata(ev.rawResult);
+    if (sub) meta["subagent"] = sub;
+  }
   if (ev.output !== undefined) update.rawOutput = ev.output;
   if (ev.diffContent && ev.diffContent.length > 0) {
     update.content = ev.diffContent;

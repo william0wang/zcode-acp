@@ -15,6 +15,7 @@ import {
   resolveZcodeCommand,
   ZcodeBackend,
 } from "./backend/index.js";
+import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { AGENT_INFO, PROTOCOL_VERSION, log } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
@@ -37,6 +38,14 @@ export class ZcodeAcpServer {
   backend: ZcodeBackend | null = null;
   /** acp_sid → zcode session id (usually identical, but kept for clarity). */
   readonly sessionMap = new Map<string, string>();
+  /**
+   * Reverse map: zcode session id → acp_sid. The background-task listener only
+   * knows the zcode sid (it comes from backend events), but ACP notifications
+   * must address the acp_sid the client knows. Usually the two are identical,
+   * but forked/loaded sessions can diverge, so we maintain an explicit reverse
+   * index rather than assuming equality.
+   */
+  readonly acpSidByZcodeSid = new Map<string, string>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();
   /**
@@ -47,6 +56,14 @@ export class ZcodeAcpServer {
   readonly preemptLocks = new Map<string, Promise<void>>();
   /** Capabilities advertised by the connected client (Zed, JetBrains, ...). */
   clientCapabilities: ClientCapabilities = {};
+  /**
+   * Connection-scoped AgentContext, captured at `connect()` time. Held so that
+   * background listeners can push `session/update` notifications OUTSIDE a
+   * request handler (e.g. when a background task completes after `session/
+   * prompt` has already returned). Null before `connect()` runs (only during
+   * the brief startup window — sessions can't be created before connect).
+   */
+  acpClient: acp.AgentContext | null = null;
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
   /**
@@ -65,6 +82,14 @@ export class ZcodeAcpServer {
   >();
   /** Per-session model cache for configOptions model dropdown. */
   readonly modelCache = new Map<string, string>();
+  /**
+   * Per-session (zcodeSid) background-task listeners. Registered once when a
+   * session is created/resumed/loaded and lives across prompts, forwarding
+   * background task status + result notifications to the client outside of
+   * request handlers. The turn loop's own listener coexists with this one
+   * (backend.listeners is now a Set per session).
+   */
+  readonly backgroundListeners = new Map<string, BackgroundTaskListener>();
   /**
    * Per-Bash-callId stdout snapshot already streamed via terminal_output. Used
    * by dispatchTerminalUpdate for two dedup guards:
@@ -94,6 +119,61 @@ export class ZcodeAcpServer {
   /** Resolve the zcode session id for an ACP session id. */
   resolveSid(acpSid: string): string | undefined {
     return this.sessionMap.get(acpSid);
+  }
+
+  /**
+   * Register the acp_sid ↔ zcode_sid mapping both ways. Use this instead of
+   * `sessionMap.set(...)` directly so the reverse index stays in sync (the
+   * background-task listener needs the reverse lookup to address notifications).
+   */
+  registerSession(acpSid: string, zcodeSid: string): void {
+    this.sessionMap.set(acpSid, zcodeSid);
+    this.acpSidByZcodeSid.set(zcodeSid, acpSid);
+  }
+
+  /**
+   * Ensure a background-task listener is registered for the session. Idempotent
+   * — returns the existing listener if already registered (covers resume/load
+   * after new, and fork). Lives for the whole session so background agents that
+   * finish AFTER `session/prompt` returns still get their status/result
+   * forwarded to the client. The turn loop's own listener coexists via the
+   * backend's per-session listener Set.
+   */
+  ensureBackgroundListener(zcodeSid: string): BackgroundTaskListener {
+    const existing = this.backgroundListeners.get(zcodeSid);
+    if (existing) return existing;
+    const backend = this.ensureBackend();
+    const listener = new BackgroundTaskListener(this, zcodeSid);
+    this.backgroundListeners.set(zcodeSid, listener);
+    backend.registerEventListener(zcodeSid, listener);
+    log(`  [bg] background listener registered for ${zcodeSid}`);
+    return listener;
+  }
+
+  /** Resolve the ACP session id for a zcode session id (reverse of resolveSid). */
+  resolveAcpSid(zcodeSid: string): string | undefined {
+    return this.acpSidByZcodeSid.get(zcodeSid);
+  }
+
+  /**
+   * Push a `session/update` notification to the client from OUTSIDE a request
+   * handler (used by the background-task listener). Resolves the acp_sid from
+   * the zcode_sid and no-ops (returning false) if the client or session is
+   * unknown. Never throws — callers run in the event loop and must not crash
+   * the bridge on a notification failure.
+   */
+  async notifyByZcodeSid(zcodeSid: string, update: acp.SessionUpdate): Promise<boolean> {
+    const cx = this.acpClient;
+    if (!cx) return false;
+    const acpSid = this.resolveAcpSid(zcodeSid);
+    if (!acpSid) return false;
+    try {
+      await cx.notify("session/update", { sessionId: acpSid, update });
+      return true;
+    } catch (e) {
+      log(`notifyByZcodeSid: session/update failed: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
   }
 
   /** Whether the client declared `_meta.terminal_output` (Zed's Bash UI hook). */

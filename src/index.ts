@@ -103,7 +103,7 @@ async function main(): Promise<void> {
   }, 2000);
   backendDeathInterval.unref();
 
-  acp
+  const connection = acp
     .agent({ name: AGENT_INFO.name })
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
     .onRequest("session/new", async (ctx) => {
@@ -147,6 +147,16 @@ async function main(): Promise<void> {
     .onRequest("session/setMode", extParams, (ctx) => setMode(server, ctx.params, ctx.client))
     .onNotification("session/cancel", (ctx) => cancel(server, ctx.params))
     .connect(stream);
+
+  // Capture the connection-scoped AgentContext so background listeners can push
+  // session/update notifications outside of request handlers (e.g. when a
+  // background task completes after session/prompt has returned).
+  server.acpClient = connection.client;
+
+  // Capture the connection-scoped AgentContext so background listeners can push
+  // session/update notifications outside of request handlers (e.g. when a
+  // background task completes after session/prompt has returned).
+  server.acpClient = connection.client;
 }
 
 main().catch((err) => {

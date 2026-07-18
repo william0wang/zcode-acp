@@ -57,7 +57,8 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
   // Register it so subsequent ACP calls targeting the fork can resolve the sid.
   const result = (resp.result ?? {}) as { forkedSessionId?: string };
   if (result.forkedSessionId) {
-    server.sessionMap.set(result.forkedSessionId, result.forkedSessionId);
+    server.registerSession(result.forkedSessionId, result.forkedSessionId);
+    server.ensureBackgroundListener(result.forkedSessionId);
   }
   log(`session/fork → ${result.forkedSessionId ?? "?"}`);
   return result;
@@ -187,7 +188,7 @@ export async function cancelBackgroundTask(
   params: ExtensionParams,
 ): Promise<Result> {
   const zcodeSid = resolveSidOrThrow(server, params);
-  const taskId = params.taskId;
+  const taskId = String(params.taskId ?? "");
   if (!taskId) throw new Error("cancelBackgroundTask requires taskId");
   const resp = await server
     .ensureBackend()
@@ -198,6 +199,10 @@ export async function cancelBackgroundTask(
       15000,
     );
   if (resp.error) throw new Error(`cancelBackgroundTask failed: ${resp.error.message}`);
+  // Reflect the cancellation on the ACP tool card (status:failed + cancelled
+  // flag) and clear the background listener's local tracking. Best-effort.
+  const listener = server.backgroundListeners.get(zcodeSid);
+  if (listener) void listener.markCancelled(taskId);
   log(
     `session/cancelBackgroundTask → cancelled=${(resp.result as { cancelled?: boolean })?.cancelled}`,
   );

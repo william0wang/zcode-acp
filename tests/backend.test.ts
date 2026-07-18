@@ -92,6 +92,47 @@ describe("ZcodeBackend reader routing (unit)", () => {
     b.close();
   });
 
+  it("fans session/event out to multiple registered listeners and isolates unregister", () => {
+    const b = makeRoutingSubject();
+    const gotA: ZcodeEvent[] = [];
+    const gotB: ZcodeEvent[] = [];
+    const listenerA: EventListener = { handleEvent: (ev) => gotA.push(ev) };
+    const listenerB: EventListener = { handleEvent: (ev) => gotB.push(ev) };
+    b.registerEventListener("sess_x", listenerA);
+    b.registerEventListener("sess_x", listenerB);
+    b.route({
+      method: "session/event",
+      params: { sessionId: "sess_x", seq: 1, type: "turn.started", payload: {} },
+    });
+    // Both listeners receive the event.
+    expect(gotA).toHaveLength(1);
+    expect(gotB).toHaveLength(1);
+    // Unregistering one leaves the other intact.
+    b.unregisterEventListener("sess_x", listenerA);
+    b.route({
+      method: "session/event",
+      params: { sessionId: "sess_x", seq: 2, type: "turn.completed", payload: {} },
+    });
+    expect(gotA).toHaveLength(1); // no new event for A
+    expect(gotB).toHaveLength(2); // B still receives
+    b.close();
+  });
+
+  it("isolates listeners per session id", () => {
+    const b = makeRoutingSubject();
+    const gotX: ZcodeEvent[] = [];
+    const gotY: ZcodeEvent[] = [];
+    b.registerEventListener("sess_x", { handleEvent: (ev) => gotX.push(ev) });
+    b.registerEventListener("sess_y", { handleEvent: (ev) => gotY.push(ev) });
+    b.route({
+      method: "session/event",
+      params: { sessionId: "sess_x", seq: 1, type: "turn.started", payload: {} },
+    });
+    expect(gotX).toHaveLength(1);
+    expect(gotY).toHaveLength(0);
+    b.close();
+  });
+
   it("drains pending requests with an error once the reader dies", async () => {
     const b = makeRoutingSubject();
     const pending = b.request(11, "ping", {}, 5000);

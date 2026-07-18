@@ -51,7 +51,10 @@ export class ZcodeBackend {
   readonly proc: ChildProcess;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly serverRequests: ServerRequest[] = [];
-  private readonly listeners = new Map<string, EventListener>();
+  // Per-session listener SET so a long-lived session listener (e.g. background
+  // task monitor) can coexist with a per-turn EventStreamListener. Each event
+  // is delivered to every registered listener for the session.
+  private readonly listeners = new Map<string, Set<EventListener>>();
   private readerDead = false;
   /** Monotonic id for fire-and-forget sends (send()). Uses a high range to
    *  avoid collisions with the server's request ids (low range). */
@@ -172,8 +175,20 @@ export class ZcodeBackend {
       if (method === "session/event") {
         const ev = (msg.params ?? {}) as unknown as ZcodeEvent;
         const sid = ev.sessionId;
-        const listener = sid ? this.listeners.get(sid) : undefined;
-        listener?.handleEvent(ev);
+        const set = sid ? this.listeners.get(sid) : undefined;
+        if (set) {
+          // Iterate a snapshot so a listener that (un)registers during dispatch
+          // doesn't mutate the set under us.
+          for (const listener of [...set]) {
+            try {
+              listener.handleEvent(ev);
+            } catch (e) {
+              warn(
+                `backend: listener.handleEvent threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+        }
       }
       // Other notifications are currently ignored (state.updated, etc.).
     }
@@ -204,11 +219,19 @@ export class ZcodeBackend {
   // ---------- listeners / server requests ----------
 
   registerEventListener(zcodeSid: string, listener: EventListener): void {
-    this.listeners.set(zcodeSid, listener);
+    let set = this.listeners.get(zcodeSid);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(zcodeSid, set);
+    }
+    set.add(listener);
   }
 
-  unregisterEventListener(zcodeSid: string): void {
-    this.listeners.delete(zcodeSid);
+  unregisterEventListener(zcodeSid: string, listener: EventListener): void {
+    const set = this.listeners.get(zcodeSid);
+    if (!set) return;
+    set.delete(listener);
+    if (set.size === 0) this.listeners.delete(zcodeSid);
   }
 
   /** Non-blocking drain of pending server→client requests. */

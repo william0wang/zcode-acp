@@ -146,3 +146,42 @@ describe("EventTranslator", () => {
     expect(t.turnResultType).toBe("cancelled");
   });
 });
+
+describe("EventTranslator background-task turn deferral", () => {
+  it("skips every event of a background_task turn (defers to BackgroundTaskListener)", () => {
+    const t = new EventTranslator();
+    // A background notification turn starts.
+    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    // Its text deltas MUST NOT be emitted (else double-forwarded alongside the
+    // bg listener) and MUST NOT set turnStarted.
+    const out1 = t.translate(ev("model.streaming", { kind: "text_delta", delta: "bg result" }));
+    expect(out1).toEqual([]);
+    expect(t.turnStarted).toBe(false);
+    // Its turn.completed MUST NOT set turnDone (else it'd exit the user's
+    // still-running real turn).
+    const out2 = t.translate(ev("turn.completed", { resultType: "success" }));
+    expect(out2).toEqual([]);
+    expect(t.turnDone).toBe(false);
+  });
+
+  it("resumes normal handling after the next user-initiated turn.started", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    t.translate(ev("model.streaming", { kind: "text_delta", delta: "bg" })); // dropped
+    // A normal user turn starts → deferral cleared.
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    expect(t.turnStarted).toBe(true);
+    const out = t.translate(ev("model.streaming", { kind: "text_delta", delta: "user reply" }));
+    expect(out).toEqual([{ kind: "TextDelta", text: "user reply" }]);
+  });
+
+  it("ignores background_task tool.updated events inside the deferred turn", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    const out = t.translate(
+      ev("tool.updated", { kind: "scheduled", toolCallId: "c1", toolName: "Read" }),
+    );
+    expect(out).toEqual([]);
+    expect(t.seenToolIds.has("c1")).toBe(false);
+  });
+});

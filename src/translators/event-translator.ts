@@ -33,6 +33,13 @@ export class EventTranslator {
   turnFailed = false;
   turnResultType: string | null = null;
   turnError: Record<string, unknown> | null = null;
+  /**
+   * True while inside a background-task notification turn
+   * (`turn.started {inputSource:"background_task"}`). Set on its turn.started,
+   * cleared on the next user-initiated turn.started. While true, `translate`
+   * drops all events — that turn is owned by BackgroundTaskListener.
+   */
+  private skippingBackgroundTurn = false;
 
   /** Tool call ids we've already emitted a ToolCallNew for. */
   readonly seenToolIds = new Set<string>();
@@ -50,8 +57,27 @@ export class EventTranslator {
     const results: InternalEvent[] = [];
 
     if (etype === "turn.started") {
+      // Background-task completion triggers an automatic backend turn
+      // (`inputSource:"background_task"`) whose text_delta is the task result.
+      // That turn is owned by the BackgroundTaskListener (session-scoped), NOT
+      // this per-prompt translator — if we consumed it we'd (a) double-forward
+      // the result and (b) mis-set turnDone and exit the user's real turn loop.
+      // So we skip every event of a background_task turn until the next
+      // user-initiated turn.started clears the flag.
+      const inputSource = payload["inputSource"];
+      if (inputSource === "background_task") {
+        this.skippingBackgroundTurn = true;
+        log("  [event] turn.started (background_task) → deferring to bg listener");
+        return results;
+      }
+      this.skippingBackgroundTurn = false;
       this.turnStarted = true;
       log("  [event] turn.started");
+    } else if (this.skippingBackgroundTurn) {
+      // Inside a deferred background_task turn: drop everything (the bg
+      // listener handles it). turn.completed/turn.failed for the bg turn also
+      // land here and are intentionally NOT used to set turnDone.
+      return results;
     } else if (etype === "model.streaming") {
       results.push(...this.translateStreaming(payload));
     } else if (etype === "tool.updated") {

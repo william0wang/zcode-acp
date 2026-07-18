@@ -640,7 +640,105 @@ Set the thought level.
 }
 ```
 
-## Version Compatibility
+## Background Tasks & Sub-Agents
+
+When the model dispatches a sub-agent via the `Agent` (or `Task`) tool, the
+backend keeps producing events on the **same session stream** — both while the
+sub-agent runs and after the main turn ends. The bridge forwards a curated
+subset to the ACP client:
+
+### Synchronous sub-agent (blocking)
+
+The `Agent` tool blocks until the sub-agent finishes. Its internal tool calls
+(`Read`, `Bash`, …) arrive as ordinary `tool.updated` events on the main stream
+and are forwarded as regular `tool_call` cards. The `Agent` card itself carries
+structured metadata in `_meta.subagent` (parsed from the result content):
+
+```json
+{
+  "sessionUpdate": "tool_call_update",
+  "toolCallId": "call_xxx",
+  "status": "completed",
+  "_meta": {
+    "claudeCode": { "toolName": "Agent" },
+    "subagent": {
+      "agentId": "agent_73c7c63d-...",
+      "tokens": 40904,
+      "toolUses": 1,
+      "durationMs": 10559
+    }
+  }
+}
+```
+
+### Background sub-agent (`run_in_background: true`)
+
+The `Agent` tool returns immediately with a launch acknowledgement (result
+content contains `agentId` + `output_file` + "working in the background"). The
+main turn then completes, but the backend continues to push the task's
+lifecycle on the same stream:
+
+**1. Status changes** — `session.updated` carries a `taskId` and `status`:
+
+```json
+{
+  "method": "session/event",
+  "params": {
+    "sessionId": "sess_abc123",
+    "seq": 16,
+    "type": "session.updated",
+    "payload": {
+      "taskId": "agent_88a44529-...",
+      "toolCallId": "call_orig",
+      "toolName": "Agent",
+      "status": "running",
+      "description": "Read README first heading",
+      "outputPath": "/.../output.txt",
+      "terminalId": "agent_88a44529-...",
+      "startedAt": "2026-07-18T09:06:45.929Z"
+    }
+  }
+}
+```
+
+The bridge's session-scoped `BackgroundTaskListener` turns these into a
+dedicated ACP tool card (`[background] <description>`) plus status updates:
+
+| Backend event | ACP notification |
+|---|---|
+| first `session.updated` (status `running`) | `tool_call` (new card, `kind:"other"`, `status:"in_progress"`) |
+| `session.updated` (status `completed`) | `tool_call_update` (`status:"completed"`) |
+
+`session.updated` events WITHOUT a `taskId` (e.g. usage updates) are ignored by
+the background listener — they remain owned by the turn loop.
+
+**2. Completion notification turn** — when the background task finishes, the
+backend auto-triggers a new turn whose `turn.started` carries
+`inputSource:"background_task"`:
+
+```json
+{
+  "type": "turn.started",
+  "payload": {
+    "inputSource": "background_task",
+    "inputVisibility": "model-only",
+    "input": "<task-notification>\n  <task-id>agent_...</task-id>\n  <status>completed</status-status>\n  ...\n</task-notification>",
+    "turnId": "turn_95197b25-..."
+  }
+}
+```
+
+The background listener forwards that turn's `model.streaming text_delta` as
+`agent_message_chunk` so the user sees the background result. The per-prompt
+turn loop **defers** this entire turn (drops its events) to avoid double-
+forwarding and to keep it from prematurely ending the user's real turn.
+
+### `session/cancelBackgroundTask`
+
+Cancels a background task. The bridge additionally marks the corresponding ACP
+tool card as `failed` with `_meta.backgroundTask.cancelled = true`.
+
+
 
 | ZCode CLI version | session/subscribe | Extension methods | Notes |
 |---------------|-------------------|----------|------|

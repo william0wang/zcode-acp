@@ -161,6 +161,7 @@ API only because the ZCode backend itself sends them for inference.
 | `session.ts`         | session/new/list/resume/load/prompt/set_config_option/cancel                                                 |
 | `extensions.ts`      | fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask/setModel/setMode/setThoughtLevel           |
 | `dispatch.ts`        | dispatchEvent single exit point: InternalEvent → ACP session/update                                          |
+| `background-tasks.ts` | Session-scoped `BackgroundTaskListener` — forwards background sub-agent status (`session.updated` taskId) + completion-notification turns to the client OUTSIDE request handlers (lives across prompts) |
 | `server-requests.ts` | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing |
 | `io.ts`              | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                   |
 | `slash.ts`           | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought)            |

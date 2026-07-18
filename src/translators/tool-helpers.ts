@@ -291,6 +291,62 @@ export function extractLocations(
   return [];
 }
 
+/**
+ * Structured sub-agent metadata extracted from an Agent/Task tool result's
+ * content. The zcode backend appends these as plain-text markers at the end of
+ * the result content (e.g. `agentId: agent_xxx (use SendMessage ...)` and
+ * `<usage>subagent_tokens: 40904\ntool_uses: 1\nduration_ms: 10559</usage>`).
+ * Editors can use the parsed fields to badge the tool card; the raw content is
+ * left intact for the user-facing text.
+ */
+export interface SubagentMetadata {
+  agentId?: string;
+  background?: boolean;
+  tokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+}
+
+const AGENT_ID_RE = /agentId:\s*(agent_[A-Za-z0-9-]+)/;
+// <usage>subagent_tokens: 40904\ntool_uses: 1\nduration_ms: 10559</usage>
+const USAGE_RE =
+  /<usage>\s*subagent_tokens:\s*(\d+)\s*tool_uses:\s*(\d+)\s*duration_ms:\s*(\d+)\s*<\/usage>/;
+const BACKGROUND_RE = /\b(background(ed)?|async_launched|backgroundTaskId)\b/i;
+
+/**
+ * Parse sub-agent metadata markers from an Agent/Task result content string.
+ * Returns null when no sub-agent markers are present (so non-Agent results
+ * short-circuit cheaply). The content may be a JSON string (the backend wraps
+ * the result) or plain text — both shapes are handled.
+ */
+export function parseSubagentMetadata(rawContent: unknown): SubagentMetadata | null {
+  let text: string;
+  if (typeof rawContent === "string") {
+    text = rawContent;
+  } else if (rawContent && typeof rawContent === "object" && !Array.isArray(rawContent)) {
+    const c = (rawContent as Record<string, unknown>)["content"];
+    if (typeof c !== "string") return null;
+    text = c;
+  } else {
+    return null;
+  }
+  if (!text.includes("agentId:") && !text.includes("<usage>")) return null;
+
+  const meta: SubagentMetadata = {};
+  const aid = text.match(AGENT_ID_RE);
+  if (aid) meta.agentId = aid[1];
+  const usage = text.match(USAGE_RE);
+  if (usage) {
+    meta.tokens = Number(usage[1]);
+    meta.toolUses = Number(usage[2]);
+    meta.durationMs = Number(usage[3]);
+  }
+  if (BACKGROUND_RE.test(text)) meta.background = true;
+  // Require at least one recognised field, else treat as non-subagent.
+  if (meta.agentId === undefined && meta.tokens === undefined) return null;
+  return meta;
+}
+
 /** Render a turn.failed error object into a readable single-line string. */
 export function formatTurnError(error: unknown): string {
   if (!error || typeof error !== "object" || Array.isArray(error)) return "";
