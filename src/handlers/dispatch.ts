@@ -110,8 +110,18 @@ function dispatchToolCallUpdate(
     server.supportsTerminalOutput() && (toolName === "Bash" || toolName === "bash");
 
   if (termSupported) {
-    // Bash terminal protocol (full 2-notification split arrives in Commit 5).
-    // For now emit the terminal_output data + the standard update with status.
+    // Background Bash: the `result` event carries the launch acknowledgement
+    // ("Command running in background with ID: exec_…"), NOT the final output.
+    // Closing the card now (terminal_exit + status:completed) would make it
+    // indistinguishable from a normal Bash call and steal the lifecycle from
+    // the BackgroundTaskListener, which owns the real completion via
+    // out-of-band `session.updated` events. So stream any launch text via
+    // terminal_output and leave the card in_progress.
+    if (ev.background) {
+      return dispatchTerminalUpdate(server, cx, acpSid, ev, toolName, {
+        skipExit: true,
+      });
+    }
     return dispatchTerminalUpdate(server, cx, acpSid, ev, toolName);
   }
 
@@ -171,6 +181,7 @@ async function dispatchTerminalUpdate(
   acpSid: string,
   ev: Extract<InternalEvent, { kind: "ToolCallUpdate" }>,
   toolName: string,
+  opts: { skipExit?: boolean } = {},
 ): Promise<void> {
   // Extract the textual output from whichever payload field carries it.
   let termData: unknown = ev.rawOutput ?? ev.rawResult;
@@ -200,6 +211,18 @@ async function dispatchTerminalUpdate(
         _meta: { terminal_output: { terminal_id: ev.callId, data: delta } },
       });
     }
+  }
+
+  // Background Bash launch: leave the card in_progress — BackgroundTaskListener
+  // owns the final status + terminal_exit via out-of-band session.updated. We
+  // MUST still seed terminalSentData with an empty entry (even when no launch
+  // text was streamed) so the listener can recognise this callId as a tracked
+  // launch card and route its updates back to the same card.
+  if (opts.skipExit) {
+    if (!server.terminalSentData.has(ev.callId)) {
+      server.terminalSentData.set(ev.callId, "");
+    }
+    return;
   }
 
   // ② terminal_exit (terminal state) — only on completed/failed.

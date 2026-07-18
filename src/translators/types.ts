@@ -28,6 +28,13 @@ export interface ToolCallNewEvent {
   content?: ToolCallContent[];
   diffContent?: ToolCallContent[];
   locations?: ToolCallLocation[];
+  /**
+   * True when the tool was launched with `run_in_background: true` (currently
+   * only Bash). The dispatcher uses this to keep the card in_progress instead
+   * of emitting a premature terminal_exit — the BackgroundTaskListener owns
+   * the final status via out-of-band `session.updated` events.
+   */
+  background?: boolean;
 }
 
 export interface ToolCallUpdateEvent {
@@ -41,6 +48,13 @@ export interface ToolCallUpdateEvent {
   content?: ToolCallContent[];
   diffContent?: ToolCallContent[];
   locations?: ToolCallLocation[];
+  /**
+   * Carries the background flag from the originating ToolCallNew through to
+   * `result` updates so the dispatcher can skip terminal_exit for background
+   * Bash. Resolved from a per-translator `backgroundCallIds` cache because
+   * `tool.updated { kind:"result" }` omits the input.
+   */
+  background?: boolean;
 }
 
 export interface UsageDeltaEvent {

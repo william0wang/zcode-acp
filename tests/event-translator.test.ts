@@ -185,3 +185,86 @@ describe("EventTranslator background-task turn deferral", () => {
     expect(t.seenToolIds.has("c1")).toBe(false);
   });
 });
+
+describe("EventTranslator run_in_background flag threading", () => {
+  it("tags ToolCallNew as background when input.run_in_background=true (cached from streaming)", () => {
+    const t = new EventTranslator();
+    // model.streaming tool_call declares the background launch.
+    t.translate(
+      ev("model.streaming", {
+        kind: "tool_call",
+        toolCallId: "c1",
+        toolName: "Bash",
+        input: { command: "sleep 3", run_in_background: true },
+      }),
+    );
+    const out = t.translate(
+      ev("tool.updated", { kind: "scheduled", toolCallId: "c1", inputOmitted: true }),
+    );
+    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
+    expect(newEv.background).toBe(true);
+    // Cached for later result lookup.
+    expect(t.backgroundCallIds.has("c1")).toBe(true);
+  });
+
+  it("tags ToolCallNew as background when scheduled payload carries input directly", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("tool.updated", {
+        kind: "scheduled",
+        toolCallId: "c2",
+        toolName: "Bash",
+        input: { command: "echo hi", run_in_background: true },
+      }),
+    );
+    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
+    expect(newEv.background).toBe(true);
+  });
+
+  it("does NOT tag as background when run_in_background is absent or false", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("tool.updated", {
+        kind: "scheduled",
+        toolCallId: "c3",
+        toolName: "Bash",
+        input: { command: "ls" },
+      }),
+    );
+    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
+    expect(newEv.background).toBeUndefined();
+  });
+
+  it("threads background flag through to the result ToolCallUpdate (input omitted on result)", () => {
+    const t = new EventTranslator();
+    t.translate(
+      ev("model.streaming", {
+        kind: "tool_call",
+        toolCallId: "c4",
+        toolName: "Bash",
+        input: { command: "sleep 3", run_in_background: true },
+      }),
+    );
+    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c4", inputOmitted: true }));
+    const out = t.translate(
+      ev("tool.updated", {
+        kind: "result",
+        toolCallId: "c4",
+        result: { success: true, content: "Command running in background with ID: exec_…" },
+      }),
+    );
+    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
+    expect(u.background).toBe(true);
+    expect(u.status).toBe("completed");
+  });
+
+  it("does not tag a foreground Bash result as background", () => {
+    const t = new EventTranslator();
+    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c5", toolName: "Bash" }));
+    const out = t.translate(
+      ev("tool.updated", { kind: "result", toolCallId: "c5", result: { content: "done" } }),
+    );
+    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
+    expect(u.background).toBeUndefined();
+  });
+});

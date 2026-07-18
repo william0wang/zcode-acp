@@ -27,6 +27,18 @@ interface ZcodeEventPayload {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * Whether a tool input dict declared `run_in_background: true`. Used to tag
+ * ToolCallNew/Update events so the dispatcher and BackgroundTaskListener can
+ * keep the launch card in_progress and own its lifecycle via out-of-band
+ * `session.updated` events (rather than closing it the instant the launch
+ * acknowledgement returns).
+ */
+function isBackgroundInput(inp: unknown): boolean {
+  if (!inp || typeof inp !== "object" || Array.isArray(inp)) return false;
+  return (inp as Record<string, unknown>)["run_in_background"] === true;
+}
+
 export class EventTranslator {
   turnStarted = false;
   turnDone = false;
@@ -49,6 +61,14 @@ export class EventTranslator {
   readonly toolInputs = new Map<string, unknown>();
   /** Tool call ids that reached a terminal state (result/error). */
   readonly finalToolIds = new Set<string>();
+  /**
+   * call_ids launched with `run_in_background: true`. Populated when the
+   * scheduled event resolves the input (streaming cache or payload), so the
+   * later `result` event — whose input is omitted — can still mark its
+   * ToolCallUpdate as background. Read by `translateTool` to thread the flag
+   * through to dispatch (which skips terminal_exit for background Bash).
+   */
+  readonly backgroundCallIds = new Set<string>();
 
   /** Translate one zcode event into 0..n internal events. */
   translate(event: ZcodeEventPayload): InternalEvent[] {
@@ -145,6 +165,11 @@ export class EventTranslator {
         if (inp === undefined) inp = this.toolInputs.get(callId);
         const summary = summarizeToolInput(toolName, inp);
         const title = summary ? `${toolName}: ${summary}` : toolName;
+        // Track background launches so the later `result` event (input omitted)
+        // can still tag its ToolCallUpdate. The BackgroundTaskListener also
+        // keys off this to know which callId owns the card.
+        const isBackground = isBackgroundInput(inp);
+        if (isBackground) this.backgroundCallIds.add(callId);
         const newEv: InternalEvent = {
           kind: "ToolCallNew",
           callId,
@@ -152,6 +177,7 @@ export class EventTranslator {
           acpKind,
           status: "pending",
           title,
+          ...(isBackground ? { background: true } : {}),
         };
         if (inp !== undefined) (newEv as { input?: unknown }).input = inp;
         const locs = extractLocations(toolName, inp);
@@ -186,6 +212,7 @@ export class EventTranslator {
           status: "completed",
           output: renderToolOutput(resultPayload),
           rawResult: resultPayload,
+          ...(this.backgroundCallIds.has(callId) ? { background: true } : {}),
         };
         // Bash content handled by the terminal path in dispatch; skip here.
         if (tn !== "Bash" && tn !== "bash") {
@@ -205,6 +232,7 @@ export class EventTranslator {
           tool: tn,
           status: "failed",
           output: renderToolOutput(errPayload),
+          ...(this.backgroundCallIds.has(callId) ? { background: true } : {}),
         };
         const content = buildResultContent(tn, errPayload, true);
         if (content.length > 0) (ev as { content?: typeof content }).content = content;

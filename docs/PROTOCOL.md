@@ -733,6 +733,63 @@ The background listener forwards that turn's `model.streaming text_delta` as
 turn loop **defers** this entire turn (drops its events) to avoid double-
 forwarding and to keep it from prematurely ending the user's real turn.
 
+### Background Bash (`run_in_background: true`)
+
+The `Bash` tool launched with `run_in_background: true` returns immediately
+with a launch acknowledgement (result content: "Command running in background
+with ID: exec_…"). Like the Agent sub-agent, the backend keeps pushing the
+task's lifecycle on the same stream via `session.updated` events that carry
+the originating `toolCallId`:
+
+```json
+{
+  "type": "session.updated",
+  "payload": {
+    "taskId": "exec_ac3a5053-...",
+    "toolCallId": "call_e282b4ec...",
+    "toolName": "Bash",
+    "status": "running",
+    "pid": 22410,
+    "outputPath": "/.../call_...-stdout.log",
+    "outputTail": "done\n"
+  }
+}
+```
+
+**Card reuse, not duplication.** Unlike an Agent sub-agent (which mints a fresh
+`bg_*` card), a background Bash task **reuses the launch card** — the very
+terminal card the dispatcher created when `Bash` was scheduled. This keeps the
+lifecycle on a single card instead of producing a duplicate `[background]` card
+that the editor would show alongside the closed launch card.
+
+The mechanism:
+
+1. **Launch turn** — the dispatcher tags the `ToolCallNew`/`ToolCallUpdate`
+   with `background: true` (threaded from the cached `input.run_in_background`
+   flag) and, on the launch `result`, **skips `terminal_exit`** so the launch
+   card stays `in_progress`. It seeds an empty marker in `terminalSentData`
+   for the `toolCallId` — this is the signal the background listener uses to
+   recognise "this is a tracked launch card".
+2. **Lifecycle (`session.updated`)** — the `BackgroundTaskListener` resolves
+   the `toolCallId`, sees it in `terminalSentData`, and routes status updates
+   back to the launch card. On `status:"completed"`, it emits the final
+   `outputTail` via `terminal_output` (iff launch text wasn't already streamed)
+   and closes the terminal UI with `terminal_exit` (exit code 0, or 1 on
+   `failed`), then clears the `terminalSentData` entry.
+3. **Fallback** — if the `session.updated` lacks a `toolCallId`, or the
+   `toolCallId` is unknown to `terminalSentData` (sub-agent case), the listener
+   falls back to minting a fresh `bg_*` card — the Agent sub-agent path above.
+
+| Backend event | ACP notification (background Bash) |
+|---|---|
+| first `session.updated` (status `running`) | `tool_call_update` on the launch card (`status:"in_progress"`) |
+| `session.updated` (status `completed`, with `outputTail`) | `terminal_output` (final output, if not already streamed) + `tool_call_update` with `terminal_exit` (`status:"completed"`) |
+| `session.updated` (status `failed`) | `tool_call_update` with `terminal_exit` (`status:"failed"`, exit_code 1) |
+
+`session/cancelBackgroundTask` for a background Bash task additionally emits
+`terminal_exit` with `_meta.backgroundTask.cancelled = true` so the terminal
+UI closes on cancellation.
+
 ### `session/cancelBackgroundTask`
 
 Cancels a background task. The bridge additionally marks the corresponding ACP
