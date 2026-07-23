@@ -12,7 +12,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { extractPromptText } from "../src/handlers/session.js";
+import { extractAttachments, extractPromptText } from "../src/handlers/session.js";
 
 describe("extractPromptText", () => {
   it("concatenates multiple text blocks with newlines", () => {
@@ -125,5 +125,102 @@ describe("extractPromptText", () => {
       ] as never);
       expect(out).toBe("");
     });
+  });
+});
+
+describe("extractAttachments", () => {
+  it("returns [] for no blocks / non-image blocks", () => {
+    expect(extractAttachments(undefined)).toEqual([]);
+    expect(extractAttachments([])).toEqual([]);
+    expect(
+      extractAttachments([
+        { type: "text", text: "hello" },
+        { type: "resource_link", name: "f", uri: "file:///x" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("converts a base64 image block to a dataBase64 attachment", () => {
+    const out = extractAttachments([
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" } as never,
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe("image");
+    expect(out[0].mimeType).toBe("image/png");
+    expect(out[0].dataBase64).toBe("aGVsbG8=");
+    // sizeBytes estimated from base64 length (8 chars → 6 bytes)
+    expect(out[0].sizeBytes).toBe(6);
+    expect(out[0].localPath).toBeUndefined();
+    // synthesized filename from mimeType
+    expect(out[0].filename).toBe("image-1.png");
+  });
+
+  it("prefers a file:// uri → localPath over the base64 payload", () => {
+    const out = extractAttachments([
+      {
+        type: "image",
+        data: "aGVsbG8=",
+        mimeType: "image/jpeg",
+        uri: "file:///Users/william/pics/cat.jpeg",
+      } as never,
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].localPath).toBe("/Users/william/pics/cat.jpeg");
+    expect(out[0].dataBase64).toBeUndefined();
+    // filename derived from the uri basename
+    expect(out[0].filename).toBe("cat.jpeg");
+  });
+
+  it("decodes percent-encoded file:// uris for localPath", () => {
+    const out = extractAttachments([
+      {
+        type: "image",
+        mimeType: "image/png",
+        uri: "file:///Users/some%20one/my%20pic.png",
+      } as never,
+    ]);
+    expect(out[0].localPath).toBe("/Users/some one/my pic.png");
+    expect(out[0].filename).toBe("my pic.png");
+  });
+
+  it("synthesizes filename from uri basename when mimeType is unknown", () => {
+    const out = extractAttachments([
+      {
+        type: "image",
+        data: "AAAA",
+        mimeType: "image/x-weird",
+        uri: "https://example.com/foo.png",
+      } as never,
+    ]);
+    // http uri is not a localPath, so falls to dataBase64; filename from uri basename
+    expect(out[0].dataBase64).toBe("AAAA");
+    expect(out[0].localPath).toBeUndefined();
+    expect(out[0].filename).toBe("foo.png");
+  });
+
+  it("keeps image order and indexes filenames for multiple base64 images", () => {
+    const out = extractAttachments([
+      { type: "image", data: "AAAA", mimeType: "image/png" } as never,
+      { type: "text", text: "and another" },
+      { type: "image", data: "BBBB", mimeType: "image/jpeg" } as never,
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0].filename).toBe("image-1.png");
+    expect(out[1].filename).toBe("image-2.jpg");
+  });
+
+  it("drops an image block with neither a usable uri nor data", () => {
+    const out = extractAttachments([{ type: "image", mimeType: "image/png" } as never]);
+    expect(out).toEqual([]);
+  });
+
+  it("image blocks do not leak into extractPromptText text", () => {
+    // Images are routed via attachments, never inlined into the prompt text.
+    const blocks = [
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+      { type: "text", text: "describe this" },
+    ];
+    expect(extractPromptText(blocks as never)).toBe("describe this");
+    expect(extractAttachments(blocks as never)).toHaveLength(1);
   });
 });
