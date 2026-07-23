@@ -8,32 +8,22 @@
  * overlay so the backend can authenticate; otherwise it is omitted and the
  * backend uses its own OAuth creds.
  *
- * Two uses:
- *
- *   1. Resume overlay (`buildResumeRuntimeModel`): a resumed session may carry
- *      a stale provider id in its history that the backend can no longer
- *      authenticate. Sending the *current* enabled provider's runtimeModel at
- *      resume makes the backend overlay it and use its own OAuth creds.
- *
- *   2. Model switch (`applyModelSwitch`): UI/slash model switching goes through
- *      `session/updateRuntimeModelConfig` with `applyModelSelection:true` (a
- *      runtime-only change, sidestepping `session/setModel`'s "no loaded config
- *      file" persistence failure).
+ * Used by the model switch path: UI/slash model switching goes through
+ * `session/updateRuntimeModelConfig` with `applyModelSelection:true` (a
+ * runtime-only change, sidestepping `session/setModel`'s "no loaded config
+ * file" persistence failure). Third-party providers are therefore supported
+ * only mid-conversation; session/resume loads with the backend's default
+ * (builtin) model — sending a runtimeModel there triggers "Invalid params"
+ * because session/resume's schema rejects provider.apiKey.
  */
 
-import { findProviderConfig, formatModelValue, loadAllModels, parseModelValue } from "./options.js";
+import { findProviderConfig, formatModelValue, parseModelValue } from "./options.js";
 import type { ModelRef } from "./options.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 
 const DEFAULT_KIND = "anthropic";
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic";
-
-/** The first enabled provider in config.json (used for resume overlay). */
-function firstEnabledProvider(): ModelRef | null {
-  const all = loadAllModels();
-  return all.length > 0 ? all[0] : null;
-}
 
 /** Build a runtimeModel overlay for the given provider+model. */
 export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown | null {
@@ -62,16 +52,6 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
       models,
     },
   };
-}
-
-/** Build the resume-time overlay (current enabled provider, default model). */
-export function buildResumeRuntimeModel(): unknown | null {
-  const first = firstEnabledProvider();
-  if (!first) {
-    log("runtime-model: no enabled provider in config.json (resume overlay skipped)");
-    return null;
-  }
-  return buildRuntimeModel(first, "bridge-resume");
 }
 
 /**
