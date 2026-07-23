@@ -4,8 +4,9 @@
  * History: loadProviderModels() hardcoded a single builtin provider id, so
  * custom providers configured in the ZCode desktop app never appeared in the
  * dropdown. These tests lock the new behaviour: loadAllModels() aggregates ALL
- * enabled providers, buildRuntimeModel() carries the apiKey for custom/apiKey
- * providers, and the encoded value format round-trips correctly.
+ * enabled providers, buildRuntimeModel() NEVER carries apiKey (the backend's
+ * runtimeModel schema rejects it), builtin models encode as bare modelIds, and
+ * third-party models carry their providerId prefix.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -109,7 +110,17 @@ describe("modelContextWindow", () => {
 });
 
 describe("parseModelValue / formatModelValue", () => {
-  it("round-trips providerId + modelId", () => {
+  it("builtin providers encode as bare modelId (no prefix)", () => {
+    // The common case stays clean — builtin models show just the modelId.
+    const value = formatModelValue("builtin:bigmodel-coding-plan", "GLM-5.2");
+    expect(value).toBe("GLM-5.2");
+    expect(parseModelValue(value)).toEqual({
+      providerId: "builtin:bigmodel-coding-plan",
+      modelId: "GLM-5.2",
+    });
+  });
+
+  it("third-party providers round-trip providerId + modelId", () => {
     const value = formatModelValue("2e06bf1a-custom-nvidia", "nvidia/stepfun-ai/step-3.7-flash");
     expect(value).toBe("2e06bf1a-custom-nvidia\\nvidia/stepfun-ai/step-3.7-flash");
     expect(parseModelValue(value)).toEqual({
@@ -118,9 +129,8 @@ describe("parseModelValue / formatModelValue", () => {
     });
   });
 
-  it("legacy plain modelId (no backslash) resolves to first enabled provider", () => {
+  it("a plain modelId (no backslash) resolves to the first enabled builtin provider", () => {
     const parsed = parseModelValue("GLM-5.2");
-    // No backslash → treat as legacy modelId, providerId = first enabled.
     expect(parsed.modelId).toBe("GLM-5.2");
     expect(parsed.providerId).toBe("builtin:bigmodel-coding-plan");
   });
@@ -132,14 +142,17 @@ describe("parseModelValue / formatModelValue", () => {
 });
 
 describe("buildRuntimeModel", () => {
-  it("carries apiKey for custom/apiKey providers", () => {
+  it("NEVER carries apiKey — the backend schema rejects it and resolves auth itself", () => {
+    // Even for a custom provider WITH an apiKey in config (2e06bf1a-custom-nvidia),
+    // the overlay must omit it: the backend's runtimeModel schema types apiKey as
+    // a discriminated-union object, and a bare string → "Invalid params".
     const rm = buildRuntimeModel({
       providerId: "2e06bf1a-custom-nvidia",
       providerName: "Nvidia",
       modelId: "nvidia/stepfun-ai/step-3.7-flash",
     }) as { provider: { apiKey?: string; baseURL?: string; kind?: string } };
 
-    expect(rm.provider.apiKey).toBe("sk-custom-key-123");
+    expect(rm.provider.apiKey).toBeUndefined();
     expect(rm.provider.baseURL).toBe("http://127.0.0.1:18586/openai");
     expect(rm.provider.kind).toBe("openai-compatible");
   });

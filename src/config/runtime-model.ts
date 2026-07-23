@@ -1,23 +1,27 @@
 /**
  * runtimeModel overlay plumbing.
  *
- * The backend resolves auth either from its OAuth token store (builtin OAuth
- * providers) or from the apiKey embedded in the runtimeModel (custom providers
- * and builtin apiKey-mode providers). `buildRuntimeModel` auto-detects: when the
- * provider's config.json entry has an `options.apiKey`, it is carried into the
- * overlay so the backend can authenticate; otherwise it is omitted and the
- * backend uses its own OAuth creds.
+ * The runtimeModel NEVER carries `provider.apiKey`: the backend's runtimeModel
+ * schema (`.strict()`) types apiKey as a discriminated union object
+ * `{source:"inline"|"credential"|"env"|"server-config", ...}` — a bare string
+ * is rejected with "Invalid params". The backend resolves auth itself from
+ * config.json / its OAuth store, so the overlay only needs to name the
+ * provider+model.
  *
- * Used by the model switch path: UI/slash model switching goes through
- * `session/updateRuntimeModelConfig` with `applyModelSelection:true` (a
- * runtime-only change, sidestepping `session/setModel`'s "no loaded config
- * file" persistence failure). Third-party providers are therefore supported
- * only mid-conversation; session/resume loads with the backend's default
- * (builtin) model — sending a runtimeModel there triggers "Invalid params"
- * because session/resume's schema rejects provider.apiKey.
+ * Two uses:
+ *
+ *   1. Resume overlay (`buildResumeRuntimeModel`): a resumed session may carry a
+ *      stale/revoked model in its history → send fails with "历史模型不可用".
+ *      Overlaying the current enabled provider at resume redirects the session
+ *      onto a working model.
+ *
+ *   2. Model switch (`applyModelSwitch`): UI/slash model switching goes through
+ *      `session/updateRuntimeModelConfig` with `applyModelSelection:true` (a
+ *      runtime-only change, sidestepping `session/setModel`'s "no loaded config
+ *      file" persistence failure).
  */
 
-import { findProviderConfig, formatModelValue, parseModelValue } from "./options.js";
+import { findProviderConfig, formatModelValue, loadAllModels, parseModelValue } from "./options.js";
 import type { ModelRef } from "./options.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -25,14 +29,13 @@ import type { ZcodeAcpServer } from "../server.js";
 const DEFAULT_KIND = "anthropic";
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic";
 
-/** Build a runtimeModel overlay for the given provider+model. */
+/** Build a runtimeModel overlay for the given provider+model (no apiKey). */
 export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown | null {
   const p = findProviderConfig(ref.providerId);
   if (!p) {
     log(`runtime-model: provider "${ref.providerId}" not in config.json`);
     return null;
   }
-  const apiKey = p.options?.apiKey;
   const baseURL = p.options?.baseURL ?? DEFAULT_BASE_URL;
   const models =
     Object.keys(p.models ?? {}).length > 0
@@ -46,12 +49,19 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
       providerId: ref.providerId,
       kind: p.kind ?? DEFAULT_KIND,
       baseURL,
-      // Auto-detect: custom/apiKey-mode providers carry their key so the backend
-      // can authenticate; OAuth builtins omit it and use backend-managed tokens.
-      ...(apiKey ? { apiKey } : {}),
       models,
     },
   };
+}
+
+/** Build the resume-time overlay (current enabled provider, default model). */
+export function buildResumeRuntimeModel(): unknown | null {
+  const first = loadAllModels()[0];
+  if (!first) {
+    log("runtime-model: no enabled provider in config.json (resume overlay skipped)");
+    return null;
+  }
+  return buildRuntimeModel(first, "bridge-resume");
 }
 
 /**

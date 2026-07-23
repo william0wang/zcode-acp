@@ -106,28 +106,40 @@ export function modelContextWindow(providerId: string, modelId: string): number 
   }
 }
 
+/** Builtin providerIds are prefixed with `builtin:` (e.g. `builtin:bigmodel`). */
+function isBuiltinProvider(providerId: string): boolean {
+  return providerId.startsWith("builtin:");
+}
+
 /**
  * Encode a provider+model pair into a configOption `value` string.
  *
- * Uses `\` as the separator: providerIds are `builtin:...` or UUIDs (no `\`),
- * and modelIds use `/` (e.g. `nvidia/.../step-3.7-flash`), so `\` is unambiguous.
+ * Builtin providers encode as the bare modelId (legacy form, keeps the dropdown
+ * clean for the common case). Third-party providers encode as
+ * `providerId\modelId` — `\` is unambiguous because providerIds (UUIDs) and
+ * modelIds (`/`-separated) never contain it.
  */
 export function formatModelValue(providerId: string, modelId: string): string {
+  if (isBuiltinProvider(providerId)) return modelId;
   return `${providerId}\\${modelId}`;
 }
 
 /**
  * Parse a configOption `value` back into { providerId, modelId }.
  *
- * Backward compat: a value without `\` (legacy plain modelId) is treated as a
- * modelId under the current enabled provider, preserving the old behaviour.
+ * A value without `\` is a builtin modelId (legacy form) → resolve to the first
+ * enabled builtin provider. A value with `\` is a third-party provider+model.
  */
 export function parseModelValue(value: string): { providerId: string; modelId: string } {
   const idx = value.indexOf("\\");
   if (idx < 0) {
-    // Legacy plain modelId — resolve to the first enabled provider.
-    const first = loadAllModels()[0];
-    return { providerId: first?.providerId ?? "builtin:bigmodel-coding-plan", modelId: value };
+    // Builtin plain modelId — resolve to the first enabled builtin provider
+    // (falling back to the legacy default if none configured).
+    const firstBuiltin = loadAllModels().find((m) => isBuiltinProvider(m.providerId));
+    return {
+      providerId: firstBuiltin?.providerId ?? "builtin:bigmodel-coding-plan",
+      modelId: value,
+    };
   }
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
@@ -198,11 +210,12 @@ export async function buildConfigOptions(
     currentModelId,
   );
 
-  // Model options: config.json enabled providers are authoritative. Show as
-  // "ProviderName › ModelId" so same-named models across providers stay distinct.
+  // Model options: config.json enabled providers are authoritative. Builtin
+  // models show as the bare modelId (clean dropdown for the common case);
+  // third-party models prefix the provider name so they're distinguishable.
   let modelOptions = loadAllModels().map((m) => ({
     value: formatModelValue(m.providerId, m.modelId),
-    name: `${m.providerName} › ${m.modelId}`,
+    name: isBuiltinProvider(m.providerId) ? m.modelId : `${m.providerName} › ${m.modelId}`,
   }));
   if (!modelOptions.some((o) => o.value === currentModel)) {
     // The current model isn't from an enabled provider (e.g. the session was

@@ -22,6 +22,7 @@ import type {
 } from "../backend/types.js";
 import { buildModes, buildConfigOptions } from "../config/options.js";
 import { emitInitialUsage } from "../config/model-cache.js";
+import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   buildDiffContent,
   EventTranslator,
@@ -122,7 +123,7 @@ export async function listSessions(
   return { sessions };
 }
 
-/** `session/resume` → zcode `session/resume`. */
+/** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
   params: acp.ResumeSessionRequest,
@@ -133,15 +134,17 @@ export async function resumeSession(
   const cwd = params.cwd ?? process.cwd();
   if (!targetSid) throw new Error("sessionId required");
 
-  // No runtimeModel overlay: session/resume loads with the backend's default
-  // (builtin) model. Third-party providers are only switched mid-conversation
-  // via session/updateRuntimeModelConfig — sending a runtimeModel at resume
-  // triggers "Invalid params" because session/resume's schema rejects
-  // provider.apiKey.
+  // runtimeModel overlay: a resumed session may carry a stale/revoked model in
+  // its history → send fails with "历史模型不可用". Overlaying the current
+  // enabled provider redirects the session onto a working model. The overlay
+  // deliberately carries NO apiKey (the backend's schema rejects it; it resolves
+  // auth from its own config/OAuth store).
   const zcParams: Record<string, unknown> = {
     sessionId: targetSid,
     workspace: workspaceFor(cwd),
   };
+  const runtimeModel = buildResumeRuntimeModel();
+  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
 
@@ -177,6 +180,8 @@ export async function loadSession(
     sessionId: targetSid,
     workspace: workspaceFor(cwd),
   };
+  const runtimeModel = buildResumeRuntimeModel();
+  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
   const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
   if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
   server.registerSession(targetSid, targetSid);
