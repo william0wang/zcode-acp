@@ -70,7 +70,7 @@ a hardcoded version string — read the message text to identify the root cause.
 | Message fragment                 | Cause                                                                      |
 | -------------------------------- | -------------------------------------------------------------------------- |
 | `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.           |
-| `timeout`                        | The 10s subscribe deadline elapsed — usually a hung or overloaded backend. |
+| `timeout`                        | The per-attempt 10s subscribe deadline elapsed. The bridge retries transient timeouts up to 3× (the backend can be briefly busy finalising a cancelled turn after a preempt / `session/stop`); if all retries fail, the backend was unresponsive for ~30s. |
 | `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).     |
 | `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                          |
 | session-level business error     | The target session no longer exists or was evicted.                        |

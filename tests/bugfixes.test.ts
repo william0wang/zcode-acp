@@ -98,6 +98,77 @@ describe('subscribe error surfacing (no more misleading "0.14.8 required")', () 
   });
 });
 
+describe("subscribe retries transient timeout (preempt busy window)", () => {
+  // After a preempt the backend can be briefly busy; a subscribe issued in that
+  // window times out. subscribe() should retry transient timeouts and succeed
+  // once the backend recovers, instead of failing the turn.
+
+  it("retries on timeout and succeeds on a later attempt", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const snap = { projection: { status: "idle" }, messages: [] };
+    const requestSpy = vi.spyOn(fake, "request");
+    requestSpy
+      .mockResolvedValueOnce({ id: 1, error: { message: "timeout" } })
+      .mockResolvedValueOnce({ id: 2, error: { message: "timeout" } })
+      .mockResolvedValueOnce({
+        id: 3,
+        result: { eventSeq: 5, snapshot: snap },
+      } as ZcodeResponse);
+    // Fake timers so the backoff sleeps don't slow the test.
+    vi.useFakeTimers();
+    const subP = listener.subscribe(() => 1);
+    // Flush the backoff sleeps interleaved with the awaits.
+    await vi.runAllTimersAsync();
+    const result = await subP;
+    vi.useRealTimers();
+    expect(result).toEqual(snap);
+    expect(listener.subscribed).toBe(true);
+    expect(listener.lastSeq).toBe(5);
+    expect(requestSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it("does NOT retry on non-transient errors (reader dead)", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const requestSpy = vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "zcode backend reader exited (backend dead)" },
+    } as ZcodeResponse);
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(/reader exited/);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry on method-not-found (old CLI)", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    const requestSpy = vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "method not found", code: -32601 },
+    } as ZcodeResponse);
+    await expect(listener.subscribe(() => 1)).rejects.toThrow(/method not found \(code -32601\)/);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws after exhausting all retries", async () => {
+    const fake = new ZcodeBackend([process.execPath, "-e", "process.stdin.resume()"], process.env);
+    const listener = new EventStreamListener(fake, "sess_x");
+    vi.spyOn(fake, "request").mockResolvedValue({
+      id: 1,
+      error: { message: "timeout" },
+    } as ZcodeResponse);
+    vi.useFakeTimers();
+    // Attach the rejection handler up front so the eventual rejection is never
+    // "unhandled" during the timer flush window.
+    const subP = listener.subscribe(() => 1).catch((e: unknown) => e);
+    await vi.runAllTimersAsync();
+    const err = await subP;
+    vi.useRealTimers();
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/session\/subscribe failed: timeout/);
+  });
+});
+
 describe("Bug I: stableStringify / plan signature stability", () => {
   it("treats same todos with different key order as the same signature", () => {
     const d1 = new ProjectionDiffer();

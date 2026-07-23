@@ -19,7 +19,7 @@ import type {
   ZcodeSnapshot,
   ZcodeSubscribeResult,
 } from "./types.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 
 /** ID generator function (the server's `_next_id`). */
 export type NextId = () => number;
@@ -56,21 +56,47 @@ export class EventStreamListener {
    * misleading "version too old" string.
    */
   async subscribe(nextId: NextId): Promise<ZcodeSnapshot> {
-    const resp = await this.backend.request(
-      nextId(),
-      "session/subscribe",
-      {
-        sessionId: this.sid,
-        deliveryKind: "desktop-continuous",
-        includeSnapshot: true,
-        afterSeq: 0,
-      },
-      10000,
-    );
-    if (resp.error) {
-      throw new Error(formatSubscribeError(resp));
+    // Retry transient timeouts: after a preempt (`session/stop`) the backend's
+    // main loop can be briefly busy finalising the cancelled turn (interrupting
+    // the model stream, persisting checkpoints). A subscribe issued in that
+    // window may not get a response within the per-attempt deadline. The backend
+    // recovers on its own ("wait a bit and resend works"), so a couple of
+    // retries absorb the intermittent stall instead of surfacing it to the user.
+    //
+    // Only `timeout` is retried — non-transient errors (reader dead, pipe
+    // broken, method-not-found, session-level business error) fail fast.
+    // Each attempt uses a fresh id from `nextId()` (monotonic, never reused), so
+    // a late response to an earlier timed-out request is safely discarded by
+    // `resolvePending` (no pending entry → dropped).
+    const MAX_ATTEMPTS = 3;
+    const backoffMs = (attempt: number): number => 1000 * attempt; // 1s, 2s
+    let resp: ZcodeResponse;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      resp = await this.backend.request(
+        nextId(),
+        "session/subscribe",
+        {
+          sessionId: this.sid,
+          deliveryKind: "desktop-continuous",
+          includeSnapshot: true,
+          afterSeq: 0,
+        },
+        10000,
+      );
+      if (!resp.error) break; // success
+      const isTimeout = resp.error.message === "timeout";
+      if (!isTimeout || attempt === MAX_ATTEMPTS) {
+        if (isTimeout) {
+          warn(`subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~30s)`);
+        }
+        throw new Error(formatSubscribeError(resp));
+      }
+      log(
+        `subscribe attempt ${attempt}/${MAX_ATTEMPTS} timed out, retrying in ${backoffMs(attempt)}ms (preempt/busy window)`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs(attempt)));
     }
-    const result = (resp.result ?? {}) as ZcodeSubscribeResult;
+    const result = (resp!.result ?? {}) as ZcodeSubscribeResult;
     this.lastSeq = result.eventSeq ?? 0;
     this.subscribed = true;
     return result.snapshot ?? { projection: undefined, messages: [] };
