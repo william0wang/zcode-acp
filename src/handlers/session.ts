@@ -329,8 +329,10 @@ export async function prompt(
     server.pendingTurns.delete(requestId);
     throw e;
   }
-  // The snapshot isn't consumed (differ baseline is set above); subscribe is
-  // what matters — it arms the event stream for the upcoming turn.
+  // subscribe() requests includeSnapshot:false (it only needs the eventSeq
+  // watermark to arm the event stream), so `snapshot` is an empty fallback.
+  // The real projection baseline comes from fetchMessages + differ.markSeen
+  // above. Kept as a binding only so the call fits the Promise-returning shape.
   void snapshot;
   backend.registerEventListener(zcodeSid, listener);
 

@@ -68,6 +68,14 @@ export class EventStreamListener {
     // Each attempt uses a fresh id from `nextId()` (monotonic, never reused), so
     // a late response to an earlier timed-out request is safely discarded by
     // `resolvePending` (no pending entry → dropped).
+    //
+    // includeSnapshot is FALSE here on purpose. The caller (prompt()) discards
+    // the returned snapshot anyway (`void snapshot`) — the projection baseline
+    // comes from a separate fetchMessages() call. Asking the backend for a
+    // snapshot here only makes it compute a full session snapshot (which grows
+    // O(messages) and can take seconds-to-tens-of-seconds on long sessions:
+    // observed 3.8s at 267 messages, 38s at 3500 messages) and is the primary
+    // cause of subscribe timeouts. The eventSeq watermark is all we need.
     const MAX_ATTEMPTS = 3;
     const backoffMs = (attempt: number): number => 1000 * attempt; // 1s, 2s
     let resp: ZcodeResponse;
@@ -78,7 +86,7 @@ export class EventStreamListener {
         {
           sessionId: this.sid,
           deliveryKind: "desktop-continuous",
-          includeSnapshot: true,
+          includeSnapshot: false,
           afterSeq: 0,
         },
         10000,
