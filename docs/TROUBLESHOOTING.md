@@ -59,18 +59,33 @@
 **Symptom:**
 
 ```
-session/subscribe failed (ZCode CLI 0.14.8+ required)
+session/subscribe failed: <backend error message> [(code <N>)]
 ```
+
+The error message carries the backend's real failure reason. It is **no longer**
+a hardcoded version string — read the message text to identify the root cause.
+
+**Common causes:**
+
+| Message fragment                 | Cause                                                                      |
+| -------------------------------- | -------------------------------------------------------------------------- |
+| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.           |
+| `timeout`                        | The 10s subscribe deadline elapsed — usually a hung or overloaded backend. |
+| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).     |
+| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                          |
+| session-level business error     | The target session no longer exists or was evicted.                        |
 
 **Troubleshooting steps:**
 
-1. Confirm ZCode CLI >= 0.14.8:
+1. **Read the error message** — the fragment identifies the cause (table above).
+
+2. If the message indicates `method not found`, confirm ZCode CLI >= 0.14.8:
 
    ```bash
    zcode --version
    ```
 
-2. If the version is correct but it still fails, check whether the zcode
+3. If the version is correct but it still fails, check whether the zcode
    app-server supports subscribe:
 
    ```bash
@@ -80,7 +95,7 @@ session/subscribe failed (ZCode CLI 0.14.8+ required)
    { "id": 1, "method": "session/subscribe", "params": { "sessionId": "test", "deliveryKind": "desktop-continuous", "includeSnapshot": true, "afterSeq": 0 } }
    ```
 
-3. Check whether other zcode processes are running:
+4. Check whether other zcode processes are running:
    ```bash
    ps aux | grep zcode
    killall -9 zcode  # caution: this kills all zcode processes

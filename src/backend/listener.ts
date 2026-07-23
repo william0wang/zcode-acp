@@ -12,7 +12,14 @@
  */
 
 import type { ZcodeBackend } from "./client.js";
-import type { ZcodeEvent, ZcodeProjection, ZcodeSnapshot, ZcodeSubscribeResult } from "./types.js";
+import type {
+  ZcodeEvent,
+  ZcodeProjection,
+  ZcodeResponse,
+  ZcodeSnapshot,
+  ZcodeSubscribeResult,
+} from "./types.js";
+import { log } from "../utils.js";
 
 /** ID generator function (the server's `_next_id`). */
 export type NextId = () => number;
@@ -42,11 +49,13 @@ export class EventStreamListener {
   /**
    * Subscribe and capture the initial snapshot + eventSeq watermark.
    *
-   * Returns the snapshot (with projection/messages) or null on failure. ZCode
-   * CLI 0.14.8+ always supports this; null means an old/ broken backend and
-   * the caller should surface an error (polling fallback was removed).
+   * Returns the snapshot (with projection/messages). Throws on failure,
+   * surfacing the backend's real error message (reader dead, timeout, pipe
+   * broken, method not found on old CLI, or a session-level business error) so
+   * the caller can distinguish root causes instead of seeing a single
+   * misleading "version too old" string.
    */
-  async subscribe(nextId: NextId): Promise<ZcodeSnapshot | null> {
+  async subscribe(nextId: NextId): Promise<ZcodeSnapshot> {
     const resp = await this.backend.request(
       nextId(),
       "session/subscribe",
@@ -59,12 +68,12 @@ export class EventStreamListener {
       10000,
     );
     if (resp.error) {
-      return null;
+      throw new Error(formatSubscribeError(resp));
     }
     const result = (resp.result ?? {}) as ZcodeSubscribeResult;
     this.lastSeq = result.eventSeq ?? 0;
     this.subscribed = true;
-    return result.snapshot ?? null;
+    return result.snapshot ?? { projection: undefined, messages: [] };
   }
 
   /** Called by the backend reader when a `session/event` arrives. */
@@ -128,6 +137,9 @@ export class EventStreamListener {
       10000,
     );
     if (resp.error) {
+      log(
+        `resubscribe failed (non-fatal, stall recovery degrades to polling): ${formatSubscribeError(resp)}`,
+      );
       return false;
     }
     const result = (resp.result ?? {}) as ZcodeSubscribeResult;
@@ -165,4 +177,16 @@ export class TurnMonitor {
     const result = (resp.result ?? {}) as { projection?: ZcodeProjection };
     return result.projection ?? null;
   }
+}
+
+/**
+ * Format a `session/subscribe` failure into a readable message that carries
+ * the backend's real error so the caller can distinguish root causes (reader
+ * dead, timeout, pipe broken, method-not-found on old CLI, session-level
+ * business error) instead of a single generic string.
+ */
+function formatSubscribeError(resp: ZcodeResponse): string {
+  const err = resp.error ?? { message: "unknown error" };
+  const code = err.code !== undefined && err.code !== null ? ` (code ${err.code})` : "";
+  return `session/subscribe failed: ${err.message ?? "unknown error"}${code}`;
 }

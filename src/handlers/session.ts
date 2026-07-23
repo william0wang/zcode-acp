@@ -312,11 +312,20 @@ export async function prompt(
   differ.markSeen(baselineMsgs);
 
   // Subscribe BEFORE send so we don't lose early turn.completed on short turns.
-  const snapshot = await listener.subscribe(() => server.nextId());
-  if (snapshot === null) {
+  // subscribe() throws on failure, surfacing the backend's real error (reader
+  // dead, timeout, pipe broken, method-not-found on old CLI, session error) so
+  // the cause is distinguishable. Clean up the pending turn before propagating
+  // — this call site is outside the try/finally below.
+  let snapshot: ZcodeSnapshot;
+  try {
+    snapshot = await listener.subscribe(() => server.nextId());
+  } catch (e) {
     server.pendingTurns.delete(requestId);
-    throw new Error("session/subscribe failed (ZCode CLI 0.14.8+ required)");
+    throw e;
   }
+  // The snapshot isn't consumed (differ baseline is set above); subscribe is
+  // what matters — it arms the event stream for the upcoming turn.
+  void snapshot;
   backend.registerEventListener(zcodeSid, listener);
 
   const chunkMsgId = randomUUID();
