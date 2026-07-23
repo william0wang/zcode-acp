@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
-import { CONFIG_DISPATCH, CONFIG_META, ZCODE_CREDS_PATH } from "../utils.js";
+import { CONFIG_DISPATCH, CONFIG_META, log, ZCODE_CREDS_PATH } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "../handlers/io.js";
 
@@ -286,7 +286,11 @@ export async function setConfigOption(
 }
 
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.
- *  Returns the rebuilt options so the caller can include them in the response. */
+ *  Returns the rebuilt options so the caller can include them in the response.
+ *
+ *  For model switches, also emit a usage_update with the NEW model's context
+ *  window (from config.json) so the editor's context bar refreshes immediately
+ *  instead of waiting for the next turn's UsageDelta. */
 export async function emitConfigOptionUpdate(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
@@ -305,6 +309,29 @@ export async function emitConfigOptionUpdate(
       sessionUpdate: "current_mode_update",
       currentModeId: modes.currentModeId,
     });
+  }
+  if (kind === "model") {
+    // Refresh the context bar: the backend's projection.contextWindow lags
+    // behind a model switch, so read the new model's limit from config.json.
+    try {
+      const read = await sessionRead(server, zcodeSid);
+      const proj = (read.projection ?? {}) as {
+        contextUsed?: number;
+        totalTokenCount?: number;
+      };
+      const used = proj.contextUsed || proj.totalTokenCount || 0;
+      // The rebuilt options[0] (model) currentValue is the just-switched value.
+      const modelOpt = options.find((o) => o.id === "model");
+      const { providerId, modelId } = parseModelValue(String(modelOpt?.currentValue ?? ""));
+      const size = modelContextWindow(providerId, modelId);
+      await sendSessionUpdate(cx, acpSid, {
+        sessionUpdate: "usage_update",
+        used,
+        size,
+      });
+    } catch (e) {
+      log(`options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`);
+    }
   }
   return options;
 }
