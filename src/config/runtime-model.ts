@@ -10,15 +10,16 @@
  *
  * Two uses:
  *
- *   1. Resume overlay (`buildResumeRuntimeModel`): a resumed session may carry a
- *      stale/revoked model in its history → send fails with "历史模型不可用".
- *      Overlaying the current enabled provider at resume redirects the session
- *      onto a working model.
+ *   1. Resume/load overlay (`buildResumeRuntimeModel`): a resumed session may
+ *      carry a stale/revoked model in its history → send fails with "历史模型
+ *      不可用". The overlay pins the session onto the default model — the FIRST
+ *      enabled provider's FIRST model, the same one a fresh `session/new` lands
+ *      on — so resume never inherits the session's last-used (possibly
+ *      third-party / unavailable) model.
  *
  *   2. Model switch (`applyModelSwitch`): UI/slash model switching goes through
- *      `session/updateRuntimeModelConfig` with `applyModelSelection:true` (a
- *      runtime-only change, sidestepping `session/setModel`'s "no loaded config
- *      file" persistence failure).
+ *      `session/setModel` with both a `model` ref and a `runtimeModel` provider
+ *      definition (runtime-only via `persistAsWorkspaceLastUsed:false`).
  */
 
 import { findProviderConfig, formatModelValue, loadAllModels, parseModelValue } from "./options.js";
@@ -54,7 +55,12 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
   };
 }
 
-/** Build the resume-time overlay (current enabled provider, default model). */
+/**
+ * Build the resume-time overlay pinned to the default model: the FIRST enabled
+ * provider's FIRST model (the same one a fresh `session/new` lands on). This
+ * ensures resume never inherits the session's last-used model, which may be a
+ * now-unavailable third-party model (e.g. Nvidia) and cause "历史模型不可用".
+ */
 export function buildResumeRuntimeModel(): unknown | null {
   const first = loadAllModels()[0];
   if (!first) {

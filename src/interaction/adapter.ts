@@ -300,7 +300,6 @@ export function buildAskUserElicitationForm(
         type: "array",
         items: { type: "string", enum: labels },
         title: q.question,
-        description: q.question,
       };
     } else {
       // Append a Skip option so the user can opt out of this question without
@@ -309,14 +308,18 @@ export function buildAskUserElicitationForm(
         type: "string",
         enum: [...labels, ELICIT_SKIP],
         title: q.question,
-        description: q.question,
       };
       required.push(key);
     }
   }
+  // The question text already appears as each field's `title` (its label), so
+  // the form `message` must NOT repeat it — otherwise Zed shows the question
+  // twice (top banner + field label). Use a neutral prompt instead. For a
+  // single question this reads naturally above its labeled field; for several,
+  // it tells the user how many fields follow.
   const message =
     questions.length === 1
-      ? (questions[0]?.question ?? "Please answer the question.")
+      ? "Please answer the question."
       : `Please answer ${questions.length} questions.`;
   const form: {
     mode: "form";
