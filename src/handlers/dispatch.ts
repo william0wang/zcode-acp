@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { currentModelCached } from "../config/model-cache.js";
-import { modelContextWindow } from "../config/options.js";
+import { modelContextWindow, parseModelValue } from "../config/options.js";
 import {
   extractExitCode,
   parseSubagentMetadata,
@@ -258,8 +258,8 @@ async function dispatchUsageDelta(
   // config.json limit.context so the editor can render the context bar.
   let size = ev.size;
   if (!size) {
-    const modelId = await currentModelCached(server, acpSid);
-    size = modelContextWindow(modelId);
+    const { providerId, modelId } = parseModelValue(await currentModelCached(server, acpSid));
+    size = modelContextWindow(providerId, modelId);
   }
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "usage_update",

@@ -10,30 +10,42 @@
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
-import { modelContextWindow } from "./options.js";
+import { formatModelValue, loadAllModels, modelContextWindow, parseModelValue } from "./options.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "../handlers/dispatch.js";
 import type { ProjectionDiffer } from "../translators/projection-differ.js";
 
-/** Read the session's current model id, with a per-session cache. */
+/**
+ * Read the session's current model as an encoded `"providerId\modelId"` string,
+ * with a per-session cache. Returns the encoded form so callers can resolve the
+ * provider (for context-window lookup / model switching) without a second read.
+ */
 export async function currentModelCached(
   server: ZcodeAcpServer,
   zcodeSid: string,
 ): Promise<string> {
   const cached = server.modelCache.get(zcodeSid);
   if (cached) return cached;
+  let providerId = "";
   let modelId = "GLM-5.2";
   try {
     const read = await sessionRead(server, zcodeSid);
     const settings = (read.settings ?? {}) as Record<string, unknown>;
-    const cur = (settings.model as { current?: { modelId?: string } })?.current;
+    const cur = (settings.model as { current?: { providerId?: string; modelId?: string } })
+      ?.current;
+    if (cur?.providerId) providerId = cur.providerId;
     if (cur?.modelId) modelId = cur.modelId;
   } catch (e) {
     log(`model-cache: session/read failed (${e instanceof Error ? e.message : String(e)})`);
   }
-  server.modelCache.set(zcodeSid, modelId);
-  return modelId;
+  if (!providerId) {
+    // Legacy session without a providerId — resolve to the first enabled provider.
+    providerId = loadAllModels()[0]?.providerId ?? "builtin:bigmodel-coding-plan";
+  }
+  const encoded = formatModelValue(providerId, modelId);
+  server.modelCache.set(zcodeSid, encoded);
+  return encoded;
 }
 
 /**
@@ -67,7 +79,10 @@ export async function emitInitialUsage(
     const used = proj.contextUsed || proj.totalTokenCount || 0;
     if (!used) return; // resume before any turn: skip to avoid showing 0.
     let size = proj.contextWindow ?? 0;
-    if (!size) size = modelContextWindow(await currentModelCached(server, zcodeSid));
+    if (!size) {
+      const { providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid));
+      size = modelContextWindow(providerId, modelId);
+    }
     await dispatchEvent(
       server,
       cx,

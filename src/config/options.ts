@@ -27,32 +27,109 @@ function readConfig(): unknown {
   return JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8"));
 }
 
-interface ConfigShape {
-  provider?: Record<string, { models?: ProviderModelsJson }>;
+/** A single provider's entry in config.json (`provider.<providerId>`). */
+interface ProviderEntry {
+  name?: string;
+  kind?: string;
+  enabled?: boolean;
+  options?: { baseURL?: string; apiKey?: string };
+  models?: ProviderModelsJson;
 }
 
-/** Read the model id list for the enabled provider from config.json. */
-export function loadProviderModels(): string[] {
+interface ConfigShape {
+  provider?: Record<string, ProviderEntry>;
+}
+
+/** A model selectable in the dropdown, with its owning provider. */
+export interface ModelRef {
+  providerId: string;
+  providerName: string;
+  modelId: string;
+}
+
+/**
+ * Collect models from ALL enabled providers in config.json.
+ *
+ * Only providers with `enabled: true` are listed — unenabled providers
+ * (including builtins without an `enabled` flag) are excluded so the dropdown
+ * reflects exactly what the user has activated in the ZCode desktop app.
+ */
+export function loadAllModels(): ModelRef[] {
   try {
     const cfg = readConfig() as ConfigShape;
-    const models = cfg.provider?.["builtin:bigmodel-coding-plan"]?.models ?? {};
-    const keys = Object.keys(models);
-    return keys.length > 0 ? keys : ["GLM-5.2"];
+    const out: ModelRef[] = [];
+    for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
+      if (!p?.enabled) continue;
+      const providerName = p.name ?? pid;
+      for (const modelId of Object.keys(p.models ?? {})) {
+        out.push({ providerId: pid, providerName, modelId });
+      }
+    }
+    if (out.length === 0) {
+      // Fallback: config unreadable or no enabled provider — keep the legacy
+      // default so a freshly-installed editor still shows something.
+      return [
+        {
+          providerId: "builtin:bigmodel-coding-plan",
+          providerName: "BigModel",
+          modelId: "GLM-5.2",
+        },
+      ];
+    }
+    return out;
   } catch {
-    return ["GLM-5.2"];
+    return [
+      { providerId: "builtin:bigmodel-coding-plan", providerName: "BigModel", modelId: "GLM-5.2" },
+    ];
   }
 }
 
-/** Read the context-window size for a model from config.json (limit.context). */
-export function modelContextWindow(modelId: string): number {
+/** Look up a provider entry by id (any provider, not just enabled). */
+export function findProviderConfig(providerId: string): ProviderEntry | null {
   try {
     const cfg = readConfig() as ConfigShape;
-    const models = cfg.provider?.["builtin:bigmodel-coding-plan"]?.models ?? {};
+    return cfg.provider?.[providerId] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Read the context-window size for a provider+model from config.json. */
+export function modelContextWindow(providerId: string, modelId: string): number {
+  try {
+    const cfg = readConfig() as ConfigShape;
+    const models = cfg.provider?.[providerId]?.models ?? {};
     const entry = models[modelId];
     return entry?.limit?.context ?? 0;
   } catch {
     return 0;
   }
+}
+
+/**
+ * Encode a provider+model pair into a configOption `value` string.
+ *
+ * Uses `\` as the separator: providerIds are `builtin:...` or UUIDs (no `\`),
+ * and modelIds use `/` (e.g. `nvidia/.../step-3.7-flash`), so `\` is unambiguous.
+ */
+export function formatModelValue(providerId: string, modelId: string): string {
+  return `${providerId}\\${modelId}`;
+}
+
+/**
+ * Parse a configOption `value` back into { providerId, modelId }.
+ *
+ * Backward compat: a value without `\` (legacy plain modelId) is treated as a
+ * modelId under the current enabled provider, preserving the old behaviour.
+ */
+export function parseModelValue(value: string): { providerId: string; modelId: string } {
+  const idx = value.indexOf("\\");
+  if (idx < 0) {
+    // Legacy plain modelId — resolve to the first enabled provider.
+    const first = loadAllModels()[0];
+    return { providerId: first?.providerId ?? "builtin:bigmodel-coding-plan", modelId: value };
+  }
+  return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
 /** Build the ACP SessionModeState ({currentModeId, availableModes}). */
@@ -86,7 +163,8 @@ export async function buildConfigOptions(
   server: ZcodeAcpServer,
   zcodeSid: string,
 ): Promise<acp.SessionConfigOption[]> {
-  let currentModel = "GLM-5.2";
+  let currentProviderId = "";
+  let currentModelId = "GLM-5.2";
   let currentMode = "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
@@ -97,8 +175,11 @@ export async function buildConfigOptions(
     const modeSet = (settings.mode as Record<string, unknown>) ?? {};
     currentMode = (modeSet.current as string) ?? currentMode;
     const modelSet = (settings.model as Record<string, unknown>) ?? {};
-    const cur = (modelSet.current as { modelId?: string }) ?? {};
-    if (cur.modelId) currentModel = cur.modelId;
+    // settings.model.current is { providerId, modelId, variant? } — read BOTH so
+    // we can disambiguate same-named models across providers.
+    const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
+    if (cur.providerId) currentProviderId = cur.providerId;
+    if (cur.modelId) currentModelId = cur.modelId;
     const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
     currentThought = (tlSet.current as string) ?? currentThought;
     const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
@@ -109,10 +190,25 @@ export async function buildConfigOptions(
     // keep defaults
   }
 
-  // Model options: config.json is authoritative (settings.model.available is incomplete).
-  let modelOptions = loadProviderModels().map((k) => ({ value: k, name: k }));
+  // currentValue encodes provider+model so the switch handler can locate the
+  // right provider (and its apiKey). Fall back to the first enabled provider
+  // when settings omits providerId (legacy sessions).
+  const currentModel = formatModelValue(
+    currentProviderId || loadAllModels()[0]?.providerId || "builtin:bigmodel-coding-plan",
+    currentModelId,
+  );
+
+  // Model options: config.json enabled providers are authoritative. Show as
+  // "ProviderName › ModelId" so same-named models across providers stay distinct.
+  let modelOptions = loadAllModels().map((m) => ({
+    value: formatModelValue(m.providerId, m.modelId),
+    name: `${m.providerName} › ${m.modelId}`,
+  }));
   if (!modelOptions.some((o) => o.value === currentModel)) {
-    modelOptions = [{ value: currentModel, name: currentModel }, ...modelOptions];
+    // The current model isn't from an enabled provider (e.g. the session was
+    // created with a now-disabled provider). Append it so the dropdown still
+    // shows the active selection.
+    modelOptions = [{ value: currentModel, name: currentModelId }, ...modelOptions];
   }
   if (!thoughtOptions) thoughtOptions = [...CONFIG_META.thought.options];
 

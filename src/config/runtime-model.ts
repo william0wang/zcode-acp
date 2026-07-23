@@ -1,9 +1,14 @@
 /**
  * runtimeModel overlay plumbing.
  *
- * The backend resolves auth from its OAuth token store, so the `runtimeModel`
- * provider deliberately carries NO `apiKey` (the config.json apiKey is the
- * legacy plain key and has expired → 401). Two uses:
+ * The backend resolves auth either from its OAuth token store (builtin OAuth
+ * providers) or from the apiKey embedded in the runtimeModel (custom providers
+ * and builtin apiKey-mode providers). `buildRuntimeModel` auto-detects: when the
+ * provider's config.json entry has an `options.apiKey`, it is carried into the
+ * overlay so the backend can authenticate; otherwise it is omitted and the
+ * backend uses its own OAuth creds.
+ *
+ * Two uses:
  *
  *   1. Resume overlay (`buildResumeRuntimeModel`): a resumed session may carry
  *      a stale provider id in its history that the backend can no longer
@@ -16,98 +21,77 @@
  *      file" persistence failure).
  */
 
-import { readFileSync } from "node:fs";
-
-import { ZCODE_CREDS_PATH, log, warn } from "../utils.js";
+import { findProviderConfig, formatModelValue, loadAllModels, parseModelValue } from "./options.js";
+import type { ModelRef } from "./options.js";
+import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 
-interface ProviderConfig {
-  providerId: string;
-  kind: string;
-  baseURL: string;
-  modelId: string;
-  models: string[];
+const DEFAULT_KIND = "anthropic";
+const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic";
+
+/** The first enabled provider in config.json (used for resume overlay). */
+function firstEnabledProvider(): ModelRef | null {
+  const all = loadAllModels();
+  return all.length > 0 ? all[0] : null;
 }
 
-interface ProviderEntry {
-  enabled?: boolean;
-  kind?: string;
-  options?: { baseURL?: string };
-  models?: Record<string, unknown>;
-}
-
-interface ConfigJson {
-  provider?: Record<string, ProviderEntry>;
-}
-
-const DEFAULTS: ProviderConfig = {
-  providerId: "builtin:bigmodel-coding-plan",
-  kind: "anthropic",
-  baseURL: "https://open.bigmodel.cn/api/anthropic",
-  modelId: "GLM-5.2",
-  models: ["GLM-5.2"],
-};
-
-/** Read the enabled provider's config from config.json (no apiKey). */
-function readEnabledProvider(): ProviderConfig {
-  try {
-    const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as ConfigJson;
-    for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
-      if (p?.enabled) {
-        const opts = p.options ?? {};
-        const modelKeys = Object.keys(p.models ?? {});
-        return {
-          providerId: pid,
-          kind: p.kind ?? DEFAULTS.kind,
-          baseURL: opts.baseURL || DEFAULTS.baseURL,
-          modelId: modelKeys[0] ?? DEFAULTS.modelId,
-          models: modelKeys.length > 0 ? modelKeys : DEFAULTS.models,
-        };
-      }
-    }
-  } catch (e) {
-    log(`runtime-model: read config.json failed (${e instanceof Error ? e.message : String(e)})`);
+/** Build a runtimeModel overlay for the given provider+model. */
+export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown | null {
+  const p = findProviderConfig(ref.providerId);
+  if (!p) {
+    log(`runtime-model: provider "${ref.providerId}" not in config.json`);
+    return null;
   }
-  return DEFAULTS;
-}
-
-/** Build a runtimeModel overlay object for the enabled provider. */
-export function buildRuntimeModel(modelId?: string, revision = "bridge"): unknown | null {
-  const pc = readEnabledProvider();
-  const targetModel = modelId ?? pc.modelId;
+  const apiKey = p.options?.apiKey;
+  const baseURL = p.options?.baseURL ?? DEFAULT_BASE_URL;
+  const models =
+    Object.keys(p.models ?? {}).length > 0
+      ? Object.keys(p.models ?? {}).map((m) => ({ modelId: m }))
+      : [{ modelId: ref.modelId }];
   return {
     revision,
     generatedAt: Date.now(),
-    model: { providerId: pc.providerId, modelId: targetModel },
+    model: { providerId: ref.providerId, modelId: ref.modelId },
     provider: {
-      providerId: pc.providerId,
-      kind: pc.kind,
-      baseURL: pc.baseURL,
-      models: pc.models.map((m) => ({ modelId: m })),
+      providerId: ref.providerId,
+      kind: p.kind ?? DEFAULT_KIND,
+      baseURL,
+      // Auto-detect: custom/apiKey-mode providers carry their key so the backend
+      // can authenticate; OAuth builtins omit it and use backend-managed tokens.
+      ...(apiKey ? { apiKey } : {}),
+      models,
     },
   };
 }
 
 /** Build the resume-time overlay (current enabled provider, default model). */
 export function buildResumeRuntimeModel(): unknown | null {
-  return buildRuntimeModel(undefined, "bridge-resume");
+  const first = firstEnabledProvider();
+  if (!first) {
+    log("runtime-model: no enabled provider in config.json (resume overlay skipped)");
+    return null;
+  }
+  return buildRuntimeModel(first, "bridge-resume");
 }
 
 /**
  * Switch a session's model via session/updateRuntimeModelConfig.
  *
- * Uses `applyModelSelection:true` so the change applies at runtime without
+ * `value` is the configOption value: either `"providerId\modelId"` (encoded) or
+ * a legacy plain modelId (resolved to the first enabled provider). Uses
+ * `applyModelSelection:true` so the change applies at runtime without
  * persistence — sidestepping `session/setModel`'s "no loaded config file"
  * failure. Invalidates the model cache on success. Returns true on success.
  */
 export async function applyModelSwitch(
   server: ZcodeAcpServer,
   zcodeSid: string,
-  modelId: string,
+  value: string,
 ): Promise<boolean> {
-  const runtimeModel = buildRuntimeModel(modelId, "bridge-switch");
+  const { providerId, modelId } = parseModelValue(value);
+  const runtimeModel = buildRuntimeModel({ providerId, providerName: providerId, modelId });
   if (runtimeModel === null) {
-    log("runtime-model: cannot read provider config (config.json)");
+    log(`runtime-model: cannot build overlay for "${value}" (provider not found)`);
     return false;
   }
   const backend = server.ensureBackend();
@@ -129,3 +113,6 @@ export async function applyModelSwitch(
 export function invalidateModelCache(server: ZcodeAcpServer, zcodeSid: string): void {
   server.modelCache.delete(zcodeSid);
 }
+
+// Re-exported so callers that only import runtime-model.ts can format values.
+export { formatModelValue };
