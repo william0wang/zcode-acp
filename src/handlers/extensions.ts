@@ -304,7 +304,7 @@ export async function setMode(
  * With expectLock=true, we first require observing "prompt is running" once
  * (proving the turn truly started) before trusting a later success.
  */
-async function waitForTurnIdle(
+export async function waitForTurnIdle(
   server: ZcodeAcpServer,
   zcodeSid: string,
   timeoutMs: number,
