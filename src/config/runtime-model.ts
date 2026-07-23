@@ -65,13 +65,20 @@ export function buildResumeRuntimeModel(): unknown | null {
 }
 
 /**
- * Switch a session's model via session/updateRuntimeModelConfig.
+ * Switch a session's model via `session/setModel`.
  *
  * `value` is the configOption value: either `"providerId\modelId"` (encoded) or
- * a legacy plain modelId (resolved to the first enabled provider). Uses
- * `applyModelSelection:true` so the change applies at runtime without
- * persistence — sidestepping `session/setModel`'s "no loaded config file"
- * failure. Invalidates the model cache on success. Returns true on success.
+ * a legacy plain modelId (resolved to the first enabled builtin provider).
+ *
+ * Sends BOTH a `model` ref (the target) AND a `runtimeModel` (the full provider
+ * definition). The runtimeModel lets the backend register the provider into its
+ * workspace catalog (so even third-party / non-default models are recognised),
+ * while `model` names the selection. `persistAsWorkspaceLastUsed:false` keeps
+ * this a runtime-only change. Invalidates the model cache on success.
+ *
+ * NOTE: the older `session/updateRuntimeModelConfig` path returns `changed:false`
+ * on current backends without applying — `session/setModel` is the working
+ * protocol since the backend model-management refactor.
  */
 export async function applyModelSwitch(
   server: ZcodeAcpServer,
@@ -87,8 +94,13 @@ export async function applyModelSwitch(
   const backend = server.ensureBackend();
   const resp = await backend.request(
     server.nextId(),
-    "session/updateRuntimeModelConfig",
-    { sessionId: zcodeSid, runtimeModel, applyModelSelection: true },
+    "session/setModel",
+    {
+      sessionId: zcodeSid,
+      model: { providerId, modelId },
+      runtimeModel,
+      persistAsWorkspaceLastUsed: false,
+    },
     15000,
   );
   if (resp.error) {
