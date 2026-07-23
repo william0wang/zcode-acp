@@ -208,7 +208,7 @@ export class ZcodeAcpServer {
       agentInfo: { ...AGENT_INFO },
       agentCapabilities: {
         loadSession: true,
-        promptCapabilities: { image: false, audio: false, embeddedContext: false },
+        promptCapabilities: { image: true, audio: false, embeddedContext: false },
         mcpCapabilities: { http: false, sse: false },
         sessionCapabilities: { list: {}, resume: {}, fork: {} },
       },

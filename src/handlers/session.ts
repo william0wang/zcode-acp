@@ -277,9 +277,12 @@ export async function prompt(
   const zcodeSid = server.resolveSid(params.sessionId);
   if (!zcodeSid) throw new Error(`session ${params.sessionId} not found`);
 
-  // Extract prompt text from ACP ContentBlock[].
+  // Extract prompt text + image attachments from ACP ContentBlock[].
   const text = extractPromptText(params.prompt);
-  if (!text) throw new Error("empty prompt");
+  const attachments = extractAttachments(params.prompt);
+  // A prompt is valid if it has text OR at least one image attachment (a user
+  // may drag in an image with no accompanying text).
+  if (!text && attachments.length === 0) throw new Error("empty prompt");
 
   // Slash-command interception: dispatches directly to ZCode methods and
   // returns end_turn without entering the turn loop. Unknown /x falls through.
@@ -324,7 +327,9 @@ export async function prompt(
     const sendResp = await backend.request(
       server.nextId(),
       "session/send",
-      { sessionId: zcodeSid, content: text },
+      attachments.length > 0
+        ? { sessionId: zcodeSid, content: text, attachments }
+        : { sessionId: zcodeSid, content: text },
       15000,
     );
     if (sendResp.error) {
@@ -588,6 +593,89 @@ export function extractPromptText(blocks: acp.ContentBlock[] | undefined): strin
     }
   }
   return parts.join("\n").trim();
+}
+
+/**
+ * ACP `ContentBlock::Image` → zcode `session/send` attachment.
+ *
+ * zcode's per-attachment normalizer accepts either a `localPath` (absolute FS
+ * path, preferred) or `dataBase64` + `mimeType` (raw base64, no data: prefix).
+ * ACP `ImageContent` carries `data` (base64) and an optional `uri`; when the
+ * uri is a file:// pointer we send localPath so the backend streams from disk
+ * instead of re-encoding.
+ */
+export interface ImageAttachment {
+  kind: "image";
+  filename: string;
+  mimeType: string;
+  sizeBytes?: number;
+  dataBase64?: string;
+  localPath?: string;
+}
+
+/** Extension inferred from mimeType for synthesizing a filename. */
+const MIME_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+  "image/bmp": "bmp",
+  "image/svg+xml": "svg",
+};
+
+/**
+ * Extract image attachments from ACP ContentBlock[]. Non-image blocks are
+ * ignored (text/resource_link/resource stay owned by `extractPromptText`).
+ * Exported for unit testing.
+ */
+export function extractAttachments(blocks: acp.ContentBlock[] | undefined): ImageAttachment[] {
+  const out: ImageAttachment[] = [];
+  let imageIndex = 0;
+  for (const block of blocks ?? []) {
+    const b = block as {
+      type?: string;
+      data?: string;
+      mimeType?: string;
+      uri?: string | null;
+    };
+    if (b.type !== "image") continue;
+    imageIndex += 1;
+    const mimeType = b.mimeType ?? "image/png";
+    // Prefer a file:// uri → localPath so the backend streams from disk.
+    const uri = typeof b.uri === "string" ? b.uri : "";
+    if (uri.startsWith("file://")) {
+      const localPath = fileUriToPath(uri);
+      out.push({
+        kind: "image",
+        filename: basename(localPath) ?? `image-${imageIndex}.${MIME_EXT[mimeType] ?? "png"}`,
+        mimeType,
+        localPath,
+      });
+      continue;
+    }
+    // Otherwise fall back to the base64 payload.
+    if (b.data) {
+      out.push({
+        kind: "image",
+        filename: uri
+          ? (basename(uri) ?? `image-${imageIndex}.${MIME_EXT[mimeType] ?? "png"}`)
+          : `image-${imageIndex}.${MIME_EXT[mimeType] ?? "png"}`,
+        mimeType,
+        dataBase64: b.data,
+        sizeBytes: Math.floor((b.data.length * 3) / 4),
+      });
+    }
+    // An image block with neither a usable uri nor data is dropped defensively.
+  }
+  return out;
+}
+
+/** Best-effort basename from a path/uri (no node:path import for a tiny helper). */
+function basename(p: string): string | null {
+  const clean = p.replace(/\/+$/, "");
+  const slash = clean.lastIndexOf("/");
+  const name = slash >= 0 ? clean.slice(slash + 1) : clean;
+  return name || null;
 }
 
 /** Convert a file:// URI to an absolute filesystem path. */
