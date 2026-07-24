@@ -130,7 +130,6 @@ export async function resumeSession(
   params: acp.ResumeSessionRequest,
   cx: acp.AgentContext,
 ): Promise<acp.ResumeSessionResponse> {
-  const backend = server.ensureBackend();
   const targetSid = params.sessionId;
   const cwd = params.cwd ?? process.cwd();
   if (!targetSid) throw new Error("sessionId required");
@@ -146,8 +145,7 @@ export async function resumeSession(
   };
   const runtimeModel = buildResumeRuntimeModel();
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
-  const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
-  if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
+  await resumeBackendSession(server, zcParams);
 
   server.registerSession(targetSid, targetSid);
   log(`session/resume -> ${targetSid}`);
@@ -172,7 +170,6 @@ export async function loadSession(
   params: acp.LoadSessionRequest,
   cx: acp.AgentContext,
 ): Promise<acp.LoadSessionResponse> {
-  const backend = server.ensureBackend();
   const targetSid = params.sessionId;
   const cwd = params.cwd ?? process.cwd();
   if (!targetSid) throw new Error("sessionId required");
@@ -183,8 +180,7 @@ export async function loadSession(
   };
   const runtimeModel = buildResumeRuntimeModel();
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
-  const resp = await backend.request(server.nextId(), "session/resume", zcParams, 15000);
-  if (resp.error) throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
+  await resumeBackendSession(server, zcParams);
   server.registerSession(targetSid, targetSid);
   log(`session/load → ${targetSid}`);
   server.ensureBackgroundListener(targetSid);
@@ -709,6 +705,41 @@ function fileUriToPath(uri: string): string {
   } catch {
     // Not a valid URL — return as-is (best-effort).
     return uri;
+  }
+}
+
+/**
+ * Resume a zcode session with retry on transient timeouts.
+ *
+ * The backend drops RPCs issued during its cold-start window (between process
+ * spawn and `startup.completed`). The first resume after a fresh backend spawn
+ * can land in that gap and time out without the backend ever seeing it. A single
+ * retry — issued after the startup window has elapsed — succeeds. Non-timeout
+ * errors (Invalid params, session not found) fail fast.
+ */
+async function resumeBackendSession(
+  server: ZcodeAcpServer,
+  zcParams: Record<string, unknown>,
+): Promise<void> {
+  const backend = server.ensureBackend();
+  const MAX_ATTEMPTS = 2;
+  const ATTEMPT_TIMEOUT_MS = 15_000;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const resp = await backend.request(
+      server.nextId(),
+      "session/resume",
+      zcParams,
+      ATTEMPT_TIMEOUT_MS,
+    );
+    if (!resp.error) return;
+    const isTimeout = resp.error.message === "timeout";
+    if (!isTimeout || attempt === MAX_ATTEMPTS) {
+      throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
+    }
+    log(
+      `session/resume attempt ${attempt}/${MAX_ATTEMPTS} timed out, retrying (backend cold-start window)`,
+    );
+    await sleep(1000);
   }
 }
 
