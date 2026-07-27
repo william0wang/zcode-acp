@@ -588,6 +588,34 @@ that question without cancelling the form.
 }
 ```
 
+**ExitPlanMode elicitation form** — single `feedback` text field; no
+approve/reject dropdown. The client's own submit button is the approve action;
+typing into the field is the reject action. Submitting with the field empty
+approves the plan; submitting with text rejects it and returns the text to
+zcode as the decline `reason` (so the agent sees the redirection when it
+re-plans). The cancel/decline button is a plain reject with no reason.
+```json
+{
+  "method": "elicitation/create",
+  "params": {
+    "mode": "form",
+    "sessionId": "sess_abc123",
+    "message": "Ready to code?\n\n1. Implement login\n2. Implement signup\n\nLeave the box empty and submit to approve; type feedback to reject and redirect.",
+    "requestedSchema": {
+      "type": "object",
+      "properties": {
+        "feedback": {
+          "type": "string",
+          "title": "Feedback",
+          "description": "Empty = approve the plan. Anything typed = reject and use this text as the redirection."
+        }
+      },
+      "required": []
+    }
+  }
+}
+```
+
 ## Extension Methods (0.14.8+)
 
 ### `session/fork`

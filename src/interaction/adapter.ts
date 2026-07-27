@@ -417,10 +417,17 @@ export function parseAskUserElicitationResponse(
 }
 
 /**
- * Build an elicitation form for ExitPlanMode (approve/reject).
+ * Build an elicitation form for ExitPlanMode.
  *
- * Uses a single required boolean-style enum so the client renders a clear
- * approve/reject choice in the form UI.
+ * Single `feedback` text field — no approve/reject dropdown. The ACP client
+ * always renders its own submit/cancel controls, so:
+ *   - submit with feedback empty   → approve (proceed with the plan)
+ *   - submit with feedback filled  → reject, and the text becomes the decline
+ *                                    `reason` the agent sees when re-planning
+ *   - cancel/decline button        → plain reject (no reason)
+ *
+ * Typing into the field IS the reject signal — a separate dropdown would be
+ * redundant (its value is forced by whether feedback is present).
  */
 export function buildExitPlanModeElicitationForm(
   params: ZcodeInteractionUserInputParams,
@@ -441,7 +448,10 @@ export function buildExitPlanModeElicitationForm(
     params.input && typeof params.input === "object"
       ? ((params.input as { plan?: string }).plan ?? "")
       : "";
-  const message = planText ? `Ready to code?\n\n${planText}` : "Ready to code?";
+  const suffix = "Leave the box empty and submit to approve; type feedback to reject and redirect.";
+  const message = planText
+    ? `Ready to code?\n\n${planText}\n\n${suffix}`
+    : `Ready to code?\n\n${suffix}`;
   const form: {
     mode: "form";
     sessionId: string;
@@ -459,34 +469,44 @@ export function buildExitPlanModeElicitationForm(
     requestedSchema: {
       type: "object",
       properties: {
-        decision: {
+        feedback: {
           type: "string",
-          enum: ["approve", "reject"],
-          title: "Decision",
-          description: "Approve to exit plan mode and start coding, or reject to keep planning.",
+          title: "Feedback",
+          description:
+            "Empty = approve the plan. Anything typed = reject and use this text as the redirection.",
         },
       },
-      required: ["decision"],
+      // Not required: an empty submit is a valid "approve".
+      required: [],
     },
   };
   if (toolCallId) form.toolCallId = toolCallId;
   return form;
 }
 
-/** Parse an ExitPlanMode elicitation response → zcode accept/decline. */
+/**
+ * Parse an ExitPlanMode elicitation response → zcode accept/decline.
+ *
+ * Accept with non-empty feedback → decline carrying the feedback as `reason`
+ * (the user typed a redirection). Accept with empty feedback → approve.
+ * Decline/cancel from the client → plain decline.
+ */
 export function parseExitPlanModeElicitationResponse(acpResp: unknown): {
   action: "accept" | "decline";
   reason?: string;
+  content?: unknown;
 } {
   if (!acpResp || typeof acpResp !== "object") {
     return { action: "decline", reason: "invalid client response" };
   }
-  const resp = acpResp as { action?: string; content?: { decision?: string } | null };
-  if (resp.action !== "accept" || !resp.content) {
+  const resp = acpResp as { action?: string; content?: { feedback?: string } | null };
+  if (resp.action !== "accept") {
     return { action: "decline", reason: "cancelled" };
   }
-  if (resp.content.decision === "approve") {
-    return { action: "accept", content: { answer_0: "approve" } } as never;
+  const feedback = typeof resp.content?.feedback === "string" ? resp.content.feedback.trim() : "";
+  if (feedback) {
+    return { action: "decline", reason: feedback };
   }
-  return { action: "decline", reason: "rejected" };
+  // content must be an object with answer_0 (zcode reads content.answer_0).
+  return { action: "accept", content: { answer_0: "approve" } };
 }

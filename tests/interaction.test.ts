@@ -474,10 +474,11 @@ describe("elicitation form: ExitPlanMode", () => {
     input: { plan: "Step 1\nStep 2" },
   };
 
-  it("embeds the plan text in the message", () => {
+  it("embeds the plan text + approve/reject hint in the message", () => {
     const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
     expect(form.message).toContain("Step 1");
     expect(form.message).toContain("Ready to code?");
+    expect(form.message).toContain("Leave the box empty and submit to approve");
   });
 
   it("attaches toolCallId scope when provided", () => {
@@ -485,20 +486,40 @@ describe("elicitation form: ExitPlanMode", () => {
     expect(form.toolCallId).toBe("tc_2");
   });
 
-  it("approve → accept with answer_0", () => {
+  it("has only a feedback field, not required (empty submit = approve)", () => {
+    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
+    const keys = Object.keys(form.requestedSchema.properties);
+    expect(keys).toEqual(["feedback"]);
+    expect(form.requestedSchema.required).toEqual([]);
+  });
+
+  it("accept with empty feedback → approve", () => {
     const resp = parseExitPlanModeElicitationResponse({
       action: "accept",
-      content: { decision: "approve" },
+      content: { feedback: "" },
     });
     expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
   });
 
-  it("reject → decline", () => {
+  it("accept with whitespace-only feedback → approve (trimmed to empty)", () => {
     const resp = parseExitPlanModeElicitationResponse({
       action: "accept",
-      content: { decision: "reject" },
+      content: { feedback: "   " },
     });
-    expect(resp.action).toBe("decline");
+    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
+  });
+
+  it("accept with feedback → decline carrying the feedback as reason", () => {
+    const resp = parseExitPlanModeElicitationResponse({
+      action: "accept",
+      content: { feedback: "  do login first  " },
+    });
+    expect(resp).toEqual({ action: "decline", reason: "do login first" });
+  });
+
+  it("accept with missing content → approve (treated as empty)", () => {
+    const resp = parseExitPlanModeElicitationResponse({ action: "accept", content: null });
+    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
   });
 
   it("cancel → decline", () => {
