@@ -11,7 +11,6 @@ import {
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
   buildAskUserElicitationForm,
-  buildExitPlanModeElicitationForm,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
@@ -19,7 +18,6 @@ import {
   isUserInputRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
-  parseExitPlanModeElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../src/interaction/adapter.js";
@@ -465,65 +463,8 @@ describe("elicitation form: AskUserQuestion", () => {
   });
 });
 
-describe("elicitation form: ExitPlanMode", () => {
-  const epmParams = {
-    requestId: "req_2",
-    sessionId: "sess_1",
-    toolCallId: "tc_2",
-    schema: { interaction: "plan_approval" },
-    input: { plan: "Step 1\nStep 2" },
-  };
-
-  it("embeds the plan text + approve/reject hint in the message", () => {
-    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
-    expect(form.message).toContain("Step 1");
-    expect(form.message).toContain("Ready to code?");
-    expect(form.message).toContain("Leave the box empty and submit to approve");
-  });
-
-  it("attaches toolCallId scope when provided", () => {
-    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1", "tc_2");
-    expect(form.toolCallId).toBe("tc_2");
-  });
-
-  it("has only a feedback field, not required (empty submit = approve)", () => {
-    const form = buildExitPlanModeElicitationForm(epmParams, "acp_1");
-    const keys = Object.keys(form.requestedSchema.properties);
-    expect(keys).toEqual(["feedback"]);
-    expect(form.requestedSchema.required).toEqual([]);
-  });
-
-  it("accept with empty feedback → approve", () => {
-    const resp = parseExitPlanModeElicitationResponse({
-      action: "accept",
-      content: { feedback: "" },
-    });
-    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
-  });
-
-  it("accept with whitespace-only feedback → approve (trimmed to empty)", () => {
-    const resp = parseExitPlanModeElicitationResponse({
-      action: "accept",
-      content: { feedback: "   " },
-    });
-    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
-  });
-
-  it("accept with feedback → decline carrying the feedback as reason", () => {
-    const resp = parseExitPlanModeElicitationResponse({
-      action: "accept",
-      content: { feedback: "  do login first  " },
-    });
-    expect(resp).toEqual({ action: "decline", reason: "do login first" });
-  });
-
-  it("accept with missing content → approve (treated as empty)", () => {
-    const resp = parseExitPlanModeElicitationResponse({ action: "accept", content: null });
-    expect(resp).toEqual({ action: "accept", content: { answer_0: "approve" } });
-  });
-
-  it("cancel → decline", () => {
-    const resp = parseExitPlanModeElicitationResponse({ action: "cancel" });
-    expect(resp.action).toBe("decline");
-  });
-});
+// ExitPlanMode is exercised via session/request_permission (see the
+// "ExitPlanMode" describe block above): `exitPlanModeToAcpPermission` +
+// `acpPermissionResponseToExitPlanMode`. There is no elicitation-form path for
+// it — routing plan approval through elicitation surfaces a generic "input
+// request" shell that reads wrong; AskUserQuestion is the elicitation use case.

@@ -28,14 +28,12 @@ import {
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
   buildAskUserElicitationForm,
-  buildExitPlanModeElicitationForm,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
-  parseExitPlanModeElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
@@ -218,29 +216,13 @@ async function handleSinglePermission(
   }
   await sendSessionUpdate(cx, acpSid, tcUpdate);
 
-  // ExitPlanMode: prefer elicitation form when the client supports it.
-  if (epm && server.supportsElicitationForm()) {
-    const formParams = buildExitPlanModeElicitationForm(
-      p as ZcodeInteractionUserInputParams,
-      acpSid,
-      toolCallId || undefined,
-    );
-    log(`  ⟳ ExitPlanMode forwarding elicitation/create (form)`);
-    const elicResp = await requestWithTimeout(
-      cx,
-      "elicitation/create",
-      formParams,
-      "elicitation/create",
-      undefined,
-      turn,
-    );
-    if (elicResp === null) {
-      return { action: "decline", reason: "elicitation failed" };
-    }
-    return parseExitPlanModeElicitationResponse(elicResp) as ZcodeInteractionResponse;
-  }
-
-  // Tool auth, or ExitPlanMode without elicitation: use request_permission.
+  // ExitPlanMode and tool auth both go through session/request_permission.
+  // ExitPlanMode intentionally does NOT use elicitation/create even when the
+  // client supports forms — matching claude-agent-acp's reference behaviour:
+  // plan approval is a permission decision (approve/reject), not a structured
+  // input, and rendering it through the elicitation channel surfaces a generic
+  // "input request" shell that reads wrong for this flow. AskUserQuestion is
+  // the right place for elicitation; plan approval is not.
   const acpParams = perm
     ? zcodePermissionToAcp(p as ZcodeInteractionPermissionParams, acpSid)!
     : exitPlanModeToAcpPermission(p as ZcodeInteractionUserInputParams, acpSid);
