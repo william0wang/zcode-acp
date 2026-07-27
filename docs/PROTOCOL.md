@@ -552,15 +552,33 @@ mechanisms based on client capabilities:
       "properties": {
         "q_0": {
           "type": "string",
-          "enum": ["auth.test.ts", "user.test.ts"],
-          "title": "Select the files to test"
+          "title": "Select the files to test",
+          "oneOf": [
+            { "const": "auth.test.ts", "title": "auth.test.ts" },
+            { "const": "user.test.ts", "title": "user.test.ts" },
+            { "const": "__skip__", "title": "Skip this question" }
+          ]
+        },
+        "q_0_other": {
+          "type": "string",
+          "title": "↳    or type a custom value (overrides the selection)"
         }
       },
-      "required": ["q_0"]
+      "required": []
     }
   }
 }
 ```
+
+ACP/MCP elicitation string fields are EITHER an enum (restricted dropdown) OR
+free text — the spec forbids a single field that is both. So each question is
+rendered as TWO fields: `q_<i>` (a `oneOf`/`anyOf` enum dropdown of the model's
+suggested answers, with a trailing "Skip this question" option whose `const` is
+the `__skip__` sentinel and whose `title` is the readable label) and
+`q_<i>_other` (a free-text companion). On submit, a non-empty `q_<i>_other`
+overrides the dropdown (single-select) or is appended to the picked values
+(multi-select); selecting "Skip this question" or leaving both blank skips just
+that question without cancelling the form.
 
 **elicitation response** (accept/decline/cancel):
 ```json

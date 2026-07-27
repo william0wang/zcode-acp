@@ -257,17 +257,29 @@ export function parseAskUserResponse(acpResp: unknown): string | null {
 // ---------- elicitation form (preferred when client supports it) ----------
 
 /**
+ * Sentinel `const` value marking a single-select question as skipped in the
+ * elicitation form. Paired with a human-readable `title` ("Skip this question")
+ * via `oneOf`, so the client renders the label — never the raw sentinel.
+ */
+const ELICIT_SKIP = "__skip__";
+
+/**
  * Build an elicitation form schema for an AskUserQuestion request.
  *
- * Each question becomes one property in the form:
- *   - Single-select → string enum of labels + a trailing "Skip" option
- *   - Multi-select  → string array enum of labels
+ * ACP/MCP elicitation string fields are EITHER an enum (restricted dropdown) OR
+ * free text — the spec ("enum strictly restricts the allowed string values")
+ * forbids "dropdown whose last row accepts custom input". To give the user both
+ * a pick list AND custom entry, each question is rendered as TWO fields:
  *
- * When the client supports form-based elicitation, this lets the user answer
- * all questions in one form rather than one popup per question. Single-select
- * fields include a "Skip" option so the user can opt out of a question without
- * cancelling the whole form (mirrors the request_permission fallback, which
- * appends a Skip option per question).
+ *   - `q_<i>`: enum dropdown of the model's suggested answers + a trailing
+ *     "Skip this question" option. Uses `oneOf`/`anyOf` with `{const, title}`
+ *     so the skip sentinel has a readable label instead of the raw `__skip__`.
+ *   - `q_<i>_other`: free-text string. If non-empty it OVERRIDES the dropdown
+ *     (single-select) or is APPENDED to the picked values (multi-select).
+ *
+ * A non-required free-text field plus a Skip enum option lets the user opt out
+ * of a single question without cancelling the whole form. Required is left
+ * empty so neither field forces an answer.
  */
 export function buildAskUserElicitationForm(
   params: ZcodeInteractionUserInputParams,
@@ -286,7 +298,6 @@ export function buildAskUserElicitationForm(
 } {
   const questions = params.questions?.length ? params.questions : (params.input?.questions ?? []);
   const properties: Record<string, unknown> = {};
-  const required: string[] = [];
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     if (!q || typeof q.question !== "string") continue;
@@ -295,22 +306,33 @@ export function buildAskUserElicitationForm(
       .map((o) => o.label ?? o.value ?? "")
       .filter((l) => l.length > 0);
     if (labels.length === 0) continue;
+    // Titled enum option for "skip": const carries the sentinel value the
+    // parser recognizes; title is what the client renders in the dropdown.
+    const skipOption = { const: ELICIT_SKIP, title: "Skip this question" };
     if (q.multiSelect) {
       properties[key] = {
         type: "array",
-        items: { type: "string", enum: labels },
         title: q.question,
+        items: { anyOf: labels.map((l) => ({ const: l, title: l })) },
       };
     } else {
-      // Append a Skip option so the user can opt out of this question without
-      // cancelling the whole form (parity with the request_permission path).
       properties[key] = {
         type: "string",
-        enum: [...labels, ELICIT_SKIP],
         title: q.question,
+        oneOf: [...labels.map((l) => ({ const: l, title: l })), skipOption],
       };
-      required.push(key);
     }
+    // Companion free-text field. Zed renders a string field's title
+    // prominently, and falls back to the description when title is absent — so
+    // a bright label here is unavoidable. Prefix with "↳" + padding so it reads
+    // as a continuation of the question above, and make the title self-contained
+    // (no description needed).
+    properties[`${key}_other`] = {
+      type: "string",
+      title: q.multiSelect
+        ? "↳    or add a custom value (combined with the selection)"
+        : "↳    or type a custom value (overrides the selection)",
+    };
   }
   // The question text already appears as each field's `title` (its label), so
   // the form `message` must NOT repeat it — otherwise Zed shows the question
@@ -335,21 +357,23 @@ export function buildAskUserElicitationForm(
     mode: "form",
     sessionId: acpSid,
     message,
-    requestedSchema: { type: "object", properties, required },
+    // No required fields: the user can skip any question (via Skip option or
+    // blank free-text) without being blocked by validation.
+    requestedSchema: { type: "object", properties, required: [] },
   };
   if (toolCallId) form.toolCallId = toolCallId;
   return form;
 }
 
-/** Sentinel enum value marking a single-select question as skipped in the form. */
-const ELICIT_SKIP = "__skip__";
-
 /**
  * Parse an elicitation form response into the zcode answers map.
  *
- * Maps each `q_<i>` form field back to the original question text. Multi-select
- * answers (arrays) are comma-joined to match the request_permission path's
- * `"a, b"` format. Returns null if the user declined/cancelled.
+ * For each question the free-text companion (`q_<i>_other`) takes precedence:
+ *   - Single-select: non-empty free-text OVERRIDES the dropdown. Otherwise the
+ *     dropdown value is used, unless it's the skip sentinel or absent (omitted).
+ *   - Multi-select: free-text is APPENDED to the picked values (de-duped, order
+ *     preserved). The skip sentinel never appears in multi-select.
+ * Returns null if the user declined/cancelled.
  */
 export function parseAskUserElicitationResponse(
   acpResp: unknown,
@@ -364,15 +388,29 @@ export function parseAskUserElicitationResponse(
     const q = questions[i];
     if (!q || typeof q.question !== "string") continue;
     const key = `q_${i}`;
-    const val = resp.content[key];
-    if (val == null) continue;
-    if (Array.isArray(val)) {
-      answers[q.question] = val.filter((v) => typeof v === "string").join(", ");
-    } else if (typeof val === "string" && val !== ELICIT_SKIP) {
-      // Skip the sentinel "__skip__" so a skipped single-select question is
-      // simply omitted from the answers map (parity with the request_permission
-      // path, which leaves the question unanswered on Skip).
-      answers[q.question] = val;
+    const otherKey = `${key}_other`;
+    const picked = resp.content[key];
+    const otherRaw = resp.content[otherKey];
+    const other = typeof otherRaw === "string" ? otherRaw.trim() : "";
+
+    if (q.multiSelect) {
+      const arr = Array.isArray(picked)
+        ? picked.filter((v): v is string => typeof v === "string" && v.length > 0)
+        : [];
+      // Merge selected values + custom free-text, preserving order and dropping dups.
+      const merged: string[] = [];
+      for (const v of [...arr, ...(other ? [other] : [])]) {
+        if (!merged.includes(v)) merged.push(v);
+      }
+      if (merged.length > 0) answers[q.question] = merged.join(", ");
+    } else {
+      // Free-text override wins when present; else use the dropdown value
+      // (skip sentinel / absent → question left unanswered).
+      if (other) {
+        answers[q.question] = other;
+      } else if (typeof picked === "string" && picked.length > 0 && picked !== ELICIT_SKIP) {
+        answers[q.question] = picked;
+      }
     }
   }
   return answers;
