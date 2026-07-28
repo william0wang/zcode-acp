@@ -37,6 +37,7 @@ import {
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
+import { buildConfigOptions, buildModes } from "../config/options.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -45,6 +46,44 @@ import { sendSessionUpdate } from "./io.js";
 interface DedupEntry {
   zcodeIds: number[];
   result?: ZcodeInteractionResponse;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Re-read the authoritative session mode and push a `config_option_update`
+ * with the mode item's currentValue set to it.
+ *
+ * Used for ExitPlanMode reconciliation: Zed's `config_state()` drops
+ * `session_modes` to None whenever `session/new` returns configOptions (which
+ * the bridge always sends), so subsequent `current_mode_update` notifications
+ * are silently ignored — only `config_option_update` drives the dropdown.
+ *
+ * Always emits (no dedup): when the user manually switched to plan via the
+ * dropdown (session/set_mode), `lastMode` can lag the real mode and a dedup
+ * check would wrongly suppress the post-exit update.
+ */
+async function emitModeViaConfigOption(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  try {
+    const modes = await buildModes(server, zcodeSid);
+    server.lastMode.set(acpSid, modes.currentModeId);
+    const options = await buildConfigOptions(server, zcodeSid);
+    const modeOpt = options.find((o) => o.id === "mode");
+    if (modeOpt) modeOpt.currentValue = modes.currentModeId;
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "config_option_update",
+      configOptions: options,
+    });
+  } catch (e) {
+    warn(`emitModeViaConfigOption failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Per-server reannounce dedup state (lazy-initialised). */
@@ -174,6 +213,22 @@ async function handleOne(
 
   // Reply to the first zcode id + all reannounced ones, and cache for late reannounces.
   sendInteractionReply(backend, pending, dedupKey, zcodeReqId, zcodeResp);
+
+  // ExitPlanMode approval switches the session mode (plan → build/etc.), but
+  // the backend applies it asynchronously — an immediate session/read still
+  // sees the pre-exit mode. Probe once after a delay to read the real post-exit
+  // mode, then push it via config_option_update: Zed's config_state() drops
+  // session_modes to None when session/new returns configOptions, so
+  // current_mode_update is silently ignored — only config_option_update drives
+  // the mode dropdown's selection.
+  if (epm && (zcodeResp as { action?: string }).action === "accept") {
+    const zcodeSid = server.resolveSid(acpSid);
+    if (zcodeSid) {
+      void sleep(1000).then(() =>
+        emitModeViaConfigOption(server, cx, acpSid, zcodeSid).catch(() => {}),
+      );
+    }
+  }
 }
 
 /** Single requestPermission (tool auth / ExitPlanMode). */

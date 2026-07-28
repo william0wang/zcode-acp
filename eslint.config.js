@@ -48,15 +48,9 @@ export default [
       "@typescript-eslint/no-explicit-any": "warn",
       // Permits `as never` to bridge SDK gaps for unstable elicitation schema.
       "@typescript-eslint/no-non-null-assertion": "off",
-      // Member sort within an import spec; statement ordering is enforced by
-      // review + the import-order convention in CONTRIBUTING.md.
-      "sort-imports": [
-        "warn",
-        {
-          ignoreCase: true,
-          memberSyntaxSortOrder: ["none", "all", "multiple", "single"],
-        },
-      ],
+      // Import ordering/member sorting is left to review + prettier; the
+      // rule produces noisy warnings without catching real bugs.
+      "sort-imports": "off",
     },
   },
 ];

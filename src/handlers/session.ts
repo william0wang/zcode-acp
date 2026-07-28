@@ -868,7 +868,7 @@ async function runEventTurn(
         // Fire edit-diff and plan-sync in parallel — they hit independent
         // backend methods (session/messages vs session/read) so there's no
         // ordering dependency between them.
-        await Promise.all([
+        const sideTasks: Promise<void>[] = [
           dispatchEditDiff(
             server,
             cx,
@@ -882,7 +882,14 @@ async function runEventTurn(
           // editor doesn't lag behind — without this, TODO changes only surface at
           // turn completion, which can be delayed by the model's remaining output.
           dispatchPlanIfChanged(server, cx, acpSid, turn.zcodeSid, differ, chunkMsgId),
-        ]);
+        ];
+        // EnterPlanMode switches the session mode mid-turn without a
+        // session/setMode notification; reconcile immediately so the editor's
+        // mode indicator flips without waiting for turn completion.
+        if (translator.toolNames.get(payload.toolCallId) === "EnterPlanMode") {
+          sideTasks.push(emitModeIfChanged(server, cx, acpSid, turn.zcodeSid));
+        }
+        await Promise.all(sideTasks);
       }
     }
 
@@ -1020,7 +1027,7 @@ async function buildSnapshot(server: ZcodeAcpServer, zcodeSid: string): Promise<
  * emit no notification of their own. Best-effort: failures are logged and
  * swallowed so they never break the turn-completion path.
  */
-async function emitModeIfChanged(
+export async function emitModeIfChanged(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
