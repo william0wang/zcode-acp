@@ -371,3 +371,64 @@ export function formatTurnError(error: unknown): string {
   }
   return out;
 }
+
+/**
+ * `turn.failed` error `code`/`type` values that represent a transient failure
+ * the bridge can retry (provider network blip, rate limit, brief outage). The
+ * real cause usually lives under `error.cause` — the top-level code is almost
+ * always the generic `UNKNOWN_ERROR` wrapper ("Turn execution failed"), so
+ * matching the top level alone would misclassify every failure as fatal.
+ */
+const TRANSIENT_CAUSE_CODES = new Set([
+  "model_request_failed",
+  "provider_not_configured",
+  "rate_limit",
+  "timeout",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "fetch_failed",
+]);
+
+/**
+ * Lowercased substrings that, when found in a turn.failed error message,
+ * indicate a transient network/provider issue. Acts as a fallback when the
+ * structured `code` is absent or unrecognised but the message clearly points
+ * at a recoverable condition.
+ */
+const TRANSIENT_MSG_KEYWORDS = [
+  "network",
+  "connection",
+  "timeout",
+  "timed out",
+  "econnreset",
+  "enotfound",
+  "etimedout",
+  "temporarily unavailable",
+  "service unavailable",
+  "retry",
+];
+
+/**
+ * Whether a `turn.failed` error object represents a transient failure worth
+ * retrying. Inspects `error.cause` first (the structured root cause), then
+ * falls back to the top-level error fields.
+ */
+export function isTransientTurnError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const e = error as Record<string, unknown>;
+  const cause = e["cause"];
+  // Prefer the nested cause; only fall back to the top-level wrapper when no
+  // cause object is present.
+  return matchesTransient(cause) || (cause === undefined && matchesTransient(e));
+}
+
+function matchesTransient(node: unknown): boolean {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return false;
+  const n = node as Record<string, unknown>;
+  const code = String(n["code"] ?? n["type"] ?? "").trim();
+  if (code && TRANSIENT_CAUSE_CODES.has(code)) return true;
+  const message = String(n["message"] ?? n["detail"] ?? "").toLowerCase();
+  if (message && TRANSIENT_MSG_KEYWORDS.some((kw) => message.includes(kw))) return true;
+  return false;
+}

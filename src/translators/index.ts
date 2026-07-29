@@ -11,6 +11,7 @@ export {
   buildDiffContent,
   extractLocations,
   formatTurnError,
+  isTransientTurnError,
 } from "./tool-helpers.js";
 export type {
   InternalEvent,

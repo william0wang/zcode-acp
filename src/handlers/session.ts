@@ -28,6 +28,7 @@ import {
   EventTranslator,
   extractLocations,
   formatTurnError,
+  isTransientTurnError,
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
@@ -332,77 +333,145 @@ export async function prompt(
   void snapshot;
   backend.registerEventListener(zcodeSid, listener);
 
-  const chunkMsgId = randomUUID();
   try {
-    const sendResp = await backend.request(
-      server.nextId(),
-      "session/send",
-      attachments.length > 0
-        ? { sessionId: zcodeSid, content: text, attachments }
-        : { sessionId: zcodeSid, content: text },
-      15000,
-    );
-    if (sendResp.error) {
-      // send failed/timeout. Don't fire stop here: a send failure usually
-      // means the turn never started (no lock to leak). Mirrors Python which
-      // just returns the error without stopping.
-      throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
-    }
-    const accepted = (sendResp.result ?? {}) as { accepted?: boolean };
-    if (!accepted.accepted) throw new Error("zcode send not accepted");
+    // Transient turn failures (e.g. provider network blips surfaced as
+    // turn.failed with cause code model_request_failed) are retried by
+    // re-sending the prompt and re-running the event loop, instead of
+    // surfacing a hard error that stops the session. Non-transient failures
+    // (send rejected, non-transient turn error) propagate immediately. After
+    // exhausting retries on a transient error we degrade gracefully: emit a
+    // user-visible message and return end_turn so the session stays usable.
+    // 1 initial attempt + 5 retries. Backoff grows exponentially then caps so
+    // later retries don't keep stretching: 1s, 2s, 4s, 4s, 4s.
+    const MAX_TURN_ATTEMPTS = 6;
+    const MAX_BACKOFF_MS = 4000;
+    const backoffMs = (attempt: number): number =>
+      Math.min(1000 * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+    let lastTurnError: Record<string, unknown> | null = null;
 
-    // Event-driven turn loop: translate events via EventTranslator + dispatch.
-    const result = await runEventTurn(
-      server,
-      listener,
-      monitor,
-      differ,
+    for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        // A prior transient turn ended the backend turn; before re-sending,
+        // reconcile the differ baseline so the retried turn's new messages
+        // aren't treated as already-seen, surface a retry hint, then back off.
+        if (turn.cancelled) {
+          stopBackendTurn(server, zcodeSid);
+          return { stopReason: "cancelled" };
+        }
+        differ.markSeen(await fetchMessages(server, zcodeSid));
+        await sendTextChunk(
+          cx,
+          params.sessionId,
+          `[网络异常，正在重试 (${attempt - 1}/${MAX_TURN_ATTEMPTS - 1})…]`,
+          randomUUID(),
+        );
+        log(
+          `  [retry] transient turn failed, re-sending (attempt ${attempt}/${MAX_TURN_ATTEMPTS})`,
+        );
+        await sleep(backoffMs(attempt - 1));
+      }
+
+      const chunkMsgId = randomUUID();
+      const sendResp = await backend.request(
+        server.nextId(),
+        "session/send",
+        attachments.length > 0
+          ? { sessionId: zcodeSid, content: text, attachments }
+          : { sessionId: zcodeSid, content: text },
+        15000,
+      );
+      if (sendResp.error) {
+        // send failed/timeout. Don't fire stop here: a send failure usually
+        // means the turn never started (no lock to leak). Mirrors Python which
+        // just returns the error without stopping.
+        throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
+      }
+      const accepted = (sendResp.result ?? {}) as { accepted?: boolean };
+      if (!accepted.accepted) throw new Error("zcode send not accepted");
+
+      try {
+        // Event-driven turn loop: translate events via EventTranslator + dispatch.
+        const result = await runEventTurn(
+          server,
+          listener,
+          monitor,
+          differ,
+          cx,
+          params.sessionId,
+          chunkMsgId,
+          turn,
+        );
+
+        // Session title: set once on the first end_turn, but ONLY for freshly
+        // created sessions. Resumed/loaded sessions already carry a title from
+        // their history and must not be overwritten by the first post-load
+        // message. sessionTitles enforces set-once within a session;
+        // titleEligibleSessions gates which sessions are titled at all.
+        if (
+          result.stopReason === "end_turn" &&
+          server.titleEligibleSessions.has(params.sessionId) &&
+          !server.sessionTitles.has(params.sessionId)
+        ) {
+          // Title = first non-empty line of the prompt, truncated to 80 chars.
+          // Multi-line prompts must not leak newlines into the session title.
+          // Split on any line break (\r\n, \n, \r) so all platforms are covered.
+          const title =
+            text
+              .split(/\r\n|\r|\n/)
+              .map((l) => l.trim())
+              .find((l) => l.length > 0)
+              ?.slice(0, 80) ?? text.slice(0, 80);
+          server.sessionTitles.set(params.sessionId, title);
+          const { updateSessionTitle } = await import("../tasks-index.js");
+          void updateSessionTitle(zcodeSid, title, text);
+          await sendSessionUpdate(cx, params.sessionId, {
+            sessionUpdate: "session_info_update",
+            title,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+
+        // Auto-compact: if context usage exceeds the threshold, compact before
+        // returning so the next prompt has room. Configured via
+        // ZCODE_ACP_AUTO_COMPACT_THRESHOLD (absolute token count; 0/unset =
+        // disabled). Only on end_turn — cancelled/max_turn_requests skips
+        // compaction. Best-effort: failures are logged inside
+        // maybeAutoCompact, never thrown.
+        if (result.stopReason === "end_turn") {
+          const { maybeAutoCompact } = await import("../config/auto-compact.js");
+          await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
+        }
+
+        return result;
+      } catch (e) {
+        // Only a transient TurnFailedError is retryable; everything else (send
+        // failures, non-transient turn errors, exhausted retries, cancellation)
+        // propagates to the caller.
+        if (
+          e instanceof TurnFailedError &&
+          attempt < MAX_TURN_ATTEMPTS &&
+          !turn.cancelled &&
+          isTransientTurnError(e.turnError)
+        ) {
+          lastTurnError = e.turnError;
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    // All retries exhausted on a transient error → degrade gracefully. Keep the
+    // session usable so the user can resend the message instead of the editor
+    // surfacing a hard error and stopping. Skip auto-compact here: compaction
+    // after a failed turn is more likely to confuse state than help.
+    const errMsg = formatTurnError(lastTurnError) || "turn failed after retries";
+    await sendTextChunk(
       cx,
       params.sessionId,
-      chunkMsgId,
-      turn,
+      `[请求失败：${errMsg}。会话仍可用，请重新发送消息重试。]`,
+      randomUUID(),
     );
-
-    // Session title: set once on the first end_turn, but ONLY for freshly
-    // created sessions. Resumed/loaded sessions already carry a title from
-    // their history and must not be overwritten by the first post-load message.
-    // sessionTitles enforces set-once within a session; titleEligibleSessions
-    // gates which sessions are titled at all.
-    if (
-      result.stopReason === "end_turn" &&
-      server.titleEligibleSessions.has(params.sessionId) &&
-      !server.sessionTitles.has(params.sessionId)
-    ) {
-      // Title = first non-empty line of the prompt, truncated to 80 chars.
-      // Multi-line prompts must not leak newlines into the session title.
-      // Split on any line break (\r\n, \n, \r) so all platforms are covered.
-      const title =
-        text
-          .split(/\r\n|\r|\n/)
-          .map((l) => l.trim())
-          .find((l) => l.length > 0)
-          ?.slice(0, 80) ?? text.slice(0, 80);
-      server.sessionTitles.set(params.sessionId, title);
-      const { updateSessionTitle } = await import("../tasks-index.js");
-      void updateSessionTitle(zcodeSid, title, text);
-      await sendSessionUpdate(cx, params.sessionId, {
-        sessionUpdate: "session_info_update",
-        title,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    // Auto-compact: if context usage exceeds the threshold, compact before
-    // returning so the next prompt has room. Configured via
-    // ZCODE_ACP_AUTO_COMPACT_THRESHOLD (absolute token count; 0/unset = disabled).
-    // Only on end_turn — cancelled/max_turn_requests skips compaction.
-    // Best-effort: failures are logged inside maybeAutoCompact, never thrown.
-    if (result.stopReason === "end_turn") {
-      const { maybeAutoCompact } = await import("../config/auto-compact.js");
-      await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
-    }
-
-    return result;
+    return { stopReason: "end_turn" };
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
@@ -451,6 +520,21 @@ export async function cancel(
     }
   }
   log(`session/cancel → ${zcodeSid}`);
+}
+
+/**
+ * Raised by `runEventTurn` when the backend emits `turn.failed`. Carries the
+ * structured error object (with its nested `cause`) so `prompt`'s retry loop
+ * can classify transient vs fatal via `isTransientTurnError`. The display
+ * message is derived from `formatTurnError` at construction time.
+ */
+class TurnFailedError extends Error {
+  readonly turnError: Record<string, unknown>;
+  constructor(turnError: Record<string, unknown>) {
+    super(formatTurnError(turnError) || "turn failed");
+    this.name = "TurnFailedError";
+    this.turnError = turnError;
+  }
 }
 
 /**
@@ -910,7 +994,10 @@ async function runEventTurn(
       if (translator.turnFailed) {
         // Best-effort stop in case the failed turn left a residual lock.
         stopBackendTurn(server, turn.zcodeSid);
-        throw new RequestError(-32603, formatTurnError(translator.turnError));
+        // Throw a TurnFailedError carrying the structured error so the caller
+        // (prompt's retry loop) can classify transient vs fatal. The error
+        // message is formatted for display when it ultimately reaches the user.
+        throw new TurnFailedError(translator.turnError ?? {});
       }
       // Fallback: if no text streamed, surface the last assistant reply.
       if (!emittedText) {

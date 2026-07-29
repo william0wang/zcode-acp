@@ -165,6 +165,43 @@ a hardcoded version string — read the message text to identify the root cause.
    - `⚠ elicitation/create failed: ...` → the client does not support it or the request failed
    - `⚠ request_permission failed: ...` → the fallback path failed
 
+### Turn fails with `model_request_failed` / network error
+
+**Symptom:** A turn ends with an error like `model_request_failed` / "Network
+connection failed for the provider request" / "Turn execution failed". Instead
+of stopping the session, the bridge retries transient failures automatically.
+
+**What happens:**
+
+When the ZCode backend emits `turn.failed` with a transient cause (provider
+network blip, rate limit, brief outage), the bridge retries the turn up to
+**5 times** (6 total attempts) with exponential backoff capped at 4s
+(1s / 2s / 4s / 4s / 4s). Each retry re-sends the prompt and surfaces a
+`[网络异常，正在重试 (n/5)…]` hint so the user knows the turn is being retried
+rather than hanging.
+
+Transient errors are identified by the nested `error.cause.code`
+(`model_request_failed`, `provider_not_configured`, `rate_limit`, `timeout`,
+`ECONNRESET`, etc.) or by network/connection/timeout keywords in
+`error.cause.message`. Non-transient failures (e.g. `prompt is running`) still
+surface as hard errors immediately.
+
+After retries are exhausted, the bridge **degrades gracefully**: it emits a
+user-visible `[请求失败：…。会话仍可用，请重新发送消息重试。]` message and returns
+`end_turn`, so the session stays usable — resend the message to try again.
+
+**Debugging:**
+
+```
+ZCODE_ACP_DEBUG=1
+```
+
+Look for `[retry] transient turn failed, re-sending (attempt N/6)` lines to
+confirm the retry path is active. If transient failures persist across all
+retries, the underlying provider/network issue needs investigation (see
+[Authentication / credential errors](#authentication--credential-errors-401-provider-auth-failed)
+and check the provider endpoint reachability).
+
 ### `/` completion menu is empty
 
 **Symptom:** Typing `/` shows no command completion.
