@@ -31,6 +31,8 @@ export interface ClientCapabilities {
 export interface PendingTurn {
   zcodeSid: string;
   cancelled: boolean;
+  /** Set once session/stop has been fired for this turn, to avoid re-sending. */
+  stopSent?: boolean;
 }
 
 export class ZcodeAcpServer {

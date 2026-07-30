@@ -34,7 +34,6 @@ import {
 import type { InternalEvent } from "../translators/index.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
-import { waitForTurnIdle } from "./extensions.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk } from "./io.js";
 import { handleServerRequests } from "./server-requests.js";
@@ -311,38 +310,6 @@ export async function prompt(
   // Per-session ProjectionDiffer (persists across turns). The baseline mark_seen
   // prevents the differ from re-emitting history at turn completion.
   const differ = getOrCreateDiffer(server, zcodeSid);
-
-  // Public lock probe before subscribe. The preempt path (preemptInFlightTurn
-  // above) only covers the "two concurrent prompts" case — it scans
-  // pendingTurns and waits for the OLD turn to exit. But a cancel-then-prompt
-  // sequence is different: cancel fires a fire-and-forget stop and the old
-  // turn loop exits (deletes its pendingTurns entry) BEFORE the backend
-  // actually releases its turn lock. When the new prompt then calls
-  // session/subscribe, it collides with the still-held backend lock and times
-  // out (~30s, observed in Zed.log @ 2026-07-30T13:57-58).
-  //
-  // This probe is the catch-all: regardless of pendingTurns state, probe
-  // session/goal show until the backend stops reporting "prompt is running".
-  // expectLock=false because we don't know whether a turn ever ran — if the
-  // backend is idle the first probe succeeds immediately (zero latency on the
-  // normal path). Best-effort: on timeout we proceed to subscribe anyway,
-  // which has its own 3x10s retry as a last-resort fallback.
-  const IDLE_PROBE_TIMEOUT_MS = 15_000;
-  const idle = await waitForTurnIdle(
-    server,
-    zcodeSid,
-    IDLE_PROBE_TIMEOUT_MS,
-    "session/goal",
-    false, // lock already held (cancel case) → wait for release; idle → first probe succeeds
-  );
-  if (!idle) {
-    warn(
-      `  [prompt] backend lock still held after ${Math.round(IDLE_PROBE_TIMEOUT_MS / 1000)}s probe, proceeding to subscribe best-effort`,
-    );
-  } else {
-    log(`  [prompt] backend idle before subscribe`);
-  }
-
   const baselineMsgs = await fetchMessages(server, zcodeSid);
   differ.markSeen(baselineMsgs);
 
@@ -574,11 +541,10 @@ class TurnFailedError extends Error {
  * `_cancel_backend_turn`: send stop with an id (some backends route by id
  * presence), never wait for a response, never throw.
  *
- * Probing the lock afterward is the caller's job — on the preempt path
- * (preemptInFlightTurn) we follow up with waitForTurnIdle to confirm release;
- * the turn-loop cancel sites call this and rely on their own event-driven
- * exit. The backend's turn loop emits turn.completed on its own (success if
- * stop didn't catch the streaming turn in time, cancelled otherwise).
+ * The turn-loop cancel site calls this once (guarded by turn.stopSent), then
+ * keeps looping until the backend emits turn.completed/turn.failed. preempt
+ * waits on pendingTurns deletion — which only happens after that backend
+ * completion event — so it transitively waits for the backend to be done.
  */
 function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
   try {
@@ -631,19 +597,22 @@ function withPreemptLock(
 
 /**
  * Cancel any other in-flight turn for this zcodeSid and wait for it to fully
- * exit (listener unregistered + pendingTurns cleaned) before returning.
+ * exit (pendingTurns cleaned) before returning.
  *
  * Must be called from inside a preempt lock section (the caller has already
  * registered itself in pendingTurns), so a concurrent prompt entering its own
  * section is guaranteed to see this caller's turn and cancel it.
  *
- * Why wait for the map entry to disappear (not just fire stop): registering
- * a second EventStreamListener overwrites the first (Map.set in client.ts),
- * so the old turn loop must have run its finally block before we subscribe.
- * The map cleanup in that finally block is the synchronization point.
+ * We do NOT fire stop here — the old turn's own loop detects turn.cancelled
+ * and fires stop itself (turn-loop cancel site), then keeps looping until the
+ * backend emits turn.completed/turn.failed. Since the turn loop now waits for
+ * that backend completion event before exiting, the pendingTurns cleanup in
+ * its finally block is the reliable "backend is done, lock released" signal.
+ * Waiting on pendingTurns deletion therefore blocks until the backend has
+ * truly finished — far more reliable than probing session/goal show (which
+ * times out during the backend's stop-finalization window).
  *
- * Best-effort: never throws. On timeout, continues anyway — session/send
- * will then hit the lock and take the existing error path.
+ * Best-effort: never throws. On timeout, continues anyway.
  */
 async function preemptInFlightTurn(
   server: ZcodeAcpServer,
@@ -655,40 +624,27 @@ async function preemptInFlightTurn(
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid && reqId !== selfRequestId) {
       oldRequestId = reqId;
-      turn.cancelled = true; // signal the old turn loop to exit
+      turn.cancelled = true; // signal the old turn loop to fire stop + wait
       break;
     }
   }
   if (oldRequestId === undefined) return; // no in-flight turn, proceed
 
-  log(`  [preempt] in-flight turn ${oldRequestId} found, stopping it`);
-  // Fire-and-forget stop (mirrors Python's _cancel_backend_turn). The old
-  // turn loop will receive turn.completed and exit on its own.
-  stopBackendTurn(server, zcodeSid);
+  log(`  [preempt] in-flight turn ${oldRequestId} found, cancelling`);
 
-  // The old turn is already streaming (lock held), so expectLock=false: we
-  // don't need to observe the lock appearing first, only its release. Probe
-  // session/goal show until it stops reporting "prompt is running" — this is
-  // the same mechanism waitForTurnIdle uses for compact/goal, and unlike
-  // pendingTurns polling it does NOT depend on the backend emitting a
-  // cancelled event (which never comes for a streaming turn hit by stop:
-  // it completes as success, not cancelled).
-  //
-  // pendingTurns cleanup by the old turn's finally block still happens and
-  // remains the listener-overwrite guard, but we no longer BLOCK on it.
-  const PREEMPT_TIMEOUT_MS = 35_000;
-  const released = await waitForTurnIdle(
-    server,
-    zcodeSid,
-    PREEMPT_TIMEOUT_MS,
-    "session/goal",
-    false, // old turn already holds the lock; just wait for release
-  );
-  if (!released) {
-    warn(`  [preempt] lock wait timed out for old turn ${oldRequestId}, proceeding best-effort`);
-  } else {
-    log(`  [preempt] old turn ${oldRequestId} lock released, proceeding`);
+  // Wait for the old turn to fully exit. The turn loop's cancel handling fires
+  // stop and keeps looping until the backend emits turn.completed/turn.failed,
+  // so pendingTurns deletion only happens once the backend is truly done.
+  const PREEMPT_TIMEOUT_MS = 120_000;
+  const t0 = Date.now();
+  while (server.pendingTurns.has(oldRequestId)) {
+    if (Date.now() - t0 > PREEMPT_TIMEOUT_MS) {
+      warn(`  [preempt] timed out waiting for old turn ${oldRequestId} to exit`);
+      return;
+    }
+    await sleep(200);
   }
+  log(`  [preempt] old turn ${oldRequestId} exited, proceeding`);
 }
 
 // ---------- internals ----------
@@ -922,8 +878,20 @@ async function runEventTurn(
     }
 
     if (turn.cancelled) {
-      stopBackendTurn(server, turn.zcodeSid);
-      return { stopReason: "cancelled" };
+      // Send stop ONCE, then keep looping to wait for the backend's turn
+      // completion event. Returning immediately here lets the old turn's
+      // prompt() exit (deleting pendingTurns) BEFORE the backend finishes
+      // processing stop — the next prompt's subscribe/send then collides with
+      // the still-finalizing backend (observed 18-41s recovery window). By
+      // continuing the loop we block until the backend emits turn.completed/
+      // turn.failed (translator.turnDone check below), the real "backend done"
+      // signal. pendingTurns stays until then, so the next prompt's preempt
+      // waits on it.
+      if (!turn.stopSent) {
+        stopBackendTurn(server, turn.zcodeSid);
+        turn.stopSent = true;
+      }
+      // Fall through to pollEvent — keep receiving events until turn end.
     }
 
     const ev = await listener.pollEvent(500);

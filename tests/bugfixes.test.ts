@@ -110,9 +110,8 @@ describe("subscribe retries transient timeout (preempt busy window)", () => {
     const requestSpy = vi.spyOn(fake, "request");
     requestSpy
       .mockResolvedValueOnce({ id: 1, error: { message: "timeout" } })
-      .mockResolvedValueOnce({ id: 2, error: { message: "timeout" } })
       .mockResolvedValueOnce({
-        id: 3,
+        id: 2,
         result: { eventSeq: 5, snapshot: snap },
       } as ZcodeResponse);
     // Fake timers so the backoff sleeps don't slow the test.
@@ -125,7 +124,7 @@ describe("subscribe retries transient timeout (preempt busy window)", () => {
     expect(result).toEqual(snap);
     expect(listener.subscribed).toBe(true);
     expect(listener.lastSeq).toBe(5);
-    expect(requestSpy).toHaveBeenCalledTimes(3);
+    expect(requestSpy).toHaveBeenCalledTimes(2);
   });
 
   it("does NOT retry on non-transient errors (reader dead)", async () => {

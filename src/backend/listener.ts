@@ -56,12 +56,12 @@ export class EventStreamListener {
    * misleading "version too old" string.
    */
   async subscribe(nextId: NextId): Promise<ZcodeSnapshot> {
-    // Retry transient timeouts: after a preempt (`session/stop`) the backend's
-    // main loop can be briefly busy finalising the cancelled turn (interrupting
-    // the model stream, persisting checkpoints). A subscribe issued in that
-    // window may not get a response within the per-attempt deadline. The backend
-    // recovers on its own ("wait a bit and resend works"), so a couple of
-    // retries absorb the intermittent stall instead of surfacing it to the user.
+    // Retry transient timeouts as a lightweight safety net for cold-start /
+    // network blips. The cancel-preempt path no longer needs subscribe retries
+    // to absorb a backend stop-finalization window: the turn loop now blocks
+    // until the backend emits turn.completed/turn.failed before its prompt()
+    // exits, so by the time the next prompt reaches subscribe the backend is
+    // already idle. These retries are just a last-resort cushion.
     //
     // Only `timeout` is retried — non-transient errors (reader dead, pipe
     // broken, method-not-found, session-level business error) fail fast.
@@ -76,8 +76,8 @@ export class EventStreamListener {
     // O(messages) and can take seconds-to-tens-of-seconds on long sessions:
     // observed 3.8s at 267 messages, 38s at 3500 messages) and is the primary
     // cause of subscribe timeouts. The eventSeq watermark is all we need.
-    const MAX_ATTEMPTS = 3;
-    const backoffMs = (attempt: number): number => 1000 * attempt; // 1s, 2s
+    const MAX_ATTEMPTS = 2;
+    const backoffMs = (attempt: number): number => 500 * attempt; // 0.5s
     let resp: ZcodeResponse;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       resp = await this.backend.request(
@@ -89,18 +89,18 @@ export class EventStreamListener {
           includeSnapshot: false,
           afterSeq: 0,
         },
-        10000,
+        5000,
       );
       if (!resp.error) break; // success
       const isTimeout = resp.error.message === "timeout";
       if (!isTimeout || attempt === MAX_ATTEMPTS) {
         if (isTimeout) {
-          warn(`subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~30s)`);
+          warn(`subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~${Math.round((MAX_ATTEMPTS * 5000 + 500) / 1000)}s)`);
         }
         throw new Error(formatSubscribeError(resp));
       }
       log(
-        `subscribe attempt ${attempt}/${MAX_ATTEMPTS} timed out, retrying in ${backoffMs(attempt)}ms (preempt/busy window)`,
+        `subscribe attempt ${attempt}/${MAX_ATTEMPTS} timed out, retrying in ${backoffMs(attempt)}ms`,
       );
       await new Promise((resolve) => setTimeout(resolve, backoffMs(attempt)));
     }
