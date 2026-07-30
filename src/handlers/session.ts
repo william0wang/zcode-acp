@@ -311,6 +311,38 @@ export async function prompt(
   // Per-session ProjectionDiffer (persists across turns). The baseline mark_seen
   // prevents the differ from re-emitting history at turn completion.
   const differ = getOrCreateDiffer(server, zcodeSid);
+
+  // Public lock probe before subscribe. The preempt path (preemptInFlightTurn
+  // above) only covers the "two concurrent prompts" case — it scans
+  // pendingTurns and waits for the OLD turn to exit. But a cancel-then-prompt
+  // sequence is different: cancel fires a fire-and-forget stop and the old
+  // turn loop exits (deletes its pendingTurns entry) BEFORE the backend
+  // actually releases its turn lock. When the new prompt then calls
+  // session/subscribe, it collides with the still-held backend lock and times
+  // out (~30s, observed in Zed.log @ 2026-07-30T13:57-58).
+  //
+  // This probe is the catch-all: regardless of pendingTurns state, probe
+  // session/goal show until the backend stops reporting "prompt is running".
+  // expectLock=false because we don't know whether a turn ever ran — if the
+  // backend is idle the first probe succeeds immediately (zero latency on the
+  // normal path). Best-effort: on timeout we proceed to subscribe anyway,
+  // which has its own 3x10s retry as a last-resort fallback.
+  const IDLE_PROBE_TIMEOUT_MS = 15_000;
+  const idle = await waitForTurnIdle(
+    server,
+    zcodeSid,
+    IDLE_PROBE_TIMEOUT_MS,
+    "session/goal",
+    false, // lock already held (cancel case) → wait for release; idle → first probe succeeds
+  );
+  if (!idle) {
+    warn(
+      `  [prompt] backend lock still held after ${Math.round(IDLE_PROBE_TIMEOUT_MS / 1000)}s probe, proceeding to subscribe best-effort`,
+    );
+  } else {
+    log(`  [prompt] backend idle before subscribe`);
+  }
+
   const baselineMsgs = await fetchMessages(server, zcodeSid);
   differ.markSeen(baselineMsgs);
 
