@@ -294,8 +294,11 @@ async function handleSinglePermission(
     undefined,
     turn,
   );
+  if (acpResp === INTERRUPTED) {
+    return onInteractionInterrupted(cx, acpSid, toolCallId, turn);
+  }
   if (acpResp === null) {
-    return { action: "decline", reason: "timeout or cancelled" };
+    return { action: "decline", reason: "declined or cancelled" };
   }
   return perm
     ? acpPermissionResponseToZcode(acpResp)
@@ -305,7 +308,7 @@ async function handleSinglePermission(
 /**
  * AskUserQuestion: sequential per-question, multi-select per-option.
  *
- * Single-select: one popup per question; Skip/cancel/timeout → overall decline.
+ * Single-select: one popup per question; Skip/cancel → overall decline.
  * Multi-select: one Include/Skip popup per option; Include picks comma-joined.
  */
 export async function handleAskUserQuestion(
@@ -345,7 +348,7 @@ export async function handleAskUserQuestion(
       }
       const selected = parseAskUserResponse(resp);
       if (selected === null) {
-        warn(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel/timeout, declining`);
+        warn(`  ⚠ AskUserQuestion [${idx + 1}] skip/cancel, declining`);
         return { action: "decline", reason: "skipped or cancelled" };
       }
       answers[q.question] = selected;
@@ -368,12 +371,12 @@ export async function handleAskUserQuestion(
         acpParams.toolCall.toolCallId = `${toolCallId}_${idx}_${sub}`;
         const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, label, turn);
         // Abort the whole multi-select if the turn was cancelled (user sent a
-        // new prompt) or the popup timed out — otherwise the remaining options
-        // keep popping up and block the new task. Mirrors the single-select
-        // path's null → decline behaviour.
+        // new prompt) or the popup returned nothing — otherwise the remaining
+        // options keep popping up and block the new task. Mirrors the
+        // single-select path's null → decline behaviour.
         if (turn?.cancelled || resp === null) {
-          warn(`  ⚠ AskUserQuestion [${idx + 1}] multi aborted (cancel/timeout), declining`);
-          return { action: "decline", reason: "cancelled or timed out" };
+          warn(`  ⚠ AskUserQuestion [${idx + 1}] multi aborted (cancel/interrupt), declining`);
+          return { action: "decline", reason: "cancelled or interrupted" };
         }
         if (parseAskUserResponse(resp) === "yes") {
           picked.push(label);
@@ -428,6 +431,9 @@ async function handleAskUserViaElicitation(
     undefined,
     turn,
   );
+  if (acpResp === INTERRUPTED) {
+    return onInteractionInterrupted(cx, acpSid, toolCallId, turn);
+  }
   if (acpResp === null) {
     return { action: "decline", reason: "elicitation failed" };
   }
@@ -477,7 +483,7 @@ async function askOnce(
 ): Promise<unknown> {
   const acpReqId = _server.nextId();
   log(`  ⟳ AskUserQuestion forwarding session/request_permission (acp_id=${acpReqId})`);
-  return requestWithTimeout(
+  const resp = await requestWithTimeout(
     cx,
     "session/request_permission",
     acpParams,
@@ -485,32 +491,67 @@ async function askOnce(
     undefined,
     turn,
   );
+  if (resp === INTERRUPTED) {
+    // Interrupted (connection close / env timeout / cancel): mark the popup's
+    // tool_call failed and flip turn.cancelled so the outer loop aborts and the
+    // turn loop stops the backend. Return null so callers' existing null →
+    // decline branch handles the reply uniformly.
+    await onInteractionInterrupted(cx, acpParams.sessionId, acpParams.toolCall.toolCallId, turn);
+    return null;
+  }
+  return resp;
 }
 
 // ---------- request helpers ----------
 
 /**
- * Interaction request timeout. Python's `_await_client_response` uses 600s and
- * this matches it — long enough for slow models, retries, and user deliberation
- * (well past the turn loop's 120s no-progress guard), while still bounding a
- * dead client so it cannot pin a turn forever (the turn loop's
- * `await handleServerRequests` would otherwise block indefinitely and the 120s
- * no-progress timer could never re-check).
+ * Interaction request wait strategy.
+ *
+ * By default we wait INDEFINITELY for the user to respond to a confirmation
+ * popup — this matches every mainstream agent (Claude Code, Gemini CLI, Codex,
+ * Cursor all wait forever for tool-auth/ExitPlanMode/AskUserQuestion; the ACP
+ * spec has no timeout on `session/request_permission`). A finite timeout that
+ * auto-declines is actively harmful: it decides for the user (often the
+ * opposite of their intent) and then keeps running, which is exactly the bug
+ * this fixed.
+ *
+ * Two things can still break a pending wait:
+ *   1. `turn.cancelled` — the user pressed stop / sent a new prompt (preempt).
+ *   2. Connection close (`cx.signal` abort / `cx.closed` resolves) — the editor
+ *      went away. This is the real crash signal and replaces the old timeout.
+ *
+ * An explicit timeout is kept as an opt-in escape hatch via the
+ * `ZCODE_ACP_INTERACTION_TIMEOUT_MS` env var (milliseconds; 0/unset = wait
+ * forever). On any of these interrupts the caller replies `decline` to unlock
+ * the backend AND flips `turn.cancelled` so the turn loop stops the backend
+ * turn instead of auto-continuing.
  */
-const INTERACTION_TIMEOUT_MS = 600_000;
+const INTERACTION_TIMEOUT_MS = parseInteractionTimeout();
+
+function parseInteractionTimeout(): number {
+  const raw = process.env.ZCODE_ACP_INTERACTION_TIMEOUT_MS;
+  if (!raw) return 0; // 0 = wait indefinitely
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
 
 /**
- * Send a client-side request with a timeout and turn-cancel awareness. Resolves
- * to the client response, or `null` on timeout/error/cancel (callers treat null
- * as decline). The underlying `cx.request` promise stays pending after a
- * timeout/cancel (the SDK has no abort), but we no longer await it; it settles
- * naturally when the client eventually responds or the connection closes.
- *
- * Turn cancel: while awaiting the client response we poll `turn.cancelled`
- * every 100ms (mirrors Python `_await_client_response`, which drains + checks
- * cancel every 0.1s). Without this, a user pressing stop during a permission
- * popup would be ignored until the client responds or 600s elapses, because the
- * turn loop's `await handleServerRequests` blocks here.
+ * Marker returned when a wait was interrupted (connection close, env timeout,
+ * or turn cancel) as opposed to the client deliberately returning null. Callers
+ * flip `turn.cancelled` on this so the backend turn is stopped rather than
+ * allowed to continue after the decline reply.
+ */
+const INTERRUPTED = Symbol("interactionInterrupted");
+type InteractionResult = unknown | typeof INTERRUPTED;
+
+/**
+ * Send a client-side request and wait for the response. By default waits
+ * indefinitely (see {@link INTERACTION_TIMEOUT_MS}). Resolves to the client
+ * response, `null` if the client returned null/errored, or {@link INTERRUPTED}
+ * if the wait was broken by connection close / env timeout / turn cancel. The
+ * underlying `cx.request` promise stays pending after an interrupt (the SDK has
+ * no abort) but is no longer awaited; it settles naturally when the client
+ * eventually responds or the connection closes.
  */
 async function requestWithTimeout(
   cx: acp.AgentContext,
@@ -519,46 +560,99 @@ async function requestWithTimeout(
   label: string,
   timeoutMs = INTERACTION_TIMEOUT_MS,
   turn?: PendingTurn,
-): Promise<unknown> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let cancelTimer: ReturnType<typeof setInterval> | undefined;
-  const timeout = new Promise<null>((resolve) => {
-    timer = setTimeout(() => {
-      warn(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
-      resolve(null);
-    }, timeoutMs);
-  });
-  const racers: Array<Promise<unknown>> = [
+): Promise<InteractionResult> {
+  // Build the racers. The primary is the client request itself.
+  const racers: Array<Promise<InteractionResult>> = [
     cx.request(method, params as never).catch((e: unknown) => {
       warn(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }),
-    timeout,
   ];
-  // Race a cancel poll so the user can abort a pending popup. Resolves null on
-  // cancel; callers already treat null as decline. Only added when a turn is
-  // available (turn-less callers, e.g. tests, skip cancel awareness).
+
+  // Connection-close detection: replaces the old finite timeout as the crash
+  // guard. `cx.signal` is an AbortSignal that fires when the stream closes;
+  // `cx.closed` is the Promise form. Either being present is enough.
+  const signal = (cx as { signal?: AbortSignal }).signal;
+  const closed = (cx as { closed?: Promise<void> }).closed;
+  if (signal || closed) {
+    racers.push(
+      new Promise<typeof INTERRUPTED>((resolve) => {
+        let done = false;
+        const fire = () => {
+          if (done) return;
+          done = true;
+          warn(`  ⚠ ${label} aborted (client connection closed)`);
+          resolve(INTERRUPTED);
+        };
+        signal?.addEventListener("abort", fire);
+        closed?.then(fire).catch(() => {});
+      }),
+    );
+  }
+
+  // Optional env timeout (off by default).
+  if (timeoutMs > 0) {
+    racers.push(
+      new Promise<typeof INTERRUPTED>((resolve) => {
+        const t = setTimeout(() => {
+          warn(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
+          resolve(INTERRUPTED);
+        }, timeoutMs);
+        t.unref?.();
+      }),
+    );
+  }
+
+  // Turn-cancel poll: lets the user abort a pending popup via stop/preempt.
   if (turn) {
     racers.push(
-      new Promise<null>((resolve) => {
-        cancelTimer = setInterval(() => {
+      new Promise<typeof INTERRUPTED>((resolve) => {
+        const cancelTimer = setInterval(() => {
           if (turn.cancelled) {
             warn(`  ⚠ ${label} aborted (turn cancelled)`);
-            resolve(null);
+            resolve(INTERRUPTED);
           }
         }, 100);
-        // unref so this polling interval cannot keep the event loop (and thus
-        // the process) alive while awaiting a client response (up to 600s).
+        // unref so this polling interval cannot keep the event loop alive.
         cancelTimer.unref?.();
       }),
     );
   }
-  try {
-    return await Promise.race(racers);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (cancelTimer) clearInterval(cancelTimer);
+
+  return Promise.race(racers);
+}
+
+/**
+ * Handle an interrupted interaction wait (connection close, env timeout, or
+ * turn cancel). Emits a `failed` tool_call_update so the editor shows a clear
+ * red marker, and flips `turn.cancelled` so the turn loop stops the backend
+ * turn instead of auto-continuing after the decline reply.
+ *
+ * Returns the decline response the caller should send back to zcode.
+ */
+async function onInteractionInterrupted(
+  cx: acp.AgentContext,
+  acpSid: string,
+  toolCallId: string,
+  turn?: PendingTurn,
+): Promise<ZcodeInteractionResponse> {
+  if (toolCallId) {
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "failed",
+      content: [
+        {
+          type: "content",
+          content: { type: "text", text: "交互中断：连接关闭或超时，请重新发起对话。" },
+        },
+      ],
+    }).catch(() => {
+      /* best-effort: editor may already be gone */
+    });
   }
+  if (turn) turn.cancelled = true;
+  return { action: "decline", reason: "interrupted (connection closed or timeout)" };
 }
 
 // ---------- reply helpers ----------

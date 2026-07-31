@@ -3,9 +3,9 @@
  *
  * Bug: when an AskUserQuestion carries multiple questions (especially
  * multi-select ones), the fallback `request_permission` path emitted one
- * popup per question / per option in a tight loop with no cancel/timeout
- * check. If the user sent a new prompt (preempting the turn) or a popup
- * timed out, the remaining popups still fired and blocked the new task.
+ * popup per question / per option in a tight loop with no cancel/interrupt
+ * check. If the user sent a new prompt (preempting the turn) or a popup was
+ * interrupted, the remaining popups still fired and blocked the new task.
  *
  * These tests verify the fix: the loop now aborts immediately on
  * `turn.cancelled` or `resp === null`, returning a single decline instead
@@ -86,11 +86,11 @@ function twoSingleSelectParams(): ZcodeInteractionUserInputParams {
 }
 
 describe("AskUserQuestion multi-select fallback: cancel/timeout aborts loop", () => {
-  it("stops after the first option times out (resp=null) and declines", async () => {
+  it("stops after the first option returns null (declined) and declines", async () => {
     const server = makeServer();
-    const { cx, callCount } = makeCx([null, null, null]); // all time out
+    const { cx, callCount } = makeCx([null, null, null]); // all declined
     const result = await handleAskUserQuestion(server, cx, "s1", multiSelectParams());
-    expect(result).toEqual({ action: "decline", reason: "cancelled or timed out" });
+    expect(result).toEqual({ action: "decline", reason: "cancelled or interrupted" });
     // Only ONE request_permission should have fired (the first option), not 3.
     expect(callCount()).toBe(1);
   });
@@ -116,7 +116,7 @@ describe("AskUserQuestion multi-select fallback: cancel/timeout aborts loop", ()
       return r;
     }) as typeof origRequest;
     const result = await handleAskUserQuestion(server, cx, "s1", multiSelectParams(), turn);
-    expect(result).toEqual({ action: "decline", reason: "cancelled or timed out" });
+    expect(result).toEqual({ action: "decline", reason: "cancelled or interrupted" });
     // Only one popup fired despite 3 options.
     expect(callCount()).toBe(1);
   });
