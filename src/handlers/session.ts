@@ -879,25 +879,36 @@ async function runEventTurn(
 
     if (turn.cancelled) {
       // Send stop ONCE, then keep looping to wait for the backend's turn
-      // completion event. Returning immediately here lets the old turn's
-      // prompt() exit (deleting pendingTurns) BEFORE the backend finishes
-      // processing stop — the next prompt's subscribe/send then collides with
-      // the still-finalizing backend (observed 18-41s recovery window). By
-      // continuing the loop we block until the backend emits turn.completed/
-      // turn.failed (translator.turnDone check below), the real "backend done"
-      // signal. pendingTurns stays until then, so the next prompt's preempt
-      // waits on it.
+      // completion event. Returning immediately here would let the old
+      // turn's prompt() exit (deleting pendingTurns) BEFORE the backend
+      // finishes processing stop — the next prompt's subscribe/send then
+      // collides with the still-finalizing backend (observed 18-41s
+      // recovery window). By continuing the loop we block until the
+      // backend emits turn.completed/turn.failed (translator.turnDone
+      // below), the real "backend done" signal. pendingTurns stays until
+      // then, so the next prompt's preempt waits on it.
+      //
+      // But continuing the loop must NOT keep pushing output to the UI:
+      // session/cancel is a notification, so the editor unlocks the input
+      // box the instant it is sent. Once cancelled we switch to a silent
+      // drain — events are still translated (to detect turnDone) but every
+      // dispatch point below is skipped, so the user's stop takes effect on
+      // screen immediately while we still wait for the backend to truly end.
       if (!turn.stopSent) {
         stopBackendTurn(server, turn.zcodeSid);
         turn.stopSent = true;
       }
-      // Fall through to pollEvent — keep receiving events until turn end.
+      // Fall through to pollEvent (silently).
     }
 
     const ev = await listener.pollEvent(500);
     if (ev === null) {
       // Stall reconciliation: probe authoritative status after 15s of silence.
+      // Skipped while cancelled: we've already fired stop, so the backend will
+      // emit its own completion event, and the reconciliation branch's
+      // fetchLastReply/sendTextChunk would push output after the user stopped.
       if (
+        !turn.cancelled &&
         translator.turnStarted &&
         Date.now() - lastProgress > 15_000 &&
         Date.now() - lastStallCheck > 15_000
@@ -928,6 +939,15 @@ async function runEventTurn(
 
     lastProgress = Date.now();
     const internalEvents = translator.translate(ev);
+    if (turn.cancelled) {
+      // Silent drain: translate advances the state machine (needed to detect
+      // turnDone below) but we discard every internal event. No text, reasoning,
+      // tool, or usage is dispatched after the user stopped.
+      if (translator.turnDone) {
+        return { stopReason: "cancelled" };
+      }
+      continue;
+    }
     for (const iev of internalEvents) {
       if (iev.kind === "TextDelta") emittedText = true;
       if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
