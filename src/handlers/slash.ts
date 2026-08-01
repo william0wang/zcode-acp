@@ -35,7 +35,7 @@ import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
-import { compact, fork, rewind, steer } from "./extensions.js";
+import { compact, fork, goal, rewind, steer } from "./extensions.js";
 
 /**
  * ZCode built-in commands that require the TUI command center or interactive
@@ -124,14 +124,7 @@ export async function handleSlashCommand(
       }
       case "goal": {
         if (!arg) throw new RequestError(-32602, "/goal requires a goal description");
-        await server
-          .ensureBackend()
-          .request(
-            server.nextId(),
-            "session/goal",
-            { sessionId: zcodeSid, action: "set", objective: arg },
-            30000,
-          );
+        await goal(server, { sessionId: acpSid, action: "set", objective: arg });
         return ok(`✓ goal set: ${arg}`);
       }
       case "fork": {
@@ -153,6 +146,7 @@ export async function handleSlashCommand(
         if (!arg) throw new RequestError(-32602, "/model requires a model id");
         const switchOk = await applyModelSwitch(server, zcodeSid, arg);
         if (!switchOk) throw new RequestError(-32603, `model switch failed for ${arg}`);
+        await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "model");
         return ok(`✓ model = ${arg}`);
       }
       case "mode":
