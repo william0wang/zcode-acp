@@ -293,7 +293,11 @@ describe("dispatchEvent", () => {
       server,
       cx,
       SID,
-      { kind: "ConfigChanged", mode: "plan", model: { providerId: "anthropic", modelId: "GLM-5.2" } },
+      {
+        kind: "ConfigChanged",
+        mode: "plan",
+        model: { providerId: "anthropic", modelId: "GLM-5.2" },
+      },
       CHUNK,
     );
     expect(sent).toHaveLength(2);
@@ -315,15 +319,52 @@ describe("dispatchEvent", () => {
 
   it("ConfigChanged (thought only) emits config_option_update, no mode update", async () => {
     const { cx, sent } = mockContext();
-    await dispatchEvent(makeServer(false), cx, SID, { kind: "ConfigChanged", thought: "max" }, CHUNK);
+    await dispatchEvent(
+      makeServer(false),
+      cx,
+      SID,
+      { kind: "ConfigChanged", thought: "max" },
+      CHUNK,
+    );
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       sessionUpdate: "config_option_update",
-      configOptions: [
-        { id: "model" },
-        { id: "mode" },
-        { id: "thought", currentValue: "max" },
-      ],
+      configOptions: [{ id: "model" }, { id: "mode" }, { id: "thought", currentValue: "max" }],
     });
+  });
+
+  it("ConfigChanged without model keeps the session's current model (no default reset)", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(false);
+    server.registerSession(SID, "sess_real");
+    // Fake backend: session/read reports DeepSeek as the session's current
+    // model. A mid-turn state.updated that changes only mode/thought must NOT
+    // reset the model dropdown to the default — regression for the model
+    // jumping back to the default when sending a message.
+    server.backend = {
+      isDead: false,
+      request: async () => ({
+        result: {
+          settings: {
+            model: { current: { providerId: "deepseek", modelId: "DeepSeek-V3.5" } },
+            mode: { current: "build" },
+            thoughtLevel: { current: "high" },
+          },
+        },
+      }),
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      { kind: "ConfigChanged", mode: "plan", thought: "high" },
+      CHUNK,
+    );
+    expect(sent).toHaveLength(2);
+    const options = (sent[0] as { configOptions: acp.SessionConfigOption[] }).configOptions;
+    expect(options[0]).toMatchObject({ id: "model", currentValue: "deepseek\\DeepSeek-V3.5" });
+    expect(options[1]).toMatchObject({ id: "mode", currentValue: "plan" });
+    expect(options[2]).toMatchObject({ id: "thought", currentValue: "high" });
   });
 });

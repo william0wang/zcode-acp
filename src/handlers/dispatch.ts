@@ -80,11 +80,12 @@ export async function dispatchEvent(
  * configOptions (+ current_mode_update for mode) so the editor UI follows the
  * switch immediately — even mid-turn, without waiting for turn completion.
  *
- * Builds the option STRUCTURES without a backend `session/read` (zcodeSid=null
- * path: model list from config.json, mode/thought enums from CONFIG_META), then
- * overlays the authoritative values from the event patch. The backend's
- * settings projection may lag mid-turn, so the event values win — matching how
- * the zcode app itself refreshes its UI from `state.updated`.
+ * Builds the option structures from the session's authoritative settings
+ * (`session/read` via buildConfigOptions), then overlays the values from the
+ * event patch. A state.updated patch only carries the fields that actually
+ * changed, so building from the null defaults instead would reset every
+ * untouched field — most visibly the model dropdown jumping back to the
+ * default model mid-conversation.
  * Best-effort: failures are logged and swallowed, never thrown into the loop.
  */
 async function dispatchConfigChanged(
@@ -94,7 +95,10 @@ async function dispatchConfigChanged(
   ev: Extract<InternalEvent, { kind: "ConfigChanged" }>,
 ): Promise<void> {
   try {
-    const options = await buildConfigOptions(server, null);
+    // Fall back to null (defaults) only if the session mapping isn't live yet —
+    // events routed through a registered turn loop always have it.
+    const zcodeSid = server.resolveSid(acpSid) ?? null;
+    const options = await buildConfigOptions(server, zcodeSid);
     if (ev.model) options[0].currentValue = formatModelValue(ev.model.providerId, ev.model.modelId);
     if (ev.mode !== undefined) options[1].currentValue = ev.mode;
     if (ev.thought !== undefined) options[2].currentValue = ev.thought;
