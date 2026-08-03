@@ -667,10 +667,24 @@ export async function setConfigOptionHandler(
 }
 
 /**
- * `session/cancel` → mark the pending turn cancelled. The turn loop observes
- * the flag and forwards `session/stop` itself (mirrors Python: cancel only
- * sets the flag; stop is sent by `_run_event_turn`). Eagerly sending stop
- * here would race with a turn that already completed.
+ * `session/cancel` → stop the in-flight turn immediately. Mirrors the ZCode
+ * App's stop button, which sends a stop command directly (there is no
+ * "cancel" concept on the client — only stop).
+ *
+ * We fire `session/stop` here instead of deferring it to the turn loop. The
+ * loop is blocked for seconds at a time behind awaits (handleServerRequests
+ * waiting on a permission popup; dispatchEvent running per-event; the
+ * tool-result path awaiting dispatchEditDiff/dispatchPlanIfChanged backend
+ * calls with up to 8s timeouts). A deferred stop only fires once the loop
+ * finishes whatever await it is stuck in, so the user's press of stop can lag
+ * by the full remaining await window — the turn visibly "keeps running".
+ * `session/stop` is fire-and-forget and fully idempotent (the backend no-ops
+ * on a session with no active turn, and on a turn already aborted), so firing
+ * it eagerly is safe; the loop's `stopSent` guard prevents a second send.
+ *
+ * `turn.cancelled` is still set so the turn loop switches to its silent-drain
+ * path (translate to detect turnDone, but discard every internal event — no
+ * text/tool/usage is pushed after the user stopped).
  */
 export async function cancel(
   server: ZcodeAcpServer,
@@ -681,6 +695,10 @@ export async function cancel(
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
       turn.cancelled = true;
+      if (!turn.stopSent) {
+        stopBackendTurn(server, zcodeSid);
+        turn.stopSent = true;
+      }
       break; // one turn per session at a time
     }
   }
@@ -769,14 +787,17 @@ function withPreemptLock(
  * registered itself in pendingTurns), so a concurrent prompt entering its own
  * section is guaranteed to see this caller's turn and cancel it.
  *
- * We do NOT fire stop here — the old turn's own loop detects turn.cancelled
- * and fires stop itself (turn-loop cancel site), then keeps looping until the
- * backend emits turn.completed/turn.failed. Since the turn loop now waits for
- * that backend completion event before exiting, the pendingTurns cleanup in
- * its finally block is the reliable "backend is done, lock released" signal.
- * Waiting on pendingTurns deletion therefore blocks until the backend has
- * truly finished — far more reliable than probing session/goal show (which
- * times out during the backend's stop-finalization window).
+ * `session/stop` is fired here, immediately, for the same reason the cancel
+ * handler fires it eagerly: the old turn loop is blocked behind long awaits
+ * (permission popups, per-event dispatch, tool-result backend calls), so a
+ * deferred stop would lag by the remaining await window and the old turn
+ * would visibly keep running. The loop's `stopSent` guard skips a second
+ * send. See `cancel()` for the idempotency rationale.
+ *
+ * We then wait on pendingTurns deletion (the old turn's prompt() finally
+ * block) — that only runs after runEventTurn returns, which only happens once
+ * the backend emits turn.completed/turn.failed. With stop already sent, the
+ * backend aborts in milliseconds, so this wait is short.
  *
  * Best-effort: never throws. On timeout, continues anyway.
  */
@@ -790,7 +811,11 @@ async function preemptInFlightTurn(
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid && reqId !== selfRequestId) {
       oldRequestId = reqId;
-      turn.cancelled = true; // signal the old turn loop to fire stop + wait
+      turn.cancelled = true; // signal the old turn loop to silent-drain
+      if (!turn.stopSent) {
+        stopBackendTurn(server, zcodeSid);
+        turn.stopSent = true;
+      }
       break;
     }
   }
@@ -798,9 +823,10 @@ async function preemptInFlightTurn(
 
   log(`  [preempt] in-flight turn ${oldRequestId} found, cancelling`);
 
-  // Wait for the old turn to fully exit. The turn loop's cancel handling fires
-  // stop and keeps looping until the backend emits turn.completed/turn.failed,
-  // so pendingTurns deletion only happens once the backend is truly done.
+  // Wait for the old turn to fully exit. With stop already fired above, the
+  // backend aborts quickly and emits turn.completed; the old turn loop sees
+  // translator.turnDone and returns, then prompt()'s finally deletes the
+  // pendingTurns entry — which is what we are waiting on here.
   const PREEMPT_TIMEOUT_MS = 120_000;
   const t0 = Date.now();
   while (server.pendingTurns.has(oldRequestId)) {
@@ -1034,6 +1060,16 @@ async function runEventTurn(
   let lastStallCheck = Date.now();
   let emittedText = false;
   let emittedOutput = false;
+  // Thinking-phase feedback: GLM models spend seconds in CoT before emitting
+  // any model.streaming event, during which the backend is silent and the
+  // editor shows nothing — users perceive this as "frozen". To bridge that
+  // gap we emit ONE agent_thought_chunk hint shortly after the turn starts,
+  // but only if no real output (text / reasoning / tool) has arrived yet.
+  // It uses a dedicated messageId so it never collides with the real reasoning
+  // stream (thought_<chunkMsgId>) and is naturally superseded once content flows.
+  let turnStartedAt: number | null = null;
+  let thinkingHintSent = false;
+  const THINKING_HINT_DELAY_MS = 1200;
 
   while (Date.now() - lastProgress < NO_PROGRESS_MS) {
     // Drain + handle server→client requests (interaction/*). Refreshes the
@@ -1069,6 +1105,26 @@ async function runEventTurn(
 
     const ev = await listener.pollEvent(500);
     if (ev === null) {
+      // Thinking-phase hint: if the turn has started but produced no output
+      // yet (no text/reasoning/tool streamed), and we've been silent longer
+      // than the threshold, emit a single "thinking" thought chunk so the
+      // editor shows activity instead of a frozen screen. Skipped once any
+      // real output has been dispatched, and never sent after cancellation.
+      if (
+        !turn.cancelled &&
+        !thinkingHintSent &&
+        turnStartedAt !== null &&
+        !emittedText &&
+        !emittedOutput &&
+        Date.now() - turnStartedAt > THINKING_HINT_DELAY_MS
+      ) {
+        thinkingHintSent = true;
+        await sendSessionUpdate(cx, acpSid, {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: "正在思考…" },
+          messageId: `thinking_${chunkMsgId}`,
+        });
+      }
       // Stall reconciliation: probe authoritative status after 15s of silence.
       // Skipped while cancelled: we've already fired stop, so the backend will
       // emit its own completion event, and the reconciliation branch's
@@ -1105,6 +1161,12 @@ async function runEventTurn(
 
     lastProgress = Date.now();
     const internalEvents = translator.translate(ev);
+    // Capture the turn-start timestamp for the thinking-phase hint above.
+    // Done after translate so the flag flip on the turn.started event is
+    // observed on the same iteration that processes it.
+    if (turnStartedAt === null && translator.turnStarted) {
+      turnStartedAt = Date.now();
+    }
     if (turn.cancelled) {
       // Silent drain: translate advances the state machine (needed to detect
       // turnDone below) but we discard every internal event. No text, reasoning,

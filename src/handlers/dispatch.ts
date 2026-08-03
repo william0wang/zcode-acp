@@ -312,7 +312,11 @@ async function dispatchUsageDelta(
   // config.json limit.context so the editor can render the context bar.
   let size = ev.size;
   if (!size) {
-    const { providerId, modelId } = parseModelValue(await currentModelCached(server, acpSid));
+    // Resolve to the real backend session id — `acpSid` may be a lazy
+    // session/new placeholder that the backend rejects with "Session is not
+    // active", wasting a 5s request timeout on every usage_update.
+    const zcodeSid = server.resolveSid(acpSid) ?? acpSid;
+    const { providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid));
     size = modelContextWindow(providerId, modelId);
   }
   await sendSessionUpdate(cx, acpSid, {
