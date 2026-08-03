@@ -48,18 +48,25 @@ export interface ModelRef {
 }
 
 /**
- * Collect models from ALL enabled providers in config.json.
+ * Collect models from config.json for the dropdown.
  *
- * Only providers with `enabled: true` are listed — unenabled providers
- * (including builtins without an `enabled` flag) are excluded so the dropdown
- * reflects exactly what the user has activated in the ZCode desktop app.
+ * Builtin providers (id prefix `builtin:`) must be `enabled: true` — they
+ * reflect the plans the user activated in the ZCode desktop app. Custom
+ * (third-party) providers are included UNLESS explicitly `enabled: false`:
+ * the newer CLI leaves the flag unset on active third-party providers, so
+ * treating "absent" as enabled keeps them in the dropdown while still
+ * honoring an explicit disable.
  */
 export function loadAllModels(): ModelRef[] {
   try {
     const cfg = readConfig() as ConfigShape;
     const out: ModelRef[] = [];
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
-      if (!p?.enabled) continue;
+      if (isBuiltinProvider(pid)) {
+        if (p?.enabled !== true) continue;
+      } else if (p?.enabled === false) {
+        continue;
+      }
       const providerName = p.name ?? pid;
       for (const modelId of Object.keys(p.models ?? {})) {
         out.push({ providerId: pid, providerName, modelId });
@@ -107,7 +114,7 @@ export function modelContextWindow(providerId: string, modelId: string): number 
 }
 
 /** Builtin providerIds are prefixed with `builtin:` (e.g. `builtin:bigmodel`). */
-function isBuiltinProvider(providerId: string): boolean {
+export function isBuiltinProvider(providerId: string): boolean {
   return providerId.startsWith("builtin:");
 }
 
@@ -330,7 +337,9 @@ export async function emitConfigOptionUpdate(
         size,
       });
     } catch (e) {
-      log(`options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`);
+      log(
+        `options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`,
+      );
     }
   }
   return options;

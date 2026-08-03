@@ -22,6 +22,7 @@ import type {
 } from "../backend/types.js";
 import { buildModes, buildConfigOptions } from "../config/options.js";
 import { emitInitialUsage } from "../config/model-cache.js";
+import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   buildDiffContent,
@@ -42,6 +43,34 @@ import { handleServerRequests } from "./server-requests.js";
 function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: string } {
   const p = cwd || process.cwd();
   return { workspacePath: p, workspaceKey: p };
+}
+
+/**
+ * Push the provider registry to the backend so third-party providers (those in
+ * config.json) are recognised. The V4 backend doesn't auto-load them from
+ * config.json — without this RPC a session switching to a third-party model
+ * fails with `provider_not_configured`. Best-effort: failures are logged, not
+ * thrown, so a registry push problem never blocks session creation.
+ */
+async function syncProviderRegistry(server: ZcodeAcpServer, cwd: string): Promise<void> {
+  try {
+    const registry = buildProviderRegistry();
+    const resp = await server
+      .ensureBackend()
+      .request(
+        server.nextId(),
+        "workspace/updateProviderRegistry",
+        { workspace: workspaceFor(cwd), registry },
+        10000,
+      );
+    if (resp.error) {
+      warn(`provider-registry: sync failed: ${resp.error.message}`);
+      return;
+    }
+    log("provider-registry: synced to backend");
+  } catch (e) {
+    warn(`provider-registry: sync threw (${e instanceof Error ? e.message : String(e)})`);
+  }
 }
 
 /** Convert a millisecond timestamp to ISO 8601 (for session list). */
@@ -79,6 +108,11 @@ export async function newSession(
   server.titleEligibleSessions.add(sid);
   log(`session/new → ${sid}`);
   server.ensureBackgroundListener(sid);
+
+  // Push the provider registry so third-party providers in config.json are
+  // recognised by this isolated backend subprocess. Must happen before any
+  // model switch / turn that targets a non-builtin provider.
+  await syncProviderRegistry(server, cwd);
 
   // Sync to the App's tasks-index.sqlite so the App UI shows this session.
   // Best-effort; failures are logged inside upsertSessionTask and swallowed.
@@ -145,6 +179,10 @@ export async function resumeSession(
   };
   const runtimeModel = buildResumeRuntimeModel();
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
+  // Push the provider registry BEFORE resume: a resumed session may carry a
+  // third-party model in its history, and the backend needs the provider
+  // registered to even process the resume turn.
+  await syncProviderRegistry(server, cwd);
   await resumeBackendSession(server, zcParams);
 
   server.registerSession(targetSid, targetSid);
@@ -180,6 +218,10 @@ export async function loadSession(
   };
   const runtimeModel = buildResumeRuntimeModel();
   if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
+  // Push the provider registry BEFORE resume: a loaded session may carry a
+  // third-party model in its history, and the backend needs the provider
+  // registered to process it.
+  await syncProviderRegistry(server, cwd);
   await resumeBackendSession(server, zcParams);
   server.registerSession(targetSid, targetSid);
   log(`session/load → ${targetSid}`);

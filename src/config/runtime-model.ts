@@ -1,12 +1,11 @@
 /**
  * runtimeModel overlay plumbing.
  *
- * The runtimeModel NEVER carries `provider.apiKey`: the backend's runtimeModel
- * schema (`.strict()`) types apiKey as a discriminated union object
- * `{source:"inline"|"credential"|"env"|"server-config", ...}` — a bare string
- * is rejected with "Invalid params". The backend resolves auth itself from
- * config.json / its OAuth store, so the overlay only needs to name the
- * provider+model.
+ * The runtimeModel names the provider+model a session should use. For THIRD-
+ * PARTY providers it also carries `apiKey` as `{source:"inline", value:"<key>"}`;
+ * the backend resolves model-call auth from the overlay itself, so omitting it
+ * yields HTTP 401 "Missing API key". Builtin providers keep using their own
+ * OAuth/config auth and never inline a key. `apiFormat` mirrors `kind`.
  *
  * Two uses:
  *
@@ -20,9 +19,20 @@
  *   2. Model switch (`applyModelSwitch`): UI/slash model switching goes through
  *      `session/setModel` with both a `model` ref and a `runtimeModel` provider
  *      definition (runtime-only via `persistAsWorkspaceLastUsed:false`).
+ *
+ * Note: a provider registry push (`workspace/updateProviderRegistry`) is ALSO
+ * required for the backend to recognise third-party providers at all — without
+ * it the turn fails with `provider_not_configured` before auth is even tried.
+ * See provider-registry.ts.
  */
 
-import { findProviderConfig, formatModelValue, loadAllModels, parseModelValue } from "./options.js";
+import {
+  findProviderConfig,
+  formatModelValue,
+  isBuiltinProvider,
+  loadAllModels,
+  parseModelValue,
+} from "./options.js";
 import type { ModelRef } from "./options.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -30,7 +40,22 @@ import type { ZcodeAcpServer } from "../server.js";
 const DEFAULT_KIND = "anthropic";
 const DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/anthropic";
 
-/** Build a runtimeModel overlay for the given provider+model (no apiKey). */
+/** Map config.json `kind` → backend `apiFormat`. */
+function apiFormatForKind(kind: string | undefined): string {
+  if (kind?.includes("anthropic")) return "anthropic-messages";
+  return "openai-chat-completions";
+}
+
+/**
+ * Build a runtimeModel overlay for the given provider+model.
+ *
+ * For THIRD-PARTY providers the overlay MUST carry `apiKey` as the inline union
+ * `{source:"inline", value:"<key>"}` — the backend resolves model-call auth from
+ * the runtimeModel itself, so omitting it yields HTTP 401 "Missing API key".
+ * (This was previously believed unnecessary; live probing proved otherwise.)
+ * Builtin providers resolve auth from their own OAuth/config store, so no
+ * apiKey is sent for them. `apiFormat` mirrors `kind` per the backend's catalog.
+ */
 export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown | null {
   const p = findProviderConfig(ref.providerId);
   if (!p) {
@@ -42,16 +67,24 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
     Object.keys(p.models ?? {}).length > 0
       ? Object.keys(p.models ?? {}).map((m) => ({ modelId: m }))
       : [{ modelId: ref.modelId }];
+  const provider: Record<string, unknown> = {
+    providerId: ref.providerId,
+    kind: p.kind ?? DEFAULT_KIND,
+    apiFormat: apiFormatForKind(p.kind),
+    baseURL,
+    models,
+  };
+  // Third-party providers must inline their apiKey — the backend won't resolve
+  // it from anywhere else and the call fails with 401 without it. Builtin
+  // providers use OAuth/config auth and must NOT send an inline key.
+  if (!isBuiltinProvider(ref.providerId) && p.options?.apiKey) {
+    provider.apiKey = { source: "inline", value: p.options.apiKey };
+  }
   return {
     revision,
     generatedAt: Date.now(),
     model: { providerId: ref.providerId, modelId: ref.modelId },
-    provider: {
-      providerId: ref.providerId,
-      kind: p.kind ?? DEFAULT_KIND,
-      baseURL,
-      models,
-    },
+    provider,
   };
 }
 

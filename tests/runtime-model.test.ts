@@ -4,9 +4,13 @@
  * History: loadProviderModels() hardcoded a single builtin provider id, so
  * custom providers configured in the ZCode desktop app never appeared in the
  * dropdown. These tests lock the new behaviour: loadAllModels() aggregates ALL
- * enabled providers, buildRuntimeModel() NEVER carries apiKey (the backend's
- * runtimeModel schema rejects it), builtin models encode as bare modelIds, and
- * third-party models carry their providerId prefix.
+ * enabled builtin providers PLUS every custom provider (the newer CLI no
+ * longer sets `enabled` on third-party providers, so filtering on it would
+ * drop them), buildRuntimeModel() inlines apiKey as {source:"inline",value}
+ * for third-party providers (the backend resolves model-call auth from the
+ * overlay itself; omitting it yields HTTP 401) but omits it for builtins.
+ * Builtin models encode as bare modelIds, and third-party models carry their
+ * providerId prefix.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -53,6 +57,14 @@ const FAKE_CONFIG = {
       options: { apiKey: "test-key-beta", baseURL: "https://example.test/api" },
       models: { "beta-1": { limit: { context: 200000 } } },
     },
+    "custom-provider-gamma": {
+      name: "Gamma",
+      kind: "openai-compatible",
+      enabled: false,
+      source: "custom",
+      options: { apiKey: "test-key-gamma", baseURL: "http://127.0.0.1:8001/v1" },
+      models: { "gamma-1": { limit: { context: 200000 } } },
+    },
   },
 };
 
@@ -76,16 +88,27 @@ const { loadAllModels, modelContextWindow, parseModelValue, formatModelValue, bu
   });
 
 describe("loadAllModels", () => {
-  it("only collects models from enabled providers", () => {
+  it("collects enabled builtins + active custom providers", () => {
     const models = loadAllModels();
     const ids = models.map((m) => m.modelId);
-    // Enabled builtin + enabled custom. The disabled Secondary and the
-    // custom-without-enabled (Beta) must NOT appear.
+    // Enabled builtin + enabled custom appear.
     expect(ids).toContain("model-a");
     expect(ids).toContain("model-b");
     expect(ids).toContain("alpha-1");
-    // beta-1 is in a provider WITHOUT an enabled flag → excluded.
-    expect(ids).not.toContain("beta-1");
+    // Disabled builtin (Secondary) stays out — its model-a never duplicates.
+    expect(ids.filter((id) => id === "model-a")).toHaveLength(1);
+    // beta-1 (custom WITHOUT an enabled flag) is included: the newer CLI leaves
+    // `enabled` unset on active third-party providers, so "absent" = enabled.
+    expect(ids).toContain("beta-1");
+    // gamma-1 (custom with an EXPLICIT enabled:false) is excluded.
+    expect(ids).not.toContain("gamma-1");
+  });
+
+  it("tracks provider identity for every custom provider", () => {
+    const models = loadAllModels();
+    const beta = models.find((m) => m.modelId === "beta-1");
+    expect(beta?.providerName).toBe("Beta");
+    expect(beta?.providerId).toBe("custom-provider-beta");
   });
 
   it("carries the provider name for display", () => {
@@ -140,29 +163,38 @@ describe("parseModelValue / formatModelValue", () => {
 });
 
 describe("buildRuntimeModel", () => {
-  it("NEVER carries apiKey — the backend schema rejects it and resolves auth itself", () => {
-    // Even for a custom provider WITH an apiKey in config (custom-provider-alpha),
-    // the overlay must omit it: the backend's runtimeModel schema types apiKey as
-    // a discriminated-union object, and a bare string → "Invalid params".
+  it("inlines apiKey as {source:'inline', value} for third-party providers", () => {
+    // The backend resolves model-call auth from the runtimeModel itself — a
+    // third-party overlay WITHOUT apiKey yields HTTP 401 "Missing API key".
+    // apiKey is the inline union, never a bare string (the strict schema rejects it).
     const rm = buildRuntimeModel({
       providerId: "custom-provider-alpha",
       providerName: "Alpha",
       modelId: "alpha-1",
-    }) as { provider: { apiKey?: string; baseURL?: string; kind?: string } };
+    }) as {
+      provider: {
+        apiKey?: { source: string; value: string };
+        baseURL?: string;
+        kind?: string;
+        apiFormat?: string;
+      };
+    };
 
-    expect(rm.provider.apiKey).toBeUndefined();
+    expect(rm.provider.apiKey).toEqual({ source: "inline", value: "test-key-alpha" });
     expect(rm.provider.baseURL).toBe("http://127.0.0.1:8000/v1");
     expect(rm.provider.kind).toBe("openai-compatible");
+    expect(rm.provider.apiFormat).toBe("openai-chat-completions");
   });
 
-  it("omits apiKey for builtin OAuth providers (no apiKey in config)", () => {
+  it("omits apiKey for builtin OAuth providers (auth resolved from config/OAuth)", () => {
     const rm = buildRuntimeModel({
       providerId: "builtin:primary",
       providerName: "Primary",
       modelId: "model-a",
-    }) as { provider: { apiKey?: string } };
+    }) as { provider: { apiKey?: string; apiFormat?: string } };
 
     expect(rm.provider.apiKey).toBeUndefined();
+    expect(rm.provider.apiFormat).toBe("anthropic-messages");
   });
 
   it("returns null for an unknown provider", () => {
