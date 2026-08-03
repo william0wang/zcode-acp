@@ -41,10 +41,12 @@ resume / fork`. The prompt capabilities (image/audio/embeddedContext) and
   never supplies credentials. Omitting the `type` field defaults to `"agent"`,
   which the ACP registry's auth-check accepts as "agent self-handles auth".
 
-`initialize` does **not** spawn the backend. The backend is lazily created on
-the first `session/new` (via `ensureBackend()`), so the handshake succeeds
-even in an environment without `~/.zcode/v2/config.json` (e.g. the registry
-CI runs `initialize` with an isolated `HOME`).
+`initialize` does **not** spawn the backend, and neither does `session/new`:
+the backend is lazily created on the first backend RPC — for a fresh session
+that is the first `session/create` at its first use (prompt / config change /
+extension method). This keeps the handshake succeeding even in an environment
+without `~/.zcode/v2/config.json` (e.g. the registry CI runs `initialize` with
+an isolated `HOME`).
 
 Client capabilities advertised at `initialize` are recorded on the server
 (`clientCapabilities`) and drive later behaviour: `supportsElicitationForm()`
@@ -56,12 +58,20 @@ terminal UI.
 ### 1. Session lifecycle
 
 ```
-session/new → session/create → register EventListener
+session/new → placeholder id (backend session NOT created yet)
+     |
+first use: prompt / set_config_option / extension method
+     |
+  session/create → register EventListener
      |
 prompt request → session/send → EventTranslator translates → dispatchEvent
      |                                  |
   end_turn / cancelled         session/update notification
 ```
+
+Sessions are materialized lazily (`ensureRealSession`): an editor startup that
+never sends a message leaves no empty session in the backend or the App's task
+index.
 
 ### 2. Event stream subscription
 

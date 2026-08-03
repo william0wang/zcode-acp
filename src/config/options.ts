@@ -151,19 +151,23 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
-/** Build the ACP SessionModeState ({currentModeId, availableModes}). */
+/** Build the ACP SessionModeState ({currentModeId, availableModes}).
+ *  zcodeSid null = pending session (session/new not yet materialized) — skip
+ *  the backend read and return defaults. */
 export async function buildModes(
   server: ZcodeAcpServer,
-  zcodeSid: string,
+  zcodeSid: string | null,
 ): Promise<acp.SessionModeState> {
   let currentMode = "yolo";
-  try {
-    const read = await sessionRead(server, zcodeSid);
-    const settings = (read.settings ?? {}) as Record<string, unknown>;
-    const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-    currentMode = (modeSet.current as string) ?? currentMode;
-  } catch {
-    // keep default
+  if (zcodeSid !== null) {
+    try {
+      const read = await sessionRead(server, zcodeSid);
+      const settings = (read.settings ?? {}) as Record<string, unknown>;
+      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
+      currentMode = (modeSet.current as string) ?? currentMode;
+    } catch {
+      // keep default
+    }
   }
   return {
     currentModeId: currentMode,
@@ -177,36 +181,41 @@ export async function buildModes(
   };
 }
 
-/** Build the ACP configOptions array (3 items: model/mode/thought). */
+/** Build the ACP configOptions array (3 items: model/mode/thought).
+ *  zcodeSid null = pending session — skip the backend read and use defaults;
+ *  mode defaults to "yolo" (the mode session/create hardcodes) so the dropdown
+ *  matches the mode indicator for a fresh session. */
 export async function buildConfigOptions(
   server: ZcodeAcpServer,
-  zcodeSid: string,
+  zcodeSid: string | null,
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
   let currentModelId = "GLM-5.2";
-  let currentMode = "build";
+  let currentMode = zcodeSid === null ? "yolo" : "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
 
-  try {
-    const read = await sessionRead(server, zcodeSid);
-    const settings = (read.settings ?? {}) as Record<string, unknown>;
-    const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-    currentMode = (modeSet.current as string) ?? currentMode;
-    const modelSet = (settings.model as Record<string, unknown>) ?? {};
-    // settings.model.current is { providerId, modelId, variant? } — read BOTH so
-    // we can disambiguate same-named models across providers.
-    const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
-    if (cur.providerId) currentProviderId = cur.providerId;
-    if (cur.modelId) currentModelId = cur.modelId;
-    const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
-    currentThought = (tlSet.current as string) ?? currentThought;
-    const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
-    if (tlAvail.length > 0) {
-      thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
+  if (zcodeSid !== null) {
+    try {
+      const read = await sessionRead(server, zcodeSid);
+      const settings = (read.settings ?? {}) as Record<string, unknown>;
+      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
+      currentMode = (modeSet.current as string) ?? currentMode;
+      const modelSet = (settings.model as Record<string, unknown>) ?? {};
+      // settings.model.current is { providerId, modelId, variant? } — read BOTH so
+      // we can disambiguate same-named models across providers.
+      const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
+      if (cur.providerId) currentProviderId = cur.providerId;
+      if (cur.modelId) currentModelId = cur.modelId;
+      const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
+      currentThought = (tlSet.current as string) ?? currentThought;
+      const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
+      if (tlAvail.length > 0) {
+        thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
+      }
+    } catch {
+      // keep defaults
     }
-  } catch {
-    // keep defaults
   }
 
   // currentValue encodes provider+model so the switch handler can locate the

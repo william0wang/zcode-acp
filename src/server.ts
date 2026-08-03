@@ -48,6 +48,19 @@ export class ZcodeAcpServer {
    * index rather than assuming equality.
    */
   readonly acpSidByZcodeSid = new Map<string, string>();
+  /**
+   * Sessions returned by `session/new` whose backend session has not been
+   * created yet (acp_sid → { cwd }). session/new defers `session/create` until
+   * the session is first used, so an editor startup that never prompts leaves
+   * no empty session in the backend or the App's task index. `ensureRealSession`
+   * materializes these on first use; entries live only as long as the bridge
+   * process (a never-used placeholder vanishes with it).
+   *
+   * `creating` holds the in-flight materialization promise while a first-use
+   * create is running, so concurrent first-uses (e.g. a raced double prompt)
+   * share one `session/create` instead of creating two backend sessions.
+   */
+  readonly pendingSessions = new Map<string, { cwd: string; creating?: Promise<string> }>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();
   /**

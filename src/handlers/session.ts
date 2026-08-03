@@ -1,10 +1,14 @@
 /**
  * Session lifecycle handlers: initialize, new, list, resume, load, prompt, cancel.
  *
- * These map ACP session methods to ZCode app-server calls. `session/prompt` runs
- * the event-driven turn loop (subscribe-before-send ordering, no-progress
- * timeout, stall reconciliation). ZCode events are translated via
- * EventTranslator and dispatched as ACP `session/update` notifications.
+ * These map ACP session methods to ZCode app-server calls. `session/new` is
+ * lazy: it returns a placeholder id and defers zcode `session/create` to the
+ * session's first use (`ensureRealSession`), so an editor startup that never
+ * prompts leaves no empty session in the backend or the App's task index.
+ * `session/prompt` runs the event-driven turn loop (subscribe-before-send
+ * ordering, no-progress timeout, stall reconciliation). ZCode events are
+ * translated via EventTranslator and dispatched as ACP `session/update`
+ * notifications.
  */
 
 import process from "node:process";
@@ -79,58 +83,99 @@ function toIso(ms: number | undefined): string | undefined {
   return new Date(ms).toISOString();
 }
 
-/** `session/new` → zcode `session/create` (mode hardcoded yolo). */
+/**
+ * `session/new` → local placeholder id. The real zcode `session/create` is
+ * deferred to first use (`ensureRealSession`) so an editor startup that never
+ * sends a message leaves no empty session in the backend or the App's task
+ * index. The created session uses mode yolo (hardcoded).
+ */
 export async function newSession(
   server: ZcodeAcpServer,
   params: acp.NewSessionRequest,
 ): Promise<acp.NewSessionResponse> {
-  const backend = server.ensureBackend();
   const cwd = params.cwd ?? process.cwd();
-  log(`session/new: cwd=${cwd}`);
-
-  const resp = await backend.request(
-    server.nextId(),
-    "session/create",
-    { workspace: workspaceFor(cwd), mode: "yolo" },
-    15000,
-  );
-  if (resp.error) {
-    throw new Error(`zcode create failed: ${resp.error.message ?? ""}`);
-  }
-  const result = (resp.result ?? {}) as ZcodeCreateResult;
-  const session = result.session ?? {};
-  const sid = session.sessionId;
-  if (!sid) throw new Error("zcode create returned no sessionId");
-
-  server.registerSession(sid, sid);
+  // Placeholder id — the client addresses this session with it until the
+  // backend session materializes; never shown in session/list.
+  const acpSid = randomUUID();
+  server.pendingSessions.set(acpSid, { cwd });
   // Only freshly-created sessions are eligible for auto-title on first
   // end_turn; resumed/loaded sessions already have a title and must keep it.
-  server.titleEligibleSessions.add(sid);
-  log(`session/new → ${sid}`);
-  server.ensureBackgroundListener(sid);
+  server.titleEligibleSessions.add(acpSid);
+  log(`session/new (lazy) → ${acpSid} cwd=${cwd}`);
 
-  // Push the provider registry so third-party providers in config.json are
-  // recognised by this isolated backend subprocess. Must happen before any
-  // model switch / turn that targets a non-builtin provider.
-  await syncProviderRegistry(server, cwd);
-
-  // Sync to the App's tasks-index.sqlite so the App UI shows this session.
-  // Best-effort; failures are logged inside upsertSessionTask and swallowed.
-  const { upsertSessionTask } = await import("../tasks-index.js");
-  void upsertSessionTask({
-    workspaceKey: cwd,
-    taskId: sid,
-    title: session.title ?? "",
-    traceId: session.traceId,
-  });
-
-  const modes = await buildModes(server, sid);
-  server.lastMode.set(sid, modes.currentModeId);
+  // No backend RPC yet: modes/configOptions are built from defaults (the
+  // pending session's real values arrive via updates once materialized).
+  const modes = await buildModes(server, null);
+  server.lastMode.set(acpSid, modes.currentModeId);
   return {
-    sessionId: sid,
+    sessionId: acpSid,
     modes,
-    configOptions: await buildConfigOptions(server, sid),
+    configOptions: await buildConfigOptions(server, null),
   };
+}
+
+/**
+ * Materialize a lazy `session/new` placeholder into a real backend session on
+ * first use (prompt / set_config_option / extension methods). Idempotent:
+ * returns the existing mapping for already-created sessions, and concurrent
+ * first-uses share a single `session/create` via the pending entry's `creating`
+ * promise. Unknown ids throw.
+ */
+export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string): Promise<string> {
+  const existing = server.resolveSid(acpSid);
+  if (existing) return existing;
+  const pending = server.pendingSessions.get(acpSid);
+  if (!pending) throw new Error(`session ${acpSid} not found`);
+  if (pending.creating) return pending.creating;
+
+  // The create body runs synchronously up to its first await, so the `creating`
+  // promise is stored before any concurrent caller can observe the entry.
+  const creating = (async () => {
+    const backend = server.ensureBackend();
+    const resp = await backend.request(
+      server.nextId(),
+      "session/create",
+      { workspace: workspaceFor(pending.cwd), mode: "yolo" },
+      15000,
+    );
+    if (resp.error) {
+      throw new Error(`zcode create failed: ${resp.error.message ?? ""}`);
+    }
+    const result = (resp.result ?? {}) as ZcodeCreateResult;
+    const session = result.session ?? {};
+    const sid = session.sessionId;
+    if (!sid) throw new Error("zcode create returned no sessionId");
+
+    server.pendingSessions.delete(acpSid);
+    server.registerSession(acpSid, sid);
+    log(`session/new ${acpSid} → created ${sid} (lazy, on first use)`);
+    server.ensureBackgroundListener(sid);
+
+    // Push the provider registry so third-party providers in config.json are
+    // recognised by this isolated backend subprocess. Must happen before any
+    // model switch / turn that targets a non-builtin provider.
+    await syncProviderRegistry(server, pending.cwd);
+
+    // Sync to the App's tasks-index.sqlite so the App UI shows this session.
+    // Best-effort; failures are logged inside upsertSessionTask and swallowed.
+    const { upsertSessionTask } = await import("../tasks-index.js");
+    void upsertSessionTask({
+      workspaceKey: pending.cwd,
+      taskId: sid,
+      title: session.title ?? "",
+      traceId: session.traceId,
+    });
+
+    return sid;
+  })();
+  pending.creating = creating;
+  try {
+    return await creating;
+  } finally {
+    // Reset the in-flight marker (on success the sessionMap short-circuits
+    // later calls; on failure this lets the next use retry the create).
+    pending.creating = undefined;
+  }
 }
 
 /** `session/list` → zcode `session/list`. */
@@ -315,8 +360,6 @@ export async function prompt(
   requestId: number,
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
-  const zcodeSid = server.resolveSid(params.sessionId);
-  if (!zcodeSid) throw new Error(`session ${params.sessionId} not found`);
 
   // Extract prompt text + image attachments from ACP ContentBlock[].
   const text = extractPromptText(params.prompt);
@@ -324,6 +367,10 @@ export async function prompt(
   // A prompt is valid if it has text OR at least one image attachment (a user
   // may drag in an image with no accompanying text).
   if (!text && attachments.length === 0) throw new Error("empty prompt");
+
+  // Materialize a lazy session/new placeholder on first use. Placed after the
+  // empty-prompt check so an invalid request doesn't create a backend session.
+  const zcodeSid = await ensureRealSession(server, params.sessionId);
 
   // Slash-command interception: dispatches directly to ZCode methods and
   // returns end_turn without entering the turn loop. Unknown /x falls through.
@@ -528,11 +575,11 @@ export async function setConfigOptionHandler(
   params: acp.SetSessionConfigOptionRequest,
   cx: acp.AgentContext,
 ): Promise<acp.SetSessionConfigOptionResponse> {
-  const zcodeSid = server.resolveSid(params.sessionId);
-  if (!zcodeSid) throw new Error(`session ${params.sessionId} not found`);
   if (typeof params.value !== "string") {
     throw new Error(`unsupported config value type: ${String(params.value)}`);
   }
+  // Materialize a lazy session/new placeholder on first use.
+  const zcodeSid = await ensureRealSession(server, params.sessionId);
   const { setConfigOption, emitConfigOptionUpdate } = await import("../config/options.js");
   const result = await setConfigOption(server, zcodeSid, params.configId, params.value);
   if (!result) {

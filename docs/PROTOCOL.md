@@ -78,7 +78,10 @@ Messages are classified by the presence of `id` and `method`:
 
 ### `session/create`
 
-Create a new session.
+Create a new session. Note: the bridge defers this call until a session's
+first use — ACP `session/new` returns a local placeholder id and materializes
+the backend session (this RPC) on the first prompt / config change / extension
+method, so an editor startup that never sends a message leaves no session.
 
 **Request:**
 ```json

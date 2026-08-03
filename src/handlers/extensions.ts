@@ -20,6 +20,7 @@ import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
+import { ensureRealSession } from "./session.js";
 
 /** Build the zcode `target` object from ACP params (checkpoint or latest). */
 function buildCheckpointTarget(params: ExtensionParams): unknown {
@@ -28,11 +29,15 @@ function buildCheckpointTarget(params: ExtensionParams): unknown {
   return { kind: "latestCheckpoint" };
 }
 
-/** Resolve zcode sid from ACP params; throw if unknown. */
-function resolveSidOrThrow(server: ZcodeAcpServer, params: { sessionId: string }): string {
-  const sid = server.resolveSid(params.sessionId);
-  if (!sid) throw new Error(`session ${params.sessionId} not found`);
-  return sid;
+/**
+ * Resolve zcode sid from ACP params, materializing a lazy session/new
+ * placeholder on first use; throw if the session is unknown.
+ */
+async function resolveSidOrThrow(
+  server: ZcodeAcpServer,
+  params: { sessionId: string },
+): Promise<string> {
+  return ensureRealSession(server, params.sessionId);
 }
 
 interface ExtensionParams {
@@ -44,7 +49,7 @@ type Result = Record<string, unknown>;
 
 /** session/fork → zcode session/fork: branch a new session from a checkpoint. */
 export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const backend = server.ensureBackend();
   const resp = await backend.request(
     server.nextId(),
@@ -66,7 +71,7 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
 
 /** session/rewind → zcode session/rewind: restore workspace files to a checkpoint. */
 export async function rewind(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const zcParams: Record<string, unknown> = {
     sessionId: zcodeSid,
     target: buildCheckpointTarget(params),
@@ -85,7 +90,7 @@ export async function rewindCascade(
   server: ZcodeAcpServer,
   params: ExtensionParams,
 ): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const zcParams: Record<string, unknown> = {
     sessionId: zcodeSid,
     target: buildCheckpointTarget(params),
@@ -102,7 +107,7 @@ export async function rewindCascade(
 
 /** session/goal → zcode session/goal: read/set/replace/clear/pause/resume the goal. */
 export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const action = (params.action as string) ?? "show";
   const zcParams: Record<string, unknown> = { sessionId: zcodeSid, action };
   if ((action === "set" || action === "replace") && params.objective !== undefined) {
@@ -135,7 +140,7 @@ export async function compact(
   cx: acp.AgentContext,
 ): Promise<Result> {
   const acpSid = params.sessionId;
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const resp = await server
     .ensureBackend()
     .request(server.nextId(), "session/compact", { sessionId: zcodeSid }, 30000);
@@ -170,7 +175,7 @@ export async function compact(
 
 /** session/steer → zcode session/steer: append instructions to a running turn. */
 export async function steer(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const content = String(params.content ?? "");
   if (!content.trim()) throw new Error("steer requires content");
   const resp = await server
@@ -187,7 +192,7 @@ export async function cancelBackgroundTask(
   server: ZcodeAcpServer,
   params: ExtensionParams,
 ): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const taskId = String(params.taskId ?? "");
   if (!taskId) throw new Error("cancelBackgroundTask requires taskId");
   const resp = await server
@@ -214,7 +219,7 @@ export async function setThoughtLevel(
   server: ZcodeAcpServer,
   params: ExtensionParams,
 ): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   // 3.3.0 marks thoughtLevel optional (omitting it resets to the model's
   // default). Forward it only when present so a reset call isn't rejected.
   const zcParams: Record<string, unknown> = { sessionId: zcodeSid };
@@ -232,7 +237,7 @@ export async function updateRuntimeModelConfig(
   server: ZcodeAcpServer,
   params: ExtensionParams,
 ): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const runtimeModel = params.runtimeModel;
   if (!runtimeModel) throw new Error("updateRuntimeModelConfig requires runtimeModel");
   const zcParams: Record<string, unknown> = { sessionId: zcodeSid, runtimeModel };
@@ -248,7 +253,7 @@ export async function updateRuntimeModelConfig(
 
 /** session/setModel → applyModelSwitch (runtime overlay, not persistence). */
 export async function setModel(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const modelId = params.modelId as string;
   if (!modelId) throw new Error("setModel requires modelId");
   const ok = await applyModelSwitch(server, zcodeSid, modelId);
@@ -264,7 +269,7 @@ export async function setMode(
   cx: acp.AgentContext,
 ): Promise<Result> {
   const acpSid = params.sessionId;
-  const zcodeSid = resolveSidOrThrow(server, params);
+  const zcodeSid = await resolveSidOrThrow(server, params);
   const mode = params.mode;
   if (!mode) throw new Error("setMode requires mode");
   const resp = await server
