@@ -44,7 +44,7 @@ import { sendSessionUpdate } from "./io.js";
 
 /** A dedup entry tracking reannounced zcode ids + the cached result. */
 interface DedupEntry {
-  zcodeIds: number[];
+  zcodeIds: Array<number | string>;
   result?: ZcodeInteractionResponse;
 }
 
@@ -662,7 +662,7 @@ function sendInteractionReply(
   backend: ZcodeBackend,
   pending: Map<string, DedupEntry>,
   dedupKey: string | null,
-  firstZcodeId: number,
+  firstZcodeId: number | string,
   result: ZcodeInteractionResponse,
 ): void {
   const ids = dedupKey && pending.has(dedupKey) ? pending.get(dedupKey)!.zcodeIds : [firstZcodeId];
@@ -682,21 +682,23 @@ function sendInteractionReply(
 /** Send a zcode response (result) for a server→client request id. */
 function sendZcodeReply(
   backend: ZcodeBackend,
-  zcodeId: number,
+  zcodeId: number | string,
   result: ZcodeInteractionResponse,
 ): void {
   // zcode expects {id, result} — but our backend.notify sends {method, params}. Use a raw write.
   // The backend's notify is for notifications; replies need the id. We route via a private seam.
-  (backend as unknown as { sendReply: (id: number, result: unknown) => void }).sendReply(
+  (backend as unknown as { sendReply: (id: number | string, result: unknown) => void }).sendReply(
     zcodeId,
     result,
   );
 }
 
 /** Send a zcode error response. */
-function sendZcodeError(backend: ZcodeBackend, zcodeId: number, message: string): void {
+function sendZcodeError(backend: ZcodeBackend, zcodeId: number | string, message: string): void {
   (
-    backend as unknown as { sendError: (id: number, code: number, message: string) => void }
+    backend as unknown as {
+      sendError: (id: number | string, code: number, message: string) => void;
+    }
   ).sendError(zcodeId, -32601, message);
 }
 

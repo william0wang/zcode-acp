@@ -168,4 +168,50 @@ describe("ZcodeBackend reader routing (unit)", () => {
     expect((remaining[0]!.params as { sessionId: string }).sessionId).toBe("sess_b");
     b.close();
   });
+
+  it("auto-replies session/requestRuntimePreferences instead of queueing it", async () => {
+    const b = makeRoutingSubject();
+    // Spy on what gets written back to the backend.
+    const writes: string[] = [];
+    const stdin = b.proc.stdin;
+    if (!stdin) throw new Error("test backend has no stdin");
+    const origWrite: typeof stdin.write = stdin.write.bind(stdin);
+    stdin.write = ((chunk: unknown, ...args: unknown[]) => {
+      writes.push(String(chunk));
+      return origWrite(chunk as never, ...(args as never[]));
+    }) as typeof stdin.write;
+
+    b.route({
+      id: "server-1",
+      method: "session/requestRuntimePreferences",
+      params: { sessionId: "sess_x", scope: "runtime-materialization" },
+    });
+
+    // The handshake must NOT land in the server-request queue (create is
+    // awaiting its response; nobody drains the queue during session/new).
+    expect(b.pollServerRequests()).toHaveLength(0);
+    // And a schema-valid default reply must be written back immediately.
+    const written = writes.join("");
+    expect(written).toContain('"id":"server-1"');
+    expect(written).toContain('"nativeSearchEnhancementsEnabled":false');
+    expect(written).toContain('"memoryEnabled":false');
+    // Must stay false so AskUserQuestion keeps flowing through the bridge's
+    // interaction path instead of being auto-resolved by the app-server.
+    expect(written).toContain('"askUserQuestionAutoResolutionEnabled":false');
+    b.close();
+  });
+
+  it("still queues other server→client requests untouched", () => {
+    const b = makeRoutingSubject();
+    b.route({
+      id: "server-9",
+      method: "interaction/requestPermission",
+      params: { requestId: "r9", toolCallId: "t9", sessionId: "sess_x" },
+    });
+    const reqs = b.pollServerRequests();
+    expect(reqs).toHaveLength(1);
+    expect(reqs[0]!.id).toBe("server-9");
+    expect(reqs[0]!.method).toBe("interaction/requestPermission");
+    b.close();
+  });
 });

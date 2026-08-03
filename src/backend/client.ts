@@ -36,7 +36,7 @@ interface PendingRequest {
 
 /** A server→client request that we must reply to. */
 export interface ServerRequest {
-  id: number;
+  id: number | string;
   method: string;
   params:
     ZcodeInteractionPermissionParams | ZcodeInteractionUserInputParams | Record<string, unknown>;
@@ -161,6 +161,18 @@ export class ZcodeBackend {
       // id + method: our pending response wins the race; else it's a server→client request.
       if (this.pending.has(id)) {
         this.resolvePending(id, msg as unknown as ZcodeResponse);
+      } else if (method === "session/requestRuntimePreferences") {
+        // Newer app-servers block `session/create` until this handshake is
+        // answered. Reply with defaults — no editor interaction needed.
+        // Keep askUserQuestionAutoResolutionEnabled false so AskUserQuestion
+        // still flows through the bridge's interaction path instead of being
+        // auto-resolved server-side. Without this reply, create hangs.
+        log(`backend: auto-replying ${method} (id=${String(id)}) with default preferences`);
+        this.sendReply(id, {
+          nativeSearchEnhancementsEnabled: false,
+          memoryEnabled: false,
+          askUserQuestionAutoResolutionEnabled: false,
+        });
       } else {
         this.serverRequests.push({
           id,
@@ -251,7 +263,7 @@ export class ZcodeBackend {
   }
 
   /** Reply to a zcode server→client request with a result (id + result). */
-  sendReply(id: number, result: unknown): void {
+  sendReply(id: number | string, result: unknown): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
       warn("backend: sendReply dropped (stdin closed)");
@@ -264,7 +276,7 @@ export class ZcodeBackend {
   }
 
   /** Reply to a zcode server→client request with an error. */
-  sendError(id: number, code: number, message: string): void {
+  sendError(id: number | string, code: number, message: string): void {
     const stdin = this.proc.stdin;
     if (!stdin || stdin.destroyed) {
       warn("backend: sendError dropped (stdin closed)");
