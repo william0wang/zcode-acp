@@ -104,6 +104,19 @@ export interface FilesChangedEvent {
   files: string[];
 }
 
+/**
+ * Session settings changed (model/mode/thoughtLevel switch). Carries the new
+ * authoritative values from the backend's `state.updated` patch so the
+ * dispatcher can push config_option_update / current_mode_update without a
+ * `session/read` round-trip (and without waiting for turn completion).
+ */
+export interface ConfigChangedEvent {
+  kind: "ConfigChanged";
+  mode?: string;
+  model?: { providerId: string; modelId: string };
+  thought?: string;
+}
+
 export type InternalEvent =
   | ToolCallNewEvent
   | ToolCallUpdateEvent
@@ -111,4 +124,5 @@ export type InternalEvent =
   | TextDeltaEvent
   | ReasoningDeltaEvent
   | PlanUpdateEvent
-  | FilesChangedEvent;
+  | FilesChangedEvent
+  | ConfigChangedEvent;

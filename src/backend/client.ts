@@ -186,23 +186,41 @@ export class ZcodeBackend {
       // Notification.
       if (method === "session/event") {
         const ev = (msg.params ?? {}) as unknown as ZcodeEvent;
-        const sid = ev.sessionId;
-        const set = sid ? this.listeners.get(sid) : undefined;
-        if (set) {
-          // Iterate a snapshot so a listener that (un)registers during dispatch
-          // doesn't mutate the set under us.
-          for (const listener of [...set]) {
-            try {
-              listener.handleEvent(ev);
-            } catch (e) {
-              warn(
-                `backend: listener.handleEvent threw: ${e instanceof Error ? e.message : String(e)}`,
-              );
-            }
-          }
+        this.dispatchEvent(ev);
+      } else if (method === "state.updated") {
+        // Session settings changed (model/mode/thoughtLevel switch, incl.
+        // mid-turn). The params carry the authoritative full settings patch:
+        //   { patch: {mode, model, thoughtLevel, …}, reason, revision, sessionId }
+        // Wrap as a ZcodeEvent so it flows through the same listener pipeline.
+        const params = (msg.params ?? {}) as Record<string, unknown>;
+        const ev: ZcodeEvent = {
+          sessionId: String(params.sessionId ?? ""),
+          seq: 0,
+          type: "state.updated",
+          payload: params,
+        };
+        this.dispatchEvent(ev);
+      }
+      // Other notifications are currently ignored (process/resourceSample, …).
+    }
+  }
+
+  /** Deliver a ZcodeEvent to every listener registered for its session. */
+  private dispatchEvent(ev: ZcodeEvent): void {
+    const sid = ev.sessionId;
+    const set = sid ? this.listeners.get(sid) : undefined;
+    if (set) {
+      // Iterate a snapshot so a listener that (un)registers during dispatch
+      // doesn't mutate the set under us.
+      for (const listener of [...set]) {
+        try {
+          listener.handleEvent(ev);
+        } catch (e) {
+          warn(
+            `backend: listener.handleEvent threw: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
       }
-      // Other notifications are currently ignored (state.updated, etc.).
     }
   }
 

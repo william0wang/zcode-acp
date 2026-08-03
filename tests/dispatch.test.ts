@@ -285,4 +285,45 @@ describe("dispatchEvent", () => {
       entries: [{ content: "do X", status: "pending", priority: "high" }],
     });
   });
+
+  it("ConfigChanged (mode) emits config_option_update + current_mode_update", async () => {
+    const { cx, sent } = mockContext();
+    const server = makeServer(false);
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      { kind: "ConfigChanged", mode: "plan", model: { providerId: "anthropic", modelId: "GLM-5.2" } },
+      CHUNK,
+    );
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { id: "model", currentValue: "anthropic\\GLM-5.2" },
+        { id: "mode", currentValue: "plan" },
+        { id: "thought", currentValue: "high" },
+      ],
+    });
+    expect(sent[1]).toEqual({
+      sessionUpdate: "current_mode_update",
+      currentModeId: "plan",
+    });
+    // Reconciliation mirror: lastMode reflects the advertised value.
+    expect(server.lastMode.get(SID)).toBe("plan");
+  });
+
+  it("ConfigChanged (thought only) emits config_option_update, no mode update", async () => {
+    const { cx, sent } = mockContext();
+    await dispatchEvent(makeServer(false), cx, SID, { kind: "ConfigChanged", thought: "max" }, CHUNK);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        { id: "model" },
+        { id: "mode" },
+        { id: "thought", currentValue: "max" },
+      ],
+    });
+  });
 });

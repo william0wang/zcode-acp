@@ -12,7 +12,12 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { currentModelCached } from "../config/model-cache.js";
-import { modelContextWindow, parseModelValue } from "../config/options.js";
+import {
+  buildConfigOptions,
+  formatModelValue,
+  modelContextWindow,
+  parseModelValue,
+} from "../config/options.js";
 import {
   extractExitCode,
   parseSubagentMetadata,
@@ -20,6 +25,7 @@ import {
 } from "../translators/tool-helpers.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
+import { warn } from "../utils.js";
 import { sendSessionUpdate } from "./io.js";
 
 /** Dispatch one internal event to the ACP client as a session/update. */
@@ -63,6 +69,50 @@ export async function dispatchEvent(
     case "FilesChanged":
       await dispatchFilesChanged(cx, acpSid, ev);
       break;
+    case "ConfigChanged":
+      await dispatchConfigChanged(server, cx, acpSid, ev);
+      break;
+  }
+}
+
+/**
+ * Session settings changed (model/mode/thoughtLevel switch). Push the rebuilt
+ * configOptions (+ current_mode_update for mode) so the editor UI follows the
+ * switch immediately — even mid-turn, without waiting for turn completion.
+ *
+ * Builds the option STRUCTURES without a backend `session/read` (zcodeSid=null
+ * path: model list from config.json, mode/thought enums from CONFIG_META), then
+ * overlays the authoritative values from the event patch. The backend's
+ * settings projection may lag mid-turn, so the event values win — matching how
+ * the zcode app itself refreshes its UI from `state.updated`.
+ * Best-effort: failures are logged and swallowed, never thrown into the loop.
+ */
+async function dispatchConfigChanged(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  ev: Extract<InternalEvent, { kind: "ConfigChanged" }>,
+): Promise<void> {
+  try {
+    const options = await buildConfigOptions(server, null);
+    if (ev.model) options[0].currentValue = formatModelValue(ev.model.providerId, ev.model.modelId);
+    if (ev.mode !== undefined) options[1].currentValue = ev.mode;
+    if (ev.thought !== undefined) options[2].currentValue = ev.thought;
+    await sendSessionUpdate(cx, acpSid, {
+      sessionUpdate: "config_option_update",
+      configOptions: options,
+    });
+    if (ev.mode !== undefined) {
+      // Mirror the advertised mode so turn-completion reconciliation
+      // (emitModeIfChanged) doesn't re-emit the same value.
+      server.lastMode.set(acpSid, ev.mode);
+      await sendSessionUpdate(cx, acpSid, {
+        sessionUpdate: "current_mode_update",
+        currentModeId: ev.mode,
+      });
+    }
+  } catch (e) {
+    warn(`dispatch: ConfigChanged failed (${e instanceof Error ? e.message : String(e)})`);
   }
 }
 

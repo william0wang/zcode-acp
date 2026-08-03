@@ -286,3 +286,56 @@ describe("Bug #4: flattenTodos flattens todoGroups list (not single object)", ()
     expect(flattenTodos([], undefined)).toEqual([]);
   });
 });
+
+describe("Bug: state.updated notification routed to session listeners", () => {
+  // The backend pushes `state.updated` (method: state.updated) when session
+  // settings change (model/mode/thoughtLevel switch, incl. mid-turn). It is NOT
+  // a session/event push — the bridge must wrap it as a ZcodeEvent and deliver
+  // it to the session's listeners so the turn loop can translate it.
+
+  it("delivers state.updated to registered listeners as a ZcodeEvent", async () => {
+    const payload = JSON.stringify({
+      method: "state.updated",
+      params: {
+        patch: {
+          mode: { current: "plan" },
+          model: { current: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" } },
+        },
+        reason: "mode_changed",
+        sessionId: "sess_x",
+      },
+    });
+    const fake = new ZcodeBackend(
+      [process.execPath, "-e", `setTimeout(() => process.stdout.write('${payload}\\n'), 100)`],
+      process.env,
+    );
+    const listener = new EventStreamListener(fake, "sess_x");
+    fake.registerEventListener("sess_x", listener);
+
+    const r = await listener.pollEvent(3000);
+    expect(r).toMatchObject({
+      sessionId: "sess_x",
+      type: "state.updated",
+      payload: {
+        patch: { mode: { current: "plan" } },
+        sessionId: "sess_x",
+      },
+    });
+  });
+
+  it("does not deliver state.updated to listeners of other sessions", async () => {
+    const payload = JSON.stringify({
+      method: "state.updated",
+      params: { patch: { mode: { current: "plan" } }, sessionId: "sess_x" },
+    });
+    const fake = new ZcodeBackend(
+      [process.execPath, "-e", `setTimeout(() => process.stdout.write('${payload}\\n'), 100)`],
+      process.env,
+    );
+    const listener = new EventStreamListener(fake, "sess_other");
+    fake.registerEventListener("sess_other", listener);
+
+    const r = await listener.pollEvent(400);
+    expect(r).toBeNull();
+  });
+});

@@ -114,6 +114,12 @@ export class EventTranslator {
       if (typeof used === "number") {
         results.push({ kind: "UsageDelta", used, size });
       }
+    } else if (etype === "state.updated") {
+      // Session settings changed (model/mode/thoughtLevel switch, incl.
+      // mid-turn). The backend notification carries the authoritative full
+      // settings patch — forward the new values so the editor UI follows the
+      // switch immediately instead of at the next turn's completion.
+      results.push(...this.translateStateUpdated(payload));
     } else if (etype === "turn.failed") {
       this.turnDone = true;
       this.turnFailed = true;
@@ -123,6 +129,30 @@ export class EventTranslator {
       warn(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
     }
     return results;
+  }
+
+  /**
+   * `state.updated` → one ConfigChanged event carrying the new settings values.
+   * Payload shape (wrapped from the backend notification's params):
+   *   { patch: { mode: {current}, model: {current:{providerId,modelId}},
+   *              thoughtLevel: {current} }, reason, revision, sessionId }
+   * Fields missing from the patch are omitted — the dispatcher only emits
+   * updates for what actually changed.
+   */
+  private translateStateUpdated(payload: Record<string, unknown>): InternalEvent[] {
+    const patch = (payload["patch"] as Record<string, unknown> | undefined) ?? {};
+    const ev: InternalEvent = { kind: "ConfigChanged" };
+    const mode = (patch["mode"] as Record<string, unknown> | undefined)?.current;
+    if (typeof mode === "string") ev.mode = mode;
+    const model = (patch["model"] as Record<string, unknown> | undefined)?.current as
+      | Record<string, unknown>
+      | undefined;
+    if (model && typeof model["providerId"] === "string" && typeof model["modelId"] === "string") {
+      ev.model = { providerId: model["providerId"], modelId: model["modelId"] };
+    }
+    const thought = (patch["thoughtLevel"] as Record<string, unknown> | undefined)?.current;
+    if (typeof thought === "string") ev.thought = thought;
+    return [ev];
   }
 
   private translateStreaming(payload: Record<string, unknown>): InternalEvent[] {

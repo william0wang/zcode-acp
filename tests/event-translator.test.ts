@@ -128,6 +128,41 @@ describe("EventTranslator", () => {
     expect(out).toEqual([{ kind: "UsageDelta", used: 1234, size: 200000 }]);
   });
 
+  it("translates state.updated patch → ConfigChanged (mode/model/thought)", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("state.updated", {
+        patch: {
+          mode: { current: "plan" },
+          model: { current: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" } },
+          thoughtLevel: { current: "max" },
+        },
+        reason: "mode_changed",
+      }),
+    );
+    expect(out).toEqual([
+      {
+        kind: "ConfigChanged",
+        mode: "plan",
+        model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
+        thought: "max",
+      },
+    ]);
+  });
+
+  it("omits fields missing from the state.updated patch", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("state.updated", {
+        patch: { model: { current: { providerId: "anthropic", modelId: "GLM-5.2" } } },
+        reason: "model_changed",
+      }),
+    );
+    expect(out).toEqual([
+      { kind: "ConfigChanged", model: { providerId: "anthropic", modelId: "GLM-5.2" } },
+    ]);
+  });
+
   it("captures turn.failed error and does not treat it as resultType", () => {
     const t = new EventTranslator();
     t.translate(
