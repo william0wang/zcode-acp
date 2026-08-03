@@ -71,7 +71,11 @@ prompt request → session/send → EventTranslator translates → dispatchEvent
 
 Sessions are materialized lazily (`ensureRealSession`): an editor startup that
 never sends a message leaves no empty session in the backend or the App's task
-index.
+index. The placeholder → backend-session mapping is persisted to
+`~/.zcode/v2/acp-lazy-sessions.json` (`src/lazy-sessions.ts`), so a `session/
+resume` / `session/load` of a placeholder from a previous bridge lifetime still
+resolves: with a recorded backend id the real session is resumed, without one a
+fresh (empty) session is materialized — never "Session not found".
 
 ### 2. Event stream subscription
 

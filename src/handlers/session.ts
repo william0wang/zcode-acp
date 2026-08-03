@@ -29,6 +29,11 @@ import { emitInitialUsage } from "../config/model-cache.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
+  lookupLazySession,
+  recordMaterializedSession,
+  rememberLazySession,
+} from "../lazy-sessions.js";
+import {
   buildDiffContent,
   EventTranslator,
   extractLocations,
@@ -98,6 +103,10 @@ export async function newSession(
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();
   server.pendingSessions.set(acpSid, { cwd });
+  // Durable alias so the placeholder survives a bridge restart and session/
+  // resume can still resolve it (best-effort; failures are swallowed inside
+  // the store).
+  rememberLazySession(acpSid, cwd);
   // Only freshly-created sessions are eligible for auto-title on first
   // end_turn; resumed/loaded sessions already have a title and must keep it.
   server.titleEligibleSessions.add(acpSid);
@@ -124,7 +133,22 @@ export async function newSession(
 export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string): Promise<string> {
   const existing = server.resolveSid(acpSid);
   if (existing) return existing;
-  const pending = server.pendingSessions.get(acpSid);
+  let pending = server.pendingSessions.get(acpSid);
+  if (!pending) {
+    // Placeholder from a previous bridge lifetime: recover it from the durable
+    // store. A record that already carries a zcodeSid maps straight through
+    // (the backend session still exists — re-register the alias); one without
+    // re-hydrates the pending entry so the create path below runs.
+    const record = lookupLazySession(acpSid);
+    if (record?.zcodeSid) {
+      server.registerSession(acpSid, record.zcodeSid);
+      return record.zcodeSid;
+    }
+    if (record) {
+      pending = { cwd: record.cwd };
+      server.pendingSessions.set(acpSid, pending);
+    }
+  }
   if (!pending) throw new Error(`session ${acpSid} not found`);
   if (pending.creating) return pending.creating;
 
@@ -148,6 +172,9 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
 
     server.pendingSessions.delete(acpSid);
     server.registerSession(acpSid, sid);
+    // Keep the durable alias in sync so a later bridge restart can still
+    // resume this session via the placeholder id.
+    recordMaterializedSession(acpSid, sid, pending.cwd);
     log(`session/new ${acpSid} → created ${sid} (lazy, on first use)`);
     server.ensureBackgroundListener(sid);
 
@@ -203,44 +230,88 @@ export async function listSessions(
   return { sessions };
 }
 
+/**
+ * Resolve the backend session id for `session/resume` / `session/load`.
+ *
+ * A `session/new` placeholder has no backend counterpart until first use, yet
+ * the editor may resume it anyway (panel reopen, bridge restart) — resolving it
+ * here prevents an otherwise unavoidable "Session not found". Resolution order:
+ *   1. in-memory mapping → the session is already live in this subprocess;
+ *   2. pending placeholder → materialize it (an empty session, matching the
+ *      pre-lazy behavior where a never-used session/new always resumed);
+ *   3. durable store → a placeholder from a previous bridge lifetime: with a
+ *      recorded zcodeSid the backend session still exists but isn't loaded into
+ *      this subprocess (the resume RPC is needed); without one, materialize
+ *      fresh;
+ *   4. anything else (a real id from session/list, or a stale id) → pass
+ *      through unchanged; genuinely missing sessions still error downstream.
+ */
+async function resolveResumeTarget(
+  server: ZcodeAcpServer,
+  acpSid: string,
+): Promise<{ zcodeSid: string; alreadyLive: boolean }> {
+  const mapped = server.resolveSid(acpSid);
+  if (mapped) return { zcodeSid: mapped, alreadyLive: true };
+  if (server.pendingSessions.has(acpSid)) {
+    return { zcodeSid: await ensureRealSession(server, acpSid), alreadyLive: true };
+  }
+  const record = lookupLazySession(acpSid);
+  if (record) {
+    // ensureRealSession recovers the record: with a zcodeSid it re-registers
+    // the alias (no create), without one it materializes a fresh session.
+    return {
+      zcodeSid: await ensureRealSession(server, acpSid),
+      alreadyLive: !record.zcodeSid,
+    };
+  }
+  return { zcodeSid: acpSid, alreadyLive: false };
+}
+
 /** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
   params: acp.ResumeSessionRequest,
   cx: acp.AgentContext,
 ): Promise<acp.ResumeSessionResponse> {
-  const targetSid = params.sessionId;
+  const acpSid = params.sessionId;
   const cwd = params.cwd ?? process.cwd();
-  if (!targetSid) throw new Error("sessionId required");
+  if (!acpSid) throw new Error("sessionId required");
 
-  // runtimeModel overlay: a resumed session may carry a stale/revoked model in
-  // its history → send fails with "历史模型不可用". Overlaying the current
-  // enabled provider redirects the session onto a working model. The overlay
-  // deliberately carries NO apiKey (the backend's schema rejects it; it resolves
-  // auth from its own config/OAuth store).
-  const zcParams: Record<string, unknown> = {
-    sessionId: targetSid,
-    workspace: workspaceFor(cwd),
-  };
-  const runtimeModel = buildResumeRuntimeModel();
-  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
-  // Push the provider registry BEFORE resume: a resumed session may carry a
-  // third-party model in its history, and the backend needs the provider
-  // registered to even process the resume turn.
-  await syncProviderRegistry(server, cwd);
-  await resumeBackendSession(server, zcParams);
+  // Lazy placeholders (session/new) resolve to their real backend session
+  // here; alreadyLive targets skip the resume RPC because the session is live
+  // in this backend subprocess.
+  const { zcodeSid, alreadyLive } = await resolveResumeTarget(server, acpSid);
 
-  server.registerSession(targetSid, targetSid);
-  log(`session/resume -> ${targetSid}`);
-  server.ensureBackgroundListener(targetSid);
+  if (!alreadyLive) {
+    // runtimeModel overlay: a resumed session may carry a stale/revoked model in
+    // its history → send fails with "历史模型不可用". Overlaying the current
+    // enabled provider redirects the session onto a working model. The overlay
+    // deliberately carries NO apiKey (the backend's schema rejects it; it resolves
+    // auth from its own config/OAuth store).
+    const zcParams: Record<string, unknown> = {
+      sessionId: zcodeSid,
+      workspace: workspaceFor(cwd),
+    };
+    const runtimeModel = buildResumeRuntimeModel();
+    if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
+    // Push the provider registry BEFORE resume: a resumed session may carry a
+    // third-party model in its history, and the backend needs the provider
+    // registered to even process the resume turn.
+    await syncProviderRegistry(server, cwd);
+    await resumeBackendSession(server, zcParams);
+  }
+
+  server.registerSession(acpSid, zcodeSid);
+  log(`session/resume -> ${zcodeSid}`);
+  server.ensureBackgroundListener(zcodeSid);
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
-  await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
-  const modes = await buildModes(server, targetSid);
-  server.lastMode.set(targetSid, modes.currentModeId);
+  await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
+  const modes = await buildModes(server, zcodeSid);
+  server.lastMode.set(acpSid, modes.currentModeId);
   return {
     modes,
-    configOptions: await buildConfigOptions(server, targetSid),
+    configOptions: await buildConfigOptions(server, zcodeSid),
   };
 }
 
@@ -253,26 +324,32 @@ export async function loadSession(
   params: acp.LoadSessionRequest,
   cx: acp.AgentContext,
 ): Promise<acp.LoadSessionResponse> {
-  const targetSid = params.sessionId;
+  const acpSid = params.sessionId;
   const cwd = params.cwd ?? process.cwd();
-  if (!targetSid) throw new Error("sessionId required");
+  if (!acpSid) throw new Error("sessionId required");
 
-  const zcParams: Record<string, unknown> = {
-    sessionId: targetSid,
-    workspace: workspaceFor(cwd),
-  };
-  const runtimeModel = buildResumeRuntimeModel();
-  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
-  // Push the provider registry BEFORE resume: a loaded session may carry a
-  // third-party model in its history, and the backend needs the provider
-  // registered to process it.
-  await syncProviderRegistry(server, cwd);
-  await resumeBackendSession(server, zcParams);
-  server.registerSession(targetSid, targetSid);
-  log(`session/load → ${targetSid}`);
-  server.ensureBackgroundListener(targetSid);
+  // Same placeholder resolution as resumeSession; alreadyLive targets skip the
+  // backend resume RPC (the session is live in this subprocess).
+  const { zcodeSid, alreadyLive } = await resolveResumeTarget(server, acpSid);
 
-  const messages = await fetchMessages(server, targetSid);
+  if (!alreadyLive) {
+    const zcParams: Record<string, unknown> = {
+      sessionId: zcodeSid,
+      workspace: workspaceFor(cwd),
+    };
+    const runtimeModel = buildResumeRuntimeModel();
+    if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
+    // Push the provider registry BEFORE resume: a loaded session may carry a
+    // third-party model in its history, and the backend needs the provider
+    // registered to process it.
+    await syncProviderRegistry(server, cwd);
+    await resumeBackendSession(server, zcParams);
+  }
+  server.registerSession(acpSid, zcodeSid);
+  log(`session/load → ${zcodeSid}`);
+  server.ensureBackgroundListener(zcodeSid);
+
+  const messages = await fetchMessages(server, zcodeSid);
   let replayed = 0;
   for (const m of messages) {
     const info = m.info ?? {};
@@ -285,7 +362,7 @@ export async function loadSession(
         const text = (p as { text?: string }).text ?? "";
         if (!text) continue;
         const sessionUpdate = role === "user" ? "user_message_chunk" : "agent_message_chunk";
-        await sendSessionUpdate(cx, targetSid, {
+        await sendSessionUpdate(cx, acpSid, {
           sessionUpdate,
           content: { type: "text", text },
           messageId: mid,
@@ -294,7 +371,7 @@ export async function loadSession(
         const rp = p as { text?: string; content?: string };
         const text = rp.text ?? rp.content ?? "";
         if (text) {
-          await sendSessionUpdate(cx, targetSid, {
+          await sendSessionUpdate(cx, acpSid, {
             sessionUpdate: "agent_thought_chunk",
             content: { type: "text", text },
             messageId: `thought_${mid}`,
@@ -317,7 +394,7 @@ export async function loadSession(
           status: (tp.status as acp.ToolCallStatus) ?? "completed",
           ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
         };
-        await sendSessionUpdate(cx, targetSid, update);
+        await sendSessionUpdate(cx, acpSid, update);
       }
       // patch / step-start / other: skipped (history replay focuses on text + tool summary)
     }
@@ -329,11 +406,11 @@ export async function loadSession(
   // its todos immediately (filter to PlanUpdate only — text/tools were already
   // replayed above and the differ hasn't mark_seen'd this history).
   try {
-    const snapshot = await buildSnapshot(server, targetSid);
-    const loadDiffer = getOrCreateDiffer(server, targetSid);
+    const snapshot = await buildSnapshot(server, zcodeSid);
+    const loadDiffer = getOrCreateDiffer(server, zcodeSid);
     const planEvents = loadDiffer.diff(snapshot).filter((e) => e.kind === "PlanUpdate");
     for (const iev of planEvents) {
-      await dispatchEvent(server, cx, targetSid, iev, `load_${randomUUID().slice(0, 8)}`);
+      await dispatchEvent(server, cx, acpSid, iev, `load_${randomUUID().slice(0, 8)}`);
     }
   } catch (e) {
     log(
@@ -342,13 +419,13 @@ export async function loadSession(
   }
 
   // Initial usage_update so the editor shows the context bar immediately.
-  await emitInitialUsage(server, cx, targetSid, targetSid, getOrCreateDiffer(server, targetSid));
+  await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
 
-  const modes = await buildModes(server, targetSid);
-  server.lastMode.set(targetSid, modes.currentModeId);
+  const modes = await buildModes(server, zcodeSid);
+  server.lastMode.set(acpSid, modes.currentModeId);
   return {
     modes,
-    configOptions: await buildConfigOptions(server, targetSid),
+    configOptions: await buildConfigOptions(server, zcodeSid),
   };
 }
 

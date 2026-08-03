@@ -134,6 +134,13 @@ List all sessions.
 
 Resume an existing session.
 
+The sessionId may be a lazy `session/new` placeholder (the editor persists it
+and resumes it after a bridge restart). The bridge resolves it before the
+backend call: an in-memory or persisted (`acp-lazy-sessions.json`) mapping is
+followed to the real backend session — resuming it, or materializing a fresh
+empty one if the placeholder was never used. Real ids from `session/list` pass
+through unchanged.
+
 **Request:**
 ```json
 {
