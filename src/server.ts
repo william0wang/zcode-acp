@@ -90,6 +90,13 @@ export class ZcodeAcpServer {
   readonly titleEligibleSessions = new Set<string>();
   /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
   readonly lastMode = new Map<string, string>();
+  /**
+   * Timestamp of the last cancel (user stop or preempt), keyed by zcodeSid.
+   * Set in cancel() and preemptInFlightTurn(); read in runEventTurn's stall
+   * reconciliation to fast-fail turns that collide with the backend's
+   * ~20s model-connection recovery window after a mid-stream abort.
+   */
+  readonly lastCancelledAt = new Map<string, number>();
   /** Per-session ProjectionDiffers (persists across turns). */
   readonly differs = new Map<
     string,

@@ -699,6 +699,9 @@ export async function cancel(
         stopBackendTurn(server, zcodeSid);
         turn.stopSent = true;
       }
+      // Record cancel time so a prompt arriving in the backend's ~20s
+      // model-connection recovery window can fast-fail instead of hanging.
+      server.lastCancelledAt.set(zcodeSid, Date.now());
       break; // one turn per session at a time
     }
   }
@@ -816,6 +819,8 @@ async function preemptInFlightTurn(
         stopBackendTurn(server, zcodeSid);
         turn.stopSent = true;
       }
+      // Record cancel time (same recovery-window rationale as cancel()).
+      server.lastCancelledAt.set(zcodeSid, Date.now());
       break;
     }
   }
@@ -1056,6 +1061,10 @@ async function runEventTurn(
   const translator = new EventTranslator();
   differ.resetTurn();
   const NO_PROGRESS_MS = 120_000;
+  // Backend's GLM API connection cleanup window after a mid-stream abort.
+  // Measured: a prompt sent <18s after cancel stalls 80-120s; ≥20s recovers
+  // to normal. 25s covers the tail of the recovery distribution.
+  const CANCEL_RECOVERY_WINDOW_MS = 25_000;
   let lastProgress = Date.now();
   let lastStallCheck = Date.now();
   let emittedText = false;
@@ -1152,6 +1161,18 @@ async function runEventTurn(
           return { stopReason: "end_turn" };
         }
         if (proj?.status === "running") {
+          // Cancel-recovery fast-fail: if this session was cancelled recently
+          // and the new turn has stalled (turn.started emitted, then silence),
+          // the backend is in its model-connection recovery window — the model
+          // request is queued but won't produce output for tens of seconds.
+          // Rather than hanging 80-120s, surface a recovery hint and end the
+          // turn so the user can retry once the window passes.
+          const lastCancel = server.lastCancelledAt.get(turn.zcodeSid);
+          if (lastCancel && Date.now() - lastCancel < CANCEL_RECOVERY_WINDOW_MS) {
+            await sendTextChunk(cx, acpSid, "[后端正在从停止中恢复，请稍后重试。]", randomUUID());
+            stopBackendTurn(server, turn.zcodeSid);
+            return { stopReason: "end_turn" };
+          }
           lastProgress = Date.now();
           await listener.resubscribe(() => server.nextId());
         }
