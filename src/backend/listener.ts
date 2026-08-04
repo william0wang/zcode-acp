@@ -95,7 +95,9 @@ export class EventStreamListener {
       const isTimeout = resp.error.message === "timeout";
       if (!isTimeout || attempt === MAX_ATTEMPTS) {
         if (isTimeout) {
-          warn(`subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~${Math.round((MAX_ATTEMPTS * 5000 + 500) / 1000)}s)`);
+          warn(
+            `subscribe: all ${MAX_ATTEMPTS} attempts timed out (backend unresponsive for ~${Math.round((MAX_ATTEMPTS * 5000 + 500) / 1000)}s)`,
+          );
         }
         throw new Error(formatSubscribeError(resp));
       }
@@ -124,6 +126,15 @@ export class EventStreamListener {
     } else {
       this.queue.push(event);
     }
+  }
+
+  /**
+   * True if events are queued waiting for a poll (non-destructive). Lets the
+   * turn loop check liveness without consuming an event — used by the stall
+   * reconciliation to confirm a turn is still alive before ending it.
+   */
+  hasQueuedEvents(): boolean {
+    return this.queue.length > 0;
   }
 
   /**

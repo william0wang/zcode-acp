@@ -40,35 +40,36 @@ export async function maybeAutoCompact(
   const threshold = autoCompactThreshold();
   if (threshold <= 0) return; // disabled
 
-  // Read current context usage via session/read.
-  let used = 0;
-  try {
-    const backend = server.ensureBackend();
-    const resp = await backend.request(
-      server.nextId(),
-      "session/read",
-      { sessionId: zcodeSid },
-      5000,
-    );
-    if (resp.error) return;
-    const result = (resp.result ?? {}) as { projection?: { contextUsed?: number } };
-    used = result.projection?.contextUsed ?? 0;
-  } catch (e) {
-    warn(`auto-compact: session/read failed (${e instanceof Error ? e.message : String(e)})`);
-    return;
-  }
-
-  if (used < threshold) return;
-
-  log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
   const msgId = randomUUID();
-  await sendTextChunk(
-    cx,
-    acpSid,
-    `🔄 auto-compact: context usage ${used.toLocaleString()} ≥ threshold ${threshold.toLocaleString()}, compressing…`,
-    msgId,
-  );
   try {
+    // Read current context usage via session/read.
+    let used = 0;
+    try {
+      const backend = server.ensureBackend();
+      const resp = await backend.request(
+        server.nextId(),
+        "session/read",
+        { sessionId: zcodeSid },
+        5000,
+      );
+      if (resp.error) return;
+      const result = (resp.result ?? {}) as { projection?: { contextUsed?: number } };
+      used = result.projection?.contextUsed ?? 0;
+    } catch (e) {
+      warn(`auto-compact: session/read failed (${e instanceof Error ? e.message : String(e)})`);
+      return;
+    }
+
+    if (used < threshold) return;
+
+    log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
+    await sendTextChunk(
+      cx,
+      acpSid,
+      `🔄 auto-compact: context usage ${used.toLocaleString()} ≥ threshold ${threshold.toLocaleString()}, compressing…`,
+      msgId,
+    );
+
     // compact() handles: session/compact → waitForTurnIdle → emitInitialUsage.
     const result = (await compact(server, { sessionId: acpSid }, cx)) as {
       __lockTimeout?: boolean;

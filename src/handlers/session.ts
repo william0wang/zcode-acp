@@ -600,9 +600,11 @@ export async function prompt(
         // returning so the next prompt has room. Configured via
         // ZCODE_ACP_AUTO_COMPACT_THRESHOLD (absolute token count; 0/unset =
         // disabled). Only on end_turn — cancelled/max_turn_requests skips
-        // compaction. Best-effort: failures are logged inside
-        // maybeAutoCompact, never thrown.
-        if (result.stopReason === "end_turn") {
+        // compaction, as does a stall-recovered end_turn (the completion was
+        // inferred by the stall heuristic, not confirmed by turn.completed —
+        // compressing an in-flight task's context would destroy the work).
+        // Best-effort: failures are logged inside maybeAutoCompact, never thrown.
+        if (result.stopReason === "end_turn" && !turn.stallRecovered) {
           const { maybeAutoCompact } = await import("../config/auto-compact.js");
           await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
         }
@@ -1151,18 +1153,44 @@ async function runEventTurn(
         lastStallCheck = Date.now();
         const proj = await monitor.pollOnce();
         if (proj?.status === "idle") {
-          // Turn completed but the event was lost.
-          if (!emittedText) {
-            const reply = await fetchLastReply(server, turn.zcodeSid, differ);
-            if (reply) {
-              await sendTextChunk(cx, acpSid, reply, chunkMsgId);
-            } else if (!emittedOutput) {
-              // No text and no output → suspected failure.
-              stopBackendTurn(server, turn.zcodeSid);
-              throw new RequestError(-32603, "turn produced no output");
-            }
+          // A single idle probe can also fire mid-work: the backend is silent
+          // during the model's thinking/connection phase and may report idle
+          // while the turn is still alive. Confirm before trusting it — wait
+          // briefly, then probe once more. Only a second idle WITH no queued
+          // events ends the turn: an event arriving in the window proves the
+          // turn is alive (it stays queued for the next poll).
+          await sleep(1500);
+          if (listener.hasQueuedEvents()) {
+            lastProgress = Date.now();
+            continue; // alive — events will be consumed by the next poll
           }
-          return { stopReason: "end_turn" };
+          const proj2 = await monitor.pollOnce();
+          if (proj2?.status === "idle" && !listener.hasQueuedEvents()) {
+            // Turn completed but the event was lost (double-confirmed).
+            if (!emittedText) {
+              const reply = await fetchLastReply(server, turn.zcodeSid, differ);
+              if (reply) {
+                await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+              } else if (!emittedOutput) {
+                // No text and no output → suspected failure.
+                stopBackendTurn(server, turn.zcodeSid);
+                throw new RequestError(-32603, "turn produced no output");
+              }
+            }
+            // Heuristic ending: prompt() must skip auto-compact for this
+            // turn — the completion was inferred, and compressing an
+            // in-flight task's context would destroy the work.
+            turn.stallRecovered = true;
+            return { stopReason: "end_turn" };
+          }
+          // Second probe says the backend is still working (or events arrived
+          // mid-probe) — keep waiting; queued events are consumed by the next
+          // poll iteration.
+          lastProgress = Date.now();
+          if (proj2?.status === "running") {
+            await listener.resubscribe(() => server.nextId());
+          }
+          continue;
         }
         if (proj?.status === "running") {
           // Cancel-recovery fast-fail: if this session was cancelled recently
