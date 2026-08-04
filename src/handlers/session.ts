@@ -692,6 +692,11 @@ export async function cancel(
 ): Promise<void> {
   const zcodeSid = server.resolveSid(params.sessionId);
   if (!zcodeSid) return;
+  // Cancel ALL matching turns for this session (not just the first). During a
+  // preempt-wait, pendingTurns holds both the old turn (already cancelled by
+  // preempt) and the new queued prompt; breaking on the first match would
+  // leave the queued prompt running. The stopSent guard dedupes the backend
+  // stop call across turns and repeated cancels.
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
       turn.cancelled = true;
@@ -702,7 +707,6 @@ export async function cancel(
       // Record cancel time so a prompt arriving in the backend's ~20s
       // model-connection recovery window can fast-fail instead of hanging.
       server.lastCancelledAt.set(zcodeSid, Date.now());
-      break; // one turn per session at a time
     }
   }
   log(`session/cancel → ${zcodeSid}`);
@@ -1165,13 +1169,21 @@ async function runEventTurn(
           // and the new turn has stalled (turn.started emitted, then silence),
           // the backend is in its model-connection recovery window — the model
           // request is queued but won't produce output for tens of seconds.
-          // Rather than hanging 80-120s, surface a recovery hint and end the
-          // turn so the user can retry once the window passes.
+          // Rather than hanging 80-120s, surface a recovery hint, stop the
+          // stalled turn, then switch to silent drain (keep looping until the
+          // backend emits turn.completed) so pendingTurns isn't cleaned up
+          // while the backend is still finalizing — preserving the invariant
+          // that preemptInFlightTurn relies on.
           const lastCancel = server.lastCancelledAt.get(turn.zcodeSid);
           if (lastCancel && Date.now() - lastCancel < CANCEL_RECOVERY_WINDOW_MS) {
             await sendTextChunk(cx, acpSid, "[后端正在从停止中恢复，请稍后重试。]", randomUUID());
             stopBackendTurn(server, turn.zcodeSid);
-            return { stopReason: "end_turn" };
+            turn.cancelled = true;
+            turn.stopSent = true;
+            // Fall through: the cancelled branch at the top of the next
+            // iteration + silent drain below will wait for the backend's
+            // completion event before returning.
+            continue;
           }
           lastProgress = Date.now();
           await listener.resubscribe(() => server.nextId());
@@ -1198,7 +1210,7 @@ async function runEventTurn(
       continue;
     }
     for (const iev of internalEvents) {
-      if (iev.kind === "TextDelta") emittedText = true;
+      if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") emittedText = true;
       if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
       // Sync usage to the differ so the turn-completion diff doesn't re-emit a
       // UsageDelta for the same value (the differ's lastUsage baseline is
