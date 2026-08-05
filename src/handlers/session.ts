@@ -866,7 +866,7 @@ export function extractPromptText(blocks: acp.ContentBlock[] | undefined): strin
       text?: string;
       name?: string;
       uri?: string;
-      resource?: { text?: string; uri?: string };
+      resource?: { text?: string; blob?: string; uri?: string };
     };
     if (b.type === "text" && b.text) {
       parts.push(b.text);
@@ -880,11 +880,20 @@ export function extractPromptText(blocks: acp.ContentBlock[] | undefined): strin
       const label = b.name || path;
       parts.push(`[related resource: ${label}](${path})`);
     } else if (b.type === "resource" && b.resource) {
-      // Embedded resource (TextResourceContents). We don't advertise
-      // embeddedContext, but accept text payloads defensively in case a client
-      // sends them anyway.
-      const text = b.resource.text;
-      if (text) parts.push(text);
+      // Embedded resource. We don't advertise embeddedContext, but accept text
+      // payloads defensively in case a client sends them anyway. Binary
+      // payloads (BlobResourceContents) are never decoded — the base64 blob is
+      // useless to the model — so rewrite the resource uri into a readable
+      // filesystem location (same treatment as resource_link). Dropping it
+      // entirely left the prompt empty, which errored on a binary-only drag.
+      const r = b.resource;
+      if (r.text) {
+        parts.push(r.text);
+      } else if (r.blob && r.uri) {
+        const path = r.uri.startsWith("file://") ? fileUriToPath(r.uri) : r.uri;
+        const label = basename(path) || path;
+        parts.push(`[related resource: ${label}](${path})`);
+      }
     }
   }
   return parts.join("\n").trim();

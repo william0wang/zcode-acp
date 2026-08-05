@@ -116,11 +116,46 @@ describe("extractPromptText", () => {
       expect(out).toBe("embedded body");
     });
 
-    it("skips embedded resources without a text payload", () => {
+    it("rewrites a binary blob resource to a local file link", () => {
+      // Dragging a binary file (PDF/zip/…) arrives as BlobResourceContents.
+      // The base64 blob is never inlined — the uri becomes a readable link so
+      // a binary-only drop doesn't produce an empty prompt (which errored).
       const out = extractPromptText([
         {
           type: "resource",
-          resource: { uri: "file:///x", blob: "aGVsbG8=" },
+          resource: { uri: "file:///Users/william/report.pdf", blob: "aGVsbG8=" },
+        },
+      ] as never);
+      expect(out).toBe("[related resource: report.pdf](/Users/william/report.pdf)");
+    });
+
+    it("decodes percent-encoded binary resource uris", () => {
+      const out = extractPromptText([
+        {
+          type: "resource",
+          resource: { uri: "file:///tmp/my%20doc.pdf", blob: "AAAA" },
+        },
+      ] as never);
+      expect(out).toBe("[related resource: my doc.pdf](/tmp/my doc.pdf)");
+    });
+
+    it("keeps non-file:// binary resource uris as-is", () => {
+      const out = extractPromptText([
+        {
+          type: "resource",
+          resource: { uri: "https://example.com/file.zip", blob: "AAAA" },
+        },
+      ] as never);
+      expect(out).toBe("[related resource: file.zip](https://example.com/file.zip)");
+    });
+
+    it("still skips a blob resource with no uri", () => {
+      // Defensive: the ACP schema requires uri, but a non-compliant client
+      // must not crash the prompt.
+      const out = extractPromptText([
+        {
+          type: "resource",
+          resource: { blob: "AAAA" },
         },
       ] as never);
       expect(out).toBe("");
