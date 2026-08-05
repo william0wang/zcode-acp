@@ -45,8 +45,14 @@ export function renderBar(usedPercent: number): string {
   return CHAR_FULL.repeat(filled) + CHAR_EMPTY.repeat(empty);
 }
 
-/** Format a reset timestamp (ms) as a local `MM-DD HH:MM` string, or `null`. */
-function formatResetTime(nextResetTime?: number): string | null {
+/**
+ * Format a reset timestamp (ms) as a local `MM-DD HH:MM` string, or `null`.
+ *
+ * Exported so the Opencode Go formatter can reuse the same layout (Go windows
+ * carry only a relative `resetInSec`; the caller converts that to an absolute
+ * ms timestamp against the fetch snapshot first).
+ */
+export function formatResetTime(nextResetTime?: number): string | null {
   if (nextResetTime === undefined || !Number.isFinite(nextResetTime)) return null;
   const d = new Date(nextResetTime);
   if (Number.isNaN(d.getTime())) return null;
@@ -65,7 +71,7 @@ function capitalise(s: string): string {
 
 /**
  * Build the trailing annotation for an item: reset time first (so all items
- * align), then `(used/total)` last (only some limits carry absolute counters).
+ * align), then the absolute used counter last (only some limits carry it).
  */
 function formatTrailing(item: QuotaItem): string {
   const parts: string[] = [];
@@ -73,16 +79,11 @@ function formatTrailing(item: QuotaItem): string {
   const reset = formatResetTime(item.nextResetTime);
   if (reset) parts.push(reset);
 
-  // Absolute counters — only some limit kinds carry them (MCP/TIME does,
-  // legacy TOKENS_LIMIT often does not). Placed last so the reset times of
-  // counter-less items (e.g. 5h) stay left-aligned with counter-bearing ones.
-  if (
-    typeof item.usedCount === "number" &&
-    typeof item.totalCount === "number" &&
-    Number.isFinite(item.usedCount) &&
-    Number.isFinite(item.totalCount)
-  ) {
-    parts.push(`(${item.usedCount}/${item.totalCount})`);
+  // Absolute used counter — only some limit kinds carry it (MCP/TIME_LIMIT).
+  // The total is intentionally omitted: it is a fixed allowance already
+  // expressed by the percentage bar, so showing `/1000` adds no information.
+  if (typeof item.usedCount === "number" && Number.isFinite(item.usedCount)) {
+    parts.push(`${item.usedCount}`);
   }
 
   return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
@@ -97,14 +98,20 @@ const DETAIL_LABEL_WIDTH = 14;
  * - `detail` (default `true`): show per-model usage breakdown sub-lines
  *   (`├ search-prime …`). Set to `false` for compact terminal output where the
  *   aggregate bar is enough.
+ * - `compact` (default `false`): collapse the MCP item into a trailing
+ *   annotation on the 5h line (`· MCP (used/total)`) and drop its standalone
+ *   bar line + detail sub-lines. Used only by the combined dual-provider CLI
+ *   view to keep the merged card short; the standalone `glm` subcommand and
+ *   the `/quota` slash command keep the full layout.
  */
 export interface FormatOptions {
   detail?: boolean;
+  compact?: boolean;
 }
 
-/** Resolve partial options into a complete flag. */
-function resolveOptions(opts?: FormatOptions): { detail: boolean } {
-  return { detail: opts?.detail ?? true };
+/** Resolve partial options into complete flags. */
+function resolveOptions(opts?: FormatOptions): { detail: boolean; compact: boolean } {
+  return { detail: opts?.detail ?? true, compact: opts?.compact ?? false };
 }
 
 /** Render one quota item line (+ indented detail sub-lines if present). */
@@ -134,6 +141,75 @@ const STATUS_MESSAGES: Record<Exclude<QuotaResult["kind"], "success">, string> =
 };
 
 /**
+ * A rendered GLM section — a header (plan name) and the bar lines.
+ *
+ * Exported so the combined CLI view can compose the GLM section alongside the
+ * Opencode Go section inside one card, without duplicating the per-item
+ * formatting logic.
+ */
+export interface RenderedGlmSection {
+  header: string;
+  body: string[];
+}
+
+/**
+ * Render the GLM section (header + one bar line per item) without the fence
+ * or divider.
+ *
+ * Non-success kinds return a header of `"GLM Coding Plan"` and a single
+ * explanatory body line, mirroring {@link formatQuota}'s non-success prose
+ * (just split into header/body for composability).
+ *
+ * In `compact` mode the MCP item is collapsed into a trailing annotation on
+ * the 5h line (`· MCP (used/total)`) and its own bar line + detail sub-lines
+ * are dropped — used by the combined dual-provider CLI view to keep the merged
+ * card short. The standalone `glm` subcommand and `/quota` slash command use
+ * the full layout.
+ */
+export function renderGlmSection(result: QuotaResult, opts?: FormatOptions): RenderedGlmSection {
+  const header = "GLM Coding Plan";
+  if (result.kind !== "success") {
+    return { header, body: [STATUS_MESSAGES[result.kind]] };
+  }
+  const { detail, compact } = resolveOptions(opts);
+  const title = `${header}${result.level ? ` · ${capitalise(result.level)}` : ""}`;
+
+  if (compact) {
+    // Find the MCP item to fold into the 5h line as a trailing note.
+    const mcp = result.items.find((it) => it.key === "mcp");
+    const mcpNote = formatMcpNote(mcp);
+    const body = result.items
+      .filter((it) => it.key !== "mcp")
+      .map((it) =>
+        formatItem(it, false)[0]!.replace(/$/, mcpNote && it.key === "token_5h" ? mcpNote : ""),
+      );
+    // If 5h is somehow absent but MCP exists, surface MCP as its own line so
+    // the data isn't lost.
+    const has5h = result.items.some((it) => it.key === "token_5h");
+    if (mcp && !has5h && mcpNote) {
+      body.push(formatItem(mcp, false)[0]!);
+    }
+    return { header: title, body };
+  }
+
+  const body = result.items.flatMap((item) => formatItem(item, detail));
+  return { header: title, body };
+}
+
+/**
+ * Build the MCP trailing note for compact mode: ` · MCP N` when the item
+ * carries an absolute counter, ` · MCP NN%` when it only has a percentage, or
+ * `""` when there is no MCP item.
+ */
+function formatMcpNote(mcp: QuotaItem | undefined): string {
+  if (!mcp) return "";
+  if (typeof mcp.usedCount === "number" && Number.isFinite(mcp.usedCount)) {
+    return ` · MCP ${mcp.usedCount}`;
+  }
+  return ` · MCP ${padPercent(mcp.usedPercent)}%`;
+}
+
+/**
  * Render a {@link QuotaResult} as a multi-line plain-text card wrapped in a
  * ```text fenced block.
  *
@@ -151,13 +227,11 @@ export function formatQuota(result: QuotaResult, opts?: FormatOptions): string {
     return STATUS_MESSAGES[result.kind];
   }
 
-  const { detail } = resolveOptions(opts);
-  const header = `GLM Coding Plan${result.level ? ` · ${capitalise(result.level)}` : ""}`;
+  const section = renderGlmSection(result, opts);
   // Divider spans the longest line so the frame looks balanced; 34 ≈ label(5)
   // + space(1) + bar(20) + spaces(2) + "NN%"(3) + trailing-room(3).
   const divider = "─".repeat(34);
-  const body = result.items.flatMap((item) => formatItem(item, detail));
-  return ["```text", header, divider, ...body, "```"].join("\n");
+  return ["```text", section.header, divider, ...section.body, "```"].join("\n");
 }
 
 /**

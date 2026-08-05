@@ -90,15 +90,23 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 ## 独立配额查询 CLI（zcode-quota）
 
 除了 ACP server，本包还附带一个 `zcode-quota` 命令，可在**终端**里直接查询
-GLM Coding Plan 用量——无需编辑器，也无需 server 运行。它读取同一个
-`~/.zcode/v2/config.json` 获取凭证。
+用量——无需编辑器，也无需 server 运行。默认在一张卡片里同时显示
+**GLM Coding Plan** 和 **Opencode Go**；传入 provider 参数可只看其中一个。
+
+GLM 凭证读取自 `~/.zcode/v2/config.json`。Opencode Go 凭证来自环境变量
+（dashboard 需要浏览器 cookie——见下方 [Opencode Go 配置](#opencode-go-配置)）。
 
 ```bash
-# 一次性：打印卡片后退出
+# 双平台（默认）：GLM + Opencode Go 合并为一张卡片
 zcode-quota
+
+# 只看某一个 provider
+zcode-quota glm            # 仅 GLM Coding Plan
+zcode-quota go             # 仅 Opencode Go（rolling + weekly + monthly 三窗口）
 
 # 常驻监控：清屏并每 30s 刷新（默认）
 zcode-quota -w
+zcode-quota go -w          # 只监控 Opencode Go
 
 # 自定义刷新间隔（秒，最小 10）
 zcode-quota --watch --interval 60
@@ -113,6 +121,28 @@ watch 模式会原地清屏重绘卡片，效果类似 `top`/`htop`。按 `Ctrl-
 ```bash
 node dist/bin/quota.js -w
 ```
+
+### Opencode Go 配置
+
+Opencode Go 订阅用量没有 JSON API——CLI 抓取的是登录后的 dashboard 页面
+`opencode.ai/workspace/<id>/go`，因此需要你的浏览器 `auth` cookie。设置两个
+环境变量：
+
+```bash
+export OPENCODE_GO_WORKSPACE_ID="wrk_你的工作区id"
+export OPENCODE_GO_AUTH_COOKIE="Fe26.2**你的cookie值"
+```
+
+获取方式：
+
+1. **Workspace ID**——打开 `https://opencode.ai`，进入你的 Go 工作区，从 URL
+   里复制 `wrk_…` id（`https://opencode.ai/workspace/<wrk_…>/go`）。
+2. **Auth cookie**——打开浏览器开发者工具（F12）→ Application → Cookies →
+   `opencode.ai` → 复制名为 `auth` 的 cookie 值（以 `Fe26.2**` 开头）。
+
+未设置这两个变量时，默认的双平台模式会**静默退化为只显示 GLM**（不报错）。
+若明确运行 `zcode-quota go` 但未配置，会打印一条配置提示。把它们加到 shell
+配置文件（`~/.zshrc` / `~/.bashrc`）即可持久化。
 
 ## ACP Registry
 

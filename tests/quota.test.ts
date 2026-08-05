@@ -21,7 +21,7 @@ vi.mock("../src/backend/credentials.js", () => ({
 }));
 
 import { clearCache, getCached, setCached, setClock } from "../src/quota/cache.js";
-import { formatQuota, formatQuotaPlain, renderBar } from "../src/quota/format.js";
+import { formatQuota, formatQuotaPlain, renderBar, renderGlmSection } from "../src/quota/format.js";
 import { parseLimit, parseQuotaEnvelope } from "../src/quota/parse.js";
 import type { QuotaResult } from "../src/quota/types.js";
 import { resolveQuotaHost } from "../src/quota/client.js";
@@ -230,11 +230,14 @@ describe("formatQuota", () => {
     expect(lines[3]).toContain("5h");
     expect(lines[3]).toContain("5%");
     expect(lines[3]).not.toContain("resets");
-    expect(lines[3]).not.toMatch(/\(\d+\/\d+\)/);
-    // MCP line: percent + absolute counts + reset time.
+    expect(lines[3]).not.toMatch(/\/\d+/); // no (used/total) on counter-less items
+    // MCP line: percent + used counter + reset time (total omitted — it's a
+    // fixed allowance already conveyed by the percentage bar).
     expect(lines[4]).toContain("MCP");
     expect(lines[4]).toContain("24%");
-    expect(lines[4]).toContain("(237/1000)");
+    expect(lines[4]).toContain("237");
+    expect(lines[4]).not.toMatch(/\/\d+/);
+    expect(lines[4]).not.toContain("used");
     expect(lines[4]).not.toContain("resets");
     // Detail branches (now padded model codes).
     expect(lines[5]).toMatch(/├ search-prime\s+\d+/);
@@ -248,7 +251,9 @@ describe("formatQuota", () => {
       level: "pro",
       items: [{ key: "token_5h", label: "5h", usedPercent: 18, leftPercent: 82 }],
     });
-    expect(out).not.toMatch(/\(\d+\/\d+\)/);
+    // The only trailing annotation on a counter-less item is the reset time
+    // (MM-DD HH:MM) — no bare ` · N` used counter.
+    expect(out).not.toMatch(/ · \d+$/m);
   });
 
   it("renders auth_error / rate_limited / unavailable fallbacks", () => {
@@ -320,6 +325,58 @@ describe("formatQuotaPlain", () => {
     const unavailable = formatQuotaPlain({ kind: "unavailable" });
     expect(unavailable).toBe(formatQuota({ kind: "unavailable" }));
     expect(unavailable).not.toContain("```");
+  });
+});
+
+describe("renderGlmSection", () => {
+  it("returns header + body lines for a success result (no fence, no divider)", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        { key: "token_5h", label: "5h", usedPercent: 5, leftPercent: 95 },
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [{ modelCode: "search-prime", usage: 169 }],
+        },
+      ],
+    };
+    const sec = renderGlmSection(result);
+    expect(sec.header).toBe("GLM Coding Plan · Pro");
+    expect(sec.body[0]).toContain("5h");
+    expect(sec.body.length).toBeGreaterThanOrEqual(2);
+    // Body must NOT include a fence or divider — those are formatQuota's job.
+    expect(sec.body.join("\n")).not.toContain("```");
+    expect(sec.body.join("\n")).not.toMatch(/^─+$/m);
+  });
+
+  it("returns the fallback message as the body for non-success kinds", () => {
+    expect(renderGlmSection({ kind: "auth_error" }).body[0]).toMatch(/auth expired/i);
+    expect(renderGlmSection({ kind: "unavailable" }).body[0]).toMatch(/unavailable/i);
+    expect(renderGlmSection({ kind: "rate_limited" }).body[0]).toMatch(/busy/i);
+  });
+
+  it("respects the detail flag (omits sub-lines when false)", () => {
+    const result: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 24,
+          leftPercent: 76,
+          detail: [{ modelCode: "search-prime", usage: 169 }],
+        },
+      ],
+    };
+    expect(renderGlmSection(result, { detail: false }).body.join("\n")).not.toContain(
+      "search-prime",
+    );
+    expect(renderGlmSection(result, { detail: true }).body.join("\n")).toContain("search-prime");
   });
 });
 
