@@ -15,7 +15,7 @@ import type { GoQueryResult, GoWindowKey } from "./types.js";
 const WINDOW_META: Array<{ key: GoWindowKey; label: string }> = [
   { key: "rolling", label: "5h" },
   { key: "weekly", label: "Week" },
-  { key: "monthly", label: "Mon" },
+  { key: "monthly", label: "Month" },
 ];
 
 /**

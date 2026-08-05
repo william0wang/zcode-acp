@@ -32,12 +32,17 @@ export interface CombinedResult {
 }
 
 /**
- * Which Opencode Go windows to render, per provider selection:
- *   - `all` / `glm` mode → rolling + weekly (the user's requested default)
- *   - `go` mode          → rolling + weekly + monthly (full detail)
+ * Which Opencode Go windows to render. All three (rolling + weekly + monthly)
+ * are shown in every mode that renders Go at all — the compact color layout
+ * leaves room for the monthly bar.
  */
 export function defaultGoWindows(provider: Provider): GoWindowKey[] {
-  return provider === "go" ? ["rolling", "weekly", "monthly"] : ["rolling", "weekly"];
+  // All three windows everywhere now — the compact color layout leaves room
+  // for the monthly bar. `provider` is accepted to keep the call sites
+  // self-documenting (and to allow per-provider trimming again later) even
+  // though every branch currently returns the same set.
+  void provider;
+  return ["rolling", "weekly", "monthly"];
 }
 
 /**
@@ -135,17 +140,38 @@ export function formatCombinedCardPlain(
  * (no `Quota Overview` banner, no divider). `all` mode renders the banner,
  * divider, and both sections.
  */
+/**
+ * Width the refresh line is right-aligned to. Matches the classic GLM divider
+ * width so the countdown lines up with the card's visual frame.
+ */
+const REFRESH_LINE_WIDTH = 34;
+
+/**
+ * Build the separator line that follows the first rendered section.
+ *
+ * In watch mode this carries the refresh countdown, right-aligned to
+ * {@link REFRESH_LINE_WIDTH} so its position is stable regardless of how many
+ * sections follow (or whether Go is configured). When no refresh suffix is
+ * supplied the line is blank — it still occupies the row so the layout below
+ * it never shifts.
+ */
+function separatorLine(refreshSuffix?: string): string {
+  if (!refreshSuffix) return "";
+  return refreshSuffix.padStart(REFRESH_LINE_WIDTH);
+}
+
 function renderCombinedLines(
   combined: CombinedResult,
   provider: Provider,
   glmOpts?: FormatOptions,
   goWindows?: GoWindowKey[],
   color = false,
-  /** Optional trailing annotation appended to the first section header. */
+  /** Optional refresh countdown rendered on the separator line after the
+   *  first section (e.g. `refresh in 29s`). */
   refreshSuffix?: string,
 ): string[] {
   const { glm, go } = combined;
-  const suffix = refreshSuffix ? ` · ${refreshSuffix}` : "";
+  const sep = separatorLine(refreshSuffix);
   // Fold the color flag into the GLM FormatOptions so it reaches renderGlmSection
   // alongside detail/compact without each caller having to set it.
   const glmOptsColor: FormatOptions = { ...glmOpts, color };
@@ -154,12 +180,15 @@ function renderCombinedLines(
   // body) minus the fence, so `zcode-quota glm` looks identical to today's
   // `zcode-quota`.
   if (provider === "glm") {
-    return renderSingleGlm(glm, glmOptsColor, suffix);
+    const lines = renderSingleGlm(glm, glmOptsColor);
+    // The separator rides after the (only) section, then nothing follows.
+    return sep ? [...lines, sep] : lines;
   }
   // Single-provider Go: header + body, no banner/divider.
   if (provider === "go") {
     const section = formatGoSection(go, goWindows ?? defaultGoWindows("go"), Date.now(), color);
-    return [`${section.header}${suffix}`, ...section.body];
+    const lines = [section.header, ...section.body];
+    return sep ? [...lines, sep] : lines;
   }
 
   // Combined `all` mode. GLM renders full (MCP on its own line) — the layout
@@ -173,43 +202,41 @@ function renderCombinedLines(
   const hasGlm = glmSection.body.length > 0;
   const hasGo = !!goSection && goSection.body.length > 0;
 
+  // The separator line always follows the FIRST rendered section, so its row
+  // is fixed whether or not a second section appears.
   const sections: string[][] = [];
-  // The refresh suffix rides on whichever section renders FIRST — GLM if it
-  // has data, otherwise Go.
-  if (hasGlm) {
-    sections.push([` ${glmSection.header}${suffix}`, ...glmSection.body]);
-  }
-  if (hasGo) {
-    const goSuffix = hasGlm ? "" : suffix; // GLM absent → suffix on Go header
-    sections.push([` ${goSection!.header}${goSuffix}`, ...goSection!.body]);
-  }
+  if (hasGlm) sections.push([` ${glmSection.header}`, ...glmSection.body]);
+  if (hasGo) sections.push([` ${goSection!.header}`, ...goSection!.body]);
 
   if (sections.length === 0) {
     return ["  ⚠ no usage data available"];
   }
 
   // No banner or top divider — the section headers themselves identify each
-  // provider, and an extra banner line adds noise without information.
-  // Sections are separated by a single blank line.
+  // provider, and an extra banner line adds noise without information. The
+  // refresh countdown sits on the separator row between sections (or after
+  // the only section), right-aligned.
   const body: string[] = [];
   sections.forEach((sec, i) => {
-    if (i > 0) body.push("");
+    if (i > 0) body.push(sep);
     body.push(...sec);
   });
+  // If there's only one section, the separator still trails it so the refresh
+  // line keeps its fixed position.
+  if (sections.length === 1 && sep) body.push(sep);
   return body;
 }
 
 /**
  * Render a single GLM provider as header + divider + body (the classic card,
- * minus the fence). Used for `zcode-quota glm`. The optional suffix is appended
- * to the header line (watch-mode countdown).
+ * minus the fence). Used for `zcode-quota glm`.
  */
-function renderSingleGlm(result: QuotaResult, opts?: FormatOptions, suffix = ""): string[] {
+function renderSingleGlm(result: QuotaResult, opts?: FormatOptions): string[] {
   const section = renderGlmSection(result, opts);
   if (result.kind !== "success") {
     // Non-success → just the prose line, no header/divider (matches formatQuota).
     return section.body;
   }
   const divider = "─".repeat(34);
-  return [`${section.header}${suffix}`, divider, ...section.body];
+  return [section.header, divider, ...section.body];
 }

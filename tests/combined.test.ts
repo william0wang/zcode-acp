@@ -78,13 +78,13 @@ const GO_SUCCESS: GoQueryResult = {
 };
 
 describe("defaultGoWindows", () => {
-  it("all/glm → rolling + weekly (the user's requested default)", () => {
-    expect(defaultGoWindows("all")).toEqual(["rolling", "weekly"]);
-    expect(defaultGoWindows("glm")).toEqual(["rolling", "weekly"]);
+  it("all/go → rolling + weekly + monthly (all three windows)", () => {
+    expect(defaultGoWindows("all")).toEqual(["rolling", "weekly", "monthly"]);
+    expect(defaultGoWindows("go")).toEqual(["rolling", "weekly", "monthly"]);
   });
 
-  it("go → rolling + weekly + monthly (full detail)", () => {
-    expect(defaultGoWindows("go")).toEqual(["rolling", "weekly", "monthly"]);
+  it("glm also returns all three (glm mode never renders Go, so unused)", () => {
+    expect(defaultGoWindows("glm")).toEqual(["rolling", "weekly", "monthly"]);
   });
 });
 
@@ -102,10 +102,10 @@ describe("formatCombinedCard — all mode", () => {
     expect(out).toContain(" Opencode Go");
     // The two sections are separated by exactly one blank line.
     expect(out).toContain("\n\n Opencode Go");
-    // Both Go default windows present, monthly absent by default.
+    // All three Go windows present by default (room for monthly in the layout).
     expect(out).toMatch(/5h.*42%/);
     expect(out).toMatch(/Week.*17%/);
-    expect(out).not.toMatch(/Mon.*8%/);
+    expect(out).toMatch(/Month.*8%/);
   });
 
   it("silently drops the Go section when Go is not_configured", () => {
@@ -164,6 +164,63 @@ describe("formatCombinedCard — all mode", () => {
     expect(out).toContain(`${ESC}[48;2;`);
     expect(out).not.toContain("Opencode Go");
   });
+
+  describe("refresh line (refreshSuffix)", () => {
+    it("places the refresh countdown on the separator row between sections, right-aligned", () => {
+      const out = formatCombinedCardPlain(
+        { glm: GLM_SUCCESS, go: GO_SUCCESS },
+        { provider: "all", refreshSuffix: "refresh in 25s" },
+      );
+      const lines = out.split("\n");
+      // GLM section = [header, 5h]; the refresh line sits right after it on the
+      // separator row (no extra blank line — the refresh text IS the separator),
+      // then the Go header follows directly.
+      expect(lines[2]).toBe("refresh in 25s".padStart(34));
+      expect(lines[3]).toBe(" Opencode Go");
+    });
+
+    it("keeps the refresh row position even when Go is not_configured (only GLM)", () => {
+      // Only GLM renders → refresh still trails the first section at the same row.
+      const out = formatCombinedCardPlain(
+        { glm: GLM_SUCCESS, go: { kind: "not_configured" } },
+        { provider: "all", refreshSuffix: "refresh in 25s" },
+      );
+      const lines = out.split("\n");
+      expect(lines[0]).toBe(" GLM Coding Plan · Pro");
+      expect(lines[1]).toMatch(/5h/);
+      expect(lines[2]).toBe("refresh in 25s".padStart(34));
+      expect(lines[3]).toBeUndefined();
+    });
+
+    it("omits the refresh line entirely when no refreshSuffix is given", () => {
+      const out = formatCombinedCardPlain(
+        { glm: GLM_SUCCESS, go: GO_SUCCESS },
+        { provider: "all" },
+      );
+      expect(out).not.toContain("refresh");
+      // The separator between sections is still a blank line.
+      expect(out).toContain("\n\n Opencode Go");
+    });
+
+    it("appends the refresh line after the GLM card in glm mode", () => {
+      const out = formatCombinedCardPlain(
+        { glm: GLM_SUCCESS, go: GO_SUCCESS },
+        { provider: "glm", refreshSuffix: "refresh in 3s" },
+      );
+      const lines = out.split("\n");
+      // glm card = [header, divider, 5h]; refresh is the last line.
+      expect(lines[lines.length - 1]).toBe("refresh in 3s".padStart(34));
+    });
+
+    it("appends the refresh line after the Go card in go mode", () => {
+      const out = formatCombinedCardPlain(
+        { glm: GLM_SUCCESS, go: GO_SUCCESS },
+        { provider: "go", refreshSuffix: "refresh in 9s" },
+      );
+      const lines = out.split("\n");
+      expect(lines[lines.length - 1]).toBe("refresh in 9s".padStart(34));
+    });
+  });
 });
 
 describe("formatCombinedCard — glm mode", () => {
@@ -199,7 +256,7 @@ describe("formatCombinedCard — go mode", () => {
     expect(out).not.toContain("GLM Coding Plan");
     expect(out).toMatch(/5h.*42%/);
     expect(out).toMatch(/Week.*17%/);
-    expect(out).toMatch(/Mon.*8%/);
+    expect(out).toMatch(/Month.*8%/);
   });
 
   it("Go not_configured in go mode surfaces the help line (not silently dropped)", () => {

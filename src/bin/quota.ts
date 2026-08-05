@@ -71,7 +71,7 @@ Query usage from the terminal. By default shows both GLM Coding Plan and
 Opencode Go in one card; pass a provider to focus on one.
 
 Providers:
-  (none)                    Both GLM + Opencode Go (Go: rolling + weekly).
+  (none)                    Both GLM + Opencode Go (rolling + weekly + monthly).
   glm                       GLM Coding Plan only.
   go                        Opencode Go only (rolling + weekly + monthly).
 
@@ -215,10 +215,18 @@ function refreshSuffix(remainingSec: number): string {
   return `refresh in ${remainingSec}s`;
 }
 
+/** A rendered card plus the 0-based index of the refresh (countdown) line. */
+interface RenderedCard {
+  text: string;
+  /** 0-based row of the refresh countdown line, or null when there is none. */
+  refreshRow: number | null;
+}
+
 /**
  * Render the card for a given provider selection. Centralises the
  * combined-card formatting so watch and one-shot share one code path. In watch
- * mode the refresh countdown is appended to the first section header.
+ * mode the refresh countdown is rendered on the separator row after the first
+ * section (its position is fixed whether or not a second section appears).
  *
  * `color` switches the bars to a heat-colored (green→red) 24-bit ANSI layout
  * with the usage numbers overlaid inside. The CLI caller gates this on
@@ -230,22 +238,32 @@ function renderCard(
   detail: boolean,
   color: boolean,
   refresh?: string,
-): string {
-  return formatCombinedCardPlain(combined, {
+): RenderedCard {
+  const text = formatCombinedCardPlain(combined, {
     provider,
     glm: { detail },
     goWindows: defaultGoWindows(provider),
     color,
     refreshSuffix: refresh,
   });
+  // The refresh line is the one carrying the countdown text. Without a refresh
+  // suffix there is no such line. When present it sits right after the first
+  // section, so we can find it by matching the suffix.
+  let refreshRow: number | null = null;
+  if (refresh) {
+    const lines = text.split("\n");
+    const idx = lines.findIndex((l) => l.includes(refresh));
+    refreshRow = idx >= 0 ? idx : null;
+  }
+  return { text, refreshRow };
 }
 
 /**
  * Full redraw of one watch frame: clear screen, then the card (with the
- * refresh countdown on the first header line, counting down from intervalSec).
+ * refresh countdown on the separator row after the first section).
  */
-function renderFrame(plain: string): string {
-  return `${ANSI.clearScreen}${plain}`;
+function renderFrame(text: string): string {
+  return `${ANSI.clearScreen}${text}`;
 }
 
 /**
@@ -281,24 +299,23 @@ async function runWatch(
       clearAllCaches(); // bypass caches — always show live values
       const combined = await queryCombined(provider);
       // Full redraw with the countdown starting at the interval max.
-      process.stdout.write(
-        renderFrame(renderCard(combined, provider, detail, color, refreshSuffix(intervalSec))),
-      );
-      // Per-second countdown: rewrite only the first line (the header with the
-      // countdown suffix), leaving the card body untouched. Re-rendering the
-      // whole card each second would be wasteful; instead we re-render just to
-      // grab line 1, then blast it to row 1 via cursor-home + clear-line.
+      const first = renderCard(combined, provider, detail, color, refreshSuffix(intervalSec));
+      process.stdout.write(renderFrame(first.text));
+      // Per-second countdown: rewrite only the refresh row (the separator line
+      // after the first section), leaving the card body untouched. Its row is
+      // fixed for the lifetime of this `combined` result, so we re-render the
+      // card with the new countdown purely to extract the refreshed line text,
+      // then blast it to that row via cursor-position + clear-line.
       for (let remaining = intervalSec - 1; remaining > 0; remaining--) {
         await sleep(1000, controller.signal).catch(() => undefined);
         if (controller.signal.aborted) break;
-        const firstLine = renderCard(
-          combined,
-          provider,
-          detail,
-          color,
-          refreshSuffix(remaining),
-        ).split("\n", 1)[0]!;
-        process.stdout.write(`\x1B[H${ANSI.clearLine}${firstLine}`);
+        const next = renderCard(combined, provider, detail, color, refreshSuffix(remaining));
+        if (first.refreshRow !== null && next.refreshRow !== null) {
+          const row = first.refreshRow + 1; // ANSI rows are 1-based
+          const line = next.text.split("\n")[next.refreshRow] ?? "";
+          // Move to (row, col 1), clear the line, write the refreshed countdown.
+          process.stdout.write(`\x1B[${row};1H${ANSI.clearLine}${line}`);
+        }
       }
     }
   } finally {
@@ -315,7 +332,7 @@ async function runWatch(
  */
 async function runOnce(provider: Provider, detail: boolean, color: boolean): Promise<void> {
   const combined = await queryCombined(provider);
-  const out = renderCard(combined, provider, detail, color);
+  const out = renderCard(combined, provider, detail, color).text;
 
   // Failure = every selected provider ended up unavailable (not merely
   // not_configured, which is a deliberate "skip me" state).

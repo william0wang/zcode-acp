@@ -187,14 +187,14 @@ describe("formatGoSection", () => {
     expect(sec.body[0]).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/);
     expect(sec.body[1]).toContain("Week");
     expect(sec.body[1]).toContain("17%");
-    expect(sec.body[2]).toContain("Mon");
+    expect(sec.body[2]).toContain("Month");
     expect(sec.body[2]).toContain("8%");
   });
 
   it("renders only requested windows (rolling + weekly)", () => {
     const sec = formatGoSection(success, ["rolling", "weekly"], 1000);
     expect(sec.body).toHaveLength(2);
-    expect(sec.body.find((l) => l.includes("Mon"))).toBeUndefined();
+    expect(sec.body.find((l) => l.includes("Month"))).toBeUndefined();
   });
 
   it("shows the reset time advancing as elapsed time grows (live ticker)", () => {
@@ -221,7 +221,7 @@ describe("formatGoSection", () => {
   it("renders '(no data)' when a requested window is null", () => {
     const noMonthly: GoQueryResult = { ...success, monthly: null };
     const sec = formatGoSection(noMonthly, ["rolling", "weekly", "monthly"], 1000);
-    expect(sec.body.find((l) => l.includes("Mon"))?.includes("(no data)")).toBe(true);
+    expect(sec.body.find((l) => l.includes("Month"))?.includes("(no data)")).toBe(true);
   });
 
   it("non-success kinds render a single explanation line", () => {
