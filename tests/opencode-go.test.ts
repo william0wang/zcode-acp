@@ -231,6 +231,33 @@ describe("formatGoSection", () => {
     expect(formatGoSection({ kind: "auth_error" }, ["rolling"]).body[0]).toMatch(/auth expired/i);
     expect(formatGoSection({ kind: "unavailable" }, ["rolling"]).body[0]).toMatch(/unavailable/i);
   });
+
+  describe("color mode", () => {
+    const ESC = String.fromCharCode(27);
+    const stripAnsi = (s: string): string => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+
+    it("emits ANSI escapes and overlays NN% inside the bar; reset stays on the right", () => {
+      const sec = formatGoSection(success, ["rolling", "weekly"], 1000, true);
+      const rolling = sec.body[0]!;
+      expect(rolling).toContain(`${ESC}[48;2;`); // bg color
+      expect(rolling).toContain(`${ESC}[0m`); // reset
+      // Overlay percent is inside the bar; visible right margin keeps reset only.
+      const visible = stripAnsi(rolling);
+      expect(visible).toContain("42%");
+      expect(visible).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/); // reset stamp
+      // Color mode renders the bar with ANSI bg on space cells, NOT with the
+      // plain █/░ block characters — so they must be absent.
+      expect(visible).not.toContain("█");
+      expect(visible).not.toContain("░");
+    });
+
+    it("color=false keeps the classic plain layout (no ANSI)", () => {
+      const sec = formatGoSection(success, ["rolling"], 1000, false);
+      const line = sec.body[0]!;
+      expect(line).not.toContain("\x1b[");
+      expect(line).toMatch(/5h\s+█+░*\s+42%/);
+    });
+  });
 });
 
 // --- queryGoUsage orchestration ------------------------------------------

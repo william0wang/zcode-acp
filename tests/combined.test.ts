@@ -140,6 +140,30 @@ describe("formatCombinedCard — all mode", () => {
     expect(fenced.startsWith("```text\n")).toBe(true);
     expect(fenced.endsWith("\n```")).toBe(true);
   });
+
+  it("color mode paints both sections with ANSI escapes", () => {
+    const ESC = String.fromCharCode(27);
+    const out = formatCombinedCardPlain(
+      { glm: GLM_SUCCESS, go: GO_SUCCESS },
+      { provider: "all", color: true },
+    );
+    // Both the GLM bar (24%) and the Go bar (42%) must carry ANSI bg escapes.
+    expect(out).toContain(`${ESC}[48;2;`);
+    expect(out).toContain(`${ESC}[0m`);
+    // Section headers are still present and plain (no escapes in headers).
+    expect(out).toContain("GLM Coding Plan");
+    expect(out).toContain("Opencode Go");
+  });
+
+  it("color mode respects provider=glm (paints GLM, no Go section)", () => {
+    const ESC = String.fromCharCode(27);
+    const out = formatCombinedCardPlain(
+      { glm: GLM_SUCCESS, go: GO_SUCCESS },
+      { provider: "glm", color: true },
+    );
+    expect(out).toContain(`${ESC}[48;2;`);
+    expect(out).not.toContain("Opencode Go");
+  });
 });
 
 describe("formatCombinedCard — glm mode", () => {

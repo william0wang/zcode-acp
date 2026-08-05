@@ -7,6 +7,7 @@
  * formatter for visual consistency.
  */
 
+import { pickOverlay, renderColorBar } from "../color.js";
 import { formatResetTime, renderBar } from "../format.js";
 import type { GoQueryResult, GoWindowKey } from "./types.js";
 
@@ -53,11 +54,16 @@ export interface RenderedSection {
  * Used by the combined formatter. The header is always `Opencode Go`; body
  * has one bar line per window. Non-success kinds return a header + a single
  * explanatory line.
+ *
+ * When `color` is true the bar is a heat-colored 24-bit ANSI bar with the
+ * percent overlaid inside (Go windows carry no absolute counters, so the
+ * overlay is always `NN%`), mirroring the GLM color layout.
  */
 export function formatGoSection(
   result: GoQueryResult,
   windows: readonly GoWindowKey[],
   now: number = Date.now(),
+  color = false,
 ): RenderedSection {
   const header = "Opencode Go";
 
@@ -82,6 +88,12 @@ export function formatGoSection(
     const remainingSec = Math.max(0, w.resetInSec - elapsedSec);
     const resetAt = result.fetchedAt + remainingSec * 1000;
     const reset = formatResetTime(resetAt) ?? "<1m";
+    if (color) {
+      const bar = renderColorBar(w.usagePercent, {
+        overlay: pickOverlay({ usedPercent: w.usagePercent }),
+      });
+      return `${m.label.padEnd(5)} ${bar} · ${reset}`;
+    }
     const bar = renderBar(w.usagePercent);
     // No leading indent — the bar lines align with GLM's so the two sections
     // read as one card. The section header carries the ` Opencode Go` indent.

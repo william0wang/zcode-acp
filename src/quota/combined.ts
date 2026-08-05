@@ -88,6 +88,8 @@ export function formatCombinedCard(
     provider: Provider;
     glm?: FormatOptions;
     goWindows?: GoWindowKey[];
+    /** Render heat-colored 24-bit ANSI bars with overlaid numbers. */
+    color?: boolean;
     /** Optional trailing annotation appended to the first section header
      *  (e.g. ` · refresh in 29s`). Watch mode uses it to show the countdown. */
     refreshSuffix?: string;
@@ -99,6 +101,7 @@ export function formatCombinedCard(
     provider,
     opts.glm,
     opts.goWindows,
+    opts.color,
     opts.refreshSuffix,
   );
   return ["```text", ...lines, "```"].join("\n");
@@ -111,6 +114,7 @@ export function formatCombinedCardPlain(
     provider: Provider;
     glm?: FormatOptions;
     goWindows?: GoWindowKey[];
+    color?: boolean;
     refreshSuffix?: string;
   } = { provider: "all" },
 ): string {
@@ -119,6 +123,7 @@ export function formatCombinedCardPlain(
     opts.provider,
     opts.glm,
     opts.goWindows,
+    opts.color,
     opts.refreshSuffix,
   ).join("\n");
 }
@@ -135,29 +140,35 @@ function renderCombinedLines(
   provider: Provider,
   glmOpts?: FormatOptions,
   goWindows?: GoWindowKey[],
+  color = false,
   /** Optional trailing annotation appended to the first section header. */
   refreshSuffix?: string,
 ): string[] {
   const { glm, go } = combined;
   const suffix = refreshSuffix ? ` · ${refreshSuffix}` : "";
+  // Fold the color flag into the GLM FormatOptions so it reaches renderGlmSection
+  // alongside detail/compact without each caller having to set it.
+  const glmOptsColor: FormatOptions = { ...glmOpts, color };
 
   // Single-provider GLM: behave like the original card (header + divider +
   // body) minus the fence, so `zcode-quota glm` looks identical to today's
   // `zcode-quota`.
   if (provider === "glm") {
-    return renderSingleGlm(glm, glmOpts, suffix);
+    return renderSingleGlm(glm, glmOptsColor, suffix);
   }
   // Single-provider Go: header + body, no banner/divider.
   if (provider === "go") {
-    const section = formatGoSection(go, goWindows ?? defaultGoWindows("go"));
+    const section = formatGoSection(go, goWindows ?? defaultGoWindows("go"), Date.now(), color);
     return [`${section.header}${suffix}`, ...section.body];
   }
 
   // Combined `all` mode. GLM renders full (MCP on its own line) — the layout
   // is short enough now that compact mode isn't worth the lost detail.
-  const glmSection = renderGlmSection(glm, glmOpts);
+  const glmSection = renderGlmSection(glm, glmOptsColor);
   const showGo = shouldShowGo("all", go);
-  const goSection = showGo ? formatGoSection(go, goWindows ?? defaultGoWindows("all")) : null;
+  const goSection = showGo
+    ? formatGoSection(go, goWindows ?? defaultGoWindows("all"), Date.now(), color)
+    : null;
 
   const hasGlm = glmSection.body.length > 0;
   const hasGo = !!goSection && goSection.body.length > 0;

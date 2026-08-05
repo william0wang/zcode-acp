@@ -378,6 +378,93 @@ describe("renderGlmSection", () => {
     );
     expect(renderGlmSection(result, { detail: true }).body.join("\n")).toContain("search-prime");
   });
+
+  describe("color mode (opts.color)", () => {
+    const RESULT: QuotaResult = {
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "token_5h",
+          label: "5h",
+          usedPercent: 73,
+          leftPercent: 27,
+          nextResetTime: 1783436462284,
+        },
+        {
+          key: "mcp",
+          label: "MCP",
+          usedPercent: 14,
+          leftPercent: 86,
+          usedCount: 237,
+          totalCount: 1000,
+          nextResetTime: 1784166659961,
+        },
+      ],
+    };
+    // ESC via charCode so regex avoid literal control chars (no-control-regex).
+    const ESC = String.fromCharCode(27);
+    const stripAnsi = (s: string): string => s.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+
+    it("emits 24-bit ANSI escapes on bar lines when color is true", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const body = sec.body.join("\n");
+      expect(body).toContain(`${ESC}[48;2;`); // bg color escape
+      expect(body).toContain(`${ESC}[38;2;`); // fg color escape
+      expect(body).toContain(`${ESC}[0m`); // reset
+    });
+
+    it("overlays used/total inside the MCP bar and drops it from the margin", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const mcpLine = sec.body.find((l) => l.includes("MCP"))!;
+      // The overlay characters are interleaved with ANSI escapes per cell, so
+      // strip escapes first to read the visible bar text.
+      const visible = stripAnsi(mcpLine);
+      // The used/total counter rides inside the colored bar.
+      expect(visible).toContain("237/1000");
+      // The right margin must not repeat the percent or the bare used counter.
+      expect(visible).not.toMatch(/\b14%/); // no right-margin percent
+      expect(visible).not.toMatch(/ · 237(?!\d)/); // no bare ` · 237` counter
+    });
+
+    it("overlays NN% inside the 5h bar (no counters) and keeps the reset time", () => {
+      const sec = renderGlmSection(RESULT, { color: true });
+      const fiveLine = sec.body.find((l) => l.includes("5h"))!;
+      const visible = stripAnsi(fiveLine);
+      expect(visible).toContain("73%");
+      expect(visible).toMatch(/\d{2}-\d{2} \d{2}:\d{2}/); // reset stamp present
+      // Color mode renders the bar with ANSI bg on space cells, not █/░.
+      expect(visible).not.toContain("█");
+      expect(visible).not.toContain("░");
+    });
+
+    it("color=true leaves plain (default) output untouched", () => {
+      // Sanity: default renderGlmSection has no ANSI escapes.
+      const plain = renderGlmSection(RESULT).body.join("\n");
+      expect(plain).not.toContain(ESC);
+    });
+
+    it("color mode still renders detail sub-lines when detail is true", () => {
+      const sec = renderGlmSection(
+        {
+          kind: "success",
+          level: "pro",
+          items: [
+            {
+              key: "mcp",
+              label: "MCP",
+              usedPercent: 24,
+              leftPercent: 76,
+              detail: [{ modelCode: "search-prime", usage: 169 }],
+            },
+          ],
+        },
+        { color: true, detail: true },
+      );
+      expect(sec.body.join("\n")).toContain("search-prime");
+      expect(sec.body.join("\n")).toMatch(/[├└]/);
+    });
+  });
 });
 
 describe("cache", () => {

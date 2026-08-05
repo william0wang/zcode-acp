@@ -124,3 +124,27 @@ describe("parseArgs", () => {
     expect(parseArgs(["-w", "unknown"]).provider).toBe("all");
   });
 });
+
+describe("parseArgs — plain flag", () => {
+  it("empty argv → plain defaults to false", () => {
+    expect(parseArgs([]).plain).toBe(false);
+  });
+
+  it("-p / --plain set plain to true", () => {
+    expect(parseArgs(["-p"]).plain).toBe(true);
+    expect(parseArgs(["--plain"]).plain).toBe(true);
+  });
+
+  it("plain combines with provider and watch flags in any order", () => {
+    expect(parseArgs(["--plain", "go"]).plain).toBe(true);
+    expect(parseArgs(["go", "--plain"]).plain).toBe(true);
+    expect(parseArgs(["-w", "-p"]).plain).toBe(true);
+    expect(parseArgs(["-p", "-w", "glm"]).plain).toBe(true);
+  });
+
+  it("plain is independent of detail (-d)", () => {
+    const opts = parseArgs(["-p", "-d"]);
+    expect(opts.plain).toBe(true);
+    expect(opts.detail).toBe(true);
+  });
+});

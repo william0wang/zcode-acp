@@ -60,6 +60,8 @@ export interface CliOptions {
   help: boolean;
   /** Which provider(s) to query — first positional arg (`glm`/`go`), else `all`. */
   provider: Provider;
+  /** True when the user explicitly asked for the plain monochrome layout. */
+  plain: boolean;
 }
 
 /** Human-readable usage text. */
@@ -84,14 +86,18 @@ Options:
   -w, --watch              Watch mode: clear the screen and refresh periodically.
   -i, --interval <seconds> Refresh interval for watch mode (default 30, min 10).
   -d, --detail             Show per-model MCP usage detail sub-lines (GLM only).
+  -p, --plain              Plain monochrome bars (no color, no in-bar overlay).
+                           Color is the default on a terminal; disabled
+                           automatically when stdout is piped or redirected.
   -h, --help               Show this help and exit.
 
 Examples:
-  zcode-quota                 # both providers, print once and exit
+  zcode-quota                 # both providers, print once and exit (color bars)
   zcode-quota go              # Opencode Go only (3 windows)
   zcode-quota glm -w          # GLM only, live monitor every 30s
   zcode-quota -w -i 60        # both, refresh every 60s
-  zcode-quota -d              # both, include per-model MCP breakdown`;
+  zcode-quota -d              # both, include per-model MCP breakdown
+  zcode-quota --plain         # both, classic monochrome bars`;
 
 /**
  * Clamp a raw interval (seconds, optional) to a valid ms value. Returns the
@@ -119,6 +125,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   let watch = false;
   let help = false;
   let detail = false;
+  let plain = false;
   let interval: number | undefined;
   let provider: Provider = "all";
 
@@ -132,6 +139,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
       case "-d":
       case "--detail":
         detail = true;
+        break;
+      case "-p":
+      case "--plain":
+        plain = true;
         break;
       case "-h":
       case "--help":
@@ -170,6 +181,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
     watch,
     detail,
     help,
+    plain,
     provider,
     intervalMs: resolved.ms,
     intervalClamped: resolved.clamped,
@@ -207,17 +219,23 @@ function refreshSuffix(remainingSec: number): string {
  * Render the card for a given provider selection. Centralises the
  * combined-card formatting so watch and one-shot share one code path. In watch
  * mode the refresh countdown is appended to the first section header.
+ *
+ * `color` switches the bars to a heat-colored (green→red) 24-bit ANSI layout
+ * with the usage numbers overlaid inside. The CLI caller gates this on
+ * `stdout.isTTY && !plain`.
  */
 function renderCard(
   combined: Parameters<typeof formatCombinedCardPlain>[0],
   provider: Provider,
   detail: boolean,
+  color: boolean,
   refresh?: string,
 ): string {
   return formatCombinedCardPlain(combined, {
     provider,
     glm: { detail },
     goWindows: defaultGoWindows(provider),
+    color,
     refreshSuffix: refresh,
   });
 }
@@ -237,7 +255,12 @@ function renderFrame(plain: string): string {
  * line so the card body doesn't flicker. The combined query never throws —
  * each provider degrades internally — so this loop is robust.
  */
-async function runWatch(intervalMs: number, provider: Provider, detail: boolean): Promise<void> {
+async function runWatch(
+  intervalMs: number,
+  provider: Provider,
+  detail: boolean,
+  color: boolean,
+): Promise<void> {
   const intervalSec = Math.round(intervalMs / 1000);
   const controller = new AbortController();
   const restore = (): void => {
@@ -259,7 +282,7 @@ async function runWatch(intervalMs: number, provider: Provider, detail: boolean)
       const combined = await queryCombined(provider);
       // Full redraw with the countdown starting at the interval max.
       process.stdout.write(
-        renderFrame(renderCard(combined, provider, detail, refreshSuffix(intervalSec))),
+        renderFrame(renderCard(combined, provider, detail, color, refreshSuffix(intervalSec))),
       );
       // Per-second countdown: rewrite only the first line (the header with the
       // countdown suffix), leaving the card body untouched. Re-rendering the
@@ -268,10 +291,13 @@ async function runWatch(intervalMs: number, provider: Provider, detail: boolean)
       for (let remaining = intervalSec - 1; remaining > 0; remaining--) {
         await sleep(1000, controller.signal).catch(() => undefined);
         if (controller.signal.aborted) break;
-        const firstLine = renderCard(combined, provider, detail, refreshSuffix(remaining)).split(
-          "\n",
-          1,
-        )[0]!;
+        const firstLine = renderCard(
+          combined,
+          provider,
+          detail,
+          color,
+          refreshSuffix(remaining),
+        ).split("\n", 1)[0]!;
         process.stdout.write(`\x1B[H${ANSI.clearLine}${firstLine}`);
       }
     }
@@ -287,9 +313,9 @@ async function runWatch(intervalMs: number, provider: Provider, detail: boolean)
  * result (at least one provider succeeded or is merely not_configured) goes
  * to stdout with exit 0.
  */
-async function runOnce(provider: Provider, detail: boolean): Promise<void> {
+async function runOnce(provider: Provider, detail: boolean, color: boolean): Promise<void> {
   const combined = await queryCombined(provider);
-  const out = renderCard(combined, provider, detail);
+  const out = renderCard(combined, provider, detail, color);
 
   // Failure = every selected provider ended up unavailable (not merely
   // not_configured, which is a deliberate "skip me" state).
@@ -320,10 +346,17 @@ async function main(): Promise<void> {
     process.stderr.write(`zcode-quota: interval below 10s raised to 10s (cache TTL is 10s)\n`);
   }
 
+  // Color is on by default on a real terminal; turn it off when piped/
+  // redirected (isTTY is only `true` on a real TTY — Node leaves it
+  // `undefined` for pipes/files) or when the user asks for --plain. This
+  // matches the common CLI convention (ls, git, grep) and keeps raw escape
+  // codes out of captured output.
+  const color = process.stdout.isTTY === true && !opts.plain;
+
   if (opts.watch) {
-    await runWatch(opts.intervalMs, opts.provider, opts.detail);
+    await runWatch(opts.intervalMs, opts.provider, opts.detail, color);
   } else {
-    await runOnce(opts.provider, opts.detail);
+    await runOnce(opts.provider, opts.detail, color);
   }
 }
 

@@ -113,7 +113,16 @@ zcode-quota go -w          # watch Opencode Go only
 
 # Refresh at a custom interval (seconds; minimum 10)
 zcode-quota --watch --interval 60
+
+# Plain monochrome bars (color is the default on a terminal)
+zcode-quota --plain
 ```
+
+By default the CLI renders heat-colored (green→yellow→red) progress bars with
+the usage numbers overlaid inside the bar, so each line stays short. Pass
+`--plain` (or `-p`) for the classic monochrome `█`/`░` layout. Color is also
+disabled automatically when stdout is piped or redirected, so captured output
+stays clean.
 
 The watch mode clears and redraws the card in place, like `top`/`htop`. Press
 `Ctrl-C` to exit. The 10s minimum exists because the quota API is cached for

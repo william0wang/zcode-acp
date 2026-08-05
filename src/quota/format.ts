@@ -15,6 +15,7 @@
  * fill for used quota, with the light shade marking the remainder.
  */
 
+import { pickOverlay, renderColorBar } from "./color.js";
 import type { QuotaItem, QuotaResult } from "./types.js";
 
 /**
@@ -89,6 +90,16 @@ function formatTrailing(item: QuotaItem): string {
   return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
+/**
+ * Color-mode trailing annotation: reset time only. The percent and the
+ * used/total counter are already overlaid inside the colored bar (see
+ * {@link pickOverlay}), so the right margin just carries the reset stamp.
+ */
+function formatTrailingColor(item: QuotaItem): string {
+  const reset = formatResetTime(item.nextResetTime);
+  return reset ? ` · ${reset}` : "";
+}
+
 /** Right-pad a model code for aligned detail sub-lines. */
 const DETAIL_LABEL_WIDTH = 14;
 
@@ -103,24 +114,46 @@ const DETAIL_LABEL_WIDTH = 14;
  *   bar line + detail sub-lines. Used only by the combined dual-provider CLI
  *   view to keep the merged card short; the standalone `glm` subcommand and
  *   the `/quota` slash command keep the full layout.
+ * - `color` (default `false`): render the bar as a heat-colored (green→red)
+ *   24-bit ANSI bar with the usage numbers overlaid inside (see
+ *   {@link pickOverlay}), leaving only the reset time on the right margin.
+ *   Only the `zcode-quota` CLI sets this (gated on `stdout.isTTY`); the
+ *   `/quota` slash command never does, so its fenced ```text card stays plain
+ *   and copy-paste-safe.
  */
 export interface FormatOptions {
   detail?: boolean;
   compact?: boolean;
+  color?: boolean;
 }
 
 /** Resolve partial options into complete flags. */
-function resolveOptions(opts?: FormatOptions): { detail: boolean; compact: boolean } {
-  return { detail: opts?.detail ?? true, compact: opts?.compact ?? false };
+function resolveOptions(opts?: FormatOptions): {
+  detail: boolean;
+  compact: boolean;
+  color: boolean;
+} {
+  return {
+    detail: opts?.detail ?? true,
+    compact: opts?.compact ?? false,
+    color: opts?.color ?? false,
+  };
 }
 
 /** Render one quota item line (+ indented detail sub-lines if present). */
-function formatItem(item: QuotaItem, showDetail: boolean): string[] {
+function formatItem(item: QuotaItem, showDetail: boolean, color = false): string[] {
   const lines: string[] = [];
-  const bar = renderBar(item.usedPercent);
-  lines.push(
-    `${item.label.padEnd(5)} ${bar}  ${padPercent(item.usedPercent)}%${formatTrailing(item)}`,
-  );
+  if (color) {
+    // Color mode: the percent (or used/total) is overlaid inside the heat bar,
+    // so the right margin carries only the reset stamp.
+    const bar = renderColorBar(item.usedPercent, { overlay: pickOverlay(item) });
+    lines.push(`${item.label.padEnd(5)} ${bar}${formatTrailingColor(item)}`);
+  } else {
+    const bar = renderBar(item.usedPercent);
+    lines.push(
+      `${item.label.padEnd(5)} ${bar}  ${padPercent(item.usedPercent)}%${formatTrailing(item)}`,
+    );
+  }
 
   if (showDetail && item.detail && item.detail.length > 0) {
     const last = item.detail.length - 1;
@@ -171,7 +204,7 @@ export function renderGlmSection(result: QuotaResult, opts?: FormatOptions): Ren
   if (result.kind !== "success") {
     return { header, body: [STATUS_MESSAGES[result.kind]] };
   }
-  const { detail, compact } = resolveOptions(opts);
+  const { detail, compact, color } = resolveOptions(opts);
   const title = `${header}${result.level ? ` · ${capitalise(result.level)}` : ""}`;
 
   if (compact) {
@@ -181,18 +214,21 @@ export function renderGlmSection(result: QuotaResult, opts?: FormatOptions): Ren
     const body = result.items
       .filter((it) => it.key !== "mcp")
       .map((it) =>
-        formatItem(it, false)[0]!.replace(/$/, mcpNote && it.key === "token_5h" ? mcpNote : ""),
+        formatItem(it, false, color)[0]!.replace(
+          /$/,
+          mcpNote && it.key === "token_5h" ? mcpNote : "",
+        ),
       );
     // If 5h is somehow absent but MCP exists, surface MCP as its own line so
     // the data isn't lost.
     const has5h = result.items.some((it) => it.key === "token_5h");
     if (mcp && !has5h && mcpNote) {
-      body.push(formatItem(mcp, false)[0]!);
+      body.push(formatItem(mcp, false, color)[0]!);
     }
     return { header: title, body };
   }
 
-  const body = result.items.flatMap((item) => formatItem(item, detail));
+  const body = result.items.flatMap((item) => formatItem(item, detail, color));
   return { header: title, body };
 }
 
