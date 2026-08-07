@@ -122,6 +122,31 @@ export async function handleServerRequests(
   const mySid = turn?.zcodeSid;
 
   for (;;) {
+    // Turn cancelled: drain + decline this session's requests directly instead
+    // of forwarding each to the editor (which races a 100ms cancel-poll). The
+    // backend can keep re-emitting permission/elicitation requests after a stop
+    // while it finalises; forwarding them creates a tight
+    // forward→cancel-abort→decline→re-emit loop that starves the event loop
+    // and freezes the UI (observed ~2/s sustained, accelerating until hang).
+    // Declining inline breaks the cycle: the backend gets an immediate answer
+    // per request and stops re-emitting once its stop finalisation completes.
+    // Non-busy errors and multi-attempt transient retries are unaffected —
+    // those exit the turn loop before re-entering here.
+    if (mySid !== undefined && turn?.cancelled) {
+      const drained = backend.pollServerRequests();
+      for (const req of drained) {
+        const sid = (req.params as { sessionId?: string }).sessionId;
+        if (sid === undefined || sid === mySid) {
+          sendZcodeReply(backend, req.id, {
+            action: "decline",
+            reason: "turn cancelled",
+          });
+        } else {
+          backend.requeueServerRequests([req]); // not ours — leave for owner
+        }
+      }
+      return handled;
+    }
     const all = backend.pollServerRequests();
     if (all.length === 0) return handled;
     // Without a session filter (no turn), process everything — legacy path.
@@ -561,6 +586,14 @@ async function requestWithTimeout(
   timeoutMs = INTERACTION_TIMEOUT_MS,
   turn?: PendingTurn,
 ): Promise<InteractionResult> {
+  // Each racer may register timers / listeners that outlive the race. Collect
+  // disposers so we can tear them all down once ANY racer wins — otherwise the
+  // turn-cancel setInterval keeps firing its `warn + resolve` every 100ms for
+  // the rest of the process lifetime once turn.cancelled sticks true, producing
+  // an unbounded `aborted (turn cancelled)` storm that starves the event loop.
+  const disposers: Array<() => void> = [];
+  const settled = { done: false };
+
   // Build the racers. The primary is the client request itself.
   const racers: Array<Promise<InteractionResult>> = [
     cx.request(method, params as never).catch((e: unknown) => {
@@ -577,15 +610,15 @@ async function requestWithTimeout(
   if (signal || closed) {
     racers.push(
       new Promise<typeof INTERRUPTED>((resolve) => {
-        let done = false;
         const fire = () => {
-          if (done) return;
-          done = true;
+          if (settled.done) return;
+          settled.done = true;
           warn(`  ⚠ ${label} aborted (client connection closed)`);
           resolve(INTERRUPTED);
         };
         signal?.addEventListener("abort", fire);
-        closed?.then(fire).catch(() => {});
+        if (signal) disposers.push(() => signal.removeEventListener("abort", fire));
+        if (closed) closed.then(fire).catch(() => {});
       }),
     );
   }
@@ -595,10 +628,13 @@ async function requestWithTimeout(
     racers.push(
       new Promise<typeof INTERRUPTED>((resolve) => {
         const t = setTimeout(() => {
+          if (settled.done) return;
+          settled.done = true;
           warn(`  ⚠ ${label} timed out after ${timeoutMs}ms`);
           resolve(INTERRUPTED);
         }, timeoutMs);
         t.unref?.();
+        disposers.push(() => clearTimeout(t));
       }),
     );
   }
@@ -609,17 +645,30 @@ async function requestWithTimeout(
       new Promise<typeof INTERRUPTED>((resolve) => {
         const cancelTimer = setInterval(() => {
           if (turn.cancelled) {
+            if (settled.done) return;
+            settled.done = true;
             warn(`  ⚠ ${label} aborted (turn cancelled)`);
             resolve(INTERRUPTED);
           }
         }, 100);
         // unref so this polling interval cannot keep the event loop alive.
         cancelTimer.unref?.();
+        disposers.push(() => clearInterval(cancelTimer));
       }),
     );
   }
 
-  return Promise.race(racers);
+  const winner = await Promise.race(racers);
+  // Tear down every racer's timer/listener so the losers don't leak. The
+  // turn-cancel interval is the critical one: without this it fires forever.
+  for (const dispose of disposers) {
+    try {
+      dispose();
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+  return winner;
 }
 
 /**
