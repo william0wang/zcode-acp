@@ -1145,9 +1145,12 @@ async function runEventTurn(
 
     if (turn.cancelled) {
       // Cancel requested: ensure stop was fired (cancel()/preempt normally do
-      // this, but guard anyway). We do NOT silence subsequent events — within
-      // a session the backend is the single source of truth, so whatever it
-      // emits while finalising this turn is forwarded as-is. The loop exits
+      // this, but guard anyway). We do NOT silence subsequent events here — if
+      // the backend ignored the stop and kept producing, that content is still
+      // valuable to the user and should be displayed (the backend is the single
+      // source of truth within a session). Cross-turn contamination is handled
+      // separately by the turn-attribution gate below, which discards this
+      // turn's leftover events from the *next* turn's queue. The loop exits
       // normally on the terminal event (translator.turnDone below).
       if (!turn.stopSent) {
         stopBackendTurn(server, turn.zcodeSid);
@@ -1161,8 +1164,9 @@ async function runEventTurn(
       // yet (no text/reasoning/tool streamed), and we've been silent longer
       // than the threshold, emit a single "thinking" thought chunk so the
       // editor shows activity instead of a frozen screen. Skipped once any
-      // real output has been dispatched.
+      // real output has been dispatched, and never sent after cancellation.
       if (
+        !turn.cancelled &&
         !thinkingHintSent &&
         turnStartedAt !== null &&
         !emittedText &&
@@ -1177,7 +1181,12 @@ async function runEventTurn(
         });
       }
       // Stall reconciliation: probe authoritative status after 15s of silence.
+      // Skipped while cancelled: we've already fired stop, so the backend will
+      // emit its own completion event, and this branch would otherwise push
+      // stale output or return a wrong stopReason (end_turn / throw) after the
+      // user stopped.
       if (
+        !turn.cancelled &&
         translator.turnStarted &&
         Date.now() - lastProgress > 15_000 &&
         Date.now() - lastStallCheck > 15_000
@@ -1243,6 +1252,16 @@ async function runEventTurn(
     // observed on the same iteration that processes it.
     if (turnStartedAt === null && translator.turnStarted) {
       turnStartedAt = Date.now();
+    }
+    // Turn-attribution gate: this turn's own turn.started hasn't arrived yet,
+    // so any event here is leftover from a prior turn (cancelled/preempted but
+    // still finalising) that landed in the queue while send was retrying on a
+    // busy backend. Discard it — including a prior turn's turn.completed, which
+    // would otherwise make this turn exit (cancelled) before it even begins.
+    // Real content from a turn the backend kept running after a failed stop
+    // still shows: it belongs to that prior turn's own runEventTurn, not here.
+    if (!translator.turnStarted && ev.type !== "turn.started") {
+      continue;
     }
     for (const iev of internalEvents) {
       if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") emittedText = true;
