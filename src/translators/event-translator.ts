@@ -52,6 +52,15 @@ export class EventTranslator {
    * drops all events — that turn is owned by BackgroundTaskListener.
    */
   private skippingBackgroundTurn = false;
+  /**
+   * Backend message ids (`assistantMessageId`) whose content reached this
+   * translator via the live event stream. Used by the turn loop to dedup the
+   * turn-completion fallback replay: a message already streamed live must not
+   * be re-emitted by `ProjectionDiffer.diff()`, while messages produced while
+   * no listener was attached (e.g. a backend turn resumed after compaction)
+   * have no live deltas and must be replayed.
+   */
+  readonly deliveredMessageIds = new Set<string>();
 
   /** Tool call ids we've already emitted a ToolCallNew for. */
   readonly seenToolIds = new Set<string>();
@@ -159,6 +168,11 @@ export class EventTranslator {
     const results: InternalEvent[] = [];
     const kind = (payload["kind"] as string) ?? "";
     const delta = (payload["delta"] as string) ?? "";
+    // Record the owning assistant message so the turn loop can distinguish
+    // "already streamed live" from "produced while no listener was attached"
+    // when replaying missing content at turn completion.
+    const msgId = payload["assistantMessageId"];
+    if (typeof msgId === "string" && msgId) this.deliveredMessageIds.add(msgId);
 
     if (kind === "text_delta") {
       if (delta) results.push({ kind: "TextDelta", text: delta });

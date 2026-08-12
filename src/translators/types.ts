@@ -66,11 +66,19 @@ export interface UsageDeltaEvent {
 export interface TextDeltaEvent {
   kind: "TextDelta";
   text: string;
+  /**
+   * Backend message id (assistantMessageId). Set by the projection-differ's
+   * turn-completion fallback replay so the turn loop can dedup against
+   * content already streamed via events this turn; absent on live stream deltas.
+   */
+  messageId?: string;
 }
 
 export interface ReasoningDeltaEvent {
   kind: "ReasoningDelta";
   text: string;
+  /** See TextDeltaEvent.messageId. */
+  messageId?: string;
 }
 
 export interface PlanUpdateEvent {

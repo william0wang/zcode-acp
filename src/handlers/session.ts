@@ -484,9 +484,15 @@ export async function prompt(
     zcodeSid,
     cancelled: false,
   };
+  // True when this send cancelled another in-flight prompt (preempt/stop).
+  // Drives the turn-attribution gate: only a preempted prompt can see leftover
+  // events from a prior turn in its listener queue; without preemption any
+  // events before this turn's turn.started belong to a backend-owned turn
+  // (e.g. auto-resumed after compaction) that this send was steered into.
+  let preempted = false;
   await withPreemptLock(server, zcodeSid, async () => {
     server.pendingTurns.set(requestId, turn);
-    preemptInFlightTurn(server, zcodeSid, requestId);
+    preempted = preemptInFlightTurn(server, zcodeSid, requestId);
   });
 
   const listener = new EventStreamListener(backend, zcodeSid);
@@ -631,6 +637,7 @@ export async function prompt(
           params.sessionId,
           chunkMsgId,
           turn,
+          preempted,
         );
 
         // Session title: set once on the first end_turn, but ONLY for freshly
@@ -877,7 +884,7 @@ function preemptInFlightTurn(
   server: ZcodeAcpServer,
   zcodeSid: string,
   selfRequestId: number,
-): void {
+): boolean {
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid && reqId !== selfRequestId) {
       turn.cancelled = true; // signal the old turn to stop its retry loops
@@ -889,9 +896,10 @@ function preemptInFlightTurn(
       // window as a hint (see session/send retry loop).
       server.lastCancelledAt.set(zcodeSid, Date.now());
       log(`  [preempt] in-flight turn ${reqId} cancelled, proceeding without waiting`);
-      return;
+      return true;
     }
   }
+  return false;
 }
 
 // ---------- internals ----------
@@ -1115,6 +1123,7 @@ async function runEventTurn(
   acpSid: string,
   chunkMsgId: string,
   turn: PendingTurn,
+  preempted: boolean,
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
   const translator = new EventTranslator();
@@ -1253,14 +1262,19 @@ async function runEventTurn(
     if (turnStartedAt === null && translator.turnStarted) {
       turnStartedAt = Date.now();
     }
-    // Turn-attribution gate: this turn's own turn.started hasn't arrived yet,
-    // so any event here is leftover from a prior turn (cancelled/preempted but
-    // still finalising) that landed in the queue while send was retrying on a
-    // busy backend. Discard it — including a prior turn's turn.completed, which
+    // Turn-attribution gate: before this turn's own turn.started arrives, any
+    // event is leftover from a prior turn (cancelled/preempted but still
+    // finalising) that landed in the queue while send was retrying on a busy
+    // backend. Discard it — including a prior turn's turn.completed, which
     // would otherwise make this turn exit (cancelled) before it even begins.
-    // Real content from a turn the backend kept running after a failed stop
-    // still shows: it belongs to that prior turn's own runEventTurn, not here.
-    if (!translator.turnStarted && ev.type !== "turn.started") {
+    //
+    // The gate is armed ONLY when this send preempted another prompt. Without
+    // preemption no prior-turn residue can exist: the queue can only contain
+    // events of a backend-owned turn that was already active at send time
+    // (e.g. the main-branch turn auto-resumed after a compaction) — this send
+    // was steered into it and produces NO new turn.started, so dropping those
+    // events would silently swallow the entire turn's output in the UI.
+    if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, preempted)) {
       continue;
     }
     for (const iev of internalEvents) {
@@ -1341,20 +1355,32 @@ async function runEventTurn(
         if (reply) await sendTextChunk(cx, acpSid, reply, chunkMsgId);
       }
       // Turn-completion diff: emits PlanUpdate (todos) + final usage_update,
-      // reconciles any snapshot-only tool events.
+      // reconciles any snapshot-only tool events, and replays assistant text
+      // that never reached the live event stream.
       //
-      // TextDelta and ReasoningDelta are deliberately filtered out here: the
-      // event path already streamed the assistant reply and reasoning via
-      // model.streaming (chunkMsgId). The differ's seenMessageIds dedup cannot
-      // bridge the two paths because they use different id spaces — the
-      // streaming path uses a client-generated chunkMsgId while the differ
-      // keys on the backend's message info.id. Without this filter the whole
-      // reply and reasoning are dispatched a second time. `fetchLastReply`
-      // above already covers the case where the event path delivered no text.
+      // TextDelta/ReasoningDelta are filtered only when the same message was
+      // ALREADY streamed live (dedup by backend message id — `translator`
+      // records `assistantMessageId` per streamed delta, the differ tags its
+      // replay with the same id). The differ's seenMessageIds dedup cannot
+      // bridge the two paths because the streaming path uses a client-generated
+      // chunkMsgId while the differ keys on the backend's message info.id.
+      //
+      // Without this per-message dedup the whole reply would be dispatched a
+      // second time; without the replay, a backend turn resumed while no
+      // listener was attached (e.g. the main-branch turn auto-resumed after
+      // compaction, before the user's next send) would leave its entire output
+      // invisible in the UI. `fetchLastReply` above only covers the last
+      // assistant message, not the whole missing span.
       const snapshot = await buildSnapshot(server, turn.zcodeSid);
       const completionEvents = differ.diff(snapshot);
       for (const iev of completionEvents) {
-        if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") continue;
+        if (
+          (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") &&
+          iev.messageId &&
+          translator.deliveredMessageIds.has(iev.messageId)
+        ) {
+          continue;
+        }
         await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
       // Mode reconciliation: an in-turn tool (EnterPlanMode/ExitPlanMode) can
@@ -1370,6 +1396,26 @@ async function runEventTurn(
   // 120s no progress: abandon.
   stopBackendTurn(server, turn.zcodeSid);
   return { stopReason: "max_turn_requests" };
+}
+
+/**
+ * Turn-attribution gate decision (pure, exported for tests): whether an event
+ * observed before this turn's own `turn.started` should be dropped as leftover
+ * residue of a prior turn.
+ *
+ * Residue only exists when this send preempted/cancelled another prompt (its
+ * finalising events land in the new listener's queue). Without preemption the
+ * queue can only carry events of a backend-owned turn already active at send
+ * time — e.g. the main-branch turn auto-resumed after a compaction — which
+ * this send was steered into and which emits no new `turn.started`; dropping
+ * those events would silently swallow the whole turn's output in the UI.
+ */
+export function shouldDropEventForTurnAttribution(
+  ev: { type: string },
+  turnStarted: boolean,
+  preempted: boolean,
+): boolean {
+  return !turnStarted && preempted && ev.type !== "turn.started";
 }
 
 /**

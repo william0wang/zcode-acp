@@ -115,12 +115,12 @@ export class ProjectionDiffer {
         } else if (ptype === "text" && role === "assistant") {
           const text = (p as { text?: string }).text ?? "";
           if (text.trim()) {
-            events.push({ kind: "TextDelta", text });
+            events.push({ kind: "TextDelta", text, messageId: m.info.id });
             this.emittedTextThisTurn = true;
           }
         } else if (ptype === "reasoning") {
           const text = (p as { text?: string }).text ?? "";
-          if (text.trim()) events.push({ kind: "ReasoningDelta", text });
+          if (text.trim()) events.push({ kind: "ReasoningDelta", text, messageId: m.info.id });
         } else if (ptype === "patch") {
           const ph = (p as { hash?: string }).hash;
           if (ph && !this.seenPatchHashes.has(ph)) {
