@@ -14,7 +14,7 @@ import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { flattenTodos } from "../src/handlers/session.js";
-import { CONFIG_META } from "../src/utils.js";
+import { CONFIG_META, SLASH_COMMANDS } from "../src/utils.js";
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */
@@ -243,6 +243,16 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses lowercase mode option names", () => {
     const names = CONFIG_META.mode.options.map((o) => o.name);
     expect(names).toEqual(["plan", "build", "edit", "yolo", "auto"]);
+  });
+});
+
+describe("slash command argument hints survive ZCode catalog updates", () => {
+  it("does not hardcode model ids or reasoning variants", () => {
+    const modelCommand = SLASH_COMMANDS.find((command) => command.name === "model");
+    const thoughtCommand = SLASH_COMMANDS.find((command) => command.name === "thought");
+
+    expect(modelCommand?.input?.hint).toBe("model id");
+    expect(thoughtCommand?.input?.hint).toBe("reasoning effort");
   });
 });
 

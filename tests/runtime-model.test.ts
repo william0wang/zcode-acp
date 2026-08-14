@@ -80,12 +80,18 @@ vi.mock("node:fs", async () => {
 });
 
 // Import AFTER vi.mock is set up.
-const { loadAllModels, modelContextWindow, parseModelValue, formatModelValue, buildRuntimeModel } =
-  await import("../src/config/options.js").then(async () => {
-    const opts = await import("../src/config/options.js");
-    const rm = await import("../src/config/runtime-model.js");
-    return { ...opts, buildRuntimeModel: rm.buildRuntimeModel };
-  });
+const {
+  buildConfigOptions,
+  loadAllModels,
+  modelContextWindow,
+  parseModelValue,
+  formatModelValue,
+  buildRuntimeModel,
+} = await import("../src/config/options.js").then(async () => {
+  const opts = await import("../src/config/options.js");
+  const rm = await import("../src/config/runtime-model.js");
+  return { ...opts, buildRuntimeModel: rm.buildRuntimeModel };
+});
 
 describe("loadAllModels", () => {
   it("collects enabled builtins + active custom providers", () => {
@@ -116,6 +122,16 @@ describe("loadAllModels", () => {
     const alpha = models.find((m) => m.modelId === "alpha-1");
     expect(alpha?.providerName).toBe("Alpha");
     expect(alpha?.providerId).toBe("custom-provider-alpha");
+  });
+});
+
+describe("pending session config", () => {
+  it("uses the first configured model instead of a version-pinned fallback", async () => {
+    const options = await buildConfigOptions({} as Parameters<typeof buildConfigOptions>[0], null);
+
+    expect(options.find((option) => option.id === "model")).toMatchObject({
+      currentValue: "model-a",
+    });
   });
 });
 

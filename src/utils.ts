@@ -60,12 +60,12 @@ export const SLASH_COMMANDS = [
   {
     name: "model",
     description: "Switch the session model",
-    input: { hint: "GLM-5.2|GLM-5-Turbo" },
+    input: { hint: "model id" },
   },
   {
     name: "thought",
     description: "Set the reasoning effort",
-    input: { hint: "max|high|nothink" },
+    input: { hint: "reasoning effort" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
   { name: "mcp", description: "List available MCP servers" },

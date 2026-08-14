@@ -189,8 +189,10 @@ export async function buildConfigOptions(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
 ): Promise<acp.SessionConfigOption[]> {
-  let currentProviderId = "";
-  let currentModelId = "GLM-5.2";
+  const configuredModels = loadAllModels();
+  const defaultModel = configuredModels[0];
+  let currentProviderId = defaultModel?.providerId ?? "";
+  let currentModelId = defaultModel?.modelId ?? "GLM-5.2";
   let currentMode = zcodeSid === null ? "yolo" : "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
@@ -222,14 +224,14 @@ export async function buildConfigOptions(
   // right provider (and its apiKey). Fall back to the first enabled provider
   // when settings omits providerId (legacy sessions).
   const currentModel = formatModelValue(
-    currentProviderId || loadAllModels()[0]?.providerId || "builtin:bigmodel-coding-plan",
+    currentProviderId || defaultModel?.providerId || "builtin:bigmodel-coding-plan",
     currentModelId,
   );
 
   // Model options: config.json enabled providers are authoritative. Builtin
   // models show as the bare modelId (clean dropdown for the common case);
   // third-party models prefix the provider name so they're distinguishable.
-  let modelOptions = loadAllModels().map((m) => ({
+  let modelOptions = configuredModels.map((m) => ({
     value: formatModelValue(m.providerId, m.modelId),
     name: isBuiltinProvider(m.providerId) ? m.modelId : `${m.providerName} › ${m.modelId}`,
   }));
