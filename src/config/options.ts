@@ -261,7 +261,12 @@ export async function buildConfigOptions(
     {
       id: "thought",
       name: CONFIG_META.thought.name,
-      category: "thought" as acp.SessionConfigOptionCategory,
+      // Category thought_level (not "thought") so ACP clients recognise the
+      // option as the reasoning-effort selector: the shared matchers in
+      // editors and orchestrators (e.g. Multica's acpEffortOptionIDs) key on
+      // id/category "effort"/"thought_level". The id stays "thought" — it is
+      // what session/set_config_option addresses.
+      category: "thought_level" as acp.SessionConfigOptionCategory,
       type: "select",
       currentValue: currentThought,
       options: thoughtOptions,
