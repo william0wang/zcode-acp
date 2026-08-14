@@ -181,6 +181,19 @@ export async function buildModes(
   };
 }
 
+/**
+ * Canonical display order for thought-level tokens across models
+ * (GLM-5.3: low/high/max; GLM-5-Turbo: enabled/off; others may differ).
+ * Unknown tokens keep their config order after the known ones.
+ */
+const THOUGHT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultra", "enabled", "disabled", "off"];
+
+function orderThoughtVariants(variants: string[]): Array<{ value: string; name: string }> {
+  const known = THOUGHT_ORDER.filter((t) => variants.includes(t));
+  const extra = variants.filter((t) => !THOUGHT_ORDER.includes(t));
+  return [...known, ...extra].map((t) => ({ value: t, name: t }));
+}
+
 /** Build the ACP configOptions array (3 items: model/mode/thought).
  *  zcodeSid null = pending session — skip the backend read and use defaults;
  *  mode defaults to "yolo" (the mode session/create hardcodes) so the dropdown
@@ -194,6 +207,35 @@ export async function buildConfigOptions(
   let currentMode = zcodeSid === null ? "yolo" : "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
+  if (zcodeSid === null) {
+    // Pending session — no backend to read yet, but the thought vocabulary
+    // is per model and the runtime's own source of truth is the enabled
+    // provider's models[].reasoning.variants in the local config. Advertise
+    // THAT for the default model instead of a hardcoded list: a client that
+    // relays the options into a picker (Multica's effort selector) would
+    // otherwise offer tokens the runtime rejects ("nothink" was fiction,
+    // "low" was missing).
+    const cur = loadAllModels()[0];
+    if (cur) {
+      try {
+        const cfg = readConfig() as ConfigShape;
+        const m = (cfg.provider?.[cur.providerId]?.models as
+          | Record<
+              string,
+              { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
+            >
+          | undefined)?.[cur.modelId];
+        const reasoning = m?.reasoning;
+        const variants = reasoning?.variants;
+        if (reasoning?.enabled !== false && variants && variants.length > 0) {
+          thoughtOptions = orderThoughtVariants(variants);
+          currentThought = reasoning.defaultVariant ?? variants[0];
+        }
+      } catch {
+        // unreadable config — the static fallback below applies
+      }
+    }
+  }
 
   if (zcodeSid !== null) {
     try {

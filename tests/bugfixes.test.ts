@@ -236,8 +236,11 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses thought_level category, Thought Level name, lowercase option names", () => {
     expect(CONFIG_META.thought.category).toBe("thought_level");
     expect(CONFIG_META.thought.name).toBe("Thought Level");
+    // The static fallback matches the default coding-plan model's real
+    // vocabulary (runtime-verified); the live per-model list comes from the
+    // enabled provider's reasoning.variants instead of this constant.
     const names = CONFIG_META.thought.options.map((o) => o.name);
-    expect(names).toEqual(["max", "high", "nothink"]);
+    expect(names).toEqual(["low", "high", "max"]);
   });
 
   it("uses lowercase mode option names", () => {

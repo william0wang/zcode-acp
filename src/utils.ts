@@ -93,10 +93,14 @@ export const CONFIG_META = {
   thought: {
     name: "Thought Level",
     category: "thought_level",
+    // Fallback only — the real vocabulary is per model (read from the
+    // enabled provider's models[].reasoning.variants). These values match
+    // the default coding-plan model (GLM-5.3): low/high/max, verified
+    // against the runtime's own session/read.
     options: [
-      { value: "max", name: "max" },
+      { value: "low", name: "low" },
       { value: "high", name: "high" },
-      { value: "nothink", name: "nothink" },
+      { value: "max", name: "max" },
     ],
   },
 } as const;

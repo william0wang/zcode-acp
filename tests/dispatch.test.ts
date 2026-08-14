@@ -306,7 +306,10 @@ describe("dispatchEvent", () => {
       configOptions: [
         { id: "model", currentValue: "anthropic\\GLM-5.2" },
         { id: "mode", currentValue: "plan" },
-        { id: "thought", currentValue: "high" },
+        // The default thought value is config-derived (per-model
+        // reasoning.variants of the enabled provider), so it legitimately
+        // varies with the machine the test runs on.
+        { id: "thought", currentValue: expect.any(String) },
       ],
     });
     expect(sent[1]).toEqual({
