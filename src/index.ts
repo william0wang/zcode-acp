@@ -145,6 +145,11 @@ async function main(): Promise<void> {
     )
     .onRequest("session/setModel", extParams, (ctx) => setModel(server, ctx.params))
     .onRequest("session/setMode", extParams, (ctx) => setMode(server, ctx.params, ctx.client))
+    // Spec spelling of the same call (ACP session-modes uses snake_case with
+    // `modeId`); the handler normalizes the param. Without this route, spec-only
+    // clients (e.g. Paseo) get -32601 and cannot create agents in a non-default
+    // mode.
+    .onRequest("session/set_mode", extParams, (ctx) => setMode(server, ctx.params, ctx.client))
     .onNotification("session/cancel", (ctx) => cancel(server, ctx.params))
     .connect(stream);
 

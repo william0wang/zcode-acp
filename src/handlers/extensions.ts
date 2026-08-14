@@ -270,7 +270,11 @@ export async function setMode(
 ): Promise<Result> {
   const acpSid = params.sessionId;
   const zcodeSid = await resolveSidOrThrow(server, params);
-  const mode = params.mode;
+  // Two spellings reach this handler: the bridge's camelCase extension
+  // (`session/setMode` with `mode`) and the spec's `session/set_mode` with
+  // `modeId`. Clients like Paseo only send the spec spelling and failed with
+  // -32601 when it wasn't routed, so both normalize here.
+  const mode = params.mode ?? params.modeId;
   if (!mode) throw new Error("setMode requires mode");
   const resp = await server
     .ensureBackend()
