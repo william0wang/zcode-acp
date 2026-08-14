@@ -75,7 +75,7 @@ export class ZcodeAcpServer {
      * backend's mcpServers schema matches the ACP array shape (stdio entries
      * carry command/args/env; remote entries carry type/url), so entries are
      * passed through unchanged. */
-    mcpServers?: unknown[];
+    mcpServers?: acp.McpServer[];
   }>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();

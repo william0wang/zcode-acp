@@ -158,9 +158,9 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     const backend = server.ensureBackend();
     // Client-provided MCP servers (ACP session/new mcpServers) ride along
     // when the lazy session materializes. The backend accepts the ACP array
-    // shape verbatim and merges the servers alongside its own local config
-    // (client entries winning on name clash is the backend's rule; entries
-    // here are only ever additive from this side).
+    // shape verbatim; the verified merge behaviour is additive (client
+    // entries appear next to the runtime's own local config). Same-name
+    // clash behaviour is the backend's own and unasserted here.
     const createParams: Record<string, unknown> = {
       workspace: workspaceFor(pending.cwd),
       mode: "yolo",
