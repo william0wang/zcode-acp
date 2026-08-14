@@ -67,7 +67,16 @@ export class ZcodeAcpServer {
    * create is running, so concurrent first-uses (e.g. a raced double prompt)
    * share one `session/create` instead of creating two backend sessions.
    */
-  readonly pendingSessions = new Map<string, { cwd: string; creating?: Promise<string> }>();
+  readonly pendingSessions = new Map<string, {
+    cwd: string;
+    creating?: Promise<string>;
+    /** Client-provided MCP servers from session/new, replayed verbatim into
+     * the backend's session/create when the lazy session materializes. The
+     * backend's mcpServers schema matches the ACP array shape (stdio entries
+     * carry command/args/env; remote entries carry type/url), so entries are
+     * passed through unchanged. */
+    mcpServers?: unknown[];
+  }>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();
   /**

@@ -102,7 +102,7 @@ export async function newSession(
   // Placeholder id — the client addresses this session with it until the
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();
-  server.pendingSessions.set(acpSid, { cwd });
+  server.pendingSessions.set(acpSid, { cwd, mcpServers: params.mcpServers });
   // Durable alias so the placeholder survives a bridge restart and session/
   // resume can still resolve it (best-effort; failures are swallowed inside
   // the store).
@@ -156,10 +156,23 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
   // promise is stored before any concurrent caller can observe the entry.
   const creating = (async () => {
     const backend = server.ensureBackend();
+    // Client-provided MCP servers (ACP session/new mcpServers) ride along
+    // when the lazy session materializes. The backend accepts the ACP array
+    // shape verbatim and merges the servers alongside its own local config
+    // (client entries winning on name clash is the backend's rule; entries
+    // here are only ever additive from this side).
+    const createParams: Record<string, unknown> = {
+      workspace: workspaceFor(pending.cwd),
+      mode: "yolo",
+    };
+    if (pending.mcpServers && pending.mcpServers.length > 0) {
+      createParams.mcpServers = pending.mcpServers;
+      log(`session/create carrying ${pending.mcpServers.length} client MCP server(s)`);
+    }
     const resp = await backend.request(
       server.nextId(),
       "session/create",
-      { workspace: workspaceFor(pending.cwd), mode: "yolo" },
+      createParams,
       15000,
     );
     if (resp.error) {
@@ -292,6 +305,12 @@ export async function resumeSession(
       sessionId: zcodeSid,
       workspace: workspaceFor(cwd),
     };
+    // ACP session/resume may also carry mcpServers; the backend's resume
+    // schema accepts the same array shape (verified: an unknown key would be
+    // rejected before the session lookup).
+    if (params.mcpServers && params.mcpServers.length > 0) {
+      zcParams.mcpServers = params.mcpServers;
+    }
     const runtimeModel = buildResumeRuntimeModel();
     if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
     // Push the provider registry BEFORE resume: a resumed session may carry a
