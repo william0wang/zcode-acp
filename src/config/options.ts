@@ -217,6 +217,14 @@ export async function buildConfigOptions(
     // "low" was missing).
     const cur = loadAllModels()[0];
     if (cur) {
+      // The advertised current model follows the dropdown's leading entry
+      // (the enabled provider's first model — what the runtime actually
+      // starts sessions with) rather than the legacy hardcoded "GLM-5.2".
+      // ACP clients skip a requested model switch when it equals the
+      // advertised current value, so a stale fiction silently pinned the
+      // wrong model whenever the requested id happened to match it.
+      currentProviderId = cur.providerId;
+      currentModelId = cur.modelId;
       try {
         const cfg = readConfig() as ConfigShape;
         const m = (cfg.provider?.[cur.providerId]?.models as

@@ -14,7 +14,12 @@ import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { flattenTodos } from "../src/handlers/session.js";
-import { buildConfigOptions, orderThoughtVariants } from "../src/config/options.js";
+import {
+  buildConfigOptions,
+  formatModelValue,
+  loadAllModels,
+  orderThoughtVariants,
+} from "../src/config/options.js";
 import { CONFIG_META } from "../src/utils.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
@@ -276,6 +281,22 @@ describe("Bug 6: thought option is discoverable and honest", () => {
       { value: "low", name: "low" },
       { value: "turbo", name: "turbo" },
     ]);
+  });
+
+  it("advertises the enabled provider's leading model as the pending current value", async () => {
+    // Regression: the pending session hardcoded currentValue "GLM-5.2",
+    // which can disagree with the model the runtime actually starts with
+    // (the enabled provider's leading model). ACP clients skip a requested
+    // switch when it matches the advertised current value, so the stale
+    // fiction silently pinned the wrong model whenever the requested id
+    // happened to equal it (observed with Paseo's --model GLM-5.2).
+    const server = new ZcodeAcpServer();
+    const options = await buildConfigOptions(server, null);
+    const model = options.find((o) => o.id === "model");
+    const leading = loadAllModels()[0];
+    expect(model?.currentValue).toBe(formatModelValue(leading.providerId, leading.modelId));
+    // The advertised current value must also be selectable in the dropdown.
+    expect(model?.options.map((o) => o.value)).toContain(model?.currentValue);
   });
 });
 
