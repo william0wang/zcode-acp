@@ -36,7 +36,13 @@ const FAKE_CONFIG = {
         baseURL: "https://example.test/one",
         apiKeyRequired: true,
       },
-      models: { "custom-model-1": { limit: { context: 128000 } } },
+      models: {
+        "custom-model-1": {
+          name: "Custom Model One",
+          limit: { context: 128000, output: 4096 },
+          reasoning: { enabled: true, variants: ["high", "max"], defaultVariant: "max" },
+        },
+      },
     },
     "custom-anthropic-kind": {
       name: "Custom Two",
@@ -108,7 +114,44 @@ describe("buildProviderRegistry", () => {
     expect(p?.label).toBe("Custom One");
     expect(p?.source).toBe("custom");
     expect(p?.apiKeyRequired).toBe(true);
-    expect(p?.models).toEqual([{ modelId: "custom-model-1" }]);
+    expect(p?.models).toEqual([
+      {
+        modelId: "custom-model-1",
+        label: "Custom Model One",
+        contextWindow: 128000,
+        maxOutputTokens: 4096,
+        reasoning: {
+          enabled: true,
+          levels: [
+            { value: "high", label: "high" },
+            { value: "max", label: "max" },
+          ],
+          defaultLevel: "max",
+        },
+      },
+    ]);
+  });
+
+  it("maps config.json reasoning variants/defaultVariant to levels/defaultLevel", () => {
+    // Without reasoning the backend falls back to the apiFormat's 2-state
+    // thought levels (enabled/disabled) — this is the thought-dropdown bug.
+    const reg = buildProviderRegistry();
+    const p = providerById(reg, "custom-openai-kind");
+    const model = (p?.models as Array<Record<string, unknown>>)[0];
+    expect(model.reasoning).toEqual({
+      enabled: true,
+      levels: [
+        { value: "high", label: "high" },
+        { value: "max", label: "max" },
+      ],
+      defaultLevel: "max",
+    });
+  });
+
+  it("omits reasoning for models without one (plain models stay plain)", () => {
+    const reg = buildProviderRegistry();
+    const p = providerById(reg, "builtin:primary");
+    expect(p?.models).toEqual([{ modelId: "model-a", contextWindow: 128000 }]);
   });
 
   it("serialises models as an array of {modelId}, NOT the config.json object form", () => {

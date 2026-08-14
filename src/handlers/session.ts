@@ -156,6 +156,14 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
   // promise is stored before any concurrent caller can observe the entry.
   const creating = (async () => {
     const backend = server.ensureBackend();
+    // Push the provider registry BEFORE session/create: the backend resolves
+    // the session's default model against the registry, and without the
+    // provider's reasoning/model definitions it falls back to the bare
+    // anthropic channel (2-state thought: enabled/disabled) instead of the
+    // real provider (max/high/low). Also covers third-party providers for
+    // later model switches (provider_not_configured). Best-effort — a failed
+    // push logs and continues, the session still works over the fallback.
+    await syncProviderRegistry(server, pending.cwd);
     // Client-provided MCP servers (ACP session/new mcpServers) ride along
     // when the lazy session materializes. The backend accepts the ACP array
     // shape verbatim; the verified merge behaviour is additive (client
@@ -190,11 +198,6 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     recordMaterializedSession(acpSid, sid, pending.cwd);
     log(`session/new ${acpSid} → created ${sid} (lazy, on first use)`);
     server.ensureBackgroundListener(sid);
-
-    // Push the provider registry so third-party providers in config.json are
-    // recognised by this isolated backend subprocess. Must happen before any
-    // model switch / turn that targets a non-builtin provider.
-    await syncProviderRegistry(server, pending.cwd);
 
     // Sync to the App's tasks-index.sqlite so the App UI shows this session.
     // Best-effort; failures are logged inside upsertSessionTask and swallowed.

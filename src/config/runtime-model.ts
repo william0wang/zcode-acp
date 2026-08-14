@@ -26,6 +26,7 @@
  * See provider-registry.ts.
  */
 
+import { buildModelElement, type ModelEntry } from "./provider-registry.js";
 import {
   findProviderConfig,
   formatModelValue,
@@ -63,10 +64,14 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
     return null;
   }
   const baseURL = p.options?.baseURL ?? DEFAULT_BASE_URL;
-  const models =
-    Object.keys(p.models ?? {}).length > 0
-      ? Object.keys(p.models ?? {}).map((m) => ({ modelId: m }))
-      : [{ modelId: ref.modelId }];
+  // Model elements must carry the full definition (reasoning variants /
+  // contextWindow / label) — a bare {modelId} overlay makes the backend fall
+  // back to the apiFormat's default 2-state thought levels (enabled/disabled),
+  // silently resetting the session's max/high/low dropdown on resume/switch.
+  const models = Object.entries(p.models ?? {}).map(([modelId, m]) =>
+    buildModelElement(modelId, (m ?? {}) as ModelEntry),
+  );
+  if (models.length === 0) models.push({ modelId: ref.modelId });
   const provider: Record<string, unknown> = {
     providerId: ref.providerId,
     kind: p.kind ?? DEFAULT_KIND,

@@ -218,7 +218,10 @@ export async function buildConfigOptions(
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
   let currentMode = zcodeSid === null ? "yolo" : "build";
-  let currentThought = "high";
+  // Matches the enabled provider's default reasoning variants (GLM-5.3:
+  // max/high/low, default max). Pending sessions show this until the real
+  // session/read thoughtLevel arrives.
+  let currentThought = "max";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
   if (zcodeSid === null) {
     // Pending session — no backend to read yet, but the thought vocabulary
@@ -271,7 +274,9 @@ export async function buildConfigOptions(
       if (cur.providerId) currentProviderId = cur.providerId;
       if (cur.modelId) currentModelId = cur.modelId;
       const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
-      currentThought = (tlSet.current as string) ?? currentThought;
+      // `current` is absent right after session/create — fall back to the
+      // backend's defaultLevel (the level the session actually runs at).
+      currentThought = (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
       const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
       if (tlAvail.length > 0) {
         thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));

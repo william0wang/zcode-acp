@@ -19,6 +19,13 @@ import { readFileSync } from "node:fs";
 
 import { ZCODE_CREDS_PATH, log } from "../utils.js";
 
+/** A model entry in config.json (`provider.<id>.models.<modelId>`). */
+export interface ModelEntry {
+  name?: string;
+  limit?: { context?: number; output?: number };
+  reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string };
+}
+
 /** A provider's raw entry in config.json (`provider.<providerId>`). */
 interface ProviderEntry {
   name?: string;
@@ -26,7 +33,7 @@ interface ProviderEntry {
   enabled?: boolean;
   source?: string;
   options?: { baseURL?: string; apiKey?: string; apiKeyRequired?: boolean };
-  models?: Record<string, unknown>;
+  models?: Record<string, ModelEntry | undefined>;
 }
 
 interface ConfigShape {
@@ -48,12 +55,45 @@ function apiFormatForKind(kind: string | undefined): string | undefined {
   return undefined;
 }
 
+/**
+ * Build a single model element from a config.json model entry.
+ *
+ * Beyond `{modelId}`, the backend's schema accepts label / contextWindow /
+ * maxOutputTokens / reasoning. `reasoning` is the important one: without it
+ * the backend falls back to the apiFormat's default thought levels (a 2-state
+ * enabled/disabled for anthropic-messages), losing the provider's real
+ * variants (e.g. max/high/low) — the session then shows a wrong thought-level
+ * dropdown. config.json's `variants`/`defaultVariant` map to the protocol's
+ * `levels`/`defaultLevel`.
+ *
+ * Exported: runtime-model.ts reuses it for the `runtimeModel` overlay — both
+ * paths must carry identical model definitions or the overlay (resume /
+ * setModel) silently downgrades the session back to the 2-state default.
+ */
+export function buildModelElement(modelId: string, m: ModelEntry): Record<string, unknown> {
+  const el: Record<string, unknown> = { modelId };
+  if (m.name) el.label = m.name;
+  if (m.limit?.context) el.contextWindow = m.limit.context;
+  if (m.limit?.output) el.maxOutputTokens = m.limit.output;
+  const variants = m.reasoning?.variants ?? [];
+  if (m.reasoning?.enabled && variants.length > 0) {
+    const reasoning: Record<string, unknown> = {
+      enabled: true,
+      levels: variants.map((v) => ({ value: v, label: v })),
+    };
+    if (m.reasoning.defaultVariant) reasoning.defaultLevel = m.reasoning.defaultVariant;
+    el.reasoning = reasoning;
+  }
+  return el;
+}
+
 /** Build a single provider element from a config.json entry. */
 function buildProviderElement(providerId: string, p: ProviderEntry): Record<string, unknown> {
-  // models MUST be an array of {modelId} — the backend's strict schema rejects
-  // the object form ({modelId: {...}}) that config.json uses. Only the id is
-  // required; context limits live in the backend's own model catalog.
-  const models = Object.keys(p.models ?? {}).map((modelId) => ({ modelId }));
+  // models MUST be an array — the backend's strict schema rejects the object
+  // form ({modelId: {...}}) that config.json uses.
+  const models = Object.entries(p.models ?? {}).map(([modelId, m]) =>
+    buildModelElement(modelId, m ?? {}),
+  );
   const el: Record<string, unknown> = {
     providerId,
     kind: p.kind,
@@ -104,10 +144,10 @@ export function buildProviderRegistry(): ProviderRegistryPayload {
   return { providers, generatedAt, revision };
 }
 
-/** Stable short hash over provider ids + kind + baseURL (revision gate). */
+/** Stable short hash over provider ids + kind + baseURL + models (revision gate). */
 function hashRevision(providers: ReadonlyArray<Record<string, unknown>>): string {
   const sig = providers
-    .map((p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}`)
+    .map((p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}|${JSON.stringify(p.models ?? [])}`)
     .sort()
     .join("\n");
   // FNV-1a 32-bit → hex; cheap, dependency-free, stable.
