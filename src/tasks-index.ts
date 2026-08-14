@@ -19,6 +19,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+import { DEFAULT_MODEL_ID } from "./config/options.js";
 import { warn, ZCODE_CREDS_PATH } from "./utils.js";
 
 // Precise DatabaseSync constructor type from @types/node, captured without a
@@ -112,7 +113,7 @@ async function withSqliteRetry<T>(
  * Read provider id + model ref from config.json.
  *
  * The App stores `model` as the full `providerKey/modelId` path (e.g.
- * `builtin:bigmodel-coding-plan/GLM-5.2`) — the provider map's KEY is the
+ * `builtin:bigmodel-coding-plan/GLM-5.3`) — the provider map's KEY is the
  * provider id, not the short label. We mirror that format so App-side
  * filtering/grouping by model treats bridge-created rows identically.
  *
@@ -127,14 +128,14 @@ function resolveProviderModel(): { providerId: string; modelRef: string } {
     for (const [providerKey, p] of Object.entries(cfg.provider ?? {})) {
       if (p?.enabled) {
         const models = p.models ?? {};
-        const modelId = Object.keys(models)[0] ?? "GLM-5.2";
+        const modelId = Object.keys(models)[0] ?? DEFAULT_MODEL_ID;
         return { providerId: "glm", modelRef: `${providerKey}/${modelId}` };
       }
     }
   } catch {
     // fall through to defaults
   }
-  return { providerId: "glm", modelRef: "GLM-5.2" };
+  return { providerId: "glm", modelRef: DEFAULT_MODEL_ID };
 }
 
 /**

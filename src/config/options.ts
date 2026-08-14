@@ -40,6 +40,15 @@ interface ConfigShape {
   provider?: Record<string, ProviderEntry>;
 }
 
+/**
+ * Fallback defaults for when config.json is unreadable or has no enabled
+ * provider — keeps a freshly-installed editor functional. Must stay in sync
+ * with the model the app ships first in its provider list.
+ */
+export const DEFAULT_PROVIDER_ID = "builtin:bigmodel-coding-plan";
+export const DEFAULT_PROVIDER_NAME = "BigModel";
+export const DEFAULT_MODEL_ID = "GLM-5.3";
+
 /** A model selectable in the dropdown, with its owning provider. */
 export interface ModelRef {
   providerId: string;
@@ -77,16 +86,20 @@ export function loadAllModels(): ModelRef[] {
       // default so a freshly-installed editor still shows something.
       return [
         {
-          providerId: "builtin:bigmodel-coding-plan",
-          providerName: "BigModel",
-          modelId: "GLM-5.2",
+          providerId: DEFAULT_PROVIDER_ID,
+          providerName: DEFAULT_PROVIDER_NAME,
+          modelId: DEFAULT_MODEL_ID,
         },
       ];
     }
     return out;
   } catch {
     return [
-      { providerId: "builtin:bigmodel-coding-plan", providerName: "BigModel", modelId: "GLM-5.2" },
+      {
+        providerId: DEFAULT_PROVIDER_ID,
+        providerName: DEFAULT_PROVIDER_NAME,
+        modelId: DEFAULT_MODEL_ID,
+      },
     ];
   }
 }
@@ -144,7 +157,7 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
     // (falling back to the legacy default if none configured).
     const firstBuiltin = loadAllModels().find((m) => isBuiltinProvider(m.providerId));
     return {
-      providerId: firstBuiltin?.providerId ?? "builtin:bigmodel-coding-plan",
+      providerId: firstBuiltin?.providerId ?? DEFAULT_PROVIDER_ID,
       modelId: value,
     };
   }
@@ -203,7 +216,7 @@ export async function buildConfigOptions(
   zcodeSid: string | null,
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
-  let currentModelId = "GLM-5.2";
+  let currentModelId = DEFAULT_MODEL_ID;
   let currentMode = zcodeSid === null ? "yolo" : "build";
   let currentThought = "high";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
@@ -272,7 +285,7 @@ export async function buildConfigOptions(
   // right provider (and its apiKey). Fall back to the first enabled provider
   // when settings omits providerId (legacy sessions).
   const currentModel = formatModelValue(
-    currentProviderId || loadAllModels()[0]?.providerId || "builtin:bigmodel-coding-plan",
+    currentProviderId || loadAllModels()[0]?.providerId || DEFAULT_PROVIDER_ID,
     currentModelId,
   );
 

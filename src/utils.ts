@@ -60,7 +60,7 @@ export const SLASH_COMMANDS = [
   {
     name: "model",
     description: "Switch the session model",
-    input: { hint: "GLM-5.2|GLM-5-Turbo" },
+    input: { hint: "GLM-5.3|GLM-5.2|GLM-5-Turbo" },
   },
   {
     name: "thought",

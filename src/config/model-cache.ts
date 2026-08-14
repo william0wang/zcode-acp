@@ -10,7 +10,14 @@
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
-import { formatModelValue, loadAllModels, modelContextWindow, parseModelValue } from "./options.js";
+import {
+  DEFAULT_MODEL_ID,
+  DEFAULT_PROVIDER_ID,
+  formatModelValue,
+  loadAllModels,
+  modelContextWindow,
+  parseModelValue,
+} from "./options.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "../handlers/dispatch.js";
@@ -28,7 +35,7 @@ export async function currentModelCached(
   const cached = server.modelCache.get(zcodeSid);
   if (cached) return cached;
   let providerId = "";
-  let modelId = "GLM-5.2";
+  let modelId = DEFAULT_MODEL_ID;
   try {
     const read = await sessionRead(server, zcodeSid);
     const settings = (read.settings ?? {}) as Record<string, unknown>;
@@ -41,7 +48,7 @@ export async function currentModelCached(
   }
   if (!providerId) {
     // Legacy session without a providerId — resolve to the first enabled provider.
-    providerId = loadAllModels()[0]?.providerId ?? "builtin:bigmodel-coding-plan";
+    providerId = loadAllModels()[0]?.providerId ?? DEFAULT_PROVIDER_ID;
   }
   const encoded = formatModelValue(providerId, modelId);
   server.modelCache.set(zcodeSid, encoded);

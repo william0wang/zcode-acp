@@ -11,6 +11,7 @@
 import { readFileSync } from "node:fs";
 import process from "node:process";
 
+import { DEFAULT_MODEL_ID } from "../config/options.js";
 import { log, ZCODE_CREDS_PATH } from "../utils.js";
 
 /** Parsed provider entry in config.json. */
@@ -40,7 +41,7 @@ export function loadZcodeCredentials(): ZcodeCredentials {
         const opts = p.options ?? {};
         const models = p.models ?? {};
         return {
-          ZCODE_MODEL: Object.keys(models)[0] ?? "GLM-5.2",
+          ZCODE_MODEL: Object.keys(models)[0] ?? DEFAULT_MODEL_ID,
           ZCODE_BASE_URL: opts.baseURL ?? "",
           ANTHROPIC_API_KEY: opts.apiKey ?? "",
         };
