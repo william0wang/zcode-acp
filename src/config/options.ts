@@ -188,7 +188,7 @@ export async function buildModes(
  */
 const THOUGHT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultra", "enabled", "disabled", "off"];
 
-function orderThoughtVariants(variants: string[]): Array<{ value: string; name: string }> {
+export function orderThoughtVariants(variants: string[]): Array<{ value: string; name: string }> {
   const known = THOUGHT_ORDER.filter((t) => variants.includes(t));
   const extra = variants.filter((t) => !THOUGHT_ORDER.includes(t));
   return [...known, ...extra].map((t) => ({ value: t, name: t }));

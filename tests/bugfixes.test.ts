@@ -14,7 +14,9 @@ import { EventStreamListener } from "../src/backend/listener.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { flattenTodos } from "../src/handlers/session.js";
+import { buildConfigOptions, orderThoughtVariants } from "../src/config/options.js";
 import { CONFIG_META } from "../src/utils.js";
+import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeEvent, ZcodeResponse } from "../src/backend/types.js";
 
 /** Build a listener over a fake backend (no subprocess; we drive handleEvent). */
@@ -246,6 +248,34 @@ describe("Bug 3: thought configOption metadata matches Python", () => {
   it("uses lowercase mode option names", () => {
     const names = CONFIG_META.mode.options.map((o) => o.name);
     expect(names).toEqual(["plan", "build", "edit", "yolo", "auto"]);
+  });
+});
+
+describe("Bug 6: thought option is discoverable and honest", () => {
+  it("advertises the spec category thought_level on the pending session", async () => {
+    // Regression: the category was a bare "thought", which is not one of the
+    // ACP spec's reserved SessionConfigOptionCategory names (mode/model/
+    // model_config/thought_level) — clients keying on the standard tokens
+    // (effort pickers in editors and orchestrators) could not find the
+    // reasoning selector at all.
+    const server = new ZcodeAcpServer();
+    const options = await buildConfigOptions(server, null);
+    const thought = options.find((o) => o.id === "thought");
+    expect(thought?.category).toBe("thought_level");
+    expect(thought?.options.length).toBeGreaterThan(0);
+  });
+
+  it("orders thought variants canonically and keeps unknown tokens last", () => {
+    expect(orderThoughtVariants(["high", "nothink", "low", "max"])).toEqual([
+      { value: "low", name: "low" },
+      { value: "high", name: "high" },
+      { value: "max", name: "max" },
+      { value: "nothink", name: "nothink" },
+    ]);
+    expect(orderThoughtVariants(["turbo", "low"])).toEqual([
+      { value: "low", name: "low" },
+      { value: "turbo", name: "turbo" },
+    ]);
   });
 });
 
