@@ -770,10 +770,10 @@ export async function cancel(
 ): Promise<void> {
   const zcodeSid = server.resolveSid(params.sessionId);
   if (!zcodeSid) return;
-  // Cancel ALL matching turns for this session (not just the first). During a
-  // preempt-wait, pendingTurns holds both the old turn (already cancelled by
-  // preempt) and the new queued prompt; breaking on the first match would
-  // leave the queued prompt running. The stopSent guard dedupes the backend
+  // Cancel ALL matching turns for this session (not just the first). While a
+  // prior turn is still finalising, pendingTurns holds both it and any newer
+  // prompt waiting on the backend's prompt lock; breaking on the first match
+  // could leave the live one running. The stopSent guard dedupes the backend
   // stop call across turns and repeated cancels.
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
@@ -811,9 +811,9 @@ class TurnFailedError extends Error {
  * presence), never wait for a response, never throw.
  *
  * The turn-loop cancel site calls this once (guarded by turn.stopSent), then
- * keeps looping until the backend emits turn.completed/turn.failed. preempt
- * waits on pendingTurns deletion — which only happens after that backend
- * completion event — so it transitively waits for the backend to be done.
+ * keeps looping until the backend emits turn.completed/turn.failed. The
+ * backend's prompt lock releases when ITS finalisation completes — that,
+ * not any bridge-side signal, is what the next prompt's send-retry waits on.
  */
 function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
   try {

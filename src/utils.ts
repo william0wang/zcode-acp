@@ -65,7 +65,7 @@ export const SLASH_COMMANDS = [
   {
     name: "thought",
     description: "Set the reasoning effort",
-    input: { hint: "max|high|nothink" },
+    input: { hint: "low|high|max" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
   { name: "mcp", description: "List available MCP servers" },
