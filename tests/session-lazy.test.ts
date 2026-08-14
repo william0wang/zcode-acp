@@ -225,6 +225,59 @@ describe("resumeSession with lazy placeholders", () => {
     expect(out.modes.currentModeId).toBe("yolo");
   });
 
+  it("replays client-provided mcpServers into the backend session/create", async () => {
+    // Regression: session/new accepted an mcpServers parameter but never read
+    // it, so client-configured stdio servers were silently dropped. The lazy
+    // placeholder must carry them into session/create verbatim.
+    const server = new ZcodeAcpServer();
+    const mcpServers = [
+      { name: "echo", command: "node", args: ["/tmp/mcp-echo.mjs"], env: [] },
+    ];
+    const resp = await newSession(
+      server,
+      { cwd: "/tmp/ws", mcpServers } as acp.NewSessionRequest,
+    );
+    expect(server.pendingSessions.get(resp.sessionId)).toMatchObject({ mcpServers });
+
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    await ensureRealSession(server, resp.sessionId);
+
+    const creates = calls.filter((c) => c.method === "session/create");
+    expect(creates).toHaveLength(1);
+    expect(creates[0].params).toMatchObject({ mode: "yolo", mcpServers });
+  });
+
+  it("omits mcpServers from session/create when the client provided none", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    await ensureRealSession(server, resp.sessionId);
+
+    const creates = calls.filter((c) => c.method === "session/create");
+    expect(creates[0].params).not.toHaveProperty("mcpServers");
+  });
+
+  it("forwards resume-provided mcpServers to the backend session/resume", async () => {
+    // Regression companion: ACP session/resume also carries mcpServers; the
+    // backend re-connects them as part of the resume.
+    const server = new ZcodeAcpServer();
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    const mcpServers = [{ name: "echo", command: "node", args: [], env: [] }];
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real_1", cwd: "/tmp/ws", mcpServers } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    const resumes = calls.filter((c) => c.method === "session/resume");
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0].params).toMatchObject({ sessionId: "sess_real_1", mcpServers });
+  });
+
   it("resumes an already-materialized placeholder without backend resume", async () => {
     const server = new ZcodeAcpServer();
     const resp = await newSession(server, newSessionParams("/tmp/ws"));
