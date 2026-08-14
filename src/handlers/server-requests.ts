@@ -133,6 +133,7 @@ export async function handleServerRequests(
     // Non-busy errors and multi-attempt transient retries are unaffected —
     // those exit the turn loop before re-entering here.
     if (mySid !== undefined && turn?.cancelled) {
+      let declined = false;
       const drained = backend.pollServerRequests();
       for (const req of drained) {
         const sid = (req.params as { sessionId?: string }).sessionId;
@@ -141,11 +142,12 @@ export async function handleServerRequests(
             action: "decline",
             reason: "turn cancelled",
           });
+          declined = true;
         } else {
           backend.requeueServerRequests([req]); // not ours — leave for owner
         }
       }
-      return handled;
+      return handled || declined;
     }
     const all = backend.pollServerRequests();
     if (all.length === 0) return handled;
@@ -659,6 +661,11 @@ async function requestWithTimeout(
   }
 
   const winner = await Promise.race(racers);
+  // Mark settled BEFORE disposing: the primary racer (the client request)
+  // resolves without touching settled.done, so a later `closed.then(fire)`
+  // would otherwise pass its guard and emit a spurious "aborted (client
+  // connection closed)" warn long after a normal completion.
+  settled.done = true;
   // Tear down every racer's timer/listener so the losers don't leak. The
   // turn-cancel interval is the critical one: without this it fires forever.
   for (const dispose of disposers) {

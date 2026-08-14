@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { shouldDropEventForTurnAttribution } from "../src/handlers/session.js";
+import { preemptInFlightTurn, shouldDropEventForTurnAttribution } from "../src/handlers/session.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { EventTranslator } from "../src/translators/event-translator.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
@@ -28,14 +28,26 @@ describe("turn-attribution gate: steer into a backend-owned turn must NOT be dro
     // Compression just finished; the backend resumed its main-branch turn and
     // this send was steered into it — no new turn.started will ever arrive.
     expect(
-      shouldDropEventForTurnAttribution(ev("model.streaming"), /* turnStarted */ false, /* preempted */ false),
+      shouldDropEventForTurnAttribution(
+        ev("model.streaming"),
+        /* turnStarted */ false,
+        /* preempted */ false,
+      ),
     ).toBe(false);
     expect(
-      shouldDropEventForTurnAttribution(ev("tool.updated"), /* turnStarted */ false, /* preempted */ false),
+      shouldDropEventForTurnAttribution(
+        ev("tool.updated"),
+        /* turnStarted */ false,
+        /* preempted */ false,
+      ),
     ).toBe(false);
     // Its natural completion must also pass so the loop terminates normally.
     expect(
-      shouldDropEventForTurnAttribution(ev("turn.completed"), /* turnStarted */ false, /* preempted */ false),
+      shouldDropEventForTurnAttribution(
+        ev("turn.completed"),
+        /* turnStarted */ false,
+        /* preempted */ false,
+      ),
     ).toBe(false);
   });
 
@@ -43,25 +55,45 @@ describe("turn-attribution gate: steer into a backend-owned turn must NOT be dro
     // User interrupted an in-flight prompt: leftover events of the cancelled
     // turn land in the new listener's queue and must not contaminate it.
     expect(
-      shouldDropEventForTurnAttribution(ev("model.streaming"), /* turnStarted */ false, /* preempted */ true),
+      shouldDropEventForTurnAttribution(
+        ev("model.streaming"),
+        /* turnStarted */ false,
+        /* preempted */ true,
+      ),
     ).toBe(true);
     expect(
-      shouldDropEventForTurnAttribution(ev("turn.completed"), /* turnStarted */ false, /* preempted */ true),
+      shouldDropEventForTurnAttribution(
+        ev("turn.completed"),
+        /* turnStarted */ false,
+        /* preempted */ true,
+      ),
     ).toBe(true);
   });
 
   it("never drops anything once this turn's own turn.started arrived", () => {
     expect(
-      shouldDropEventForTurnAttribution(ev("model.streaming"), /* turnStarted */ true, /* preempted */ true),
+      shouldDropEventForTurnAttribution(
+        ev("model.streaming"),
+        /* turnStarted */ true,
+        /* preempted */ true,
+      ),
     ).toBe(false);
     expect(
-      shouldDropEventForTurnAttribution(ev("turn.completed"), /* turnStarted */ true, /* preempted */ true),
+      shouldDropEventForTurnAttribution(
+        ev("turn.completed"),
+        /* turnStarted */ true,
+        /* preempted */ true,
+      ),
     ).toBe(false);
   });
 
   it("never drops a turn.started event itself", () => {
     expect(
-      shouldDropEventForTurnAttribution(ev("turn.started"), /* turnStarted */ false, /* preempted */ true),
+      shouldDropEventForTurnAttribution(
+        ev("turn.started"),
+        /* turnStarted */ false,
+        /* preempted */ true,
+      ),
     ).toBe(false);
   });
 });
@@ -124,5 +156,88 @@ describe("turn-completion replay: re-emit text never streamed live, dedup by mes
     const texts = replayed.filter((e) => e.kind === "TextDelta");
     expect(texts).toHaveLength(1);
     expect(texts[0]).toMatchObject({ kind: "TextDelta", messageId: "msg_missing_2" });
+  });
+});
+
+describe("gate placement: residue must be dropped BEFORE translate", () => {
+  it("prior turn's turn.completed must not flip sticky turnDone on this turn's translator", () => {
+    // Regression: the gate used to run AFTER translate(), so a preempted
+    // turn's residue turn.completed flipped the fresh translator's sticky
+    // turnDone flag. This turn's own turn.started then passed the gate and
+    // the very next turnDone check exited the loop immediately — the new
+    // prompt returned "cancelled"/zero output at its own start event.
+    const translator = new EventTranslator();
+    const preempted = true;
+    const events = [
+      { type: "turn.completed", payload: { resultType: "cancelled" } }, // prior turn's residue
+      { type: "turn.started" }, // this turn's own start
+      { type: "model.streaming", payload: { kind: "text_delta", delta: "hi" } },
+      { type: "turn.completed", payload: { resultType: "success" } }, // this turn's real end
+    ];
+    let exitResultType: string | null = null;
+    let delivered = 0;
+    for (const ev of events) {
+      // Mirrors runEventTurn ordering: gate BEFORE translate, turnDone check
+      // after dispatch.
+      if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, preempted)) continue;
+      translator.translate(ev as never);
+      delivered++;
+      if (translator.turnDone) {
+        exitResultType = translator.turnResultType;
+        break;
+      }
+    }
+    // Must terminate on ITS OWN success event (3 events translated), not on
+    // the residue (which with the old ordering exited after 2 with
+    // resultType="cancelled").
+    expect(delivered).toBe(3);
+    expect(exitResultType).toBe("success");
+  });
+});
+
+describe("preemptInFlightTurn cancels ALL matching turns", () => {
+  it("skips the stale entry and stops the live one too (not just the first match)", () => {
+    // Regression: breaking on the first pendingTurns match could hit an
+    // already-cancelled-but-still-finalising turn and leave the LIVE turn
+    // running — the new prompt then retried against a busy backend for 30s.
+    const mkTurn = (cancelled: boolean, stopSent: boolean) => ({
+      zcodeSid: "zs_1",
+      cancelled,
+      stopSent,
+    });
+    const pendingTurns = new Map<number, ReturnType<typeof mkTurn>>([
+      [101, mkTurn(true, true)], // stale: cancelled by an earlier preempt, finalising
+      [102, mkTurn(false, false)], // live: the one that MUST be stopped
+    ]);
+    const sends: Array<{ method: string; sid: string }> = [];
+    const server = {
+      pendingTurns,
+      lastCancelledAt: new Map<string, number>(),
+      ensureBackend: () => ({
+        send: (method: string, params: { sessionId: string }) =>
+          sends.push({ method, sid: params.sessionId }),
+      }),
+    };
+    const preempted = preemptInFlightTurn(server as never, "zs_1", 103);
+    expect(preempted).toBe(true);
+    expect(pendingTurns.get(101)?.cancelled).toBe(true);
+    expect(pendingTurns.get(102)?.cancelled).toBe(true);
+    expect(pendingTurns.get(102)?.stopSent).toBe(true);
+    // stopBackendTurn fires once (stopSent guard dedupes across both turns).
+    expect(sends).toEqual([{ method: "session/stop", sid: "zs_1" }]);
+  });
+
+  it("returns false when no other turn exists for the session", () => {
+    const pendingTurns = new Map<
+      number,
+      { zcodeSid: string; cancelled: boolean; stopSent: boolean }
+    >([[201, { zcodeSid: "zs_other", cancelled: false, stopSent: false }]]);
+    const server = {
+      pendingTurns,
+      lastCancelledAt: new Map<string, number>(),
+      ensureBackend: () => ({ send: () => {} }),
+    };
+    expect(preemptInFlightTurn(server as never, "zs_1", 202)).toBe(false);
+    expect(pendingTurns.get(201)?.cancelled).toBe(false);
   });
 });

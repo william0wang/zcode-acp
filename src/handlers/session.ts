@@ -879,27 +879,35 @@ function withPreemptLock(
  * keeps dispatching whatever the backend sends for this session — which is
  * correct, because within a single session the backend is the single source
  * of truth and its events should reach the client.
+ *
+ * Exported for unit tests (multi-turn pendingTurns scenarios).
  */
-function preemptInFlightTurn(
+export function preemptInFlightTurn(
   server: ZcodeAcpServer,
   zcodeSid: string,
   selfRequestId: number,
 ): boolean {
+  // Cancel ALL matching turns (mirrors cancel()): pendingTurns can hold more
+  // than one entry for this session — e.g. an already-cancelled turn still
+  // finalising plus the live one. Breaking on the first match could hit the
+  // stale entry and leave the live turn running, so the new prompt's send
+  // would retry against a busy backend for 30s and fail. The stopSent guard
+  // dedupes the backend stop call across turns.
+  let found = false;
   for (const [reqId, turn] of server.pendingTurns) {
-    if (turn.zcodeSid === zcodeSid && reqId !== selfRequestId) {
-      turn.cancelled = true; // signal the old turn to stop its retry loops
-      if (!turn.stopSent) {
-        stopBackendTurn(server, zcodeSid);
-        turn.stopSent = true;
-      }
-      // Record cancel time so the prompt()'s send-retry can use the recovery
-      // window as a hint (see session/send retry loop).
-      server.lastCancelledAt.set(zcodeSid, Date.now());
-      log(`  [preempt] in-flight turn ${reqId} cancelled, proceeding without waiting`);
-      return true;
+    if (turn.zcodeSid !== zcodeSid || reqId === selfRequestId) continue;
+    turn.cancelled = true; // signal the old turn to stop its retry loops
+    if (!turn.stopSent) {
+      stopBackendTurn(server, zcodeSid);
+      turn.stopSent = true;
     }
+    // Record cancel time so the prompt()'s send-retry can use the recovery
+    // window as a hint (see session/send retry loop).
+    server.lastCancelledAt.set(zcodeSid, Date.now());
+    log(`  [preempt] in-flight turn ${reqId} cancelled, proceeding without waiting`);
+    found = true;
   }
-  return false;
+  return found;
 }
 
 // ---------- internals ----------
@@ -1220,7 +1228,8 @@ async function runEventTurn(
             if (!emittedText) {
               const reply = await fetchLastReply(server, turn.zcodeSid, differ);
               if (reply) {
-                await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+                registerFetchedReply(translator, reply);
+                await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
               } else if (!emittedOutput) {
                 // No text and no output → suspected failure.
                 stopBackendTurn(server, turn.zcodeSid);
@@ -1255,18 +1264,16 @@ async function runEventTurn(
     }
 
     lastProgress = Date.now();
-    const internalEvents = translator.translate(ev);
-    // Capture the turn-start timestamp for the thinking-phase hint above.
-    // Done after translate so the flag flip on the turn.started event is
-    // observed on the same iteration that processes it.
-    if (turnStartedAt === null && translator.turnStarted) {
-      turnStartedAt = Date.now();
-    }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still
     // finalising) that landed in the queue while send was retrying on a busy
     // backend. Discard it — including a prior turn's turn.completed, which
     // would otherwise make this turn exit (cancelled) before it even begins.
+    //
+    // The gate must run BEFORE translate(): translator flags (turnDone /
+    // turnFailed / turnResultType) are sticky, so translating a prior turn's
+    // terminal event here would flip them and make THIS turn exit prematurely
+    // at the first check after its own turn.started passes the gate.
     //
     // The gate is armed ONLY when this send preempted another prompt. Without
     // preemption no prior-turn residue can exist: the queue can only contain
@@ -1276,6 +1283,13 @@ async function runEventTurn(
     // events would silently swallow the entire turn's output in the UI.
     if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, preempted)) {
       continue;
+    }
+    const internalEvents = translator.translate(ev);
+    // Capture the turn-start timestamp for the thinking-phase hint above.
+    // Done after translate so the flag flip on the turn.started event is
+    // observed on the same iteration that processes it.
+    if (turnStartedAt === null && translator.turnStarted) {
+      turnStartedAt = Date.now();
     }
     for (const iev of internalEvents) {
       if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") emittedText = true;
@@ -1352,7 +1366,10 @@ async function runEventTurn(
       // Fallback: if no text streamed, surface the last assistant reply.
       if (!emittedText) {
         const reply = await fetchLastReply(server, turn.zcodeSid, differ);
-        if (reply) await sendTextChunk(cx, acpSid, reply, chunkMsgId);
+        if (reply) {
+          registerFetchedReply(translator, reply);
+          await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
+        }
       }
       // Turn-completion diff: emits PlanUpdate (todos) + final usage_update,
       // reconciles any snapshot-only tool events, and replays assistant text
@@ -1426,11 +1443,25 @@ export function shouldDropEventForTurnAttribution(
  * just-finished reply. Skips assistant messages the differ already saw (by
  * dedup key) so a previous turn's reply is never re-emitted as this turn's.
  */
+/**
+ * Register a fetchLastReply-delivered message as text-delivered so the
+ * turn-completion diff replay doesn't dispatch the same text a second time
+ * (the differ never saw this message — its live events were lost — so its
+ * diff would re-emit the TextDelta). Reasoning is NOT registered: it was
+ * never streamed either, so the replay dispatching it is pure gain.
+ */
+function registerFetchedReply(
+  translator: EventTranslator,
+  reply: { messageId: string | null },
+): void {
+  if (reply.messageId) translator.deliveredMessageIds.add(reply.messageId);
+}
+
 async function fetchLastReply(
   server: ZcodeAcpServer,
   zcodeSid: string,
   differ: ProjectionDiffer,
-): Promise<string | null> {
+): Promise<{ text: string; messageId: string | null } | null> {
   for (let attempt = 0; attempt < 4; attempt++) {
     const messages = await fetchMessages(server, zcodeSid);
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1443,7 +1474,7 @@ async function fetchLastReply(
         const p = m.parts[j];
         if (p && typeof p === "object" && (p as { type?: string }).type === "text") {
           const text = (p as { text?: string }).text ?? "";
-          if (text.trim()) return text;
+          if (text.trim()) return { text, messageId: m.info?.id ?? null };
         }
       }
     }
