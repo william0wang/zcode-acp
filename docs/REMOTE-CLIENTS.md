@@ -1,0 +1,148 @@
+# Remote Clients — Integration Guide
+
+How to attach any out-of-editor client — browser SPA, mobile app, CLI, desktop
+tool — to bridge sessions over the network. This document IS the contract:
+everything here is implemented by `zcode-acp-hub` and the bridge's remote
+endpoint; anything not written here is not part of the contract.
+
+ACP method semantics are defined by the [ACP spec](https://agentclientprotocol.com);
+this guide covers only the transport, discovery, and the multi-client behaviors
+on top of it. For how ACP methods map to the ZCode backend, see
+[PROTOCOL.md](PROTOCOL.md).
+
+## Topology
+
+```text
+remote client ──WS── tunnel ── hub (single entry, one mapped port)
+                                  │ byte-level proxy, no ACP semantics
+                                  ▼
+                    bridge ACP endpoint (loopback, never exposed)
+                                  │ same AgentApp as stdio
+ACP editor ────── stdio ──────────┘
+```
+
+- The hub is the **only** public entry. It does token auth, instance discovery,
+  and byte-level WebSocket proxying — no session state, no ACP semantics
+  (ADR-0002). The bridge endpoint is loopback-only; nothing dials it but the
+  hub.
+- One WS connection is bound to **one bridge instance** for its whole lifetime.
+  Switching instances means opening a new connection.
+- The bridge process lives and dies with the editor that spawned it (ADR-0001):
+  close the editor and every remote attachment drops. There is no standalone
+  server that outlives the editor.
+
+## Security model
+
+- One shared bearer token (`ZCODE_ACP_REMOTE_TOKEN`) guards both the discovery
+  API and the ACP WebSocket. Possession of the token equals **full control of
+  every agent session** — prompting, answering permissions, tool-driven file
+  writes. Treat it like a password: long, random, never committed.
+- The hub speaks plain HTTP/WS. TLS is expected from the tunnel in front
+  (Cloudflare Tunnel terminates it; with frp, terminate TLS in front or keep
+  the network trusted). The token on cleartext HTTP over an untrusted network
+  is a credential leak.
+- `/api/*` responses carry `Access-Control-Allow-Origin: *` — the token is the
+  security boundary; there is no origin restriction.
+
+## Discovery API
+
+| Endpoint             | Auth     | Purpose                          |
+| -------------------- | -------- | -------------------------------- |
+| `GET /api/health`    | none     | Liveness probe; `200` body `ok`. |
+| `GET /api/instances` | required | Registered bridge instances.     |
+
+HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
+
+`/api/instances` returns a JSON array (sorted by start time):
+
+```json
+[
+  {
+    "id": "72341",
+    "port": 8378,
+    "pid": 72341,
+    "startedAt": 1723800000000,
+    "workspace": "/Users/me/proj",
+    "sessions": [{ "sessionId": "5f0c…", "title": "Fix login bug", "updatedAt": 1723800012000 }]
+  }
+]
+```
+
+- `id` is the bridge process id — stable for that editor window's lifetime,
+  unique per window.
+- `sessions[].sessionId` is the ACP session id: pass it to `session/load`
+  after connecting. `title` may be absent until the session's first turn.
+- Poll every 3–5s. There is no push notification for registry changes yet.
+- Fields are **additive-only** across releases — ignore fields you don't know.
+
+Lifecycle timings: a bridge re-registers every 10s (the registration doubles as
+heartbeat); an instance disappears ~30s after its heartbeats stop; the hub
+exits after ~10 idle minutes with no instances and no proxies, and the next
+bridge re-spawns it on demand.
+
+## Connecting
+
+```text
+ws(s)://<hub-host>/acp?instance=<id>&token=<token>
+```
+
+- Native clients may send `Authorization: Bearer <token>` instead of the query
+  parameter; browsers cannot set WS headers, which is why `?token=` exists.
+  Prefer the header when you can — it keeps the token out of URLs and logs.
+- Handshake failures (bad token, unknown instance id) destroy the socket
+  before open. Treat any non-open outcome as "re-discover, then retry".
+- Framing: one JSON-RPC message per **text** frame. Binary frames are ignored.
+- The hub sends WebSocket pings every 30s on both legs (tunnels drop idle
+  links). Browser and native WS stacks answer pongs automatically — nothing to
+  implement, but don't disable pongs.
+
+## ACP session flow
+
+1. `initialize` — `protocolVersion` MUST be the **number** `1` (a string is
+   rejected). Nothing else may be sent before it.
+2. Attach or create:
+   - `session/load { sessionId }` with an id from discovery — replays the
+     conversation history (text + tool summaries) as `session/update`s, so a
+     freshly attached client can render the full story.
+   - `session/new { cwd? }` — a new session on that bridge.
+   - `session/list` enumerates the bridge's known sessions.
+3. Drive: `session/prompt`, `session/cancel`, `session/set_config_option`
+   (model / mode / thought level), slash commands in the prompt text —
+   see [PROTOCOL.md](PROTOCOL.md).
+
+## Multi-client semantics
+
+The stdio editor and every remote client are peers on the same sessions:
+
+- All agent notifications (`session/update`) are broadcast to every client.
+- Permission and elicitation requests go to **every** client and the **first
+  response wins**. Losers receive `$/cancel_request` for the pending request
+  id — close the dialog and drop it. Never leave a request unanswered forever.
+- Capabilities are OR-merged across clients: a remote client advertising e.g.
+  `elicitation.form` upgrades the shared interaction for the whole bridge.
+- Concurrent prompts for one session are serialized by the bridge — two
+  clients prompting at once cannot interleave turns.
+
+## Failure & recovery
+
+| Symptom                                | Cause                                                                                                                     | Client action                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| WS closes                              | bridge exited (editor closed) or network drop                                                                             | Poll `/api/instances`; if the instance is gone, its sessions are gone too — drop it from the UI.    |
+| Instance missing from `/api/instances` | Heartbeats stopped >30s                                                                                                   | Remove the instance from the UI.                                                                    |
+| Connect fails for a while              | Hub process died; a bridge re-spawns it on the next heartbeat (typically ≤10s, worst case ~1min under the spawn throttle) | Retry with backoff.                                                                                 |
+| Disconnect mid-turn                    | Mobile network flap, background suspension                                                                                | The turn continues server-side. Reconnect and `session/load` — history replay is the recovery path. |
+
+Updates emitted while you are disconnected are not individually re-delivered;
+`session/load` replay is the catch-up mechanism.
+
+## Platform notes
+
+- **Browser**: a page served over `https://` can only open `wss://` — take TLS
+  from the tunnel. CORS is `*`, so any static host works; the client needs no
+  backend of its own.
+- **Mobile**: background suspension kills the socket; on resume, reconnect and
+  `session/load` the previously open session. Store hub URL + token locally;
+  reconnect with exponential backoff. The 30s hub pings keep NAT mappings warm
+  while foregrounded.
+- **CLI / native tools**: prefer the `Authorization` header; a one-shot
+  `session/prompt` + update stream is a perfectly fine first client.

@@ -145,6 +145,10 @@ headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
 security boundary. A proxied connection stays bound to one instance; switching
 instances means reconnecting.
 
+Building a remote client — web, mobile, or CLI? The full integration contract
+(endpoints, framing, lifecycle timings, failure recovery, platform notes)
+lives in [docs/REMOTE-CLIENTS.md](docs/REMOTE-CLIENTS.md).
+
 **Semantics.** All agent notifications are broadcast to every client.
 Permission / elicitation requests go to every client and the **first answer
 wins**; losing clients receive `$/cancel_request` so their dialogs close.
