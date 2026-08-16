@@ -1,0 +1,296 @@
+/**
+ * Hub integration tests — real hub on an ephemeral port: auth, discovery,
+ * register/unregister lifecycle, heartbeat pruning, WS byte proxying, and the
+ * idle-exit policy.
+ */
+
+import net from "node:net";
+
+import { WebSocket, WebSocketServer } from "ws";
+
+import { afterEach, describe, expect, it } from "vitest";
+
+import { startHub, type HubHandle } from "../src/remote/hub-server.js";
+
+const TOKEN = "test-hub-token";
+const BASE_PORT = 18400; // bridge ports start here; ephemeral hub uses port 0
+
+const cleanups: Array<() => Promise<void> | void> = [];
+
+function track<T>(value: T, stop: (v: T) => Promise<void> | void): T {
+  cleanups.push(() => stop(value));
+  return value;
+}
+
+async function startTestHub(
+  opts: Partial<Parameters<typeof startHub>[0]> = {},
+): Promise<HubHandle> {
+  const hub = await startHub({ port: 0, host: "127.0.0.1", token: TOKEN, ...opts });
+  cleanups.push(() => hub.close());
+  return hub;
+}
+
+afterEach(async () => {
+  while (cleanups.length) {
+    const stop = cleanups.pop()!;
+    await stop();
+  }
+});
+
+function registerBody(overrides: Record<string, unknown> = {}) {
+  return {
+    token: TOKEN,
+    id: "inst-1",
+    port: BASE_PORT,
+    pid: 123,
+    workspace: "/tmp/proj",
+    sessions: [{ sessionId: "s1", title: "hello", updatedAt: 1 }],
+    ...overrides,
+  };
+}
+
+async function listInstances(hub: HubHandle, token = TOKEN): Promise<Response> {
+  return fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
+  ]);
+}
+
+describe("hub discovery API", () => {
+  it("answers health without auth", async () => {
+    const hub = await startTestHub();
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/health`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ok");
+  });
+
+  it("rejects /api/instances without or with a wrong token", async () => {
+    const hub = await startTestHub();
+    expect((await fetch(`http://127.0.0.1:${hub.port}/api/instances`)).status).toBe(401);
+    expect((await listInstances(hub, "wrong")).status).toBe(401);
+  });
+
+  it("returns CORS headers and handles preflight", async () => {
+    const hub = await startTestHub();
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      method: "OPTIONS",
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+  });
+
+  it("survives a client aborting mid-POST (no unhandled rejection)", async () => {
+    const hub = await startTestHub();
+    await new Promise<void>((resolve) => {
+      const sock = net.connect({ host: "127.0.0.1", port: hub.port }, () => {
+        // Announce more body bytes than are sent, then drop the connection —
+        // readJson's async iterator rejects on the aborted request body.
+        sock.write(
+          "POST /api/register HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+            "Content-Type: application/json\r\nContent-Length: 100\r\n\r\n" +
+            '{"token":"test-hub-token"',
+        );
+        sock.destroy();
+        resolve();
+      });
+    });
+    // Give the aborted request's rejection a beat to surface, then confirm the
+    // hub is still serving.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/health`);
+    expect(res.status).toBe(200);
+  });
+
+  it("lists registered instances with their sessions", async () => {
+    const hub = await startTestHub();
+    const reg = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody()),
+    });
+    expect(reg.status).toBe(200);
+
+    const res = await listInstances(hub);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    const list = (await res.json()) as Array<Record<string, unknown>>;
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      id: "inst-1",
+      port: BASE_PORT,
+      workspace: "/tmp/proj",
+      sessions: [{ sessionId: "s1", title: "hello", updatedAt: 1 }],
+    });
+    expect(list[0]!["lastSeen"]).toBeUndefined();
+  });
+
+  it("rejects a register with a wrong body token or bad payload", async () => {
+    const hub = await startTestHub();
+    const wrongToken = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ token: "nope" })),
+    });
+    expect(wrongToken.status).toBe(401);
+
+    const badPayload = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port: 0, sessions: "x" })),
+    });
+    expect(badPayload.status).toBe(400);
+    expect((await listInstances(hub)).status === 200).toBe(true);
+  });
+
+  it("preserves startedAt across heartbeats and removes on unregister", async () => {
+    const hub = await startTestHub();
+    const post = (body: unknown) =>
+      fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    await post(registerBody());
+    await new Promise((r) => setTimeout(r, 30));
+    await post(registerBody({ sessions: [] })); // heartbeat re-register
+
+    const list1 = (await (await listInstances(hub)).json()) as Array<{
+      startedAt: number;
+      sessions: unknown[];
+    }>;
+    expect(list1).toHaveLength(1);
+    const startedAt = list1[0]!.startedAt;
+    expect(list1[0]!.sessions).toEqual([]);
+
+    const unreg = await fetch(`http://127.0.0.1:${hub.port}/api/unregister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: TOKEN, id: "inst-1" }),
+    });
+    expect(unreg.status).toBe(200);
+    const list2 = (await (await listInstances(hub)).json()) as unknown[];
+    expect(list2).toEqual([]);
+    expect(startedAt).toBeGreaterThan(0);
+  });
+
+  it("prunes instances whose heartbeat stopped", async () => {
+    const hub = await startTestHub({ heartbeatTimeoutMs: 250 });
+    await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody()),
+    });
+    const before = (await (await listInstances(hub)).json()) as unknown[];
+    expect(before).toHaveLength(1);
+
+    await new Promise((r) => setTimeout(r, 700)); // > TTL + prune interval
+    const after = (await (await listInstances(hub)).json()) as unknown[];
+    expect(after).toEqual([]);
+  });
+});
+
+describe("hub WS proxy", () => {
+  function startEchoBridge(): Promise<{ server: WebSocketServer; port: number }> {
+    return new Promise((resolve) => {
+      const server = new WebSocketServer({ port: 0, host: "127.0.0.1" }, () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+      });
+      server.on("connection", (ws) => {
+        ws.on("message", (data) => ws.send(data));
+      });
+    });
+  }
+
+  it("proxies bytes between a remote client and the bridge endpoint", async () => {
+    const hub = await startTestHub();
+    const echo = track(
+      await startEchoBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port: echo.port })),
+    });
+
+    const client = track(
+      new WebSocket(`ws://127.0.0.1:${hub.port}/acp?instance=inst-1&token=${TOKEN}`),
+      (ws) =>
+        new Promise<void>((resolve) => {
+          if (ws.readyState === WebSocket.CLOSED) {
+            resolve();
+            return;
+          }
+          ws.close();
+          ws.once("close", () => resolve());
+        }),
+    );
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        client.once("open", () => resolve());
+        client.once("error", (e) => reject(e));
+      }),
+      3000,
+      "ws open",
+    );
+
+    const reply = withTimeout(
+      new Promise<string>((resolve) => client.once("message", (d) => resolve(d.toString()))),
+      3000,
+      "ws echo",
+    );
+    client.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }));
+    expect(JSON.parse(await reply)).toEqual({ jsonrpc: "2.0", id: 1, method: "ping" });
+  });
+
+  it("refuses WS upgrades with a bad token or unknown instance", async () => {
+    const hub = await startTestHub();
+    const cases = [
+      `ws://127.0.0.1:${hub.port}/acp?instance=inst-1&token=wrong`,
+      `ws://127.0.0.1:${hub.port}/acp?instance=unknown&token=${TOKEN}`,
+    ];
+    for (const url of cases) {
+      const client = new WebSocket(url);
+      const closed = new Promise<void>((resolve) => {
+        client.once("error", () => resolve());
+        client.once("close", () => resolve());
+      });
+      await withTimeout(closed, 3000, "ws reject");
+      expect(client.readyState).not.toBe(WebSocket.OPEN);
+    }
+  });
+});
+
+describe("hub idle exit", () => {
+  it("exits after the idle window with no instances and no proxies", async () => {
+    let exited = false;
+    const hub = await startTestHub({
+      idleExitMs: 150,
+      onIdleExit: () => {
+        exited = true;
+      },
+    });
+    await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody()),
+    });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(exited).toBe(false); // busy: one instance registered
+
+    await fetch(`http://127.0.0.1:${hub.port}/api/unregister`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: TOKEN, id: "inst-1" }),
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(exited).toBe(true);
+  });
+});
