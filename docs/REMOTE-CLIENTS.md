@@ -71,7 +71,9 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 - `id` is the bridge process id — stable for that editor window's lifetime,
   unique per window.
 - `sessions[].sessionId` is the ACP session id: pass it to `session/load`
-  after connecting. `title` may be absent until the session's first turn.
+  after connecting. `title` is adopted from the backend for resumed sessions
+  and set after a fresh session's first turn — it can still be absent for a
+  session that has never completed a turn.
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 

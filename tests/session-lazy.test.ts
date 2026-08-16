@@ -56,10 +56,11 @@ beforeEach(() => {
 
 /**
  * Fake backend: answers session/create (counting creates), session/resume,
- * session/read (empty projection/settings), session/messages (empty) and the
- * provider-registry push; errors on everything else.
+ * session/read (empty projection/settings), session/messages (empty), the
+ * provider-registry push, and session/list (from `listed`, for title
+ * adoption); errors on everything else.
  */
-function fakeBackend(): ZcodeBackend & {
+function fakeBackend(listed: Array<{ sessionId: string; title?: string }> = []): ZcodeBackend & {
   calls: Array<{ method: string; params: unknown }>;
 } {
   const calls: Array<{ method: string; params: unknown }> = [];
@@ -80,6 +81,8 @@ function fakeBackend(): ZcodeBackend & {
         case "session/resume":
         case "workspace/updateProviderRegistry":
           return { id, result: {} };
+        case "session/list":
+          return { id, result: { sessions: listed } };
         case "session/read":
           return { id, result: { projection: { contextUsed: 0 }, settings: {} } };
         case "session/messages":
@@ -230,13 +233,8 @@ describe("resumeSession with lazy placeholders", () => {
     // it, so client-configured stdio servers were silently dropped. The lazy
     // placeholder must carry them into session/create verbatim.
     const server = new ZcodeAcpServer();
-    const mcpServers = [
-      { name: "echo", command: "node", args: ["/tmp/mcp-echo.mjs"], env: [] },
-    ];
-    const resp = await newSession(
-      server,
-      { cwd: "/tmp/ws", mcpServers } as acp.NewSessionRequest,
-    );
+    const mcpServers = [{ name: "echo", command: "node", args: ["/tmp/mcp-echo.mjs"], env: [] }];
+    const resp = await newSession(server, { cwd: "/tmp/ws", mcpServers } as acp.NewSessionRequest);
     expect(server.pendingSessions.get(resp.sessionId)).toMatchObject({ mcpServers });
 
     const { backend, calls } = fakeBackend();
@@ -379,5 +377,66 @@ describe("loadSession with lazy placeholders", () => {
 
     const resume = calls.find((c) => c.method === "session/resume");
     expect(resume?.params).toMatchObject({ sessionId: "sess_real" });
+  });
+});
+
+describe("stored title adoption on load/resume", () => {
+  it("adopts the backend's stored title into the discovery summary", async () => {
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend([{ sessionId: "sess_real", title: "Historical title" }]);
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionTitles.get("sess_real")).toBe("Historical title");
+    expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
+  });
+
+  it("does not overwrite an in-process title", async () => {
+    const server = new ZcodeAcpServer();
+    server.sessionTitles.set("sess_real", "In-process title");
+    const { backend, calls } = fakeBackend([{ sessionId: "sess_real", title: "Historical title" }]);
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionTitles.get("sess_real")).toBe("In-process title");
+    expect(calls.some((c) => c.method === "session/list")).toBe(false);
+  });
+
+  it("leaves the session untitled when the backend has no stored title", async () => {
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend();
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionSummaries.get("sess_real")?.title).toBeUndefined();
+  });
+
+  it("loadSession adopts the title the same way", async () => {
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend([{ sessionId: "sess_real", title: "Historical title" }]);
+    server.backend = backend;
+
+    await loadSession(
+      server,
+      { sessionId: "sess_real" } as acp.LoadSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
   });
 });

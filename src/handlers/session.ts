@@ -246,6 +246,38 @@ export async function listSessions(
 }
 
 /**
+ * Adopt the backend's stored title for a loaded/resumed session.
+ *
+ * The prompt loop's auto-title only fires for freshly created sessions
+ * (`titleEligibleSessions`), so a session resumed across a bridge restart
+ * would otherwise appear title-less in the hub's discovery API — remote
+ * clients have no editor-side session storage to fall back on. The backend's
+ * session/list is the only title source for sessions born in a previous
+ * bridge lifetime. Best-effort: failures log and leave the session untitled.
+ */
+async function adoptStoredTitle(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  if (server.sessionTitles.has(acpSid)) return;
+  try {
+    const backend = server.ensureBackend();
+    const resp = await backend.request(server.nextId(), "session/list", {}, 15000);
+    if (resp.error) return;
+    const result = (resp.result ?? {}) as ZcodeListResult;
+    const hit = (result.sessions ?? []).find((s) => s.sessionId === zcodeSid);
+    if (hit?.title) {
+      server.sessionTitles.set(acpSid, hit.title);
+      server.touchSessionSummary(acpSid, hit.title);
+      log(`adopted stored title for ${acpSid.slice(0, 8)}: ${hit.title}`);
+    }
+  } catch (e) {
+    log(`stored title lookup failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
  * Resolve the backend session id for `session/resume` / `session/load`.
  *
  * A `session/new` placeholder has no backend counterpart until first use, yet
@@ -325,6 +357,7 @@ export async function resumeSession(
   server.registerSession(acpSid, zcodeSid);
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
+  await adoptStoredTitle(server, acpSid, zcodeSid);
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
@@ -369,6 +402,7 @@ export async function loadSession(
   server.registerSession(acpSid, zcodeSid);
   log(`session/load → ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
+  await adoptStoredTitle(server, acpSid, zcodeSid);
 
   const messages = await fetchMessages(server, zcodeSid);
   let replayed = 0;
