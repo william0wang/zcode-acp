@@ -103,6 +103,9 @@ export async function newSession(
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();
   server.pendingSessions.set(acpSid, { cwd, mcpServers: params.mcpServers });
+  // Persists past materialization (pendingSessions is cleared on first use) so
+  // the remote discovery payload can still label the workspace.
+  server.sessionCwds.set(acpSid, cwd);
   // Durable alias so the placeholder survives a bridge restart and session/
   // resume can still resolve it (best-effort; failures are swallowed inside
   // the store).
@@ -147,6 +150,7 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     if (record) {
       pending = { cwd: record.cwd };
       server.pendingSessions.set(acpSid, pending);
+      server.sessionCwds.set(acpSid, record.cwd);
     }
   }
   if (!pending) throw new Error(`session ${acpSid} not found`);
@@ -658,6 +662,7 @@ export async function prompt(
               .find((l) => l.length > 0)
               ?.slice(0, 80) ?? text.slice(0, 80);
           server.sessionTitles.set(params.sessionId, title);
+          server.touchSessionSummary(params.sessionId, title);
           const { updateSessionTitle } = await import("../tasks-index.js");
           void updateSessionTitle(zcodeSid, title, text);
           await sendSessionUpdate(cx, params.sessionId, {
@@ -713,6 +718,9 @@ export async function prompt(
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
+    // Turn end = session activity — refresh the discovery summary timestamp
+    // regardless of outcome (end_turn, cancelled, retries exhausted).
+    server.touchSessionSummary(params.sessionId);
   }
 }
 

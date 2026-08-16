@@ -16,6 +16,7 @@ import {
   ZcodeBackend,
 } from "./backend/index.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
+import { ClientRegistry } from "./remote/broadcast.js";
 import { AGENT_INFO, PROTOCOL_VERSION, log } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
@@ -67,16 +68,26 @@ export class ZcodeAcpServer {
    * create is running, so concurrent first-uses (e.g. a raced double prompt)
    * share one `session/create` instead of creating two backend sessions.
    */
-  readonly pendingSessions = new Map<string, {
-    cwd: string;
-    creating?: Promise<string>;
-    /** Client-provided MCP servers from session/new, replayed verbatim into
-     * the backend's session/create when the lazy session materializes. The
-     * backend's mcpServers schema matches the ACP array shape (stdio entries
-     * carry command/args/env; remote entries carry type/url), so entries are
-     * passed through unchanged. */
-    mcpServers?: acp.McpServer[];
-  }>();
+  readonly pendingSessions = new Map<
+    string,
+    {
+      cwd: string;
+      creating?: Promise<string>;
+      /** Client-provided MCP servers from session/new, replayed verbatim into
+       * the backend's session/create when the lazy session materializes. The
+       * backend's mcpServers schema matches the ACP array shape (stdio entries
+       * carry command/args/env; remote entries carry type/url), so entries are
+       * passed through unchanged. */
+      mcpServers?: acp.McpServer[];
+    }
+  >();
+  /**
+   * Session cwds (acp_sid → cwd), recorded at session/new and lazy-recovery.
+   * Unlike pendingSessions this survives materialization — the hub discovery
+   * payload needs a workspace label for live sessions, whose pending entries
+   * are deleted on first use.
+   */
+  readonly sessionCwds = new Map<string, string>();
   /** Currently running turns, keyed by the ACP request id. */
   readonly pendingTurns = new Map<number, PendingTurn>();
   /**
@@ -85,16 +96,24 @@ export class ZcodeAcpServer {
    * concurrent prompts from both missing each other and registering at once.
    */
   readonly preemptLocks = new Map<string, Promise<void>>();
-  /** Capabilities advertised by the connected client (Zed, JetBrains, ...). */
+  /** Capabilities advertised by connected clients (Zed, JetBrains, remote). */
   clientCapabilities: ClientCapabilities = {};
   /**
-   * Connection-scoped AgentContext, captured at `connect()` time. Held so that
-   * background listeners can push `session/update` notifications OUTSIDE a
-   * request handler (e.g. when a background task completes after `session/
-   * prompt` has already returned). Null before `connect()` runs (only during
-   * the brief startup window — sessions can't be created before connect).
+   * All connected ACP clients (the stdio editor plus any remote WebSocket
+   * clients). Handlers push notifications through `clients.broadcast()` so
+   * every attached client sees the same stream; the registry replaces the old
+   * single `acpClient` reference. Background listeners use it to push
+   * `session/update` notifications outside request handlers.
    */
-  acpClient: acp.AgentContext | null = null;
+  readonly clients = new ClientRegistry();
+  /**
+   * Lightweight session summaries for the remote hub's discovery API
+   * (acp_sid → { title, updatedAt }). In-memory only — the hub holds no
+   * business state and the bridge dies with its editor, so persistence would
+   * buy nothing. Maintained by `touchSessionSummary` at session registration,
+   * title set, and turn completion.
+   */
+  readonly sessionSummaries = new Map<string, { title?: string; updatedAt: number }>();
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
   /**
@@ -167,6 +186,24 @@ export class ZcodeAcpServer {
   registerSession(acpSid: string, zcodeSid: string): void {
     this.sessionMap.set(acpSid, zcodeSid);
     this.acpSidByZcodeSid.set(zcodeSid, acpSid);
+    this.touchSessionSummary(acpSid);
+  }
+
+  /** Update a session's discovery summary (title sticky once set). */
+  touchSessionSummary(acpSid: string, title?: string): void {
+    const existing = this.sessionSummaries.get(acpSid);
+    this.sessionSummaries.set(acpSid, {
+      title: title ?? existing?.title,
+      updatedAt: Date.now(),
+    });
+  }
+
+  /**
+   * Best-effort workspace label for the hub discovery payload: first known
+   * session cwd, else the bridge process cwd.
+   */
+  workspaceLabel(): string {
+    return this.sessionCwds.values().next().value ?? process.cwd();
   }
 
   /**
@@ -201,12 +238,12 @@ export class ZcodeAcpServer {
    * the bridge on a notification failure.
    */
   async notifyByZcodeSid(zcodeSid: string, update: acp.SessionUpdate): Promise<boolean> {
-    const cx = this.acpClient;
-    if (!cx) return false;
+    if (this.clients.size === 0) return false;
     const acpSid = this.resolveAcpSid(zcodeSid);
     if (!acpSid) return false;
     try {
-      await cx.notify("session/update", { sessionId: acpSid, update });
+      // Broadcast notify swallows per-client failures internally (warn only).
+      await this.clients.broadcast().notify("session/update", { sessionId: acpSid, update });
       return true;
     } catch (e) {
       log(`notifyByZcodeSid: session/update failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -230,10 +267,33 @@ export class ZcodeAcpServer {
     return this.clientCapabilities.elicitation?.form != null;
   }
 
+  /**
+   * OR-merge capabilities from a newly connected client. Each connection runs
+   * its own `initialize`; boolean capabilities are unioned across clients so a
+   * feature advertised by ANY attached client (Zed or a remote one) enables the
+   * richer interaction path, and `_meta` flags (e.g. terminal_output) merge
+   * shallowly. Idempotent for re-connecting clients with equal capabilities.
+   */
+  mergeClientCapabilities(caps: ClientCapabilities): void {
+    const cur = this.clientCapabilities;
+    const next: ClientCapabilities = { ...cur, ...caps };
+    next.fs = {
+      readTextFile: cur.fs?.readTextFile || caps.fs?.readTextFile,
+      writeTextFile: cur.fs?.writeTextFile || caps.fs?.writeTextFile,
+    };
+    next.terminal = cur.terminal || caps.terminal;
+    next.elicitation = {
+      form: cur.elicitation?.form || caps.elicitation?.form,
+      url: cur.elicitation?.url || caps.elicitation?.url,
+    };
+    if (cur._meta || caps._meta) next._meta = { ...cur._meta, ...caps._meta };
+    this.clientCapabilities = next;
+  }
+
   /** Handle `initialize`: negotiate version + declare agent capabilities. */
   async initialize(params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
     const clientInfo = (params.clientInfo as { name?: string; version?: string } | null) ?? null;
-    this.clientCapabilities = (params.clientCapabilities as ClientCapabilities) ?? {};
+    this.mergeClientCapabilities((params.clientCapabilities as ClientCapabilities) ?? {});
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +
         `, client=${clientInfo?.name ?? "unknown"}` +

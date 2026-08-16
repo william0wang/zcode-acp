@@ -78,3 +78,28 @@ describe("ZcodeAcpServer.initialize", () => {
     expect(server.backend).toBeNull();
   });
 });
+
+describe("ZcodeAcpServer discovery summaries", () => {
+  it("touchSessionSummary bumps updatedAt and keeps the title sticky", async () => {
+    const server = new ZcodeAcpServer();
+    server.touchSessionSummary("s1");
+    expect(server.sessionSummaries.get("s1")?.title).toBeUndefined();
+
+    server.touchSessionSummary("s1", "My title");
+    const titled = server.sessionSummaries.get("s1")!;
+    expect(titled.title).toBe("My title");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    server.touchSessionSummary("s1");
+    const touched = server.sessionSummaries.get("s1")!;
+    expect(touched.title).toBe("My title");
+    expect(touched.updatedAt).toBeGreaterThan(titled.updatedAt);
+  });
+
+  it("workspaceLabel prefers a known session cwd and falls back to process cwd", () => {
+    const server = new ZcodeAcpServer();
+    expect(server.workspaceLabel()).toBe(process.cwd());
+    server.sessionCwds.set("s1", "/tmp/proj");
+    expect(server.workspaceLabel()).toBe("/tmp/proj");
+  });
+});
