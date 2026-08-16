@@ -177,12 +177,7 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
       createParams.mcpServers = pending.mcpServers;
       log(`session/create carrying ${pending.mcpServers.length} client MCP server(s)`);
     }
-    const resp = await backend.request(
-      server.nextId(),
-      "session/create",
-      createParams,
-      15000,
-    );
+    const resp = await backend.request(server.nextId(), "session/create", createParams, 15000);
     if (resp.error) {
       throw new Error(`zcode create failed: ${resp.error.message ?? ""}`);
     }
@@ -1439,14 +1434,6 @@ export function shouldDropEventForTurnAttribution(
 }
 
 /**
- * Fetch the last assistant message text as a fallback for lost text events.
- *
- * Retries up to 4 times with a short delay because zcode has a data-consistency
- * window after `status:idle` where `session/messages` may not yet include the
- * just-finished reply. Skips assistant messages the differ already saw (by
- * dedup key) so a previous turn's reply is never re-emitted as this turn's.
- */
-/**
  * Register a fetchLastReply-delivered message as text-delivered so the
  * turn-completion diff replay doesn't dispatch the same text a second time
  * (the differ never saw this message — its live events were lost — so its
@@ -1460,6 +1447,14 @@ function registerFetchedReply(
   if (reply.messageId) translator.deliveredMessageIds.add(reply.messageId);
 }
 
+/**
+ * Fetch the last assistant message text as a fallback for lost text events.
+ *
+ * Retries up to 4 times with a short delay because zcode has a data-consistency
+ * window after `status:idle` where `session/messages` may not yet include the
+ * just-finished reply. Skips assistant messages the differ already saw (by
+ * dedup key) so a previous turn's reply is never re-emitted as this turn's.
+ */
 async function fetchLastReply(
   server: ZcodeAcpServer,
   zcodeSid: string,
