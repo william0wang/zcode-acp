@@ -12,11 +12,11 @@ resembles JSON-RPC, but **does not include the `jsonrpc` field**.
 
 Messages are classified by the presence of `id` and `method`:
 
-| Combination | Type | Direction |
-|------|------|------|
-| `id` + no `method` | Response | zcode -> bridge |
-| `id` + `method` | Request | bridge -> zcode or zcode -> bridge |
-| `method` + no `id` | Notification | bidirectional |
+| Combination        | Type         | Direction                          |
+| ------------------ | ------------ | ---------------------------------- |
+| `id` + no `method` | Response     | zcode -> bridge                    |
+| `id` + `method`    | Request      | bridge -> zcode or zcode -> bridge |
+| `method` + no `id` | Notification | bidirectional                      |
 
 ### Request format
 
@@ -84,6 +84,7 @@ the backend session (this RPC) on the first prompt / config change / extension
 method, so an editor startup that never sends a message leaves no session.
 
 **Request:**
+
 ```json
 {
   "id": 1,
@@ -99,6 +100,7 @@ method, so an editor startup that never sends a message leaves no session.
 ```
 
 **Response:**
+
 ```json
 {
   "id": 1,
@@ -117,6 +119,7 @@ method, so an editor startup that never sends a message leaves no session.
 List all sessions.
 
 **Request:**
+
 ```json
 {
   "id": 2,
@@ -142,6 +145,7 @@ empty one if the placeholder was never used. Real ids from `session/list` pass
 through unchanged.
 
 **Request:**
+
 ```json
 {
   "id": 3,
@@ -161,6 +165,7 @@ through unchanged.
 Send a prompt.
 
 **Request:**
+
 ```json
 {
   "id": 4,
@@ -173,6 +178,7 @@ Send a prompt.
 ```
 
 **Response:**
+
 ```json
 {
   "id": 4,
@@ -200,6 +206,7 @@ Stop the current turn (fire-and-forget).
 Read the session state and projection.
 
 **Request:**
+
 ```json
 {
   "id": 5,
@@ -211,6 +218,7 @@ Read the session state and projection.
 ```
 
 **Response:**
+
 ```json
 {
   "id": 5,
@@ -226,9 +234,7 @@ Read the session state and projection.
       "model": { "current": { "modelId": "GLM-5.2" } },
       "thoughtLevel": { "current": "high" }
     },
-    "todos": [
-      { "content": "Implement login", "status": "pending", "priority": "high" }
-    ]
+    "todos": [{ "content": "Implement login", "status": "pending", "priority": "high" }]
   }
 }
 ```
@@ -238,6 +244,7 @@ Read the session state and projection.
 Fetch the session's historical messages.
 
 **Request:**
+
 ```json
 {
   "id": 6,
@@ -255,6 +262,7 @@ Fetch the session's historical messages.
 Subscribe to a session's event push.
 
 **Request:**
+
 ```json
 {
   "id": 7,
@@ -269,6 +277,7 @@ Subscribe to a session's event push.
 ```
 
 **Response:**
+
 ```json
 {
   "id": 7,
@@ -322,6 +331,7 @@ Model streaming output.
 ```
 
 `kind` can be:
+
 - `text_delta`: text delta
 - `reasoning_delta`: reasoning text delta
 - `tool_call`: tool call declaration (caches toolName and input)
@@ -348,6 +358,7 @@ Tool status update.
 ```
 
 `kind` can be:
+
 - `scheduled`: tool scheduled
 - `started`: tool started executing
 - `progress`: progress update (stdoutTail / stderrTail)
@@ -497,6 +508,7 @@ Tool permission request.
 User input request (ExitPlanMode / AskUserQuestion).
 
 **ExitPlanMode:**
+
 ```json
 {
   "id": 101,
@@ -512,6 +524,7 @@ User input request (ExitPlanMode / AskUserQuestion).
 ```
 
 **AskUserQuestion:**
+
 ```json
 {
   "id": 102,
@@ -539,17 +552,18 @@ User input request (ExitPlanMode / AskUserQuestion).
 ZCode `interaction/*` requests are routed to different ACP interaction
 mechanisms based on client capabilities:
 
-| Request type | Client supports elicitation.form | Client does not |
-|---------|:------------------------:|:----------:|
-| Tool auth (`interaction/requestPermission`) | `session/request_permission` | `session/request_permission` |
-| ExitPlanMode (`interaction/requestUserInput` + plan_approval) | `elicitation/create` (approve/reject form) | `session/request_permission` |
-| AskUserQuestion (`interaction/requestUserInput`) | `elicitation/create` (single form) | per-question `session/request_permission` |
+| Request type                                                  |      Client supports elicitation.form      |              Client does not              |
+| ------------------------------------------------------------- | :----------------------------------------: | :---------------------------------------: |
+| Tool auth (`interaction/requestPermission`)                   |        `session/request_permission`        |       `session/request_permission`        |
+| ExitPlanMode (`interaction/requestUserInput` + plan_approval) | `elicitation/create` (approve/reject form) |       `session/request_permission`        |
+| AskUserQuestion (`interaction/requestUserInput`)              |     `elicitation/create` (single form)     | per-question `session/request_permission` |
 
 **Capability detection**: at `initialize` time the client declares support via
 `clientCapabilities.elicitation.form`. The server detects it with
 `server.supportsElicitationForm()`.
 
 **elicitation form example** (AskUserQuestion):
+
 ```json
 {
   "method": "elicitation/create",
@@ -591,6 +605,7 @@ overrides the dropdown (single-select) or is appended to the picked values
 that question without cancelling the form.
 
 **elicitation response** (accept/decline/cancel):
+
 ```json
 {
   "action": "accept",
@@ -604,6 +619,7 @@ typing into the field is the reject action. Submitting with the field empty
 approves the plan; submitting with text rejects it and returns the text to
 zcode as the decline `reason` (so the agent sees the redirection when it
 re-plans). The cancel/decline button is a plain reject with no reason.
+
 ```json
 {
   "method": "elicitation/create",
@@ -633,6 +649,7 @@ re-plans). The cancel/decline button is a plain reject with no reason.
 Fork a new session from a checkpoint.
 
 **Request:**
+
 ```json
 {
   "id": 8,
@@ -649,6 +666,7 @@ Fork a new session from a checkpoint.
 Rewind to a checkpoint.
 
 **Request:**
+
 ```json
 {
   "id": 9,
@@ -666,6 +684,7 @@ Rewind to a checkpoint.
 Read / set / replace / clear the goal.
 
 **Request:**
+
 ```json
 {
   "id": 10,
@@ -685,6 +704,7 @@ Read / set / replace / clear the goal.
 Compact the conversation history.
 
 **Request:**
+
 ```json
 {
   "id": 11,
@@ -700,6 +720,7 @@ Compact the conversation history.
 Append instructions to a running turn.
 
 **Request:**
+
 ```json
 {
   "id": 12,
@@ -716,6 +737,7 @@ Append instructions to a running turn.
 Switch the session mode.
 
 **Request:**
+
 ```json
 {
   "id": 13,
@@ -732,6 +754,7 @@ Switch the session mode.
 Set the thought level.
 
 **Request:**
+
 ```json
 {
   "id": 14,
@@ -807,10 +830,10 @@ lifecycle on the same stream:
 The bridge's session-scoped `BackgroundTaskListener` turns these into a
 dedicated ACP tool card (`[background] <description>`) plus status updates:
 
-| Backend event | ACP notification |
-|---|---|
+| Backend event                              | ACP notification                                               |
+| ------------------------------------------ | -------------------------------------------------------------- |
 | first `session.updated` (status `running`) | `tool_call` (new card, `kind:"other"`, `status:"in_progress"`) |
-| `session.updated` (status `completed`) | `tool_call_update` (`status:"completed"`) |
+| `session.updated` (status `completed`)     | `tool_call_update` (`status:"completed"`)                      |
 
 `session.updated` events WITHOUT a `taskId` (e.g. usage updates) are ignored by
 the background listener — they remain owned by the turn loop.
@@ -883,11 +906,11 @@ The mechanism:
    `toolCallId` is unknown to `terminalSentData` (sub-agent case), the listener
    falls back to minting a fresh `bg_*` card — the Agent sub-agent path above.
 
-| Backend event | ACP notification (background Bash) |
-|---|---|
-| first `session.updated` (status `running`) | `tool_call_update` on the launch card (`status:"in_progress"`) |
+| Backend event                                             | ACP notification (background Bash)                                                                                         |
+| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| first `session.updated` (status `running`)                | `tool_call_update` on the launch card (`status:"in_progress"`)                                                             |
 | `session.updated` (status `completed`, with `outputTail`) | `terminal_output` (final output, if not already streamed) + `tool_call_update` with `terminal_exit` (`status:"completed"`) |
-| `session.updated` (status `failed`) | `tool_call_update` with `terminal_exit` (`status:"failed"`, exit_code 1) |
+| `session.updated` (status `failed`)                       | `tool_call_update` with `terminal_exit` (`status:"failed"`, exit_code 1)                                                   |
 
 `session/cancelBackgroundTask` for a background Bash task additionally emits
 `terminal_exit` with `_meta.backgroundTask.cancelled = true` so the terminal
@@ -898,13 +921,11 @@ UI closes on cancellation.
 Cancels a background task. The bridge additionally marks the corresponding ACP
 tool card as `failed` with `_meta.backgroundTask.cancelled = true`.
 
-
-
-| ZCode CLI version | session/subscribe | Extension methods | Notes |
-|---------------|-------------------|----------|------|
-| >= 0.15.0 | Supported | All supported | Full functionality |
-| >= 0.14.8 | Supported | Partially supported | workspace/* unavailable |
-| 0.14.5 ~ 0.14.7 | Not supported | Not supported | Incompatible with this project |
+| ZCode CLI version | session/subscribe | Extension methods   | Notes                          |
+| ----------------- | ----------------- | ------------------- | ------------------------------ |
+| >= 0.15.0         | Supported         | All supported       | Full functionality             |
+| >= 0.14.8         | Supported         | Partially supported | workspace/* unavailable        |
+| 0.14.5 ~ 0.14.7   | Not supported     | Not supported       | Incompatible with this project |
 
 ## Additional backend methods (not wired into the bridge)
 
@@ -912,3 +933,22 @@ The backend exposes more RPC methods than the bridge uses (sub-agent listing,
 event pull, session usage/close, automation, workspace config, MCP/plugins).
 These have no ACP-side counterpart yet. See [`BACKLOG.md`](./BACKLOG.md) for
 the full list and which are candidates for future support.
+
+## Multi-client semantics (remote access)
+
+When `ZCODE_ACP_REMOTE=1` is enabled, the bridge accepts additional ACP clients
+over WebSocket (via the machine-level hub) alongside the stdio editor. All
+clients share the same backend sessions; the rules below define how one agent
+serves many clients.
+
+| Aspect                                             | Behaviour                                                                                                                                                                                |
+| -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session/update` notifications                     | Broadcast to every connected client. A client that never saw a session (e.g. an editor receiving a phone-created session) simply ignores the update.                                     |
+| `session/request_permission`, `elicitation/create` | Sent to every client; the **first response wins**. Losing requests are aborted, which emits `$/cancel_request` so the losing client dismisses its dialog and replies `RequestCancelled`. |
+| Capabilities                                       | OR-merged across clients at each `initialize` (booleans union, `_meta` shallow-merged). A capability any client declares is enabled for interaction routing.                             |
+| Concurrent `session/prompt` on one session         | Serialized by the per-session preempt lock — identical to the single-client case; a second client's prompt preempts or queues the same way.                                              |
+| `session/cancel`                                   | Affects the shared turn regardless of which client sent it.                                                                                                                              |
+| Process lifetime                                   | Follows the stdio client: when the editor disconnects, the bridge (and every remote attachment) exits. Remote clients never extend the lifetime.                                         |
+
+Transport details (hub discovery API, token auth, tunnel notes) live in the
+[Remote Access](../README.md#remote-access) section of the README.

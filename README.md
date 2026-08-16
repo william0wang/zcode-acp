@@ -79,14 +79,88 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 
 ## Environment variables
 
-| Variable          | Default         | Purpose                                                                                                                                                                                                                                                                                                      |
-| ----------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ZCODE_BIN`       | `zcode`         | Path to the ZCode CLI binary or its `.cjs` entry                                                                                                                                                                                                                                                             |
-| `ZCODE_NODE`      | _(discovered)_  | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`)                                                                                                                                                                                                                                    |
-| `ZCODE_MODEL`     | _(from config)_ | Override the active model id                                                                                                                                                                                                                                                                                 |
-| `ZCODE_BASE_URL`  | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                               |
-| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _(unset)_ | Absolute token count that triggers automatic context compaction. After each successful turn (`end_turn`), if `contextUsed >= threshold`, the server invokes `session/compact` to free up context before the next prompt. Set to `0` or leave unset to disable (default). Example: `240000` triggers compaction at 240K tokens. The compaction target itself is decided by the ZCode backend. |
-| `ZCODE_ACP_DEBUG` | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`. |
+| Variable                           | Default         | Purpose                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZCODE_BIN`                        | `zcode`         | Path to the ZCode CLI binary or its `.cjs` entry                                                                                                                                                                                                                                                                                                                                             |
+| `ZCODE_NODE`                       | _(discovered)_  | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`)                                                                                                                                                                                                                                                                                                                    |
+| `ZCODE_MODEL`                      | _(from config)_ | Override the active model id                                                                                                                                                                                                                                                                                                                                                                 |
+| `ZCODE_BASE_URL`                   | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                                                                                                               |
+| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _(unset)_       | Absolute token count that triggers automatic context compaction. After each successful turn (`end_turn`), if `contextUsed >= threshold`, the server invokes `session/compact` to free up context before the next prompt. Set to `0` or leave unset to disable (default). Example: `240000` triggers compaction at 240K tokens. The compaction target itself is decided by the ZCode backend. |
+| `ZCODE_ACP_DEBUG`                  | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`.                                                                                 |
+| `ZCODE_ACP_REMOTE`                 | _(unset)_       | Set to `1` to enable [remote access](#remote-access) — serve the same sessions to additional ACP clients over WebSocket.                                                                                                                                                                                                                                                                     |
+| `ZCODE_ACP_REMOTE_TOKEN`           | _(unset)_       | Auth token for remote access. **Mandatory** when `ZCODE_ACP_REMOTE=1`; remote stays disabled without it.                                                                                                                                                                                                                                                                                     |
+| `ZCODE_ACP_HUB_PORT`               | `8377`          | Port of the machine-level `zcode-acp-hub`. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                         |
+| `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`     | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
+| `ZCODE_ACP_REMOTE_PORT`            | `8378`          | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
+
+## Remote Access
+
+With `ZCODE_ACP_REMOTE=1` the bridge additionally accepts ACP connections over
+WebSocket, so a phone or browser can watch and drive the **same sessions** as
+your editor. Zed (or any ACP editor over stdio) remains the primary client and
+owns the process: when the editor disconnects, the bridge — and every remote
+attachment — exits with it.
+
+```text
+phone / browser ──WS── tunnel ── hub (127.0.0.1:8377, single entry)
+                                   │ byte-level proxy
+                                   ▼
+                     bridge ACP endpoint (127.0.0.1:8378+n)
+                                   │ same AgentApp as stdio
+Zed ──────── stdio ────────────────┘
+```
+
+Enable it per-agent in Zed's settings (Zed merges these into the agent's
+environment):
+
+```json
+"agents": {
+  "ZCode": {
+    "command": "zcode-acp-server",
+    "env": {
+      "ZCODE_ACP_REMOTE": "1",
+      "ZCODE_ACP_REMOTE_TOKEN": "<a-long-random-secret>"
+    }
+  }
+}
+```
+
+**Hub.** The first bridge with remote enabled spawns `zcode-acp-hub` as a
+detached, machine-level singleton on `ZCODE_ACP_HUB_PORT` (it can also be run
+manually). It does three things only: token auth, instance discovery, and
+byte-level WebSocket proxying — no session state, no ACP semantics. It exits
+after ~10 idle minutes and is re-spawned on demand. Each bridge registers
+every 10s as a heartbeat and drops out of discovery ~30s after it stops.
+
+**Discovery API** (for client authors; fields are additive-only):
+
+```text
+GET /api/instances              → [{"id","port","pid","startedAt","workspace",
+                                    "sessions":[{"sessionId","title?","updatedAt"}]}]
+WS   /acp?instance=<id>         → proxied to that bridge's endpoint
+```
+
+Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
+headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
+security boundary. A proxied connection stays bound to one instance; switching
+instances means reconnecting.
+
+**Semantics.** All agent notifications are broadcast to every client.
+Permission / elicitation requests go to every client and the **first answer
+wins**; losing clients receive `$/cancel_request` so their dialogs close.
+Concurrent prompts for one session are serialized exactly as they are for a
+single editor. Capabilities declared by any client are OR-merged.
+
+**Tunnels.** Designed for one-port tunnels (Cloudflare Tunnel, frp): map the
+hub port only. frp's `tcp` mode passes WebSocket as-is; Cloudflare Tunnel
+drops idle WebSocket connections, so the hub sends 30s keepalive pings on both
+legs. The bridge endpoint itself is loopback-only and never exposed.
+
+**Binding beyond loopback.** The hub speaks plain HTTP/WS — the token travels
+and authorizes in cleartext, so `ZCODE_ACP_HUB_HOST=0.0.0.0` (needed only when
+the tunnel agent runs in its own container) is exactly as safe as the network
+it lands on. Keep the bind loopback unless that interface is private to the
+tunnel agent, and put TLS in front before mapping it anywhere untrusted.
 
 ## Standalone Quota CLI
 
@@ -247,12 +321,12 @@ ZCode backend over **local pipes**; that data reaches the GLM cloud API only
 because the ZCode backend itself sends it there for inference — this server
 adds no extra destinations.
 
-| Concern | What & why |
-| ------- | ---------- |
-| Network | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content |
-| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess |
-| Disk | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
-| Logging | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged |
+| Concern     | What & why                                                                                                                                                                                                                        |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                          |
+| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess                                         |
+| Disk        | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
+| Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                      |
 
 ## License
 

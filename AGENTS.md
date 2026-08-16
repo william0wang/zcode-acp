@@ -9,15 +9,15 @@ methods and streams events back as ACP `session/update` notifications.
 
 ## Commands
 
-| Task | Command |
-|------|---------|
-| Build | `pnpm build` |
-| Typecheck | `pnpm typecheck` |
-| Test (all) | `pnpm test` |
-| Test (single file) | `npx vitest run tests/<file>.test.ts` |
-| Lint | `pnpm lint` |
-| Format (changed files only) | `pnpm prettier --write <path>` |
-| Smoke test | `pnpm smoke` |
+| Task                        | Command                               |
+| --------------------------- | ------------------------------------- |
+| Build                       | `pnpm build`                          |
+| Typecheck                   | `pnpm typecheck`                      |
+| Test (all)                  | `pnpm test`                           |
+| Test (single file)          | `npx vitest run tests/<file>.test.ts` |
+| Lint                        | `pnpm lint`                           |
+| Format (changed files only) | `pnpm prettier --write <path>`        |
+| Smoke test                  | `pnpm smoke`                          |
 
 **Package manager**: pnpm. **Node**: >=22. **Module system**: ESM (`"type": "module"`).
 
@@ -51,8 +51,15 @@ src/
 │   ├── projection-differ.ts  Snapshot diff for turn-completion reconciliation
 │   └── tool-helpers.ts       Diff builder, location extractor
 ├── interaction/          Permission, ExitPlanMode, AskUserQuestion handling
+├── remote/               Remote access (opt-in via ZCODE_ACP_REMOTE=1)
+│   ├── broadcast.ts      ClientRegistry + broadcast proxy (notify fan-out, request first-wins)
+│   ├── config.ts         ENV parsing (gate, mandatory token, hub/bridge ports)
+│   ├── endpoint.ts       Loopback ACP endpoint + hub registration heartbeat
+│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level WS proxy
 ├── quota/                GLM Coding Plan usage API client (/quota command)
-└── bin/quota.ts          Standalone zcode-quota CLI
+└── bin/
+    ├── hub.ts            Standalone zcode-acp-hub daemon entry
+    └── quota.ts          Standalone zcode-quota CLI
 ```
 
 **Key boundary**: `backend/` talks to the ZCode subprocess. `handlers/` talks to
@@ -85,6 +92,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   `withPreemptLock`. Don't bypass it — two simultaneous turns corrupt the listener.
 - **AGENTS.md is workspace-scoped**: the global `~/.zcode/AGENTS.md` also exists;
   this file takes precedence for this repo.
+- **WS proxy frame type**: the SDK's WS server drops non-text frames, and
+  `ws.send(buffer)` defaults to a BINARY frame. The hub proxy must forward with
+  `{ binary: isBinary }` — losing the flag silently eats every proxied message.
+- **Broadcast loser promises settle late**: after first-response-wins, aborted
+  loser requests resolve/reject only when the peer answers the cancellation.
+  Every raced promise needs a no-op `.catch` or Node crashes on
+  unhandledRejection. See `src/remote/broadcast.ts`.
+- **Remote failures never touch stdio**: any remote-side failure (port, hub,
+  token) must warn and disable remote only — the editor link stays up.
 
 ## Docs to read before sensitive changes
 

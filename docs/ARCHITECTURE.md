@@ -142,12 +142,12 @@ local relay: prompts, code, and tool outputs pass through process memory on
 their way between the editor and the ZCode subprocess, but reach the GLM cloud
 API only because the ZCode backend itself sends them for inference.
 
-| Concern | Detail |
-| ------- | ------ |
-| Network | One outbound request in the whole codebase — `src/quota/client.ts` GET to the quota API, Bearer token only, no body |
-| Credentials | API key from `~/.zcode/v2/config.json` (authenticates the subprocess + quota request), never logged. OAuth handled by the ZCode subprocess, not this server |
-| Disk | No new files. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — syncs sessions into the ZCode app's history & search (session title + first prompt) |
-| Logging | `log()`/`warn()` → stderr only for troubleshooting; even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are logged |
+| Concern     | Detail                                                                                                                                                           |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network     | One outbound request in the whole codebase — `src/quota/client.ts` GET to the quota API, Bearer token only, no body                                              |
+| Credentials | API key from `~/.zcode/v2/config.json` (authenticates the subprocess + quota request), never logged. OAuth handled by the ZCode subprocess, not this server      |
+| Disk        | No new files. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — syncs sessions into the ZCode app's history & search (session title + first prompt) |
+| Logging     | `log()`/`warn()` → stderr only for troubleshooting; even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are logged                                               |
 
 ## Module Responsibilities
 
@@ -170,15 +170,15 @@ API only because the ZCode backend itself sends them for inference.
 
 ### `handlers/` — ACP method handling
 
-| File                 | Responsibility                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `session.ts`         | session/new/list/resume/load/prompt/set_config_option/cancel                                                 |
-| `extensions.ts`      | fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask/setModel/setMode/setThoughtLevel           |
-| `dispatch.ts`        | dispatchEvent single exit point: InternalEvent → ACP session/update                                          |
+| File                  | Responsibility                                                                                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session.ts`          | session/new/list/resume/load/prompt/set_config_option/cancel                                                                                                                                            |
+| `extensions.ts`       | fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask/setModel/setMode/setThoughtLevel                                                                                                      |
+| `dispatch.ts`         | dispatchEvent single exit point: InternalEvent → ACP session/update                                                                                                                                     |
 | `background-tasks.ts` | Session-scoped `BackgroundTaskListener` — forwards background sub-agent status (`session.updated` taskId) + completion-notification turns to the client OUTSIDE request handlers (lives across prompts) |
-| `server-requests.ts` | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing |
-| `io.ts`              | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                   |
-| `slash.ts`           | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought)            |
+| `server-requests.ts`  | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing                                                                                            |
+| `io.ts`               | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                                                                                                              |
+| `slash.ts`            | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought)                                                                                                       |
 
 ### `interaction/` — Interaction bridging
 
@@ -193,6 +193,24 @@ API only because the ZCode backend itself sends them for inference.
 | `options.ts`       | configOptions / modes construction, set_config_option dispatch |
 | `runtime-model.ts` | runtimeModel overlay construction and application              |
 | `model-cache.ts`   | Model ID cache and usage initialization                        |
+
+### `remote/` — Remote access (opt-in via `ZCODE_ACP_REMOTE=1`)
+
+| File            | Responsibility                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `broadcast.ts`  | ClientRegistry + broadcast proxy: notify fans out to all clients; request is first-response-wins with loser `$/cancel_request` |
+| `config.ts`     | ENV parsing (gate, mandatory token, hub/bridge ports)                                                                          |
+| `endpoint.ts`   | Loopback ACP endpoint (SDK AcpServer transport, port auto-increment) + hub registration/heartbeat                              |
+| `hub-server.ts` | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, idle exit                        |
+
+When enabled, the same `AgentApp` serves the stdio editor and a loopback
+WebSocket endpoint. Every connection (editor or remote) joins the broadcast
+registry via `trackConnections`, so one turn's notifications reach all clients
+regardless of who prompted. The bridge registers itself with the machine-level
+`zcode-acp-hub` (`bin/hub.ts`), which is the only public entry point and holds
+no session state (see `docs/adr/0002`). The bridge's lifetime still follows the
+stdio client (ADR-0001); the listener is `unref()`'d so remote clients alone
+never keep the process alive.
 
 ## Key State Machines
 
