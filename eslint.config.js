@@ -6,7 +6,14 @@ import tsparser from "@typescript-eslint/parser";
 
 export default [
   {
-    ignores: ["dist/**", "node_modules/**", "coverage/**", "*.config.js", "eslint.config.js"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "coverage/**",
+      ".zcode/**",
+      "*.config.js",
+      "eslint.config.js",
+    ],
   },
   js.configs.recommended,
   {
