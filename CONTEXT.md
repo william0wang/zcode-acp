@@ -43,3 +43,19 @@ _Avoid_: gateway, broker
 One registered bridge as seen through the Hub. A remote connection binds to
 exactly one instance; instance switching means reconnecting.
 _Avoid_: agent, server, worker
+
+**Replay**:
+Delivering a session's stored history to an attaching client as session/update
+notifications. Serves both the initial attach and reconnect catch-up.
+_Avoid_: history sync, restore, backfill
+
+**Turn**:
+One span of session history from a user message up to (not including) the next
+user message. The alignment unit for replay cuts — a replay never starts
+mid-turn. Leading non-user messages belong to the first turn.
+_Avoid_: round, exchange, message (a turn contains many messages)
+
+**Cursor**:
+An opaque handle identifying the oldest replayed Turn, used to page further
+back into history. Valid only while the history it points into is unchanged.
+_Avoid_: token (collides with the auth token), offset, bookmark
