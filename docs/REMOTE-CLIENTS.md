@@ -103,14 +103,55 @@ ws(s)://<hub-host>/acp?instance=<id>&token=<token>
 1. `initialize` — `protocolVersion` MUST be the **number** `1` (a string is
    rejected). Nothing else may be sent before it.
 2. Attach or create:
-   - `session/load { sessionId }` with an id from discovery — replays the
-     conversation history (text + tool summaries) as `session/update`s, so a
-     freshly attached client can render the full story.
+   - `session/load { sessionId, cwd, mcpServers }` with an id from discovery —
+     replays the conversation history (text + tool summaries) as
+     `session/update`s, so a freshly attached client can render the full
+     story. `cwd` and `mcpServers` (even `[]`) are required — the SDK's params
+     schema rejects the request without them.
    - `session/new { cwd? }` — a new session on that bridge.
    - `session/list` enumerates the bridge's known sessions.
 3. Drive: `session/prompt`, `session/cancel`, `session/set_config_option`
    (model / mode / thought level), slash commands in the prompt text —
    see [PROTOCOL.md](PROTOCOL.md).
+
+## Tail replay and history pagination
+
+Replaying a long session's full history is O(history) on every attach and
+reconnect. The bridge supports tail replay (non-standard, additive — omit
+everything below and you get the full replay):
+
+- **Tail limit**: `session/load` with `_meta.zcode.limit` (NOT top-level —
+  the SDK's params schema strips unknown top-level keys; `_meta` is the
+  preserved extension channel). It counts **messages**, and the replay is
+  aligned back to the start of the turn containing the oldest message — never
+  a mid-turn cut. `0` attaches with metadata only. Clamped to `[0, 500]`.
+- **`replayMeta`** rides top-level in the result:
+
+  ```json
+  {
+    "replayMeta": {
+      "cursor": "…",
+      "hasMore": true,
+      "replayedMessages": 47,
+      "replayedTurns": 12,
+      "totalMessages": 1893,
+      "totalTurns": 412
+    }
+  }
+  ```
+
+- **`session/load_earlier`** (`{ sessionId, before, limit }`, limit defaults
+  to 50) delivers one page of `session/update`s strictly older than `before`,
+  oldest → newest — prepend them. Same `replayMeta` shape in the result;
+  `hasMore: false` ends pagination. Requires the session to be attached in
+  this bridge; it never triggers an implicit backend resume.
+- **Cursor expiry**: a cursor is valid only while the history it points into
+  is unchanged — turns appended after it was minted (the session moved on)
+  keep it valid. After the session compacts or truncates, `load_earlier`
+  returns a `"cursor expired"` error — the recovery is a fresh `session/load`.
+
+While a replay batch is in flight, live updates for the same session queue
+behind it: batches are atomic and never interleave with the live turn.
 
 ## Multi-client semantics
 

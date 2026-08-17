@@ -1,7 +1,8 @@
 # Proposal 0001 — Tail session replay with incremental history fetch
 
-Status: draft, decisions locked (2026-08-17 grilling; see ADR-0003) · Date:
-2026-08-17 · Affects: ACP endpoint (`session/load`), remote clients
+Status: implemented (2026-08-17; decisions in ADR-0003, contract documented in
+REMOTE-CLIENTS.md "Tail replay and history pagination") · Date: 2026-08-17 ·
+Affects: ACP endpoint (`session/load`), remote clients
 
 ## Problem
 
@@ -88,8 +89,9 @@ turn (clients never interpret it). Both `session/load` and
 - Requires the session to already be registered in this bridge (attached via
   `session/load`); unknown sessions error — pagination never triggers an
   implicit backend resume.
-- `hasMore: false` ends pagination. An expired or unknown cursor (session
-  compacted/truncated, history no longer matches the cursor's anchor) returns
+- `hasMore: false` ends pagination. A cursor only expires when the history
+  shrank (session compacted/truncated, no longer matching the cursor's
+  anchor); appended turns keep it valid. An expired or unknown cursor returns
   a fixed `"cursor expired"` error the client maps to a full re-
   `session/load`.
 
