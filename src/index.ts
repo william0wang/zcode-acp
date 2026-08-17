@@ -37,6 +37,7 @@ import {
   updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
 import { sendAvailableCommandsDeferred } from "./handlers/io.js";
+import { loadEarlier } from "./handlers/replay.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
 import { trackConnections } from "./remote/broadcast.js";
@@ -133,6 +134,16 @@ async function main(): Promise<void> {
       sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
       return result;
     })
+    // Tail-replay pagination (non-standard; Proposal 0001) — params stay
+    // top-level because the parser below is ours, unlike spec methods where
+    // bridge extensions must ride in `_meta.zcode`.
+    .onRequest(
+      "session/load_earlier",
+      z
+        .object({ sessionId: z.string(), before: z.string(), limit: z.number().optional() })
+        .passthrough(),
+      (ctx) => loadEarlier(server, ctx.params, server.clients.broadcast()),
+    )
     .onRequest("session/prompt", (ctx) =>
       prompt(server, ctx.params, server.clients.broadcast(), ctx.requestId as number),
     )

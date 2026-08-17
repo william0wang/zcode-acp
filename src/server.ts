@@ -16,6 +16,7 @@ import {
   ZcodeBackend,
 } from "./backend/index.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
+import { enqueueSessionSend } from "./handlers/io.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { AGENT_INFO, PROTOCOL_VERSION, log } from "./utils.js";
 
@@ -243,7 +244,11 @@ export class ZcodeAcpServer {
     if (!acpSid) return false;
     try {
       // Broadcast notify swallows per-client failures internally (warn only).
-      await this.clients.broadcast().notify("session/update", { sessionId: acpSid, update });
+      // Serialized through the replay guard so a background emission queues
+      // behind an in-flight replay batch for the same session.
+      await enqueueSessionSend(acpSid, () =>
+        this.clients.broadcast().notify("session/update", { sessionId: acpSid, update }),
+      );
       return true;
     } catch (e) {
       log(`notifyByZcodeSid: session/update failed: ${e instanceof Error ? e.message : String(e)}`);

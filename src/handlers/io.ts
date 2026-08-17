@@ -13,13 +13,77 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
 
-/** Send a `session/update` notification to the client. */
+/**
+ * Send a `session/update` notification to the client, serialized through the
+ * per-session replay guard (see `enqueueSessionSend`).
+ */
 export function sendSessionUpdate(
   cx: acp.AgentContext,
   sessionId: string,
   update: acp.SessionUpdate,
 ): Promise<void> {
-  return cx.notify("session/update", { sessionId, update });
+  return enqueueSessionSend(sessionId, () => cx.notify("session/update", { sessionId, update }));
+}
+
+/** Per-session replay guard: a FIFO chain of notification sends. */
+interface ReplayGuard {
+  tail: Promise<void>;
+}
+const replayGuards = new Map<string, ReplayGuard>();
+
+/** Append a job to a guard's chain; a rejected job never breaks later sends. */
+function enqueue(guard: ReplayGuard, job: () => Promise<void>): Promise<void> {
+  const run = guard.tail.then(job);
+  guard.tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+/**
+ * Run one client-notification send through the per-session replay guard:
+ * while a replay batch (`withReplayBatch`) is in flight for this session, the
+ * send queues behind it so a batch is never interleaved with live updates —
+ * this applies to background-task emissions too, not just handler dispatch.
+ * Sessions that never replay take the lock-free fast path.
+ */
+export function enqueueSessionSend(sessionId: string, send: () => Promise<void>): Promise<void> {
+  const guard = replayGuards.get(sessionId);
+  if (!guard) return send();
+  return enqueue(guard, send);
+}
+
+/**
+ * Run one replay batch for a session under exclusive use of its guard.
+ * While the batch runs, `sendSessionUpdate` calls for the SAME session (live
+ * turn dispatch) queue behind it; the batch's own sends go through
+ * `replayMessages`, which notifies directly — that bypass is what makes the
+ * batch atomic without a re-entrant lock. Concurrent batches serialize.
+ */
+export async function withReplayBatch<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  let guard = replayGuards.get(sessionId);
+  if (!guard) {
+    guard = { tail: Promise.resolve() };
+    replayGuards.set(sessionId, guard);
+  }
+  // Take ownership: later senders (including other batches) chain behind us.
+  const prev = guard.tail;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  guard.tail = held;
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    // Drop the entry when nobody chained behind us. enqueue and
+    // withReplayBatch are synchronous up to their first await, so a concurrent
+    // taker always swaps guard.tail before this check runs — no race window.
+    if (replayGuards.get(sessionId) === guard && guard.tail === held) {
+      replayGuards.delete(sessionId);
+    }
+  }
 }
 
 /** Send an `agent_message_chunk` text notification. */

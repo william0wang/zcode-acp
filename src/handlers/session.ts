@@ -17,13 +17,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
-import type {
-  ZcodeCreateResult,
-  ZcodeListResult,
-  ZcodeMessage,
-  ZcodeMessagesResult,
-  ZcodeSnapshot,
-} from "../backend/types.js";
+import type { ZcodeCreateResult, ZcodeListResult, ZcodeSnapshot } from "../backend/types.js";
 import { buildModes, buildConfigOptions } from "../config/options.js";
 import { emitInitialUsage } from "../config/model-cache.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
@@ -45,7 +39,8 @@ import type { InternalEvent } from "../translators/index.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
-import { sendSessionUpdate, sendTextChunk } from "./io.js";
+import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
+import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
 import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -405,57 +400,16 @@ export async function loadSession(
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
   const messages = await fetchMessages(server, zcodeSid);
-  let replayed = 0;
-  for (const m of messages) {
-    const info = m.info ?? {};
-    const role = info.role;
-    const mid = info.id ?? `hist_${randomUUID().slice(0, 12)}`;
-    for (const p of m.parts ?? []) {
-      if (!p || typeof p !== "object") continue;
-      const ptype = (p as { type?: string }).type;
-      if (ptype === "text") {
-        const text = (p as { text?: string }).text ?? "";
-        if (!text) continue;
-        const sessionUpdate = role === "user" ? "user_message_chunk" : "agent_message_chunk";
-        await sendSessionUpdate(cx, acpSid, {
-          sessionUpdate,
-          content: { type: "text", text },
-          messageId: mid,
-        });
-      } else if (ptype === "reasoning") {
-        const rp = p as { text?: string; content?: string };
-        const text = rp.text ?? rp.content ?? "";
-        if (text) {
-          await sendSessionUpdate(cx, acpSid, {
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text },
-            messageId: `thought_${mid}`,
-          });
-        }
-      } else if (ptype === "tool") {
-        const tp = p as {
-          id?: string;
-          tool?: string;
-          title?: string;
-          status?: string;
-        };
-        const title = tp.title ?? tp.tool ?? "tool call";
-        const histToolName = tp.tool ?? "";
-        const update: acp.SessionUpdate = {
-          sessionUpdate: "tool_call",
-          toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
-          title,
-          kind: "other",
-          status: (tp.status as acp.ToolCallStatus) ?? "completed",
-          ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
-        };
-        await sendSessionUpdate(cx, acpSid, update);
-      }
-      // patch / step-start / other: skipped (history replay focuses on text + tool summary)
-    }
-    replayed += 1;
-  }
-  log(`session/load: replayed ${replayed} messages`);
+  // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
+  // N messages aligned to turn boundaries — the full replay stays the default
+  // for editors that send no `_meta` (Zed path unchanged).
+  const limit = readTailLimit(params);
+  const slice = limit === null ? fullSlice(messages) : sliceTail(messages, limit);
+  await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+  log(
+    `session/load: replayed ${slice.meta.replayedMessages} messages` +
+      `${limit === null ? "" : ` (tail limit ${limit}, total ${slice.meta.totalMessages})`}`,
+  );
 
   // Replay the existing todo list as an initial plan so a loaded session shows
   // its todos immediately (filter to PlanUpdate only — text/tools were already
@@ -478,10 +432,13 @@ export async function loadSession(
 
   const modes = await buildModes(server, zcodeSid);
   server.lastMode.set(acpSid, modes.currentModeId);
-  return {
+  const result = {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid),
+    // Additive replay metadata — the anchor for load_earlier pagination.
+    replayMeta: slice.meta,
   };
+  return result as acp.LoadSessionResponse;
 }
 
 /** `session/prompt` → subscribe-before-send, run the event-driven turn loop. */
@@ -1125,20 +1082,6 @@ async function resumeBackendSession(
     );
     await sleep(1000);
   }
-}
-
-/** Fetch session/messages from zcode. */
-async function fetchMessages(server: ZcodeAcpServer, zcodeSid: string): Promise<ZcodeMessage[]> {
-  const backend = server.ensureBackend();
-  const resp = await backend.request(
-    server.nextId(),
-    "session/messages",
-    { sessionId: zcodeSid },
-    8000,
-  );
-  if (resp.error) return [];
-  const result = (resp.result ?? {}) as ZcodeMessagesResult;
-  return result.messages ?? [];
 }
 
 /** Get or create the session-level ProjectionDiffer (persists across turns). */
