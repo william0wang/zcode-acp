@@ -205,6 +205,16 @@ export async function fetchMessages(
 }
 
 /**
+ * Strip harness-injected reminder blocks from user text. The agent runtime
+ * appends `<system-reminder>…</system-reminder>` blocks (TodoWrite nudges,
+ * context handoffs) to user turns as context plumbing — they are not user
+ * speech, and replaying them verbatim makes clients render them as user input.
+ */
+function stripSystemReminders(text: string): string {
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+}
+
+/**
  * Replay messages as session/update notifications, oldest → newest.
  *
  * MUST run inside `withReplayBatch` for the session: this is the one sender
@@ -225,8 +235,12 @@ export async function replayMessages(
       if (!p || typeof p !== "object") continue;
       const ptype = (p as { type?: string }).type;
       if (ptype === "text") {
-        const text = (p as { text?: string }).text ?? "";
+        let text = (p as { text?: string }).text ?? "";
         if (!text) continue;
+        if (role === "user") {
+          text = stripSystemReminders(text);
+          if (!text) continue;
+        }
         await cx.notify("session/update", {
           sessionId: acpSid,
           update: {

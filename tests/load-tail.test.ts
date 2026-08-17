@@ -148,6 +148,45 @@ describe("session/load tail limit", () => {
   });
 });
 
+describe("system-reminder stripping in replay", () => {
+  it("strips reminder blocks from user text and drops reminder-only messages", async () => {
+    const history = hist();
+    // u2: reminder prefix + real text. u3: reminder only — must vanish.
+    history[3] = {
+      info: { id: "u2", role: "user" },
+      parts: [{ type: "text", text: "<system-reminder>todo nudge</system-reminder>\n\ntwo" }],
+    };
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [{ type: "text", text: "<system-reminder>todo nudge</system-reminder>" }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    const texts = chunks(updates);
+    expect(texts).toEqual(["sys", "one", "A1", "two", "A2a", "A2b", "A3"]);
+    expect(texts.join("\n")).not.toContain("system-reminder");
+  });
+
+  it("leaves assistant text that literally mentions the tag untouched", async () => {
+    const history = hist();
+    history[4] = {
+      info: { id: "a2a", role: "assistant" },
+      parts: [{ type: "text", text: "A2a discusses <system-reminder> tags" }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    expect(chunks(updates)).toContain("A2a discusses <system-reminder> tags");
+  });
+});
+
 describe("session/load_earlier", () => {
   async function attachTail(server: ZcodeAcpServer): Promise<string> {
     const { cx } = collectCx();
