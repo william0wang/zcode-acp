@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Replayed context-handoff summaries ("This session is being continued from a
+  previous conversation…") now carry `_meta.zcode.collapsed` on the
+  `session/update` notification so capable clients can render them folded
+  behind an expand control instead of as pseudo-user text. The full text stays
+  in the chunk; clients that ignore `_meta` (e.g. Zed) are unaffected.
+
 ## [0.3.2] - 2026-08-17
 
 ### Fixed

@@ -261,6 +261,19 @@ function stripSystemReminders(text: string): string {
 }
 
 /**
+ * Harness context-handoff summaries ("This session is being continued from a
+ * previous conversation…") are informative plumbing: replayed IN FULL but
+ * flagged via `_meta.zcode.collapsed` so capable clients render them folded
+ * behind an expand control instead of as a wall of pseudo-user text. Clients
+ * that ignore `_meta` (e.g. Zed) display the text unchanged.
+ */
+const CONTEXT_HANDOFF = /^\s*This session is being continued from a previous conversation/;
+
+function handoffMeta(): { zcode: { collapsed: true; kind: "context-handoff" } } {
+  return { zcode: { collapsed: true, kind: "context-handoff" } };
+}
+
+/**
  * Replay messages as session/update notifications, oldest → newest.
  *
  * MUST run inside `withReplayBatch` for the session: this is the one sender
@@ -287,6 +300,7 @@ export async function replayMessages(
           text = stripSystemReminders(text);
           if (!text) continue;
         }
+        const collapsed = role === "user" && CONTEXT_HANDOFF.test(text);
         await cx.notify("session/update", {
           sessionId: acpSid,
           update: {
@@ -294,6 +308,7 @@ export async function replayMessages(
             content: { type: "text", text },
             messageId: mid,
           },
+          ...(collapsed ? { _meta: handoffMeta() } : {}),
         });
       } else if (ptype === "reasoning") {
         const rp = p as { text?: string; content?: string };

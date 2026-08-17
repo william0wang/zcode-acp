@@ -72,6 +72,32 @@ differently:
 - `usage_update` / `available_commands_update` are session-level metadata,
   not list items.
 
+### Collapsed harness blocks (`_meta.zcode.collapsed`)
+
+Replayed user messages that are harness plumbing rather than user speech may
+carry a top-level `_meta` on the `session/update` notification:
+
+```json
+{
+  "sessionId": "…",
+  "update": {
+    "sessionUpdate": "user_message_chunk",
+    "content": { "type": "text", "text": "This session is being continued …" },
+    "messageId": "…"
+  },
+  "_meta": { "zcode": { "collapsed": true, "kind": "context-handoff" } }
+}
+```
+
+- `kind: "context-handoff"` — the context-window continuation summary. The
+  full text is in the chunk as usual; render it **collapsed behind an expand
+  control** (e.g. a one-line label like "前序会话摘要") instead of a wall of
+  text attributed to the user.
+- Harness noise that carries no value (TodoWrite/Read usage nudges) is
+  stripped before replay — you never see it.
+- Unknown `kind`s: render collapsed too (or fall back to plain text). Ignoring
+  `_meta` entirely is always safe — the text is complete without it.
+
 ## Scroll-up pagination
 
 ```

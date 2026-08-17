@@ -300,6 +300,73 @@ describe("message dedup in replay", () => {
   });
 });
 
+describe("context handoff collapse marker", () => {
+  /** cx that captures FULL session/update params (update + _meta). */
+  function collectParams(): {
+    cx: acp.AgentContext;
+    sent: Array<{
+      update?: { sessionUpdate?: string; content?: { text?: string } };
+      _meta?: { zcode?: { collapsed?: boolean; kind?: string } };
+    }>;
+  } {
+    const sent: Array<Record<string, unknown>> = [];
+    const cx = {
+      notify: async (_method: string, params: Record<string, unknown>) => {
+        sent.push(params);
+      },
+      request: async () => ({}),
+    } as unknown as acp.AgentContext;
+    return {
+      cx,
+      sent: sent as Array<{
+        update?: { sessionUpdate?: string; content?: { text?: string } };
+        _meta?: { zcode?: { collapsed?: boolean; kind?: string } };
+      }>,
+    };
+  }
+
+  it("flags the continuation summary with a collapse hint and keeps full text", async () => {
+    const history = hist();
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [
+        {
+          type: "text",
+          text:
+            "This session is being continued from a previous conversation that " +
+            "ran out of context. The summary below covers the earlier portion " +
+            "of the conversation.",
+        },
+      ],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, sent } = collectParams();
+
+    await loadSession(server, loadParams(), cx);
+
+    const handoff = sent.find(
+      (p) =>
+        p.update?.sessionUpdate === "user_message_chunk" &&
+        (p.update?.content?.text ?? "").includes("continued from a previous"),
+    );
+    expect(handoff).toBeDefined();
+    expect(handoff!._meta).toEqual({ zcode: { collapsed: true, kind: "context-handoff" } });
+    expect(handoff!.update!.content!.text).toContain("The summary below covers");
+  });
+
+  it("ordinary user and agent text carries no _meta", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(hist());
+    const { cx, sent } = collectParams();
+
+    await loadSession(server, loadParams(), cx);
+
+    expect(sent.length).toBeGreaterThan(0);
+    expect(sent.every((p) => p._meta === undefined)).toBe(true);
+  });
+});
+
 describe("session/load_earlier", () => {
   async function attachTail(server: ZcodeAcpServer): Promise<string> {
     const { cx } = collectCx();
