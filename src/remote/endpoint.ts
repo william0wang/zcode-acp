@@ -52,15 +52,24 @@ function tryListen(server: Server, port: number): Promise<boolean> {
   });
 }
 
-/** Session summaries for the hub's discovery API. */
-function sessionsPayload(
+/**
+ * Session summaries for the hub's discovery API. Only sessions with real
+ * interaction (`hasActivity`) are pushed: an editor restart auto-resumes its
+ * stored placeholder, materializing an empty backend session — pushing that
+ * would make remote clients list (and open) a conversation that never
+ * happened. The hub replaces the whole list on every register, so a session
+ * that gains activity shows up within one heartbeat (~10s).
+ */
+export function sessionsPayload(
   server: ZcodeAcpServer,
 ): Array<{ sessionId: string; title?: string; updatedAt: number }> {
-  return Array.from(server.sessionSummaries.entries(), ([sessionId, s]) => ({
-    sessionId,
-    ...(s.title !== undefined ? { title: s.title } : {}),
-    updatedAt: s.updatedAt,
-  }));
+  return Array.from(server.sessionSummaries.entries())
+    .filter(([, s]) => s.hasActivity)
+    .map(([sessionId, s]) => ({
+      sessionId,
+      ...(s.title !== undefined ? { title: s.title } : {}),
+      updatedAt: s.updatedAt,
+    }));
 }
 
 async function postJson(url: string, body: unknown, timeoutMs = 3000): Promise<Response> {

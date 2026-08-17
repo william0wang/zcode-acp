@@ -96,6 +96,32 @@ describe("ZcodeAcpServer discovery summaries", () => {
     expect(touched.updatedAt).toBeGreaterThan(titled.updatedAt);
   });
 
+  it("plain touches do not mark activity; a title does", () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s-artifact", "zc1");
+    expect(server.sessionSummaries.get("s-artifact")?.hasActivity).toBeFalsy();
+
+    server.touchSessionSummary("s-artifact");
+    expect(server.sessionSummaries.get("s-artifact")?.hasActivity).toBeFalsy();
+
+    server.touchSessionSummary("s-artifact", "Stored title");
+    expect(server.sessionSummaries.get("s-artifact")?.hasActivity).toBe(true);
+  });
+
+  it("markSessionActive sets the flag, bumps updatedAt, and keeps the title", async () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s1", "zc1");
+    server.touchSessionSummary("s1", "My title");
+    const before = server.sessionSummaries.get("s1")!;
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    server.markSessionActive("s1");
+    const after = server.sessionSummaries.get("s1")!;
+    expect(after.hasActivity).toBe(true);
+    expect(after.title).toBe("My title");
+    expect(after.updatedAt).toBeGreaterThan(before.updatedAt);
+  });
+
   it("workspaceLabel prefers a known session cwd and falls back to process cwd", () => {
     const server = new ZcodeAcpServer();
     expect(server.workspaceLabel()).toBe(process.cwd());

@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { RemoteConfig } from "../src/remote/config.js";
 import { trackConnections } from "../src/remote/broadcast.js";
-import { startRemoteEndpoint } from "../src/remote/endpoint.js";
+import { sessionsPayload, startRemoteEndpoint } from "../src/remote/endpoint.js";
 import { startHub } from "../src/remote/hub-server.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import { AGENT_INFO } from "../src/utils.js";
@@ -252,4 +252,35 @@ describe("hub version handshake (bridge side)", () => {
     );
     expect(bodies.length).toBeGreaterThanOrEqual(2);
   }, 15000);
+});
+
+describe("discovery payload gating", () => {
+  it("excludes never-used sessions (editor-restart artifacts)", () => {
+    const server = new ZcodeAcpServer();
+    // An editor restart auto-resumes its stored placeholder: the bridge
+    // materializes an empty backend session and registers it — no turn ever ran.
+    server.registerSession("s-artifact", "zc1");
+    server.registerSession("s-live", "zc2");
+    server.markSessionActive("s-live");
+
+    expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-live"]);
+  });
+
+  it("includes sessions that gained a title (stored title adopted on resume)", () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s", "zc");
+    server.touchSessionSummary("s", "Stored title");
+
+    const payload = sessionsPayload(server);
+    expect(payload).toHaveLength(1);
+    expect(payload[0]).toMatchObject({ sessionId: "s", title: "Stored title" });
+  });
+
+  it("an omitted hasActivity field never leaks onto the wire", () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s", "zc");
+    server.markSessionActive("s");
+
+    expect(Object.keys(sessionsPayload(server)[0]!).sort()).toEqual(["sessionId", "updatedAt"]);
+  });
 });

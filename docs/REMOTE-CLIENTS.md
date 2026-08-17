@@ -78,6 +78,10 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   after connecting. `title` is adopted from the backend for resumed sessions
   and set after a fresh session's first turn — it can still be absent for a
   session that has never completed a turn.
+- `sessions` only lists sessions with real interaction. Editors restart into a
+  stored placeholder and materialize an empty backend session — those stay
+  hidden and appear within one heartbeat (~10s) after their first prompt (or
+  a titled resume/load).
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 

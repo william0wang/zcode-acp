@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote discovery no longer lists never-used sessions: an editor restart
+  auto-resumes its stored placeholder, materializing an empty backend session
+  that was pushed to the hub and opened empty on remote clients. Sessions now
+  appear in `/api/instances` only after real interaction (a prompt turn, a
+  load with replayable history, or an adopted stored title).
+
 ## [0.3.0] - 2026-08-17
 
 ### Added

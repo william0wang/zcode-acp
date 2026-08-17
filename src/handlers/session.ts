@@ -400,6 +400,9 @@ export async function loadSession(
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
   const messages = await fetchMessages(server, zcodeSid);
+  // History on disk = real interaction (covers untitled sessions resumed from
+  // a previous bridge lifetime) — make the session discoverable remotely.
+  if (messages.length > 0) server.markSessionActive(acpSid);
   // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
   // N messages aligned to turn boundaries — the full replay stays the default
   // for editors that send no `_meta` (Zed path unchanged).
@@ -716,9 +719,10 @@ export async function prompt(
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
-    // Turn end = session activity — refresh the discovery summary timestamp
-    // regardless of outcome (end_turn, cancelled, retries exhausted).
-    server.touchSessionSummary(params.sessionId);
+    // Turn end = session activity — refresh the discovery summary and mark the
+    // session discoverable regardless of outcome (end_turn, cancelled, retries
+    // exhausted).
+    server.markSessionActive(params.sessionId);
   }
 }
 
