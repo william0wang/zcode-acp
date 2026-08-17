@@ -27,7 +27,7 @@ import {
 import { WebSocketServer } from "ws";
 
 import type { ZcodeAcpServer } from "../server.js";
-import { log, warn } from "../utils.js";
+import { AGENT_INFO, log, warn } from "../utils.js";
 import type { RemoteConfig } from "./config.js";
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
@@ -135,6 +135,9 @@ export async function startRemoteEndpoint(
     pid: process.pid,
     workspace: server.workspaceLabel(),
     sessions: sessionsPayload(server),
+    // Lets the hub detect that it is older than this bridge and restart
+    // itself (we then re-spawn it from this dist — see registerOnce).
+    version: AGENT_INFO.version,
   });
 
   const spawnHub = (): void => {
@@ -179,6 +182,26 @@ export async function startRemoteEndpoint(
         warn(
           "remote: hub rejected the token (401) — registration stopped, check ZCODE_ACP_REMOTE_TOKEN",
         );
+        return;
+      }
+      // Version handshake: the hub saw a newer bridge and is exiting. It is
+      // gone by now (it exits ~0.5s after replying) — re-spawn it from THIS
+      // dist (the upgraded code) and re-register. Throttled like the spawn
+      // below so a hub that keeps answering `restarting` can't loop us.
+      if (res.ok) {
+        const body = (await res.json().catch(() => null)) as { restarting?: boolean } | null;
+        if (body?.restarting) {
+          log("remote: hub is older than this bridge — respawning upgraded hub");
+          const respawn = setTimeout(() => {
+            if (stopped || authRejected) return;
+            if (Date.now() < spawnThrottledUntil) return;
+            spawnThrottledUntil = Date.now() + SPAWN_THROTTLE_MS;
+            spawnHub();
+            const retry = setTimeout(() => void registerOnce(), 1500);
+            retry.unref();
+          }, 2000);
+          respawn.unref();
+        }
       }
     } catch {
       // Hub unreachable: (re)spawn it, throttled so a failing spawn can't

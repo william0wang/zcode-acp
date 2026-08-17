@@ -18,7 +18,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
-import { log, warn } from "../utils.js";
+import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 
 export interface HubOptions {
   port: number;
@@ -246,8 +246,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         instances.delete(id);
         idleSince = null; // re-arm the idle clock on membership change
       }
+      // Version self-upgrade: a bridge NEWER than this hub just registered,
+      // so this process is running stale code. Reply first (the bridge
+      // re-spawns the hub from its own, newer dist when it sees `restarting`),
+      // then exit. Equal/older/absent versions never trigger a restart.
+      const stale =
+        url.pathname === "/api/register" &&
+        typeof body.version === "string" &&
+        compareVersions(body.version, AGENT_INFO.version) > 0;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end('{"ok":true}');
+      res.end(JSON.stringify(stale ? { ok: true, restarting: true } : { ok: true }));
+      if (stale) {
+        log(
+          `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
+        );
+        const restart = setTimeout(() => {
+          void close().finally(() => onIdleExit?.());
+        }, 500);
+        restart.unref();
+      }
       return;
     }
     res.writeHead(404, { "Content-Type": "text/plain" });

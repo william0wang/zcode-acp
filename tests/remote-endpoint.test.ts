@@ -6,6 +6,7 @@
  */
 
 import * as acp from "@agentclientprotocol/sdk";
+import { createServer, type Server } from "node:http";
 import { WebSocket } from "ws";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -41,6 +42,50 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 function testConfig(hubPort: number, bridgePort: number): RemoteConfig {
   return { token: TOKEN, hubPort, hubHost: "127.0.0.1", bridgePort };
+}
+
+/**
+ * Minimal stand-in hub: records parsed /api/register bodies and replies with a
+ * fixed JSON document. Used where the assertion is about the bridge's request
+ * behaviour rather than a real hub's response logic.
+ */
+function startMockHub(
+  bodies: Array<Record<string, unknown>>,
+  reply: Record<string, unknown>,
+): { port: number; ready: Promise<void>; server: Server } {
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (req.url === "/api/register") {
+        try {
+          bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          /* unreadable body — ignore */
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(reply));
+    });
+  });
+  const handle = { port: 0, ready: Promise.resolve(), server };
+  // The port is only known once listen() completes — capture it in the
+  // callback, not from an eagerly-read address().
+  handle.ready = new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      handle.port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve();
+    });
+  });
+  return handle;
+}
+
+function stopMockHub(mock: { server: Server }): Promise<void> {
+  return new Promise((resolve) => {
+    mock.server.closeAllConnections?.();
+    mock.server.close(() => resolve());
+  });
 }
 
 describe("remote endpoint", () => {
@@ -154,4 +199,57 @@ describe("remote endpoint", () => {
 
     expect(second!.port).toBe(first!.port + 1);
   });
+});
+
+describe("hub version handshake (bridge side)", () => {
+  it("sends its version in the register payload", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const mock = startMockHub(bodies, { ok: true });
+    trackStop(() => stopMockHub(mock));
+    await mock.ready;
+
+    const server = new ZcodeAcpServer();
+    const app = acp
+      .agent({ name: AGENT_INFO.name })
+      .onRequest("initialize", (ctx) => server.initialize(ctx.params));
+    trackConnections(app, server.clients);
+    const endpoint = await startRemoteEndpoint(server, app, testConfig(mock.port, 18510));
+    trackStop(() => endpoint!.stop());
+    await new Promise((r) => setTimeout(r, 300));
+
+    expect(bodies.length).toBeGreaterThanOrEqual(1);
+    expect(bodies[0]!.version).toBe(AGENT_INFO.version);
+  });
+
+  it("re-registers after a hub answers restarting (upgrade respawn)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const mock = startMockHub(bodies, { ok: true, restarting: true });
+    trackStop(() => stopMockHub(mock));
+    await mock.ready;
+
+    const server = new ZcodeAcpServer();
+    const app = acp
+      .agent({ name: AGENT_INFO.name })
+      .onRequest("initialize", (ctx) => server.initialize(ctx.params));
+    trackConnections(app, server.clients);
+    const endpoint = await startRemoteEndpoint(server, app, testConfig(mock.port, 18511));
+    trackStop(() => endpoint!.stop());
+
+    // First register lands immediately; the respawn-retry arrives ~3.5s later
+    // (2s respawn delay + 1.5s re-register). The spawned hub cannot bind the
+    // mock's port (EADDRINUSE → exit 0 by design), so the mock stays authoritative.
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (bodies.length >= 2) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 100);
+      }),
+      8000,
+      "second register after restarting reply",
+    );
+    expect(bodies.length).toBeGreaterThanOrEqual(2);
+  }, 15000);
 });

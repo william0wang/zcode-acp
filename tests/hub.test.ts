@@ -294,3 +294,62 @@ describe("hub idle exit", () => {
     expect(exited).toBe(true);
   });
 });
+
+describe("hub version self-upgrade", () => {
+  it("restarts when a newer bridge registers", async () => {
+    let exited = false;
+    const hub = await startTestHub({
+      onIdleExit: () => {
+        exited = true;
+      },
+    });
+    const res = await withTimeout(
+      fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(registerBody({ version: "9999.0.0" })),
+      }),
+      3000,
+      "register with newer version",
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, restarting: true });
+
+    // The hub exits ~500ms after replying so the response flushes first.
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (exited) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 50);
+      }),
+      5000,
+      "hub self-exit after newer-bridge register",
+    );
+    expect(exited).toBe(true);
+  });
+
+  it("does not restart for the same version or when no version is sent", async () => {
+    let exited = false;
+    const hub = await startTestHub({
+      onIdleExit: () => {
+        exited = true;
+      },
+    });
+    const { AGENT_INFO } = await import("../src/utils.js");
+    for (const version of [AGENT_INFO.version, undefined, "0.0.1"]) {
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(registerBody(version === undefined ? {} : { version })),
+      });
+      expect(await res.json()).toEqual({ ok: true });
+    }
+    await new Promise((r) => setTimeout(r, 800));
+    expect(exited).toBe(false);
+    const health = await fetch(`http://127.0.0.1:${hub.port}/api/health`);
+    expect(health.status).toBe(200);
+  });
+});

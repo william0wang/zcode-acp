@@ -4,17 +4,35 @@
  * Logging goes to stderr so it never corrupts the stdout ACP protocol stream.
  */
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
 /** ACP protocol version this server speaks. */
 export const PROTOCOL_VERSION = 1;
 
+/**
+ * Package version, read once from package.json. Kept in sync with releases by
+ * construction (the hardcoded constant used to drift from package.json); the
+ * hub-vs-bridge version handshake in remote/ relies on it changing per
+ * release.
+ */
+const PACKAGE_VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      version?: string;
+    };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
+
 /** Agent identity advertised in the initialize response. */
 export const AGENT_INFO = {
   name: "zcode-acp-server",
   title: "ZCode",
-  version: "0.1.0",
+  version: PACKAGE_VERSION,
 } as const;
 
 /** Path to the ZCode v2 config (credentials + provider/model metadata). */
