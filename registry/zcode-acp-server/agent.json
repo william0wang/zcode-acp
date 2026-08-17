@@ -1,7 +1,7 @@
 {
   "id": "zcode-acp-server",
   "name": "ZCode",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Standalone ACP server bridging the headless ZCode app-server (GLM-5.2) to editors like Zed and JetBrains. Supports streaming, tool calls, session fork/resume, mode switching, and reads GLM credentials locally — no editor-side API key required.",
   "repository": "https://github.com/william0wang/zcode-acp",
   "website": "https://github.com/william0wang/zcode-acp",
