@@ -462,10 +462,17 @@ export async function prompt(
   const zcodeSid = await ensureRealSession(server, params.sessionId);
 
   // Slash-command interception: dispatches directly to ZCode methods and
-  // returns end_turn without entering the turn loop. Unknown /x falls through.
-  const { handleSlashCommand } = await import("./slash.js");
+  // returns end_turn without entering the turn loop. Known passthrough
+  // commands and unknown /x both return null for the normal turn loop.
+  const { handleSlashCommand, neutralizeSlashText } = await import("./slash.js");
   const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
   if (intercepted) return intercepted;
+
+  // Wire text for the backend: unknown `/x` prompts (not advertised commands)
+  // are neutralized so the backend's command resolver never sees them — an
+  // unresolvable name can hard-fail the turn. Known commands pass through
+  // unchanged. The title/auto-compact paths below keep using the raw `text`.
+  const sendText = neutralizeSlashText(text);
 
   // Register self + preempt others under a per-session lock. The lock
   // serializes the critical section so that two concurrent prompts (B, C) for
@@ -568,8 +575,8 @@ export async function prompt(
       const SEND_RETRY_TIMEOUT_MS = 30_000;
       const sendParams =
         attachments.length > 0
-          ? { sessionId: zcodeSid, content: text, attachments }
-          : { sessionId: zcodeSid, content: text };
+          ? { sessionId: zcodeSid, content: sendText, attachments }
+          : { sessionId: zcodeSid, content: sendText };
       const sendT0 = Date.now();
       let sendAttempt = 0;
       while (true) {

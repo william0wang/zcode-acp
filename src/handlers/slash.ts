@@ -4,7 +4,7 @@
  * When the prompt text starts with `/`, dispatch the matching ZCode method
  * directly (compact/goal/fork/rewind/steer/model/mode/thought), emit a short
  * feedback `agent_message_chunk`, and return `end_turn` — never reaching the
- * normal turn loop. Unknown `/x` falls through to the model (extensibility).
+ * normal turn loop.
  *
  * Commands handled by the ZCode backend (skill/init/code-review and other
  * plugin commands) are NOT intercepted here — they pass through to
@@ -20,6 +20,13 @@
  * `/quota` is the exception: it does not call ZCode at all — it queries the
  * GLM Coding Plan usage API directly and renders the result.
  *
+ * Anything else starting with `/` is NOT a command: only the names advertised
+ * in the editor's `/` completion menu (plus the passthrough built-ins above)
+ * go the command route. Unknown `/x` is sent to the model as plain text via
+ * {@link neutralizeSlashText} — the backend's command resolver must never see
+ * it, because an unresolvable name can hard-fail the turn and wedge the
+ * session (e.g. pasting a directory path like `/Users/me/project`).
+ *
  * Returns the PromptResponse when intercepted, or null to let the caller run a
  * normal turn.
  */
@@ -31,8 +38,9 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
 import { formatMcpServers, loadMcpServers } from "../config/mcp-discovery.js";
+import { loadPluginCommands } from "../config/plugin-commands.js";
 import { formatQuota, queryQuota } from "../quota/index.js";
-import { CONFIG_DISPATCH, warn } from "../utils.js";
+import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 import { compact, fork, goal, rewind, steer } from "./extensions.js";
@@ -66,9 +74,57 @@ const PASSTHROUGH_COMMANDS = new Set([
   "skill",
   "init",
   // Plugin commands (code-review, android-dev, etc.) are also passthrough,
-  // but since they're dynamic we don't list them here — unknown commands
-  // fall through to return null (passthrough) by default.
+  // but since they're dynamic we don't list them here — they join the known
+  // set below via loadPluginCommands().
 ]);
+
+/**
+ * Command names the bridge treats as real commands: the static list advertised
+ * in the `/` completion menu, backend-resolvable built-ins, TUI-only names
+ * (which get a friendly error), and plugin commands. Built lazily on first
+ * use (plugin commands don't change mid-session — same freshness as the
+ * advertised list in index.ts) so importing this module does no fs work.
+ */
+let knownCommands: Set<string> | null = null;
+function knownCommandSet(): Set<string> {
+  if (!knownCommands) {
+    knownCommands = new Set<string>([
+      ...SLASH_COMMANDS.map((c) => c.name),
+      ...PASSTHROUGH_COMMANDS,
+      ...UNSUPPORTED_TUI_COMMANDS,
+      ...loadPluginCommands().map((c) => c.name),
+    ]);
+  }
+  return knownCommands;
+}
+
+/** Whether `cmd` (already lowercased, no leading slash) is a real command. */
+function isKnownCommand(cmd: string): boolean {
+  // $-prefixed names are discovered Skills (e.g. /$tdd) — always passthrough.
+  return cmd.startsWith("$") || knownCommandSet().has(cmd);
+}
+
+/**
+ * Neutralise slash-command resolution for prompts that are NOT real commands.
+ *
+ * The backend parses any prompt whose trimmed text starts with `/` as a
+ * command invocation (`name + args`), and an unresolvable name can fail the
+ * whole turn. This helper decides the wire text for `/`-leading prompts:
+ *   - known command → returned unchanged (the backend resolves it);
+ *   - anything else (e.g. a pasted path `/Users/me/proj`) → prefixed with a
+ *     zero-width space. U+200B survives the backend's trim(), so the
+ * `^\/` command parse can never match, while the model sees the prompt
+ *     verbatim (ZWSP is invisible and tokenizes as nothing).
+ *
+ * Non-slash prompts pass through unchanged.
+ */
+export function neutralizeSlashText(text: string): string {
+  const stripped = text.trimStart();
+  if (!stripped.startsWith("/")) return text;
+  const parts = stripped.slice(1).split(/\s(.*)/s);
+  const cmd = (parts[0] ?? "").toLowerCase();
+  return isKnownCommand(cmd) ? text : `\u200B${text}`;
+}
 
 /** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
 export async function handleSlashCommand(
@@ -185,8 +241,14 @@ export async function handleSlashCommand(
         // visual grouping marker for the editor's completion menu. Pass through
         // as-is — the model sees /$name and resolves it via the Skill tool.
         if (cmd.startsWith("$")) return null;
-        // Truly unknown /x → don't intercept, send to the model as normal
-        // text (extensibility — plugin commands or future commands).
+        // Plugin commands advertised in the completion menu (the remaining
+        // known names at this point — static/TUI/passthrough were all consumed
+        // above) → passthrough for the backend to resolve.
+        if (knownCommandSet().has(cmd)) return null;
+        // Unknown /x (not advertised, not a built-in — e.g. a pasted directory
+        // path): NOT a command. Return null for the normal turn loop; the
+        // caller runs the prompt through neutralizeSlashText() so the backend
+        // never attempts command resolution on it.
         return null;
     }
   } catch (e) {
