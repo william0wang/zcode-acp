@@ -24,6 +24,13 @@ session, `limit: 30`):
 Everything is additive: omit `_meta.zcode.limit` and you get the old
 full-replay behavior unchanged.
 
+One more replay-only behavior: harness-injected `<system-reminder>` blocks
+(TodoWrite nudges, context handoffs) that the runtime appends to user turns
+are stripped before replay, and user messages that contained nothing else are
+dropped entirely. You never receive them as `user_message_chunk`, so there is
+nothing to filter client-side — the user's transcript shows only what they
+actually typed.
+
 ## Attach strategy
 
 Pick the limit from your UI budget, not from the history size:

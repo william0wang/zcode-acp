@@ -78,14 +78,69 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 
 ## 环境变量
 
-| 变量              | 默认值           | 用途                                                                                                                                                                                                  |
-| ----------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ZCODE_BIN`       | `zcode`          | ZCode CLI 二进制文件路径或其 `.cjs` 入口                                                                                                                                                              |
-| `ZCODE_NODE`      | _（自动发现）_   | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）                                                                                                                                     |
-| `ZCODE_MODEL`     | _（来自 config） | 覆盖当前使用的模型 id                                                                                                                                                                                 |
-| `ZCODE_BASE_URL`  | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                             |
-| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _（未设置）  | 触发自动压缩的绝对 token 阈值。每次回合成功完成后（`end_turn`），若 `contextUsed >= 阈值`，服务端会自动调用 `session/compact` 压缩上下文，为下一个 prompt 腾出空间。设为 `0` 或不设置则禁用（默认）。例如 `240000` 表示上下文达 24 万 token 时触发压缩。压缩目标由 ZCode 后端决定。 |
-| `ZCODE_ACP_DEBUG` | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。 |
+| 变量                               | 默认值           | 用途                                                                                                                                                                                                                                                                                |
+| ---------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZCODE_BIN`                        | `zcode`          | ZCode CLI 二进制文件路径或其 `.cjs` 入口                                                                                                                                                                                                                                            |
+| `ZCODE_NODE`                       | _（自动发现）_   | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）                                                                                                                                                                                                                   |
+| `ZCODE_MODEL`                      | _（来自 config） | 覆盖当前使用的模型 id                                                                                                                                                                                                                                                               |
+| `ZCODE_BASE_URL`                   | _（来自 config） | 覆盖 provider 的 base URL                                                                                                                                                                                                                                                           |
+| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _（未设置）      | 触发自动压缩的绝对 token 阈值。每次回合成功完成后（`end_turn`），若 `contextUsed >= 阈值`，服务端会自动调用 `session/compact` 压缩上下文，为下一个 prompt 腾出空间。设为 `0` 或不设置则禁用（默认）。例如 `240000` 表示上下文达 24 万 token 时触发压缩。压缩目标由 ZCode 后端决定。 |
+| `ZCODE_ACP_DEBUG`                  | _（未设置）      | 设为 `1` 可开启详细诊断日志（事件流、探测循环、状态更新）。默认安静——只输出警告类日志（后端管道错误、命令/权限失败、锁等待超时）。诊断桥接问题时开启；日志出现在 `Zed.log` 中，前缀为 `[zcode-acp]`。                                                                               |
+| `ZCODE_ACP_REMOTE`                 | _（未设置）_     | 设为 `1` 启用[远程访问](#远程访问)——通过 WebSocket 向更多 ACP 客户端提供相同会话。                                                                                                                                                                                                  |
+| `ZCODE_ACP_REMOTE_TOKEN`           | _（未设置）_     | 远程访问的鉴权 token。启用 `ZCODE_ACP_REMOTE=1` 时**必填**；缺失则远程保持禁用。                                                                                                                                                                                                    |
+| `ZCODE_ACP_HUB_PORT`               | `8377`           | 机器级 `zcode-acp-hub` 的端口。隧道只映射这一个端口。                                                                                                                                                                                                                               |
+| `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`      | hub 绑定地址。`0.0.0.0` 会暴露仅 token 保护的明文面——只用于容器化隧道 agent 所在的私网接口（见[远程访问](#远程访问)）。                                                                                                                                                             |
+| `ZCODE_ACP_REMOTE_PORT`            | `8378`           | bridge ACP 端点的起始回环端口。每个 bridge（每个编辑器窗口）自动递增取下一个空闲端口。                                                                                                                                                                                              |
+
+## 远程访问
+
+设置 `ZCODE_ACP_REMOTE=1` 后，bridge 会额外通过 WebSocket 接收 ACP 连接，
+手机或浏览器即可观看并驱动与编辑器**相同的会话**。Zed（或任何 stdio ACP
+编辑器）仍是主客户端并拥有进程：编辑器断开时，bridge 连同所有远程连接
+一起退出。
+
+```text
+phone / browser ──WS── 隧道 ── hub (127.0.0.1:8377, 唯一入口)
+                                │ 字节级代理
+                                ▼
+                  bridge ACP 端点 (127.0.0.1:8378+n)
+                                │ 与 stdio 同一个 AgentApp
+Zed ──────── stdio ────────────┘
+```
+
+启用方式：在上文「配置 Zed」的 `env` 里追加（Zed 会把这些合并进 agent
+的环境变量）：
+
+```json
+"ZCODE_ACP_REMOTE": "1",
+"ZCODE_ACP_REMOTE_TOKEN": "<一段足够长的随机密钥>"
+```
+
+相关环境变量（详见上文表格）：`ZCODE_ACP_REMOTE`（开关）、
+`ZCODE_ACP_REMOTE_TOKEN`（必填 token）、`ZCODE_ACP_HUB_PORT`（hub 端口，
+默认 8377）、`ZCODE_ACP_HUB_HOST`（hub 绑定地址）、
+`ZCODE_ACP_REMOTE_PORT`（bridge 端点起始端口，默认 8378）。
+
+**Hub。** 第一个启用远程的 bridge 会以 detached 方式拉起机器级单例
+`zcode-acp-hub`（监听 `ZCODE_ACP_HUB_PORT`，也可手动运行）。它只做三件事：
+token 鉴权、实例发现、字节级 WebSocket 代理——不保存会话状态、不解析 ACP。
+空闲约 10 分钟后退出，需要时再被拉起。每个 bridge 每 10 秒注册一次作为
+心跳，心跳停止约 30 秒后从发现列表移除；客户端刷新时也可调用
+`GET /api/instances?probe=1` 主动探测，立即清理不可达的实例。
+
+**语义。** 所有 agent 通知广播给每个已连接客户端；权限 / elicitation 请求
+发给所有客户端，**先应答者生效**，其余客户端收到 `$/cancel_request` 关闭
+对话框。同一会话的并发 prompt 与单编辑器一样串行化。任一客户端声明的能力
+按 OR 合并。
+
+**隧道。** 面向单端口隧道（Cloudflare Tunnel、frp）设计：只映射 hub 端口。
+frp 的 `tcp` 模式原样透传 WebSocket；Cloudflare Tunnel 会断开空闲连接，
+hub 因此在两段链路上每 30 秒发送 keepalive ping。bridge 端点本身只监听
+回环地址，永不直接暴露。
+
+要构建远程客户端（Web、移动端或 CLI）？完整的集成契约（端点、帧格式、
+生命周期时序、故障恢复、平台注意事项）见
+[docs/REMOTE-CLIENTS.md](docs/REMOTE-CLIENTS.md)。
 
 ## 独立配额查询 CLI（zcode-quota）
 
@@ -227,12 +282,12 @@ commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELO
 你的提示词、代码、文件内容通过**本地管道**在编辑器与 ZCode 后端之间中转；这些数据会到达
 GLM 云端 API，仅因 ZCode 后端本身为推理而发送——本服务端不增加任何额外去向。
 
-| 方面 | 做什么 & 为什么 |
-| ---- | --------------- |
-| 网络 | 全代码库仅一处对外请求：配额 GET（`open.bigmodel.cn` / `api.z.ai`），只带 API key —— 为查询用量数字，不发送用户内容 |
-| 凭据 | API key 从 `~/.zcode/v2/config.json` 读取，用于认证 ZCode 子进程和配额请求。从不记录日志、从不写入别处。OAuth 完全由 ZCode 子进程处理 |
+| 方面 | 做什么 & 为什么                                                                                                                                               |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 网络 | 全代码库仅一处对外请求：配额 GET（`open.bigmodel.cn` / `api.z.ai`），只带 API key —— 为查询用量数字，不发送用户内容                                           |
+| 凭据 | API key 从 `~/.zcode/v2/config.json` 读取，用于认证 ZCode 子进程和配额请求。从不记录日志、从不写入别处。OAuth 完全由 ZCode 子进程处理                         |
 | 磁盘 | 不创建任何新文件。只写入已存在的 `~/.zcode/v2/tasks-index.sqlite` —— 这是**将会话同步到 ZCode App**，使其出现在历史列表和全文搜索中（存会话标题和首条提示词） |
-| 日志 | 诊断信息输出到 stderr，用于排查桥接问题。即使开启 `ZCODE_ACP_DEBUG=1`，也绝不记录提示词/代码/密钥 |
+| 日志 | 诊断信息输出到 stderr，用于排查桥接问题。即使开启 `ZCODE_ACP_DEBUG=1`，也绝不记录提示词/代码/密钥                                                             |
 
 ## 许可证
 

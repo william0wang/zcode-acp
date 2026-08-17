@@ -11,7 +11,9 @@ The server launches the ZCode headless app-server (`zcode app-server --stdio`) a
 
 ## Status
 
-Early in-development. Core scaffolding is in place; features are landing incrementally. See the project board for progress.
+In active development. Core bridging, slash commands and ZCode extensions,
+auto-compaction, remote access for mobile/web clients, and the quota APIs are
+in place; see the project board for what's next.
 
 ## Requirements
 
@@ -137,13 +139,15 @@ every 10s as a heartbeat and drops out of discovery ~30s after it stops.
 ```text
 GET /api/instances              → [{"id","port","pid","startedAt","workspace",
                                     "sessions":[{"sessionId","title?","updatedAt"}]}]
+GET /api/instances?probe=1      → same list, but unreachable bridges are pruned first
 WS   /acp?instance=<id>         → proxied to that bridge's endpoint
 ```
 
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
 security boundary. A proxied connection stays bound to one instance; switching
-instances means reconnecting.
+instances means reconnecting. Remote clients can also pull plan quota via the
+non-standard `account/usage_stats` ACP method (no session required).
 
 Building a remote client — web, mobile, or CLI? The full integration contract
 (endpoints, framing, lifecycle timings, failure recovery, platform notes)
@@ -279,6 +283,8 @@ The server is organised in layers that mirror the ACP protocol:
 - `interaction/` — bridge ZCode `interaction/*` server requests to ACP, preferring `elicitation/create` and falling back to `session/request_permission` (tool auth, ExitPlanMode, AskUserQuestion)
 - `handlers/` — ACP method handlers (`session/new`, `session/prompt`, ...) and the turn engine
 - `config/` — model / mode / thought-level configOptions and runtime model switching
+- `remote/` — opt-in remote access: loopback ACP endpoint, multi-client broadcast, `zcode-acp-hub` registration
+- `quota/` — GLM Coding Plan / Opencode Go usage API client (`/quota` command, `zcode-quota` bin)
 - `server.ts` — shared state and handler registration
 - `index.ts` — stdio wiring via the ACP SDK
 
@@ -296,6 +302,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 
 - [Architecture](docs/ARCHITECTURE.md) — event stream, dual-path deduplication, module responsibilities
 - [Protocol](docs/PROTOCOL.md) — ZCode JSON-RPC protocol details
+- [Remote Clients](docs/REMOTE-CLIENTS.md) — remote access integration contract (discovery, transport, recovery)
+- [Replay Guide](docs/REPLAY-GUIDE.md) — building a client UI on tail replay
 - [Development](docs/DEVELOPMENT.md) — local development, debugging, adding extension methods
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — common-issue troubleshooting
 

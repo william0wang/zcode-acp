@@ -38,6 +38,7 @@ src/
 │   ├── account.ts        account/usage_stats — plan quota for remote clients
 │   ├── extensions.ts     ZCode extensions (fork, rewind, compact, steer, …)
 │   ├── dispatch.ts       InternalEvent → ACP session/update dispatch
+│   ├── replay.ts         Tail replay: load limit, load_earlier pagination
 │   ├── io.ts             Client notification helpers
 │   └── server-requests.ts  Server→client requests (permission, elicitation)
 ├── config/               Discovery + runtime config

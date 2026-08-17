@@ -67,13 +67,13 @@ a hardcoded version string — read the message text to identify the root cause.
 
 **Common causes:**
 
-| Message fragment                 | Cause                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------- |
-| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.           |
+| Message fragment                 | Cause                                                                                                                                                                                                                                                      |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                                                                                           |
 | `timeout`                        | The per-attempt 10s subscribe deadline elapsed. The bridge retries transient timeouts up to 3× (the backend can be briefly busy finalising a cancelled turn after a preempt / `session/stop`); if all retries fail, the backend was unresponsive for ~30s. |
-| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).     |
-| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                          |
-| session-level business error     | The target session no longer exists or was evicted.                        |
+| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                                                                                     |
+| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                                                                                          |
+| session-level business error     | The target session no longer exists or was evicted.                                                                                                                                                                                                        |
 
 **Troubleshooting steps:**
 
@@ -307,6 +307,39 @@ and check the provider endpoint reachability).
 3. Check whether the tasks-index table schema matches:
    - Table name: `tasks`
    - Fields: workspace_key, task_id, title, task_status, ...
+
+### Remote access: hub unreachable / 401
+
+**Symptom:** A remote client cannot list instances or connect; `curl
+http://127.0.0.1:<hub-port>/api/health` fails, or `/api/*` returns 401.
+
+**Troubleshooting steps:**
+
+1. 401 means a token mismatch — `ZCODE_ACP_REMOTE_TOKEN` must be identical in
+   the bridge env, the hub env (if run manually), and the client request.
+2. A dead hub self-heals: the next bridge heartbeat (≤10s; worst ~1min under
+   the spawn throttle) re-spawns `zcode-acp-hub`. Retry with backoff rather
+   than restarting anything by hand.
+3. Confirm the ports match: the client must reach `ZCODE_ACP_HUB_PORT`
+   (default 8377) through the tunnel, and the tunnel maps exactly that one
+   port.
+4. Remote silently disabled? `ZCODE_ACP_REMOTE=1` without a token logs a
+   warning and leaves the bridge stdio-only by design.
+
+### Remote access: stale instance in the list / connect fails
+
+**Symptom:** `/api/instances` lists a workspace whose editor is already gone,
+or a WS connect to it fails.
+
+**Troubleshooting steps:**
+
+1. Hard-killed bridges (Zed force-kill, crash) never unregister — the hub's
+   heartbeat TTL drops them within ~30s.
+2. For an immediately-honest list, call `GET /api/instances?probe=1`: the hub
+   TCP-probes each registered port and prunes unreachable bridges first.
+   Clients should use this on refresh.
+3. A few-seconds outage after upgrading the package is expected: a newer
+   bridge triggers the hub's version-handshake restart, then re-spawns it.
 
 ## Log Debugging
 

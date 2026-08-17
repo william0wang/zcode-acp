@@ -90,6 +90,32 @@ describe("backend", () => {
 });
 ```
 
+### Method 4: Remote access (hub + endpoint)
+
+Run the bridge with the remote env vars on scratch ports (keep stdin open —
+the bridge exits when its stdio client disconnects):
+
+```bash
+ZCODE_ACP_REMOTE=1 \
+ZCODE_ACP_REMOTE_TOKEN=dev-token \
+ZCODE_ACP_HUB_PORT=18377 \
+ZCODE_ACP_REMOTE_PORT=18378 \
+ZCODE_ACP_DEBUG=1 \
+tail -f /dev/null | node dist/index.js
+```
+
+The first bridge spawns `dist/bin/hub.js` on its own. Verify discovery:
+
+```bash
+curl -H "Authorization: Bearer dev-token" http://127.0.0.1:18377/api/instances
+curl -H "Authorization: Bearer dev-token" "http://127.0.0.1:18377/api/instances?probe=1"
+```
+
+Integration tests live in `tests/hub.test.ts` (hub API, probe, proxy, idle
+exit) and `tests/remote-endpoint.test.ts` (registration + end-to-end proxied
+initialize). The remote features are opt-in and self-contained — remote
+failures warn and disable remote only, so stdio testing works without them.
+
 ## Debugging Tips
 
 ### Enable verbose logging

@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-17
+
+### Added
+
+- Remote access (opt-in via `ZCODE_ACP_REMOTE=1`): the bridge serves the same
+  `AgentApp` on a loopback WebSocket endpoint alongside stdio. A multi-client
+  broadcast registry fans notifications out to every attached client; requests
+  are first-response-wins with loser cancellation. The bridge's lifetime still
+  follows the stdio editor (ADR-0001).
+- `zcode-acp-hub` daemon: machine-level singleton providing token auth,
+  instance discovery, and byte-level WebSocket proxying — no session state,
+  no ACP semantics (ADR-0002). Bridges register every 10s as a heartbeat;
+  entries prune after a 30s heartbeat TTL or immediately on
+  `GET /api/instances?probe=1` (on-demand liveness). The hub idle-exits after
+  10 minutes and is re-spawned on demand; a version handshake restarts a stale
+  hub when a newer bridge registers.
+- Tail replay: `session/load` accepts `_meta.zcode.limit` and returns
+  `replayMeta`; `session/load_earlier` pages backwards with an opaque cursor
+  (Proposal 0001 / ADR-0003). Client UI guide: `docs/REPLAY-GUIDE.md`.
+- `account/usage_stats` non-standard ACP method exposing plan quota
+  (GLM Coding Plan + Opencode Go) to remote clients; failures degrade
+  gracefully so clients can hide the quota UI (Proposal 0002).
+- Remote client integration contract: `docs/REMOTE-CLIENTS.md`.
+
+### Fixed
+
+- Slash-leading prompts that are not advertised commands (e.g. `/Users/me`)
+  are neutralized and sent as plain text instead of hard-failing the backend
+  turn and wedging the session.
+- Replayed user messages strip harness `<system-reminder>` blocks (and drop
+  reminder-only messages), so clients never render them as user input.
+- Stored session titles are adopted on load/resume so hub discovery lists the
+  backend's titles.
+
 ## [0.2.0] - 2026-08-16
 
 ### Added
