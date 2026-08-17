@@ -210,13 +210,27 @@ export async function fetchMessages(
 }
 
 /**
- * Strip harness-injected reminder blocks from user text. The agent runtime
- * appends `<system-reminder>…</system-reminder>` blocks (TodoWrite nudges,
- * context handoffs) to user turns as context plumbing — they are not user
- * speech, and replaying them verbatim makes clients render them as user input.
+ * Strip harness-injected reminder plumbing from user text. The agent runtime
+ * appends TodoWrite/Read usage nudges (with an optional todo-list dump) and
+ * `<system-reminder>` blocks to user turns — they are not user speech, and
+ * replaying them verbatim makes clients render them as user input.
+ *
+ * The nudges arrive in stored history WITHOUT tags (verified against live
+ * session/messages payloads), so they are matched by their stable shape: a
+ * fixed opening signature, a fixed closing sentence, and — when present — a
+ * bracket-wrapped todo dump. Real user text before or after the block
+ * survives; user messages that consist only of plumbing are dropped by the
+ * caller's empty-check.
  */
 function stripSystemReminders(text: string): string {
-  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+    .replace(
+      /The (?:TodoWrite|Read) tool hasn't been used recently\.[\s\S]*?This is just a gentle reminder - ignore if not applicable\./g,
+      "",
+    )
+    .replace(/Here (?:are|is)[^\n]*todo list:\s*\n\s*\n\[[\s\S]*?\](?=\n|$)/g, "")
+    .trim();
 }
 
 /**

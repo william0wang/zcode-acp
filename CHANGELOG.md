@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Replay now also strips harness tool-usage reminders that the backend stores
+  WITHOUT `<system-reminder>` tags (TodoWrite/Read nudges followed by the
+  todo-list dump) — verified against live `session/messages` payloads, they
+  previously replayed verbatim and rendered as user input. Matching anchors on
+  the nudge's stable opening signature and closing sentence, so real user text
+  before or after the block survives.
+
 ## [0.3.1] - 2026-08-17
 
 ### Fixed

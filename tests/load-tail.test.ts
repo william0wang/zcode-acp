@@ -187,6 +187,85 @@ describe("system-reminder stripping in replay", () => {
   });
 });
 
+describe("tag-less tool reminder stripping in replay", () => {
+  // Exact shape captured from a live session/messages payload: the harness
+  // stores TodoWrite nudges as plain text WITHOUT <system-reminder> tags.
+  const NUDGE =
+    "The TodoWrite tool hasn't been used recently. If you're working on " +
+    "tasks that would benefit from tracking progress, consider using the " +
+    "TodoWrite tool to track progress. Also consider cleaning up the todo " +
+    "list if it no longer matches what you are working on. Only use it if " +
+    "it's relevant to the current work. This is just a gentle reminder - " +
+    "ignore if not applicable.";
+  const DUMP =
+    "Here are the existing contents of your todo list:\n\n" +
+    "[1. [completed] probe\n2. [pending] client app refresh]";
+
+  it("drops a reminder-only message (nudge + todo dump)", async () => {
+    const history = hist();
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [{ type: "text", text: `${NUDGE}\n\n${DUMP}` }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    const texts = chunks(updates);
+    expect(texts).toEqual(["sys", "one", "A1", "two", "A2a", "A2b", "A3"]);
+    expect(texts.join("\n")).not.toContain("TodoWrite");
+  });
+
+  it("keeps user text that follows the reminder in the same message", async () => {
+    const history = hist();
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [{ type: "text", text: `${NUDGE}\n\n${DUMP}\n\n这个问题还是存在` }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    expect(chunks(updates)).toContain("这个问题还是存在");
+  });
+
+  it("keeps user text that precedes the nudge", async () => {
+    const history = hist();
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [{ type: "text", text: `please fix this\n\n${NUDGE}` }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    const texts = chunks(updates);
+    expect(texts).toContain("please fix this");
+    expect(texts.join("\n")).not.toContain("gentle reminder");
+  });
+
+  it("leaves ordinary mentions of the tool name untouched", async () => {
+    const history = hist();
+    history[6] = {
+      info: { id: "u3", role: "user" },
+      parts: [{ type: "text", text: "帮我处理 TodoWrite 的问题" }],
+    };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    expect(chunks(updates)).toContain("帮我处理 TodoWrite 的问题");
+  });
+});
+
 describe("session/load_earlier", () => {
   async function attachTail(server: ZcodeAcpServer): Promise<string> {
     const { cx } = collectCx();
