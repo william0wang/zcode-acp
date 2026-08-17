@@ -1,96 +1,127 @@
 /**
  * account/usage_stats handler tests (Proposal 0002).
  *
- * Verifies the quota → plans mapping (percent always present, counts and
- * reset timestamps only when the API reported them) and the graceful-failure
- * contract: a non-success quota result throws a JSON-RPC error carrying the
- * failure kind in `data.kind` so remote clients hide the quota UI.
+ * Verifies the combined dual-provider mapping: GLM items pass through with
+ * plan level and per-model details; Opencode Go windows are emitted with the
+ * relative reset countdown converted to an absolute timestamp; per-provider
+ * failures become `kind` strings (never thrown), and a `not_configured` Go
+ * section is reported as-is so the client can omit it.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { queryQuotaMock } = vi.hoisted(() => ({ queryQuotaMock: vi.fn() }));
+const { queryCombinedMock } = vi.hoisted(() => ({ queryCombinedMock: vi.fn() }));
 
-vi.mock("../src/quota/index.js", async () => {
-  const actual =
-    await vi.importActual<typeof import("../src/quota/index.js")>("../src/quota/index.js");
-  return { ...actual, queryQuota: queryQuotaMock };
+vi.mock("../src/quota/combined.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/quota/combined.js")>(
+    "../src/quota/combined.js",
+  );
+  return { ...actual, queryCombined: queryCombinedMock };
 });
 
 import { accountUsageStats } from "../src/handlers/account.js";
-import type { QuotaResult } from "../src/quota/types.js";
+import type { CombinedResult } from "../src/quota/combined.js";
+
+const NOW = 1_700_000_000_000;
 
 beforeEach(() => {
-  queryQuotaMock.mockReset();
+  queryCombinedMock.mockReset();
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("accountUsageStats", () => {
-  it("maps parsed quota items to plan entries", async () => {
-    const result: QuotaResult = {
-      kind: "success",
-      level: "pro",
-      items: [
-        {
-          key: "token_5h",
-          label: "5h",
-          usedPercent: 35,
-          leftPercent: 65,
-          nextResetTime: 1723812000000,
-        },
-        {
-          key: "mcp",
-          label: "MCP",
-          usedPercent: 10,
-          leftPercent: 90,
-          usedCount: 3,
-          totalCount: 30,
-          nextResetTime: 1723812000000,
-        },
-      ],
-    };
-    queryQuotaMock.mockResolvedValue(result);
+  it("passes GLM items through with level and per-model details", async () => {
+    queryCombinedMock.mockResolvedValue({
+      glm: {
+        kind: "success",
+        level: "pro",
+        items: [
+          {
+            key: "token_5h",
+            label: "5h",
+            usedPercent: 35,
+            leftPercent: 65,
+            nextResetTime: 1723812000000,
+          },
+          {
+            key: "mcp",
+            label: "MCP",
+            usedPercent: 10,
+            leftPercent: 90,
+            usedCount: 3,
+            totalCount: 30,
+            detail: [{ modelCode: "search-prime", usage: 2 }],
+          },
+        ],
+      },
+      go: { kind: "not_configured" },
+    } satisfies CombinedResult);
 
     const out = await accountUsageStats();
-    expect(out.plans).toHaveLength(2);
-
-    const fiveHour = out.plans[0]!;
-    expect(fiveHour.id).toBe("token_5h");
-    expect(fiveHour.usedPercent).toBe(35);
-    expect(fiveHour.windowHours).toBe(5);
-    expect(fiveHour.resetsAt).toBe(1723812000000);
-    // No counts reported → no used/limit fields (client falls back to percent).
-    expect(fiveHour.used).toBeUndefined();
-    expect(fiveHour.limit).toBeUndefined();
-
-    const mcp = out.plans[1]!;
-    expect(mcp.id).toBe("mcp");
-    expect(mcp.used).toBe(3);
-    expect(mcp.limit).toBe(30);
-    expect(mcp.windowHours).toBeUndefined();
+    expect(out.glm.kind).toBe("success");
+    expect(out.glm.level).toBe("pro");
+    expect(out.glm.items).toHaveLength(2);
+    // Verbatim passthrough: counts and details ride along for the client.
+    expect(out.glm.items![1]).toMatchObject({
+      key: "mcp",
+      usedCount: 3,
+      totalCount: 30,
+      detail: [{ modelCode: "search-prime", usage: 2 }],
+    });
+    // not_configured Go is reported as-is — the client omits the section.
+    expect(out.opencode).toEqual({ kind: "not_configured" });
   });
 
-  it("throws a JSON-RPC error with the failure kind when quota is unavailable", async () => {
-    queryQuotaMock.mockResolvedValue({ kind: "unavailable" } satisfies QuotaResult);
-    await expect(accountUsageStats()).rejects.toMatchObject({
-      code: -32003,
-      data: { kind: "unavailable" },
+  it("converts Go reset countdowns to absolute timestamps", async () => {
+    const fetchedAt = NOW - 60_000; // snapshot is 1 minute old
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "unavailable" },
+      go: {
+        kind: "success",
+        fetchedAt,
+        rolling: { usagePercent: 5, resetInSec: 3600 }, // 1h left at fetch time
+        weekly: { usagePercent: 25, resetInSec: 86_400 },
+        monthly: null, // absent window is dropped, not rendered as "(no data)"
+      },
+    } satisfies CombinedResult);
+
+    const out = await accountUsageStats();
+    expect(out.opencode.kind).toBe("success");
+    expect(out.opencode.windows).toEqual([
+      // resetsAt = fetchedAt + (resetInSec − 60s elapsed since the snapshot)
+      { key: "rolling", label: "5h", usagePercent: 5, resetsAt: fetchedAt + 3_540_000 },
+      { key: "weekly", label: "Week", usagePercent: 25, resetsAt: fetchedAt + 86_340_000 },
+    ]);
+    // GLM failure is a kind string, never a thrown JSON-RPC error.
+    expect(out.glm).toEqual({ kind: "unavailable" });
+  });
+
+  it("reports auth failures as section kinds instead of throwing", async () => {
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "auth_error" },
+      go: { kind: "auth_error" },
+    } satisfies CombinedResult);
+
+    const out = await accountUsageStats();
+    expect(out).toEqual({
+      glm: { kind: "auth_error" },
+      opencode: { kind: "auth_error" },
     });
   });
 
-  it("throws with kind auth_error on auth failures", async () => {
-    queryQuotaMock.mockResolvedValue({ kind: "auth_error" } satisfies QuotaResult);
-    await expect(accountUsageStats()).rejects.toMatchObject({
-      data: { kind: "auth_error" },
-    });
-  });
+  it("returns empty sections when the API reports no windows", async () => {
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "success", level: "pro", items: [] },
+      go: { kind: "not_configured" },
+    } satisfies CombinedResult);
 
-  it("returns an empty plans array when the API reports no windows", async () => {
-    queryQuotaMock.mockResolvedValue({
-      kind: "success",
-      level: "pro",
-      items: [],
-    } satisfies QuotaResult);
     const out = await accountUsageStats();
-    expect(out.plans).toEqual([]);
+    expect(out.glm.items).toEqual([]);
+    expect(out.opencode.kind).toBe("not_configured");
   });
 });

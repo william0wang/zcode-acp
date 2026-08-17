@@ -121,28 +121,51 @@ is a pull-only request — callable any time after `initialize`, no session
 required. Fetch once after attach and on demand; quota changes are slow, there
 is no push.
 
+The response mirrors the `zcode-quota` CLI card's data model — one GLM section
+plus one Opencode Go section — so clients can reproduce the CLI layout
+exactly:
+
 ```json
 → { "id": 7, "method": "account/usage_stats", "params": {} }
-← { "id": 7, "result": { "plans": [
-      {
-        "id": "token_5h",
-        "name": "5h",
-        "usedPercent": 35,
-        "windowHours": 5,
-        "resetsAt": 1723812000000
+← { "id": 7, "result": {
+      "glm": {
+        "kind": "success",
+        "level": "pro",
+        "items": [
+          { "key": "token_5h", "label": "5h", "usedPercent": 35,
+            "nextResetTime": 1723812000000 },
+          { "key": "mcp", "label": "MCP", "usedPercent": 10, "usedCount": 3,
+            "totalCount": 30, "nextResetTime": 1723812000000,
+            "detail": [{ "modelCode": "search-prime", "usage": 2 }] }
+        ]
       },
-      { "id": "mcp", "name": "MCP", "usedPercent": 10, "used": 3, "limit": 30 }
-    ] } }
+      "opencode": {
+        "kind": "success",
+        "windows": [
+          { "key": "rolling", "label": "5h", "usagePercent": 5,
+            "resetsAt": 1723812000000 },
+          { "key": "weekly", "label": "Week", "usagePercent": 25,
+            "resetsAt": 1724071200000 }
+        ]
+      }
+    } }
 ```
 
-- One entry per quota window (5h / weekly / MCP). `usedPercent` (0–100) is
-  always present; `used`/`limit` only when the API reports absolute counts —
-  render the bar from the percent and the counts as a `used/limit` hint.
-- `windowHours` is 5 for the rolling window, 168 for weekly, absent otherwise.
-- Cached ~10s server-side (same cache as the `/quota` command).
-- On failure the bridge returns a JSON-RPC error (`-32003`, failure kind in
-  `data.kind`: `auth_error` | `rate_limited` | `unavailable`) — hide the quota
-  UI and retry later.
+- `glm` (`kind`: `success` | `auth_error` | `rate_limited` | `unavailable`):
+  on success, `level` is the plan level and `items` carries one entry per
+  window (`5h` / `Week` / `MCP`) with `usedPercent` (0–100) always present;
+  `usedCount`/`totalCount`/`nextResetTime` (epoch ms) and the per-model
+  `detail` breakdown only when the API reports them.
+- `opencode` (`kind`: `success` | `not_configured` | `auth_error` |
+  `unavailable`): on success, `windows` carries the rolling (`5h`) / weekly
+  (`Week`) / monthly (`Month`, when exposed) windows; the dashboard's relative
+  countdown is resolved to an absolute `resetsAt` (epoch ms). `not_configured`
+  means the user never set OpenCode Go credentials — omit the section, like
+  the CLI does.
+- Provider failures are per-section `kind` strings, not JSON-RPC errors —
+  render the same status line the CLI would (e.g. auth expired) and retry
+  later. Only transport-level failures reject the request.
+- Cached ~10s server-side (same caches as the `/quota` command).
 
 ## Slash-command handling
 
