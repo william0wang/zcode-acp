@@ -1,6 +1,6 @@
 # Proposal 0002 — Expose plan quota usage to remote clients
 
-Status: draft · Date: 2026-08-17 · Affects: bridge (new ACP method), remote clients
+Status: implemented (bridge `account/usage_stats`, 2026-08-17) · Date: 2026-08-17 · Affects: bridge (new ACP method), remote clients
 
 ## Problem
 
@@ -54,6 +54,18 @@ Semantics:
   few minutes). No push notification needed yet — quota changes are slow.
 - Non-standard, additive method name (`account/…`); nothing existing changes.
 - Failure should degrade gracefully: error → the client hides the quota UI.
+
+Implementation notes (2026-08-17):
+
+- Data source is the bridge's own `quota/` pipeline (GLM usage API + 10s
+  cache, same as `/quota`), NOT the app-server `usage/stats` RPC — inspected
+  live, that RPC returns token analytics over a time range (per-day token
+  counts, model/tool breakdowns), not billing-window quotas. The wire shape
+  above is adapted accordingly: `usedPercent` is always present; `used`/
+  `limit` only when the API reports absolute counts; `windowHours` is derived
+  from the window id (5h → 5, week → 168).
+- Failures map to JSON-RPC `-32003` with the kind in `data.kind`
+  (`auth_error` | `rate_limited` | `unavailable`).
 
 ## Client UI (once available)
 

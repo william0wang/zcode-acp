@@ -14,7 +14,7 @@ application-client (Zed / JetBrains)
        |
        v
 zcode-acp-server (stdio JSON-RPC ACP)
-  |-- handlers/     session, extensions, dispatch, server-requests, io, slash
+  |-- handlers/     session, extensions, dispatch, server-requests, io, slash, account
   |-- translators/    event-translator, projection-differ, tool-helpers
   |-- interaction/    adapter
   |-- config/         options, runtime-model, model-cache
@@ -178,7 +178,8 @@ API only because the ZCode backend itself sends them for inference.
 | `background-tasks.ts` | Session-scoped `BackgroundTaskListener` — forwards background sub-agent status (`session.updated` taskId) + completion-notification turns to the client OUTSIDE request handlers (lives across prompts) |
 | `server-requests.ts`  | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing                                                                                            |
 | `io.ts`               | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                                                                                                              |
-| `slash.ts`            | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought)                                                                                                       |
+| `slash.ts`            | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought); non-advertised `/x` prompts are neutralized into plain text (`neutralizeSlashText`) |
+| `account.ts`          | `account/usage_stats` — account-level plan quota for remote clients (Proposal 0002; quota pipeline + graceful error)                     |
 
 ### `interaction/` — Interaction bridging
 

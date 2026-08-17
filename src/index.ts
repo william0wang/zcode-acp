@@ -14,6 +14,7 @@ import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { z } from "zod";
 
+import { accountUsageStats } from "./handlers/account.js";
 import {
   cancel,
   listSessions,
@@ -144,6 +145,10 @@ async function main(): Promise<void> {
         .passthrough(),
       (ctx) => loadEarlier(server, ctx.params, server.clients.broadcast()),
     )
+    // Account-level plan quota for remote clients (non-standard; Proposal
+    // 0002). Pull-only, no session required; errors carry the failure kind in
+    // `data.kind` so clients can hide the quota UI.
+    .onRequest("account/usage_stats", z.object({}).passthrough(), () => accountUsageStats())
     .onRequest("session/prompt", (ctx) =>
       prompt(server, ctx.params, server.clients.broadcast(), ctx.requestId as number),
     )

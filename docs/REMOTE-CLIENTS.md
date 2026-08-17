@@ -114,6 +114,44 @@ ws(s)://<hub-host>/acp?instance=<id>&token=<token>
    (model / mode / thought level), slash commands in the prompt text —
    see [PROTOCOL.md](PROTOCOL.md).
 
+## Account quota (`account/usage_stats`)
+
+Non-standard, additive (Proposal 0002). Plan quota is **account-level**, so it
+is a pull-only request — callable any time after `initialize`, no session
+required. Fetch once after attach and on demand; quota changes are slow, there
+is no push.
+
+```json
+→ { "id": 7, "method": "account/usage_stats", "params": {} }
+← { "id": 7, "result": { "plans": [
+      {
+        "id": "token_5h",
+        "name": "5h",
+        "usedPercent": 35,
+        "windowHours": 5,
+        "resetsAt": 1723812000000
+      },
+      { "id": "mcp", "name": "MCP", "usedPercent": 10, "used": 3, "limit": 30 }
+    ] } }
+```
+
+- One entry per quota window (5h / weekly / MCP). `usedPercent` (0–100) is
+  always present; `used`/`limit` only when the API reports absolute counts —
+  render the bar from the percent and the counts as a `used/limit` hint.
+- `windowHours` is 5 for the rolling window, 168 for weekly, absent otherwise.
+- Cached ~10s server-side (same cache as the `/quota` command).
+- On failure the bridge returns a JSON-RPC error (`-32003`, failure kind in
+  `data.kind`: `auth_error` | `rate_limited` | `unavailable`) — hide the quota
+  UI and retry later.
+
+## Slash-command handling
+
+Only the commands the bridge advertises via `available_commands_update` (plus
+`skill`/`init` and `$`-skills) are treated as commands. Any other `/`-leading
+prompt — e.g. a pasted directory path — is delivered to the model as plain
+text with an invisible zero-width-space prefix; clients see the text verbatim
+in replay and echoes. Clients should not special-case this.
+
 ## Tail replay and history pagination
 
 Replaying a long session's full history is O(history) on every attach and

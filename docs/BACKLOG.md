@@ -33,7 +33,9 @@ have no ACP equivalent. Listed for completeness only — the bridge does not
 intend to surface them.
 
 `automation/create`, `automation/list`, `automation/delete` (scheduled tasks),
-`usage/stats`, `workspace/readState`, `workspace/upsertModelProvider`,
+`usage/stats` (token analytics; the account-level plan quota it does NOT cover
+is exposed via the bridge's own `account/usage_stats` — see Proposal 0002),
+`workspace/readState`, `workspace/upsertModelProvider`,
 `workspace/removeModelProvider`, `workspace/updateProviderRegistry`,
 `workspace/setDefaultModel`, `workspace/setDefaultThoughtLevel`,
 `workspace/setDefaultMode`, `workspace/generateText`, `mcp/list`,
