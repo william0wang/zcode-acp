@@ -187,6 +187,8 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
 
     server.pendingSessions.delete(acpSid);
     server.registerSession(acpSid, sid);
+    // session/create loads the session into this backend process.
+    server.backendLoadedSessions.add(acpSid);
     // Keep the durable alias in sync so a later bridge restart can still
     // resume this session via the placeholder id.
     recordMaterializedSession(acpSid, sid, pending.cwd);
@@ -278,7 +280,11 @@ async function adoptStoredTitle(
  * A `session/new` placeholder has no backend counterpart until first use, yet
  * the editor may resume it anyway (panel reopen, bridge restart) — resolving it
  * here prevents an otherwise unavoidable "Session not found". Resolution order:
- *   1. in-memory mapping → the session is already live in this subprocess;
+ *   1. in-memory mapping → live only if verified loaded in this backend
+ *      subprocess (`backendLoadedSessions`); a bare mapping may have been
+ *      re-registered from the durable store without a resume, and the backend
+ *      only serves messages for sessions it has loaded — those must fall
+ *      through to the resume RPC or the replay comes back empty;
  *   2. pending placeholder → materialize it (an empty session, matching the
  *      pre-lazy behavior where a never-used session/new always resumed);
  *   3. durable store → a placeholder from a previous bridge lifetime: with a
@@ -293,7 +299,9 @@ async function resolveResumeTarget(
   acpSid: string,
 ): Promise<{ zcodeSid: string; alreadyLive: boolean }> {
   const mapped = server.resolveSid(acpSid);
-  if (mapped) return { zcodeSid: mapped, alreadyLive: true };
+  if (mapped) {
+    return { zcodeSid: mapped, alreadyLive: server.backendLoadedSessions.has(acpSid) };
+  }
   if (server.pendingSessions.has(acpSid)) {
     return { zcodeSid: await ensureRealSession(server, acpSid), alreadyLive: true };
   }
@@ -347,6 +355,8 @@ export async function resumeSession(
     // registered to even process the resume turn.
     await syncProviderRegistry(server, cwd);
     await resumeBackendSession(server, zcParams);
+    // The resume RPC succeeded — the session is now loaded in this backend.
+    server.backendLoadedSessions.add(acpSid);
   }
 
   server.registerSession(acpSid, zcodeSid);
@@ -393,6 +403,8 @@ export async function loadSession(
     // registered to process it.
     await syncProviderRegistry(server, cwd);
     await resumeBackendSession(server, zcParams);
+    // The resume RPC succeeded — the session is now loaded in this backend.
+    server.backendLoadedSessions.add(acpSid);
   }
   server.registerSession(acpSid, zcodeSid);
   log(`session/load → ${zcodeSid}`);

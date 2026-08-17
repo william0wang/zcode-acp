@@ -17,7 +17,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeMessage, ZcodeMessagesResult } from "../backend/types.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import { throwError, withReplayBatch } from "./io.js";
 
 /** Upper bound for a requested tail/page size (values above clamp to this). */
@@ -199,7 +199,12 @@ export async function fetchMessages(
     { sessionId: zcodeSid },
     8000,
   );
-  if (resp.error) return [];
+  if (resp.error) {
+    // Swallowed on purpose (replay must not crash the load) — but loudly: a
+    // silent empty here renders the whole conversation blank for the client.
+    warn(`session/messages failed for ${zcodeSid}: ${resp.error.message ?? ""}`);
+    return [];
+  }
   const result = (resp.result ?? {}) as ZcodeMessagesResult;
   return result.messages ?? [];
 }

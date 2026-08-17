@@ -341,6 +341,18 @@ or a WS connect to it fails.
 3. A few-seconds outage after upgrading the package is expected: a newer
    bridge triggers the hub's version-handshake restart, then re-spawns it.
 
+### Remote access: a conversation opens empty
+
+**Symptom:** one session (typically an older one) opens EMPTY on a remote
+client while other sessions show content.
+
+**Cause:** the backend subprocess only serves `session/messages` for sessions
+it has loaded via `session/create`/`session/resume`. Older bridges trusted the
+in-memory id mapping as "live" and skipped the resume RPC — a mapping
+re-registered from the durable store without a resume (or left behind by a
+failed one) therefore replayed nothing. Fixed by explicit backend-loaded
+tracking; the backend also logs a warning now when `session/messages` errors.
+
 ## Log Debugging
 
 ### Enable verbose logging

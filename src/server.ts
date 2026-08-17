@@ -124,6 +124,17 @@ export class ZcodeAcpServer {
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
   /**
+   * Sessions verified as loaded in the CURRENT backend subprocess — populated
+   * only after a successful session/create or session/resume RPC. A bare
+   * `registerSession` mapping does NOT qualify: the backend answers
+   * `session/messages` only for sessions it has loaded, so `session/load`
+   * must not skip the resume RPC for a mapping that was never loaded (e.g.
+   * re-registered from the durable store by an early ensureRealSession
+   * caller, or left behind by a failed resume) — the replay would silently
+   * come back empty.
+   */
+  readonly backendLoadedSessions = new Set<string>();
+  /**
    * Sessions eligible for auto-title on first end_turn. Only `session/new`
    * populates this — resumed/loaded sessions already carry a title, so their
    * first post-load message must NOT overwrite it. (sessionTitles alone can't

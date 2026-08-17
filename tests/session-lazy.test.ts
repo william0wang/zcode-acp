@@ -482,3 +482,50 @@ describe("discovery activity gating", () => {
     expect(server.sessionSummaries.get("sess_hist")?.hasActivity).toBe(true);
   });
 });
+
+describe("backend-loaded session tracking", () => {
+  const stubCx = { notify: async () => {} } as unknown as acp.AgentContext;
+
+  it("session/load re-issues the resume RPC for a mapping that was never loaded", async () => {
+    const server = new ZcodeAcpServer();
+    // The poison case: a mapping re-registered from the durable store (or
+    // left by a failed resume) without the session ever being loaded into
+    // this backend subprocess.
+    server.registerSession("s-old", "sess_old");
+    const history: ZcodeMessage[] = [
+      { info: { id: "m1", role: "user" }, parts: [{ type: "text", text: "old turn" }] },
+    ];
+    const { backend, calls } = fakeBackend([], history);
+    server.backend = backend;
+
+    await loadSession(server, { sessionId: "s-old" } as acp.LoadSessionRequest, stubCx);
+
+    const resume = calls.find((c) => c.method === "session/resume");
+    expect(resume?.params).toMatchObject({ sessionId: "sess_old" });
+    expect(server.backendLoadedSessions.has("s-old")).toBe(true);
+  });
+
+  it("session/load skips the resume RPC once the session is verified loaded", async () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s-live", "sess_live");
+    server.backendLoadedSessions.add("s-live");
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    await loadSession(server, { sessionId: "s-live" } as acp.LoadSessionRequest, stubCx);
+
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
+    expect(calls.some((c) => c.method === "session/messages")).toBe(true);
+  });
+
+  it("materializing a placeholder marks it backend-loaded", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend } = fakeBackend();
+    server.backend = backend;
+
+    await ensureRealSession(server, resp.sessionId);
+
+    expect(server.backendLoadedSessions.has(resp.sessionId)).toBe(true);
+  });
+});

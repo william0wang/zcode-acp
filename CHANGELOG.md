@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that was pushed to the hub and opened empty on remote clients. Sessions now
   appear in `/api/instances` only after real interaction (a prompt turn, a
   load with replayable history, or an adopted stored title).
+- `session/load` no longer skips the backend resume RPC for a session whose id
+  mapping exists but was never loaded into the current backend subprocess
+  (re-registered from the durable store, or left behind by a failed resume).
+  The backend only serves messages for loaded sessions, so the replay came
+  back empty — an older conversation opened blank on a remote client while
+  other sessions worked. Liveness is now tracked explicitly
+  (`backendLoadedSessions`), and `session/messages` errors are logged instead
+  of silently replaying nothing.
 
 ## [0.3.0] - 2026-08-17
 
