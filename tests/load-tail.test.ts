@@ -266,6 +266,40 @@ describe("tag-less tool reminder stripping in replay", () => {
   });
 });
 
+describe("message dedup in replay", () => {
+  it("replays a backend-duplicated message id only once", async () => {
+    const history = hist();
+    // The same id at a NON-ADJACENT position, as observed in live payloads.
+    history.splice(5, 0, {
+      info: { id: "u1", role: "user" },
+      parts: [{ type: "text", text: "one" }],
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    const result = await loadSession(server, loadParams(), cx);
+
+    expect(chunks(updates)).toEqual(["sys", "one", "A1", "two", "A2a", "A2b", "three", "A3"]);
+    expect((result as { replayMeta?: { totalMessages?: number } }).replayMeta).toMatchObject({
+      totalMessages: 8,
+    });
+  });
+
+  it("keeps distinct message ids even when their text is identical", async () => {
+    const history = hist();
+    history[3] = { info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "继续" }] };
+    history[6] = { info: { id: "u3", role: "user" }, parts: [{ type: "text", text: "继续" }] };
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(history);
+    const { cx, updates } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+
+    expect(chunks(updates)).toEqual(["sys", "one", "A1", "继续", "A2a", "A2b", "继续", "A3"]);
+  });
+});
+
 describe("session/load_earlier", () => {
   async function attachTail(server: ZcodeAcpServer): Promise<string> {
     const { cx } = collectCx();
