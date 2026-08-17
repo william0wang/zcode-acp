@@ -195,6 +195,63 @@ describe("hub discovery API", () => {
   });
 });
 
+describe("hub on-demand probe", () => {
+  /** Bare TCP listener — enough for the probe's connect check. */
+  function startTcpListener(): Promise<{ server: net.Server; port: number }> {
+    return new Promise((resolve) => {
+      const server = net.createServer(() => {});
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+      });
+    });
+  }
+
+  async function registerInstance(hub: HubHandle, body: unknown): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  async function listProbed(hub: HubHandle): Promise<unknown> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances?probe=1`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    return res.json();
+  }
+
+  it("prunes dead-port instances on ?probe=1 but not on a plain list", async () => {
+    const hub = await startTestHub();
+    await registerInstance(hub, registerBody()); // BASE_PORT: nothing listens
+
+    const plain = (await (await listInstances(hub)).json()) as unknown[];
+    expect(plain).toHaveLength(1); // no probe param = unverified list
+
+    const probed = (await listProbed(hub)) as unknown[];
+    expect(probed).toEqual([]);
+
+    // The prune is persistent: the plain list stays empty afterwards.
+    const after = (await (await listInstances(hub)).json()) as unknown[];
+    expect(after).toEqual([]);
+  });
+
+  it("keeps live instances when probing", async () => {
+    const hub = await startTestHub();
+    const listener = track(
+      await startTcpListener(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await registerInstance(hub, registerBody({ port: listener.port }));
+
+    const probed = (await listProbed(hub)) as Array<Record<string, unknown>>;
+    expect(probed).toHaveLength(1);
+    expect(probed[0]).toMatchObject({ id: "inst-1", port: listener.port });
+  });
+});
+
 describe("hub WS proxy", () => {
   function startEchoBridge(): Promise<{ server: WebSocketServer; port: number }> {
     return new Promise((resolve) => {

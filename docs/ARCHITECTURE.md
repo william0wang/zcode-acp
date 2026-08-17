@@ -178,8 +178,8 @@ API only because the ZCode backend itself sends them for inference.
 | `background-tasks.ts` | Session-scoped `BackgroundTaskListener` — forwards background sub-agent status (`session.updated` taskId) + completion-notification turns to the client OUTSIDE request handlers (lives across prompts) |
 | `server-requests.ts`  | Handle zcode interaction/* requests (tool auth, ExitPlanMode, AskUserQuestion), protocol negotiation routing                                                                                            |
 | `io.ts`               | ACP notification helpers (including `sendAvailableCommandsDeferred` deferred notification)                                                                                                              |
-| `slash.ts`            | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought); non-advertised `/x` prompts are neutralized into plain text (`neutralizeSlashText`) |
-| `account.ts`          | `account/usage_stats` — account-level plan quota for remote clients (Proposal 0002; quota pipeline + graceful error)                     |
+| `slash.ts`            | Interception of `/`-prefixed commands (/compact /goal /fork /rewind /steer /model /mode /thought); non-advertised `/x` prompts are neutralized into plain text (`neutralizeSlashText`)                  |
+| `account.ts`          | `account/usage_stats` — account-level plan quota for remote clients (Proposal 0002; quota pipeline + graceful error)                                                                                    |
 
 ### `interaction/` — Interaction bridging
 
@@ -197,12 +197,12 @@ API only because the ZCode backend itself sends them for inference.
 
 ### `remote/` — Remote access (opt-in via `ZCODE_ACP_REMOTE=1`)
 
-| File            | Responsibility                                                                                                                 |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `broadcast.ts`  | ClientRegistry + broadcast proxy: notify fans out to all clients; request is first-response-wins with loser `$/cancel_request` |
-| `config.ts`     | ENV parsing (gate, mandatory token, hub/bridge ports)                                                                          |
-| `endpoint.ts`   | Loopback ACP endpoint (SDK AcpServer transport, port auto-increment) + hub registration/heartbeat                              |
-| `hub-server.ts` | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, idle exit, version self-upgrade   |
+| File            | Responsibility                                                                                                                                               |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `broadcast.ts`  | ClientRegistry + broadcast proxy: notify fans out to all clients; request is first-response-wins with loser `$/cancel_request`                               |
+| `config.ts`     | ENV parsing (gate, mandatory token, hub/bridge ports)                                                                                                        |
+| `endpoint.ts`   | Loopback ACP endpoint (SDK AcpServer transport, port auto-increment) + hub registration/heartbeat                                                            |
+| `hub-server.ts` | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, on-demand `?probe=1` liveness, idle exit, version self-upgrade |
 
 When enabled, the same `AgentApp` serves the stdio editor and a loopback
 WebSocket endpoint. Every connection (editor or remote) joins the broadcast
@@ -219,6 +219,12 @@ and is re-spawned by that bridge from its own (upgraded) `dist/` within a few
 seconds. Equal, older, or absent versions never trigger a restart — downgrades
 and mixed-version fleets are fine. Without this handshake a long-lived hub
 would keep running pre-upgrade code until its 10-minute idle exit.
+
+Discovery liveness has two layers: the heartbeat TTL (30s, pruned every 5s)
+drops bridges that stopped registering — the fallback for hard kills — and
+`GET /api/instances?probe=1` actively TCP-probes each registered loopback port
+on demand, so a client refresh gets an immediately-honest list with no
+background probing cost.
 
 ## Key State Machines
 

@@ -8,13 +8,18 @@
  * connection stays bound to one instance for its whole lifetime.
  *
  * Bridges register via POST /api/register every 10s (the registration doubles
- * as the heartbeat; entries older than the heartbeat TTL are pruned). When no
- * instance is registered and no proxy is active for `idleExitMs`, the hub
- * exits — the next bridge re-spawns it on demand.
+ * as the heartbeat; entries older than the heartbeat TTL are pruned). A client
+ * that needs an immediately-honest list (e.g. a phone app's pull-to-refresh)
+ * passes ?probe=1 to /api/instances: the hub TCP-probes each registered
+ * loopback port and prunes unreachable bridges before answering — no periodic
+ * probing, the cost is paid only when someone refreshes. When no instance is
+ * registered and no proxy is active for `idleExitMs`, the hub exits — the
+ * next bridge re-spawns it on demand.
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import net from "node:net";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
@@ -56,6 +61,8 @@ interface InstanceEntry {
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const IDLE_EXIT_MS = 10 * 60_000;
 const PING_INTERVAL_MS = 30_000;
+/** Per-instance TCP probe timeout for /api/instances?probe=1. */
+const PROBE_TIMEOUT_MS = 500;
 const MAX_BODY_BYTES = 1024 * 1024;
 
 /** Constant-time token compare (hash both to equal length first). */
@@ -112,6 +119,26 @@ function validSessions(raw: unknown): SessionSummary[] | null {
     });
   }
   return out;
+}
+
+/**
+ * TCP-probe a bridge's loopback endpoint. Loopback refusals are instant, so
+ * the timeout only guards pathological cases; a bare connect+destroy is
+ * harmless to the bridge's HTTP server.
+ */
+function portOpen(port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    const done = (ok: boolean): void => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => done(true));
+    socket.once("timeout", () => done(false));
+    socket.once("error", () => done(false));
+    socket.connect(port, "127.0.0.1");
+  });
 }
 
 /**
@@ -193,6 +220,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.writeHead(401, { "Content-Type": "text/plain" });
         res.end("unauthorized");
         return;
+      }
+      // On-demand liveness probe (?probe=1): verify every registered bridge's
+      // loopback port and prune the unreachable ones before answering, so a
+      // client refresh gets an honest list instead of waiting out the
+      // heartbeat TTL (hard-killed bridges never unregister).
+      if (["1", "true"].includes((url.searchParams.get("probe") ?? "").toLowerCase())) {
+        const probes = await Promise.all(
+          Array.from(instances.entries(), async ([id, entry]) => ({
+            id,
+            ok: await portOpen(entry.port, PROBE_TIMEOUT_MS),
+          })),
+        );
+        for (const { id, ok } of probes) {
+          if (!ok) {
+            instances.delete(id);
+            idleSince = null; // re-arm the idle clock on membership change
+            log(`hub: pruned instance ${id} (probe: endpoint unreachable)`);
+          }
+        }
       }
       const list = Array.from(instances.values())
         .sort((a, b) => a.startedAt - b.startedAt)

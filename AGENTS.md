@@ -56,7 +56,7 @@ src/
 │   ├── broadcast.ts      ClientRegistry + broadcast proxy (notify fan-out, request first-wins)
 │   ├── config.ts         ENV parsing (gate, mandatory token, hub/bridge ports)
 │   ├── endpoint.ts       Loopback ACP endpoint + hub registration heartbeat
-│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level WS proxy
+│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level WS proxy, ?probe=1 liveness
 ├── quota/                GLM Coding Plan usage API client (/quota command)
 └── bin/
     ├── hub.ts            Standalone zcode-acp-hub daemon entry

@@ -46,10 +46,10 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint             | Auth     | Purpose                          |
-| -------------------- | -------- | -------------------------------- |
-| `GET /api/health`    | none     | Liveness probe; `200` body `ok`. |
-| `GET /api/instances` | required | Registered bridge instances.     |
+| Endpoint             | Auth     | Purpose                                                      |
+| -------------------- | -------- | ------------------------------------------------------------ |
+| `GET /api/health`    | none     | Liveness probe; `200` body `ok`.                             |
+| `GET /api/instances` | required | Registered bridge instances. Add `?probe=1` to verify first. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -70,6 +70,10 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
 - `id` is the bridge process id — stable for that editor window's lifetime,
   unique per window.
+- **On refresh, call `/api/instances?probe=1`**: the hub TCP-probes each
+  registered bridge's loopback port and prunes unreachable ones before
+  answering. A plain `GET` returns the heartbeat-based view, which can list a
+  hard-killed bridge for up to the 30s heartbeat TTL.
 - `sessions[].sessionId` is the ACP session id: pass it to `session/load`
   after connecting. `title` is adopted from the backend for resumed sessions
   and set after a fresh session's first turn — it can still be absent for a
@@ -233,12 +237,12 @@ The stdio editor and every remote client are peers on the same sessions:
 
 ## Failure & recovery
 
-| Symptom                                | Cause                                                                                                                     | Client action                                                                                       |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| WS closes                              | bridge exited (editor closed) or network drop                                                                             | Poll `/api/instances`; if the instance is gone, its sessions are gone too — drop it from the UI.    |
-| Instance missing from `/api/instances` | Heartbeats stopped >30s                                                                                                   | Remove the instance from the UI.                                                                    |
+| Symptom                                | Cause                                                                                                                                                                                                                                                                    | Client action                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| WS closes                              | bridge exited (editor closed) or network drop                                                                                                                                                                                                                            | Poll `/api/instances`; if the instance is gone, its sessions are gone too — drop it from the UI.    |
+| Instance missing from `/api/instances` | Heartbeats stopped >30s, or `?probe=1` found the bridge port unreachable                                                                                                                                                                                                 | Remove the instance from the UI.                                                                    |
 | Connect fails for a while              | Hub process died; a bridge re-spawns it on the next heartbeat (typically ≤10s, worst case ~1min under the spawn throttle). Also expected for a few seconds after a bridge upgrade: the hub notices a newer bridge, restarts, and is re-spawned from the upgraded install | Retry with backoff.                                                                                 |
-| Disconnect mid-turn                    | Mobile network flap, background suspension                                                                                | The turn continues server-side. Reconnect and `session/load` — history replay is the recovery path. |
+| Disconnect mid-turn                    | Mobile network flap, background suspension                                                                                                                                                                                                                               | The turn continues server-side. Reconnect and `session/load` — history replay is the recovery path. |
 
 Updates emitted while you are disconnected are not individually re-delivered;
 `session/load` replay is the catch-up mechanism.
