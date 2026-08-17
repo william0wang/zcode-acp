@@ -153,6 +153,10 @@ everything below and you get the full replay):
 While a replay batch is in flight, live updates for the same session queue
 behind it: batches are atomic and never interleave with the live turn.
 
+UI-side recipes for consuming all of this — state model, prepend handling,
+scroll pagination, reconnect recovery — live in
+[REPLAY-GUIDE.md](REPLAY-GUIDE.md).
+
 ## Multi-client semantics
 
 The stdio editor and every remote client are peers on the same sessions:
