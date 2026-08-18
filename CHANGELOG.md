@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-18
+
+### Fixed
+
+- Remote discovery no longer lists sessions the bridge cannot serve. When a
+  project window restarts, the editor can leak the old bridge process; the new
+  bridge takes the session over via the durable alias store, but the leaked one
+  kept advertising it in every heartbeat — remote clients saw the same session
+  twice, and the stale copy opened empty. Before each 10s heartbeat the bridge
+  now probes its idle advertised sessions with a `session/messages` RPC: an
+  error or empty answer hides the session from discovery (and clears the stale
+  backend-loaded stamp so a later `session/load` re-runs the resume RPC), and a
+  non-empty answer restores it. Freshly-active sessions and sessions with an
+  in-flight turn are trusted without a probe. List membership now means
+  "openable" (`docs/REMOTE-CLIENTS.md`).
+
 ## [0.5.0] - 2026-08-18
 
 ### Added

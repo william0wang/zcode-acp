@@ -1,6 +1,6 @@
 {
   "name": "zcode-acp-server",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Agent Client Protocol (ACP) server bridging headless ZCode to editors like Zed and JetBrains.",
   "type": "module",
   "license": "Apache-2.0",

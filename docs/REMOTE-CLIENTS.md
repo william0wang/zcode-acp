@@ -82,6 +82,12 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   stored placeholder and materialize an empty backend session — those stay
   hidden and appear within one heartbeat (~10s) after their first prompt (or
   a titled resume/load).
+- `sessions` is also **availability-verified**: before every heartbeat the
+  bridge probes its idle sessions against its own backend, and a session it
+  can no longer serve (e.g. the project restarted under a newer bridge while
+  the old process leaked) is dropped from the list within one heartbeat
+  (~10s) instead of lingering as an entry that opens empty. It reappears if
+  the bridge can serve it again. Treat list membership as "openable".
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 
