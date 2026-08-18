@@ -8,17 +8,19 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { describe, expect, it } from "vitest";
 
+import { echoUserPromptToOthers } from "../src/handlers/io.js";
 import { ClientRegistry, type ClientLike } from "../src/remote/broadcast.js";
+import type { ZcodeAcpServer } from "../src/server.js";
 
 interface FakeClient {
-  cx: ClientLike;
+  cx: ClientLike & { connectionContext?: unknown };
   notifies: Array<[string, unknown]>;
   signals: Array<AbortSignal | undefined>;
   /** Registered per-request handler; defaults to resolving `{ default: true }`. */
   onRequest?: (method: string, signal: AbortSignal | undefined) => Promise<unknown>;
 }
 
-function fakeClient(opts: { failNotify?: boolean } = {}): FakeClient {
+function fakeClient(opts: { failNotify?: boolean; root?: object } = {}): FakeClient {
   const notifies: Array<[string, unknown]> = [];
   const signals: Array<AbortSignal | undefined> = [];
   const fake: FakeClient = {
@@ -26,7 +28,7 @@ function fakeClient(opts: { failNotify?: boolean } = {}): FakeClient {
     signals,
     onRequest: undefined,
   };
-  fake.cx = {
+  const cx = {
     notify(method: string, params?: unknown): Promise<void> {
       notifies.push([method, params]);
       return opts.failNotify ? Promise.reject(new Error("dead client")) : Promise.resolve();
@@ -40,7 +42,9 @@ function fakeClient(opts: { failNotify?: boolean } = {}): FakeClient {
       if (fake.onRequest) return fake.onRequest(method, options?.cancellationSignal);
       return { default: true };
     },
-  };
+  } as ClientLike & { connectionContext?: unknown };
+  cx.connectionContext = opts.root ?? {};
+  fake.cx = cx;
   return fake;
 }
 
@@ -136,5 +140,93 @@ describe("ClientRegistry broadcast", () => {
     registry.remove(a.cx);
     expect(registry.size).toBe(0);
     await expect(registry.broadcast().request("m", {})).rejects.toThrow();
+  });
+
+  it("notifyOthers reaches every connection except the prompter's", async () => {
+    const registry = new ClientRegistry();
+    const rootZed = {};
+    const zed = fakeClient({ root: rootZed });
+    const phone = fakeClient({ root: {} });
+    registry.add(zed.cx);
+    registry.add(phone.cx);
+    // A fresh wrapper over the prompter's connection — how the SDK hands a
+    // per-request context to handlers.
+    const prompter = { connectionContext: rootZed } as unknown as acp.AgentContext;
+
+    await registry.notifyOthers(prompter, "session/update", { x: 1 });
+
+    expect(zed.notifies).toHaveLength(0);
+    expect(phone.notifies).toHaveLength(1);
+    expect(phone.notifies[0]![1]).toEqual({ x: 1 });
+  });
+});
+
+describe("echoUserPromptToOthers", () => {
+  function registryWithZedAndPhone(): {
+    registry: ClientRegistry;
+    zed: FakeClient;
+    phone: FakeClient;
+    prompter: acp.AgentContext;
+  } {
+    const registry = new ClientRegistry();
+    const rootZed = {};
+    const zed = fakeClient({ root: rootZed });
+    const phone = fakeClient({ root: {} });
+    registry.add(zed.cx);
+    registry.add(phone.cx);
+    return {
+      registry,
+      zed,
+      phone,
+      prompter: { connectionContext: rootZed } as unknown as acp.AgentContext,
+    };
+  }
+
+  it("echoes the prompt text to other clients, never the prompter", async () => {
+    const { registry, zed, phone, prompter } = registryWithZedAndPhone();
+    const server = { clients: registry } as unknown as ZcodeAcpServer;
+
+    echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt: "hello from zed" });
+    await sleep(0);
+    await sleep(0);
+
+    expect(zed.notifies).toHaveLength(0);
+    expect(phone.notifies).toHaveLength(1);
+    const [method, params] = phone.notifies[0]!;
+    expect(method).toBe("session/update");
+    const p = params as { sessionId: string; update: Record<string, unknown> };
+    expect(p.sessionId).toBe("s1");
+    expect(p.update.sessionUpdate).toBe("user_message_chunk");
+    expect((p.update.content as { text: string }).text).toBe("hello from zed");
+    expect(String(p.update.messageId)).toMatch(/^uprompt_/);
+  });
+
+  it("joins text blocks of a structured prompt and skips non-text ones", async () => {
+    const { registry, phone, prompter } = registryWithZedAndPhone();
+    const server = { clients: registry } as unknown as ZcodeAcpServer;
+    const prompt = [
+      { type: "text", text: "look at this" },
+      { type: "image", data: "…" },
+      { type: "text", text: "screenshot" },
+    ] as unknown as acp.PromptRequest["prompt"];
+
+    echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt });
+    await sleep(0);
+    await sleep(0);
+
+    expect(phone.notifies).toHaveLength(1);
+    const p = phone.notifies[0]![1] as { update: { content: { text: string } } };
+    expect(p.update.content.text).toBe("look at this\nscreenshot");
+  });
+
+  it("sends nothing for an empty prompt", async () => {
+    const { registry, phone, prompter } = registryWithZedAndPhone();
+    const server = { clients: registry } as unknown as ZcodeAcpServer;
+
+    echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt: "  " });
+    await sleep(0);
+    await sleep(0);
+
+    expect(phone.notifies).toHaveLength(0);
   });
 });

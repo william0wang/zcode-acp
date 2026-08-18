@@ -37,7 +37,7 @@ import {
   steer,
   updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
-import { sendAvailableCommandsDeferred } from "./handlers/io.js";
+import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadEarlier } from "./handlers/replay.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
@@ -149,9 +149,13 @@ async function main(): Promise<void> {
     // 0002). Pull-only, no session required; errors carry the failure kind in
     // `data.kind` so clients can hide the quota UI.
     .onRequest("account/usage_stats", z.object({}).passthrough(), () => accountUsageStats())
-    .onRequest("session/prompt", (ctx) =>
-      prompt(server, ctx.params, server.clients.broadcast(), ctx.requestId as number),
-    )
+    .onRequest("session/prompt", (ctx) => {
+      // Mirror the user's message to every other client before the turn
+      // starts — the prompting client renders it locally, the others only
+      // ever see the agent's output.
+      echoUserPromptToOthers(server, ctx.client, ctx.params);
+      return prompt(server, ctx.params, server.clients.broadcast(), ctx.requestId as number);
+    })
     .onRequest("session/set_config_option", (ctx) =>
       setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
     )

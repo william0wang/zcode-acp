@@ -107,7 +107,24 @@ export interface ZcodeProjection {
 // ---------- messages / history ----------
 
 export interface ZcodeMessage {
-  info: { id?: string; role: "user" | "assistant" | "system" };
+  info: {
+    id?: string;
+    role: "user" | "assistant" | "system";
+    /**
+     * Harness semantics tag (newer backends). Identifies synthetic messages:
+     * compact_summary (compaction product), system_reminder / todo_reminder /
+     * background_notification (harness plumbing), timeline_event. Hidden
+     * plumbing carries transcriptVisibility: "hidden".
+     */
+    semantics?: {
+      kind?: string;
+      source?: string;
+      transcriptVisibility?: string;
+      uiVisibility?: string;
+    };
+    /** Compaction display form carried by compact_summary messages. */
+    summary?: { title?: string; body?: string };
+  };
   parts: ZcodeMessagePart[];
 }
 

@@ -83,6 +83,12 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   id (`sess_…`), still loadable via pass-through resume. `title` comes from
   the backend session store; sessions that never completed a turn have no
   title and are not listed.
+- **Prompt echo**: when any client sends `session/prompt`, the bridge
+  broadcasts the user's text to every OTHER attached client as a
+  `user_message_chunk` (messageId prefixed `uprompt_`). Your own prompts are
+  never echoed back to you — render them locally as you send them. Without
+  this rule a turn driven from the other side arrives without the user
+  message that started it.
 - `sessions` is gated on two rules: the conversation must be **currently
   running** (a live registration in the advertising bridge — an open editor
   tab, or a remote attachment that ran a turn) and **accessible** (every

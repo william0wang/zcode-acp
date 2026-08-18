@@ -291,6 +291,58 @@ describe("replayMessages collapsed harness blocks", () => {
     'Called the Read tool with the following input: {"file_path":"/tmp/ws/src/a.go"}\n' +
     "Result of calling the Read tool:\npackage main";
 
+  it("collapses a semantics-tagged compact_summary under the store's title", async () => {
+    const { cx, updates } = collectCx();
+    const m: ZcodeMessage = {
+      info: {
+        id: "cs1",
+        role: "user",
+        semantics: { kind: "compact_summary", transcriptVisibility: "hidden" },
+        summary: { title: "Compact summary", body: "…" },
+      },
+      parts: [{ type: "text", text: HANDOFF_TEXT }],
+    };
+    await replayMessages(cx, "s", [m]);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Compact summary");
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("compact");
+    // The hidden flag never suppresses the compaction card itself.
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(HANDOFF_TEXT);
+  });
+
+  it("drops hidden harness plumbing that matches no collapse shape", async () => {
+    const { cx, updates } = collectCx();
+    const m: ZcodeMessage = {
+      info: {
+        id: "sr1",
+        role: "user",
+        semantics: {
+          kind: "system_reminder",
+          source: "plan_file_reference",
+          transcriptVisibility: "hidden",
+        },
+      },
+      parts: [
+        {
+          type: "text",
+          text: "A plan file exists from plan mode at: /tmp/plan.md\n\nPlan contents: …",
+        },
+      ],
+    };
+    await replayMessages(cx, "s", [m]);
+    expect(updates).toHaveLength(0);
+  });
+
+  it("keeps replaying visible user messages (no semantics gate)", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [msg("u9", "user", "real question")]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("user_message_chunk");
+    expect((u.content as { text: string }).text).toBe("real question");
+  });
+
   it("replays a context handoff as a collapsed tool_call, not a user message", async () => {
     const { cx, updates } = collectCx();
     const n = await replayMessages(cx, "s", [msg("h1", "user", HANDOFF_TEXT)]);

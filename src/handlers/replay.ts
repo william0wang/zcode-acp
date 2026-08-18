@@ -277,6 +277,11 @@ function stripSystemReminders(text: string): string {
  * - context-handoff: the "This session is being continued from a previous
  *   conversation…" summaries, one per compaction (a long session can carry
  *   dozens).
+ * - compact: the same compaction product on backends that tag it with
+ *   `semantics.kind: "compact_summary"` — collapsed under the store's own
+ *   summary title ("Compact summary"), so a reload shows where history was
+ *   compacted (auto-compact included) instead of silently dropping the
+ *   bridge's live 🔄/✓ notices, which never enter backend history.
  * - tool-transcript: "Called the X tool with the following input: {…}\nResult
  *   of calling…" — tool_use/tool_result pairs the harness rewrites into
  *   plain text on resume, one message per historical tool call.
@@ -291,7 +296,7 @@ const CONTEXT_HANDOFF = /^\s*This session is being continued from a previous con
 const TOOL_TRANSCRIPT = /^\s*Called the (\w+) tool with the following input:\s*(\{[^\n]*\})/;
 const TASK_NOTIFICATION = /^\s*<task-notification>/;
 
-type CollapseKind = "context-handoff" | "tool-transcript" | "task-notification";
+type CollapseKind = "compact" | "context-handoff" | "tool-transcript" | "task-notification";
 
 function collapsedMeta(kind: CollapseKind): { zcode: { collapsed: true; kind: CollapseKind } } {
   return { zcode: { collapsed: true, kind } };
@@ -330,8 +335,21 @@ function notificationTitle(text: string): string {
 /**
  * Classify a user text part as harness plumbing, returning the collapsed
  * tool_call title + kind, or null for real user speech.
+ *
+ * Semantics-tagged payloads (newer backends) are authoritative: a
+ * compact_summary message collapses under the store's own title regardless of
+ * its text shape. The regexes below serve legacy untagged payloads.
  */
-function collapseUserText(text: string): { title: string; kind: CollapseKind } | null {
+function collapseUserText(
+  text: string,
+  semantics?: ZcodeMessage["info"]["semantics"],
+  summary?: ZcodeMessage["info"]["summary"],
+): { title: string; kind: CollapseKind } | null {
+  if (semantics?.kind === "compact_summary") {
+    const raw =
+      typeof summary?.title === "string" && summary.title ? summary.title : "Compact summary";
+    return { title: raw.length > 60 ? raw.slice(0, 57) + "…" : raw, kind: "compact" };
+  }
   if (CONTEXT_HANDOFF.test(text)) return { title: "Context handoff", kind: "context-handoff" };
   const tool = TOOL_TRANSCRIPT.exec(text);
   if (tool) {
@@ -370,7 +388,8 @@ export async function replayMessages(
           text = stripSystemReminders(text);
           if (!text) continue;
         }
-        const collapse = role === "user" ? collapseUserText(text) : null;
+        const collapse =
+          role === "user" ? collapseUserText(text, info.semantics, info.summary) : null;
         if (collapse) {
           await cx.notify("session/update", {
             sessionId: acpSid,
@@ -384,6 +403,12 @@ export async function replayMessages(
               _meta: collapsedMeta(collapse.kind),
             },
           });
+        } else if (role === "user" && info.semantics?.transcriptVisibility === "hidden") {
+          // Hidden harness plumbing that fits no collapse shape (plan-file
+          // references and similar synthetic reminders). The backend itself
+          // keeps these out of the transcript; replaying them as user text
+          // leaks pages of plumbing into the conversation view.
+          continue;
         } else {
           await cx.notify("session/update", {
             sessionId: acpSid,

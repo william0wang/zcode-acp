@@ -16,8 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now arrive as collapsed `tool_call` updates (`_meta.zcode.collapsed` kind
   `task-notification`) with the decoded `<summary>` line as the title,
   instead of a wall of XML pseudo-user text.
+- Compaction markers survive replay: on backends that tag compaction
+  products with `semantics.kind: "compact_summary"`, the replayed summary
+  collapses under the store's own title (`Compact summary`, collapsed kind
+  `compact`) instead of the generic `Context handoff` — the bridge's live
+  🔄/✓ auto-compact notices never enter backend history, so this card is the
+  durable record that a compaction (auto-compact included) happened there.
 
 ### Fixed
+
+- A prompt sent from one client now streams to the others as a
+  `user_message_chunk` echo (messageId prefixed `uprompt_`, prompting client
+  excluded — it renders its own outgoing message locally). Previously a turn
+  driven from the editor or a remote attach appeared on the other clients
+  without the user message that started it. Verified live: the bridge
+  already broadcasts thought/text/tool updates to every attached client,
+  both directly and through the hub proxy; the user's prompt text was the
+  one piece that never left the prompting client.
 
 - Replayed tool calls now carry their payload: history tool parts hold the
   invocation input and result text under `state`, but the replay only sent
@@ -26,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   string) and the backend-truncated output as content blocks, and takes the
   title/status from `state` (the previous top-level reads never matched, so
   titles fell back to the bare tool name).
+- Replay no longer leaks hidden harness plumbing: synthetic messages the
+  backend marks `transcriptVisibility: "hidden"` and that fit no collapse
+  shape (plan-file reference reminders and similar) were replayed verbatim
+  as `user_message_chunk` walls of text; they are dropped now, matching the
+  backend's own transcript visibility.
 
 ### Changed
 

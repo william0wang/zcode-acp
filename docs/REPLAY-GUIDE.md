@@ -103,6 +103,12 @@ update's `_meta`:
 
 - `kind: "context-handoff"` — the context-window continuation summary, one
   per compaction (a long session can carry dozens). Title: `Context handoff`.
+- `kind: "compact"` — the same compaction product on backends that tag it
+  with `semantics.kind: "compact_summary"` (session/compact, auto-compact,
+  and context-window handoff all land here). Title comes from the store's
+  own `summary.title` (observed: `Compact summary`) — so a reload shows
+  where history was compacted instead of silently missing the bridge's live
+  🔄/✓ auto-compact notices, which never enter backend history.
 - `kind: "tool-transcript"` — `Called the X tool with the following input:
 {…}\nResult of calling…` messages: tool_use/tool_result pairs the harness
   rewrites into text on resume, one per historical tool call. Title is
@@ -114,7 +120,9 @@ update's `_meta`:
   (e.g. `Background command "Build release APK" completed (exit code 0)`),
   capped at 60 characters; falls back to `Background task`.
 - Harness noise that carries no value (TodoWrite/Read usage nudges) is
-  stripped before replay — you never see it.
+  stripped before replay — you never see it. Synthetic messages the backend
+  marks `transcriptVisibility: "hidden"` and that fit no collapse shape
+  (plan-file references and similar plumbing) are dropped entirely.
 - Render all kinds as an ordinary collapsed tool card keyed by `toolCallId`;
   the text is complete behind the expand. Unknown `kind`s: render collapsed
   too. These updates never collide with live tool_call ids (they carry the

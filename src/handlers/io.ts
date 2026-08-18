@@ -7,6 +7,8 @@
  * the JSON shape so handlers stay readable.
  */
 
+import { randomUUID } from "node:crypto";
+
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
@@ -98,6 +100,49 @@ export function sendTextChunk(
     content: { type: "text", text },
     messageId,
   });
+}
+
+/**
+ * Echo an incoming `session/prompt` to every OTHER client as a
+ * `user_message_chunk`. ACP clients render their own outgoing prompt locally
+ * and never re-broadcast it, so without this echo a turn driven from one
+ * client (editor tab or remote attach) shows up on the others without the
+ * user message that started it. The prompting client is excluded — it would
+ * render the echo as a duplicate of what it already appended. Fire-and-forget;
+ * best-effort (failures warn and never break the prompt).
+ */
+export function echoUserPromptToOthers(
+  server: ZcodeAcpServer,
+  prompter: acp.AgentContext,
+  params: { sessionId: string; prompt: acp.PromptRequest["prompt"] },
+): void {
+  const blocks = Array.isArray(params.prompt)
+    ? params.prompt
+    : [{ type: "text", text: params.prompt }];
+  const text = blocks
+    .map((b) => (typeof b === "object" && b.type === "text" ? (b.text ?? "") : ""))
+    .filter((t) => t.length > 0)
+    .join("\n")
+    .trim();
+  if (!text) return;
+  const messageId = `uprompt_${randomUUID()}`;
+  void enqueueSessionSend(params.sessionId, () =>
+    server.clients
+      .notifyOthers(prompter, "session/update", {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text },
+          messageId,
+        },
+      })
+      .catch((e: unknown) => {
+        warn(
+          `user-prompt echo failed (sid=${params.sessionId}): ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      }),
+  );
 }
 
 /** Shape of a slash command entry (matches ACP's AvailableCommand). */

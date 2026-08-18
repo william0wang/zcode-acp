@@ -73,6 +73,32 @@ export class ClientRegistry {
     return this.proxy;
   }
 
+  /**
+   * Notify every client EXCEPT the one whose connection issued the current
+   * request (`exclude` is that connection's AgentContext — `ctx.client` from a
+   * handler). Identity is by the shared per-connection context: each request
+   * wraps it in a fresh AgentContext, so the wrappers never compare equal.
+   * (`connectionContext` is the SDK's per-connection root — public at runtime,
+   * @internal in the typings, hence the cast.) Used for the user-prompt echo:
+   * the prompting client renders its own outgoing message locally and would
+   * duplicate an echo.
+   */
+  async notifyOthers(exclude: acp.AgentContext, method: string, params?: unknown): Promise<void> {
+    const root = (exclude as { connectionContext?: unknown }).connectionContext;
+    const targets = this.snapshot().filter(
+      (cx) => (cx as { connectionContext?: unknown }).connectionContext !== root,
+    );
+    const results = await Promise.allSettled(targets.map((cx) => cx.notify(method, params)));
+    for (const r of results) {
+      if (r.status === "rejected") {
+        warn(
+          `broadcast: notifyOthers ${method} failed on one client: ` +
+            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
+  }
+
   snapshot(): ClientLike[] {
     return Array.from(this.clients);
   }
