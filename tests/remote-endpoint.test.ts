@@ -255,7 +255,7 @@ describe("hub version handshake (bridge side)", () => {
   }, 15000);
 });
 
-describe("project-scoped discovery payload (collectSessions)", () => {
+describe("running-scoped discovery payload (collectSessions)", () => {
   /** Fake backend answering only session/list with the given sessions array. */
   function listBackend(
     sessions: unknown[],
@@ -272,58 +272,48 @@ describe("project-scoped discovery payload (collectSessions)", () => {
     } as unknown as ZcodeBackend;
   }
 
-  it("lists the project's titled sessions from the shared backend store", async () => {
+  it("lists only live sessions; retired store entries never join (same-title junk)", async () => {
     const server = new ZcodeAcpServer();
-    server.sessionCwds.set("s-1", "/proj"); // projectCwd() for the workspace filter
+    server.sessionCwds.set("s-live", "/proj");
     server.backend = listBackend([
-      { sessionId: "sess_a", title: "A", updatedAt: 100, workspace: { workspacePath: "/proj" } },
-      {
-        sessionId: "sess_subagent_x",
-        title: "sub",
-        updatedAt: 90,
-        workspace: { workspacePath: "/proj" },
-      },
-      { sessionId: "sess_b", title: "B", updatedAt: 80, workspace: { workspacePath: "/other" } },
-      { sessionId: "sess_c", updatedAt: 70, workspace: { workspacePath: "/proj" } },
-      {
-        sessionId: "sess_d",
-        title: "D",
-        updatedAt: "1970-01-01T00:00:00.060Z",
-        workspace: { workspacePath: "/proj" },
-      },
+      { sessionId: "sess_live", title: "Store title", updatedAt: 900 },
+      { sessionId: "sess_junk1", title: "Same title", updatedAt: 800 },
+      { sessionId: "sess_junk2", title: "Same title", updatedAt: 700 },
+      { sessionId: "sess_subagent_x", title: "sub", updatedAt: 600 },
     ]);
+    server.registerSession("s-live", "sess_live");
+    server.markSessionActive("s-live"); // summary updatedAt ≈ Date.now() > 900
 
-    // Newest first; subagent, other-project, and untitled entries are dropped.
-    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["sess_a", "sess_d"]);
+    const out = await collectSessions(server);
+    expect(out.map((s) => s.sessionId)).toEqual(["sess_live"]);
+    // Enrichment: the store's title wins, updatedAt is the max of both.
+    expect(out[0]).toMatchObject({ title: "Store title" });
+    expect(out[0]!.updatedAt).toBeGreaterThan(900);
   });
 
-  it("merges own live summaries under their zcode sid, freshest updatedAt wins", async () => {
+  it("keeps the live summary's own values when the store lacks the session", async () => {
     const server = new ZcodeAcpServer();
-    server.sessionCwds.set("s-tab", "/proj");
-    server.backend = listBackend([
-      {
-        sessionId: "sess_old",
-        title: "Old title",
-        updatedAt: 100,
-        workspace: { workspacePath: "/proj" },
-      },
-    ]);
-    // The editor tab drives the same conversation: its summary is fresher and
-    // must replace the store entry, advertised under the zcode sid.
-    server.registerSession("s-tab", "sess_old");
+    server.backend = listBackend([{ sessionId: "sess_other", title: "other", updatedAt: 999 }]);
+    server.registerSession("s-tab", "sess_mine");
     server.markSessionActive("s-tab");
-    server.touchSessionSummary("s-tab", "Live title");
+    server.touchSessionSummary("s-tab", "Bridge title");
 
     const out = await collectSessions(server);
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ sessionId: "sess_old", title: "Live title" });
-    expect(out[0]!.updatedAt).toBeGreaterThan(100);
+    expect(out[0]).toMatchObject({ sessionId: "sess_mine", title: "Bridge title" });
+  });
 
-    // A store entry newer than the summary (another bridge drove the session)
-    // survives untouched instead.
-    server.sessionSummaries.get("s-tab")!.updatedAt = 50;
-    const kept = await collectSessions(server);
-    expect(kept[0]).toMatchObject({ sessionId: "sess_old", title: "Old title", updatedAt: 100 });
+  it("a store updatedAt newer than the summary (another bridge drove it) is kept", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = listBackend([{ sessionId: "sess_x", title: "X", updatedAt: 5000 }]);
+    server.registerSession("s-tab", "sess_x");
+    server.markSessionActive("s-tab");
+    server.sessionSummaries.get("s-tab")!.updatedAt = 100;
+
+    expect((await collectSessions(server))[0]).toMatchObject({
+      sessionId: "sess_x",
+      updatedAt: 5000,
+    });
   });
 
   it("excludes never-used sessions and pure placeholders (no backend session)", async () => {

@@ -79,16 +79,18 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   it does not need to be open in the editor. `title` comes from the backend
   session store; sessions that never completed a turn have no title and are
   not listed.
-- `sessions` is **project-scoped** (since 0.7.0): it lists the project's whole
-  titled conversation history from the shared backend store, not just the
-  conversations currently open as editor tabs. A conversation you last used
-  days ago is listable and openable immediately, as long as some bridge for
-  that project is running.
+- `sessions` is gated on two rules: the conversation must be **currently
+  running** (a live registration in the advertising bridge — an open editor
+  tab, or a remote attachment that ran a turn) and **accessible** (every
+  listed id resolves and resumes through that bridge). Retired conversations
+  of the project are NOT listed even though the backend store still has them
+  — the store only enriches live entries with the authoritative title and a
+  cross-bridge `updatedAt`.
 - Entries are **deduped across instances**: several bridges of the same
-  project (e.g. a leaked old process plus the current one) all derive the
-  same list; the hub keeps one copy per session — the instance whose copy has
-  the freshest `updatedAt` (i.e. the bridge actually driving it). Attach to
-  whichever instance the entry appears under.
+  project (e.g. a leaked old process plus the current one) can all hold the
+  same live conversation; the hub keeps one copy per session — the instance
+  whose copy has the freshest `updatedAt` (i.e. the bridge actually driving
+  it). Attach to whichever instance the entry appears under.
 - One caveat when the SAME conversation is open as an editor tab AND loaded
   remotely: the two clients hold different session ids for it, so each sees
   its own turns live and the other's only after a re-load. Browsing and

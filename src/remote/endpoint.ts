@@ -54,23 +54,26 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 }
 
 /**
- * Session summaries for the hub's discovery API — the project's WHOLE
- * conversation history, not just the tabs this bridge's editor lifetime
- * happens to have open (a tab-scoped list made conversations of untouched
- * projects invisible to remote clients until someone clicked them open).
+ * Session summaries for the hub's discovery API. Two gates, in the user's
+ * words: the conversation must be CURRENTLY RUNNING, and it must be
+ * ACCESSIBLE through the bridge that lists it.
  *
- * The backend session store is machine-global, so `session/list` returns
- * every project's sessions; we keep the ones under this bridge's project cwd
- * (excluding subagent sessions and untitled never-used ones) and merge in the
- * in-memory `sessionSummaries` for sessions this bridge drives — their
- * updatedAt reflects live turns and is fresher than the store's.
+ * - Running: membership comes only from this bridge's live registrations
+ *   (`sessionSummaries` with `hasActivity`) — open editor tabs and remote
+ *   attachments that ran a turn. The backend store also holds every retired
+ *   conversation of the project (dozens of same-titled test runs included),
+ *   so deriving membership from `session/list` floods the list with
+ *   duplicates; the list only ENRICHES members with the store's authoritative
+ *   title and cross-bridge updatedAt (which also steers the hub's dedupe
+ *   toward the instance actually driving the session).
+ * - Accessible: every member is a registered acp→zcode mapping here, so a
+ *   remote `session/load` resolves and resumes it on demand. Lazy
+ *   placeholders without a backend session never ran a turn and stay
+ *   invisible.
  *
  * Advertised ids are BACKEND session ids (sess_*): every bridge of the same
  * project derives the same id for the same conversation, which is what lets
- * the hub dedupe across instances. A remote `session/load` with such an id
- * resumes the session on demand (resolveResumeTarget passes unknown ids
- * through to the resume RPC). Lazy placeholders without a backend session
- * stay invisible — they never ran a turn.
+ * the hub dedupe across instances.
  *
  * A failed `session/list` degrades to summaries-only so a backend hiccup
  * never blanks the discovery list.
@@ -78,13 +81,26 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 export async function collectSessions(
   server: ZcodeAcpServer,
 ): Promise<Array<{ sessionId: string; title?: string; updatedAt: number }>> {
-  const byZcodeSid = new Map<string, { sessionId: string; title?: string; updatedAt: number }>();
+  // zcodeSid → freshest live summary (an editor tab and a remote attachment
+  // can hold two acpSids for the same conversation).
+  const live = new Map<string, { title?: string; updatedAt: number }>();
+  for (const [acpSid, summary] of server.sessionSummaries) {
+    if (!summary.hasActivity) continue;
+    const zcodeSid = server.resolveSid(acpSid);
+    if (!zcodeSid) continue; // pure placeholder — no backend session behind it
+    const prev = live.get(zcodeSid);
+    if (prev && summary.updatedAt <= prev.updatedAt) continue;
+    live.set(zcodeSid, {
+      ...(summary.title !== undefined ? { title: summary.title } : {}),
+      updatedAt: summary.updatedAt,
+    });
+  }
+
   const backend = server.backend;
-  if (backend && !backend.isDead) {
+  if (backend && !backend.isDead && live.size > 0) {
     try {
       // The backend filters by workspace server-side (verified live: a bogus
-      // path returns zero sessions); the equality check below stays as a
-      // belt-and-suspenders guard against echo-style responses.
+      // path returns zero sessions).
       const cwd = server.projectCwd();
       const resp = await backend.request(
         server.nextId(),
@@ -100,40 +116,31 @@ export async function collectSessions(
                 sessionId?: string;
                 title?: string;
                 updatedAt?: unknown;
-                workspace?: { workspacePath?: string };
               }>;
             }
           ).sessions ?? [];
         for (const s of sessions) {
-          if (!s.sessionId || s.sessionId.startsWith("sess_subagent")) continue;
-          if (s.workspace?.workspacePath !== cwd) continue;
-          // No title = the session never produced content (hasActivity parity).
-          if (typeof s.title !== "string" || !s.title) continue;
-          byZcodeSid.set(s.sessionId, {
-            sessionId: s.sessionId,
-            title: s.title,
-            updatedAt: toMillis(s.updatedAt),
+          if (!s.sessionId) continue;
+          const cur = live.get(s.sessionId);
+          if (!cur) continue; // not running here — the store entry is history
+          // The store is the title authority (adoptStoredTitle reads it) and
+          // its updatedAt moves when ANY bridge drives the session.
+          const storeTitle = typeof s.title === "string" && s.title ? s.title : undefined;
+          const title = storeTitle ?? cur.title;
+          live.set(s.sessionId, {
+            ...(title !== undefined ? { title } : {}),
+            updatedAt: Math.max(cur.updatedAt, toMillis(s.updatedAt)),
           });
         }
       }
     } catch {
-      /* best-effort: fall through to summaries-only */
+      /* best-effort: keep summaries-only values */
     }
   }
-  for (const [acpSid, summary] of server.sessionSummaries) {
-    if (!summary.hasActivity) continue;
-    const zcodeSid = server.resolveSid(acpSid);
-    if (!zcodeSid) continue; // pure placeholder — no backend session behind it
-    const prev = byZcodeSid.get(zcodeSid);
-    if (prev && summary.updatedAt <= prev.updatedAt) continue;
-    const title = summary.title ?? prev?.title;
-    byZcodeSid.set(zcodeSid, {
-      sessionId: zcodeSid,
-      ...(title !== undefined ? { title } : {}),
-      updatedAt: summary.updatedAt,
-    });
-  }
-  return Array.from(byZcodeSid.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+
+  return Array.from(live.entries())
+    .map(([sessionId, v]) => ({ sessionId, ...v }))
+    .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /** session/list timestamps: ms epoch (observed) or ISO string (defensive). */

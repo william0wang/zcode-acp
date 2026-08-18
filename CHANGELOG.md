@@ -11,18 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Remote discovery is now project-scoped: the heartbeat payload lists the
-  project's whole titled conversation history from the backend session store
-  (merged with the in-memory live summaries), not just the conversations
-  open as editor tabs in this bridge's lifetime. Conversations of a project
-  become visible to remote clients as soon as any of its bridges is running,
-  instead of only after their tab is opened in the editor. Listed ids are
-  backend session ids (`sess_*`) so every bridge of the same project derives
-  the same id, and a remote `session/load` with such an id resumes the
-  session on demand. The hub dedupes sessions across instances (freshest
-  `updatedAt` wins, then newest instance), which also subsumes the leaked-
-  bridge duplicate the 0.5.1 probe guarded against. `session/list` failures
-  degrade to live-summaries-only so the discovery list never blanks.
+- Remote discovery now advertises sessions under their **backend session ids**
+  (`sess_*`) instead of per-editor ACP placeholder ids, and the hub dedupes
+  sessions across instances (freshest `updatedAt` wins, then newest
+  instance). Every bridge of the same project derives the same id for the
+  same conversation, so a leaked bridge's copy can no longer surface as a
+  duplicate entry that opens empty; the hub's dedupe picks the bridge
+  actually driving the session. The listing keeps two gates: conversations
+  must be currently running (live in the advertising bridge) and accessible
+  (resolvable and resumable through it). A `session/list` RPC per heartbeat
+  enriches live entries with the store's authoritative title and a
+  cross-bridge `updatedAt`, degrading to summaries-only on failure.
 - Removed the 0.5.1 heartbeat availability probe (`session-liveness.ts`) and
   the `unavailable` summary flag: live measurements showed the backend
   serves full `session/messages` in 35–120ms (the probe's 3s timeout branch
