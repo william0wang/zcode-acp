@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-18
+
+### Added
+
+- Read-only session file access over hub-proxied HTTP (ADR-0004). The bridge's
+  loopback endpoint serves `GET /fs/list` and `GET /fs/file`, scoped to each
+  session's cwd (`path.resolve` + `realpath`; `..` segments and symlink escapes
+  are rejected), and the hub byte-proxies them at `/api/instances/{id}/fs/*`
+  behind the existing token — no new port, and the hub still holds no path
+  semantics. Files stream with `Content-Length` and an extension-based
+  Content-Type; `offset`/`length` serves byte windows (206 + `Content-Range`),
+  `line`/`limit` streams text windows (`X-Zcode-First-Line`) with O(limit)
+  memory, so arbitrarily large logs are windowable. `initialize` advertises the
+  capability as `agentCapabilities._meta.zcode.fs`. Contract:
+  `docs/REMOTE-CLIENTS.md`. Also fixes `session/resume`/`session/load` never
+  recording the session cwd, which the new endpoint relies on.
+
+### Changed
+
+- Replayed harness plumbing now arrives as collapsed `tool_call` updates
+  instead of `user_message_chunk` walls of text: context-handoff summaries
+  (title "Context handoff", one per compaction) and resume-rewritten tool
+  transcripts ("Called the X tool with the following input…", title
+  "X · <first input value>"). `tool_call` is the one ACP update kind every
+  editor folds by default, so Zed/JetBrains collapse them with zero client
+  opt-in; the full text rides the tool_call's content block and
+  `_meta.zcode.collapsed` keeps its `kind` semantics
+  (`context-handoff`/`tool-transcript`). Contract: `docs/REPLAY-GUIDE.md`.
+
 ## [0.5.1] - 2026-08-18
 
 ### Fixed

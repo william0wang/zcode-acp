@@ -130,9 +130,10 @@ environment):
 **Hub.** The first bridge with remote enabled spawns `zcode-acp-hub` as a
 detached, machine-level singleton on `ZCODE_ACP_HUB_PORT` (it can also be run
 manually). It does three things only: token auth, instance discovery, and
-byte-level WebSocket proxying — no session state, no ACP semantics. It exits
-after ~10 idle minutes and is re-spawned on demand. Each bridge registers
-every 10s as a heartbeat and drops out of discovery ~30s after it stops.
+byte-level proxying (ACP WebSocket plus read-only session files) — no session
+state, no path semantics. It exits after ~10 idle minutes and is re-spawned
+on demand. Each bridge registers every 10s as a heartbeat and drops out of
+discovery ~30s after it stops.
 
 **Discovery API** (for client authors; fields are additive-only):
 
@@ -141,13 +142,18 @@ GET /api/instances              → [{"id","port","pid","startedAt","workspace",
                                     "sessions":[{"sessionId","title?","updatedAt"}]}]
 GET /api/instances?probe=1      → same list, but unreachable bridges are pruned first
 WS   /acp?instance=<id>         → proxied to that bridge's endpoint
+GET /api/instances/{id}/fs/…    → read-only session files (list + raw bytes, ADR-0004)
 ```
 
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
 security boundary. A proxied connection stays bound to one instance; switching
 instances means reconnecting. Remote clients can also pull plan quota via the
-non-standard `account/usage_stats` ACP method (no session required).
+non-standard `account/usage_stats` ACP method (no session required), and
+browse/download the files of a session's project through the `/fs` routes
+above. During replay, compaction summaries and rewritten tool calls arrive as
+collapsed `tool_call` updates instead of walls of text
+(`docs/REPLAY-GUIDE.md`).
 
 Building a remote client — web, mobile, or CLI? The full integration contract
 (endpoints, framing, lifecycle timings, failure recovery, platform notes)

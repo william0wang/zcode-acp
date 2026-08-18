@@ -58,7 +58,7 @@ src/
 │   ├── config.ts         ENV parsing (gate, mandatory token, hub/bridge ports)
 │   ├── endpoint.ts       Loopback ACP endpoint + hub registration heartbeat
 │   ├── file-endpoint.ts  Read-only /fs/list + /fs/file, session-root scoped (ADR-0004)
-│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level WS proxy, ?probe=1 liveness
+│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level proxy (ACP WS + /fs files), ?probe=1 liveness
 ├── quota/                GLM Coding Plan usage API client (/quota command)
 └── bin/
     ├── hub.ts            Standalone zcode-acp-hub daemon entry
