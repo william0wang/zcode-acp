@@ -98,6 +98,26 @@ carry a top-level `_meta` on the `session/update` notification:
 - Unknown `kind`s: render collapsed too (or fall back to plain text). Ignoring
   `_meta` entirely is always safe — the text is complete without it.
 
+## Turn running state (`replayMeta.turnActive` + `$/zcode/turnState`)
+
+A turn may already be in flight when you attach — started by the editor or
+another remote client (the bridge runs it to completion regardless of who
+prompted). Two signals cover it:
+
+- **Attach snapshot**: `session/load`'s `replayMeta.turnActive` (boolean) —
+  `true` when any turn for this session is running at attach time. Seed your
+  spinner/running state from it.
+- **Out-of-band updates**: the notification `$/zcode/turnState` with params
+  `{ sessionId: string, running: boolean }` — emitted when a turn starts and
+  when it ends (including failures, e.g. a failed subscribe). On preemption (a
+  new prompt interrupts an in-flight one) the old turn's exit reports
+  `running: true`: the preempting turn took over, so the session is still busy.
+
+The client that sent `session/prompt` already knows its own turn via the
+request/response; these signals exist for the OTHER attached clients
+(re-attached mobile, second editor). Unknown notifications are ignorable —
+clients that don't handle `$/zcode/turnState` lose nothing (Zed ignores it).
+
 ## Scroll-up pagination
 
 ```
@@ -152,6 +172,8 @@ Never parse the cursor — it is opaque. (For the curious it round-trips
 - [ ] `session/load` params include `cwd` and `mcpServers` (even `[]`).
 - [ ] Message list keyed/deduped by `messageId`; tool cards by `toolCallId`.
 - [ ] Pagination pages prepended, live updates appended.
+- [ ] Running state seeded from `replayMeta.turnActive` and updated from
+      `$/zcode/turnState` notifications (covers other clients' turns).
 - [ ] `"cursor expired"` handled by full re-attach.
 - [ ] Cursor stored per session, never parsed, never persisted across app
       runs (it is only meaningful to the bridge that minted it).

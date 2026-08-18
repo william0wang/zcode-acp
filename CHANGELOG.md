@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-18
+
+### Added
+
+- Turn running state for re-attached clients: `session/load`'s `replayMeta`
+  now carries `turnActive` (snapshot at attach time), and every prompt emits a
+  `$/zcode/turnState` notification (`{ sessionId, running }`) at turn start and
+  end (failures included) — so remote clients that did not send the prompt
+  (re-attached mobile, second editor) can show and restore the running
+  indicator. A preempted turn's exit reports `running: true` while the
+  preempting turn is in flight. Clients that ignore the notification (Zed) are
+  unaffected. Contract: `docs/REPLAY-GUIDE.md`.
+
 ## [0.4.0] - 2026-08-17
 
 ### Added
