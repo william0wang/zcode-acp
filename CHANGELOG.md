@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- New sessions appear in remote discovery within one heartbeat of their
+  first prompt instead of only after the first turn completes: the turn
+  start now marks the session active (previously the activity flag was set
+  only in the prompt's finally, so a minutes-long first turn kept the
+  conversation invisible in remote lists the whole time). Until the
+  backend's auto-title lands, the entry carries a provisional title from
+  the first line of the prompt.
+
 ## [0.7.0] - 2026-08-18
 
 ### Added

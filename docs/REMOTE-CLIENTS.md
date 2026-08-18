@@ -81,8 +81,8 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   the editor tab: turns driven from either side stream live to both. A
   conversation with no editor placeholder is advertised under its backend
   id (`sess_…`), still loadable via pass-through resume. `title` comes from
-  the backend session store; sessions that never completed a turn have no
-  title and are not listed.
+  the backend session store once the backend has titled it; sessions whose
+  first turn is still running carry the provisional prompt-derived title.
 - **Prompt echo**: when any client sends `session/prompt`, the bridge
   broadcasts the user's text to every OTHER attached client as a
   `user_message_chunk` (messageId prefixed `uprompt_`). Your own prompts are
@@ -91,11 +91,14 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   message that started it.
 - `sessions` is gated on two rules: the conversation must be **currently
   running** (a live registration in the advertising bridge — an open editor
-  tab, or a remote attachment that ran a turn) and **accessible** (every
-  listed id resolves and resumes through that bridge). Retired conversations
-  of the project are NOT listed even though the backend store still has them
-  — the store only enriches live entries with the authoritative title and a
-  cross-bridge `updatedAt`.
+  tab, or a remote attachment that ran a turn; a brand-new conversation
+  counts from the moment its FIRST turn starts, not after it completes) and
+  **accessible** (every listed id resolves and resumes through that bridge).
+  Retired conversations of the project are NOT listed even though the
+  backend store still has them — the store only enriches live entries with
+  the authoritative title and a cross-bridge `updatedAt`. Entries may carry
+  a provisional title (first line of the first prompt, capped at 60 chars)
+  until the backend's own auto-title lands.
 - Entries are **deduped across instances**: several bridges of the same
   project (e.g. a leaked old process plus the current one) can all hold the
   same live conversation under the same id; the hub keeps one copy per

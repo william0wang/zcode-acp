@@ -518,6 +518,22 @@ export async function prompt(
     server.pendingTurns.set(requestId, turn);
     preempted = preemptInFlightTurn(server, zcodeSid, requestId);
   });
+  // Discovery: the session is live the moment its turn STARTS — mark it active
+  // here instead of only at turn end, so a freshly created conversation shows
+  // up in remote lists within one heartbeat even while its first (possibly
+  // minutes-long) turn is still running. Until the backend's auto-title lands
+  // at end_turn, seed a provisional title from the prompt text (auto-title
+  // stays authoritative — its set-once gate is the separate sessionTitles).
+  server.markSessionActive(params.sessionId);
+  if (server.sessionSummaries.get(params.sessionId)?.title === undefined) {
+    const firstLine = text.trim().split(/\r\n|\r|\n/)[0] ?? "";
+    if (firstLine) {
+      server.touchSessionSummary(
+        params.sessionId,
+        firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine,
+      );
+    }
+  }
   // Out-of-band running indicator: clients that did not send this prompt
   // (re-attached mobile, second editor) learn the turn started here — the
   // session/load replayMeta only snapshots attach time. Best-effort: a dead
