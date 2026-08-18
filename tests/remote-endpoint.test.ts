@@ -13,8 +13,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { RemoteConfig } from "../src/remote/config.js";
 import { trackConnections } from "../src/remote/broadcast.js";
+import type { ZcodeBackend } from "../src/backend/client.js";
 import { sessionsPayload, startRemoteEndpoint } from "../src/remote/endpoint.js";
 import { startHub } from "../src/remote/hub-server.js";
+import { verifySessionAvailability } from "../src/remote/session-liveness.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import { AGENT_INFO } from "../src/utils.js";
 
@@ -266,6 +268,17 @@ describe("discovery payload gating", () => {
     expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-live"]);
   });
 
+  it("excludes sessions the heartbeat marked unavailable", () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("s-stale", "zc1");
+    server.markSessionActive("s-stale");
+    server.registerSession("s-live", "zc2");
+    server.markSessionActive("s-live");
+    server.sessionSummaries.get("s-stale")!.unavailable = true;
+
+    expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-live"]);
+  });
+
   it("includes sessions that gained a title (stored title adopted on resume)", () => {
     const server = new ZcodeAcpServer();
     server.registerSession("s", "zc");
@@ -282,5 +295,87 @@ describe("discovery payload gating", () => {
     server.markSessionActive("s");
 
     expect(Object.keys(sessionsPayload(server)[0]!).sort()).toEqual(["sessionId", "updatedAt"]);
+  });
+});
+
+describe("session availability verification (heartbeat probe)", () => {
+  /** Fake backend recording probed sids; `answer` decides per-session results. */
+  function probeBackend(
+    answer: (sid: string) => { result?: { messages?: unknown[] }; error?: { message: string } },
+  ): { backend: ZcodeBackend; probed: string[] } {
+    const probed: string[] = [];
+    const backend = {
+      isDead: false,
+      request: async (_id: number, method: string, params: { sessionId: string }) => {
+        if (method !== "session/messages") return { error: { message: "unhandled" } };
+        probed.push(params.sessionId);
+        return answer(params.sessionId);
+      },
+    } as unknown as ZcodeBackend;
+    return { backend, probed };
+  }
+
+  /** Active session with an aged summary so it is no longer trusted-fresh. */
+  function agedActive(server: ZcodeAcpServer, acpSid: string, zcodeSid: string): void {
+    server.registerSession(acpSid, zcodeSid);
+    server.markSessionActive(acpSid);
+    server.backendLoadedSessions.add(acpSid);
+    server.sessionSummaries.get(acpSid)!.updatedAt = Date.now() - 120_000;
+  }
+
+  it("hides sessions that answer with an error or no messages, and clears the loaded stamp", async () => {
+    const { backend } = probeBackend((sid) =>
+      sid === "zc-err"
+        ? { error: { message: "session not found" } }
+        : sid === "zc-empty"
+          ? { result: { messages: [] } }
+          : { result: { messages: [{ info: { id: "m1" } }] } },
+    );
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    agedActive(server, "s-err", "zc-err");
+    agedActive(server, "s-empty", "zc-empty");
+    agedActive(server, "s-ok", "zc-ok");
+
+    await verifySessionAvailability(server);
+
+    expect(server.sessionSummaries.get("s-err")!.unavailable).toBe(true);
+    expect(server.sessionSummaries.get("s-empty")!.unavailable).toBe(true);
+    expect(server.sessionSummaries.get("s-ok")!.unavailable).toBeFalsy();
+    expect(server.backendLoadedSessions.has("s-err")).toBe(false);
+    expect(server.backendLoadedSessions.has("s-ok")).toBe(true);
+    expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-ok"]);
+  });
+
+  it("restores a previously unavailable session once it serves messages again", async () => {
+    const { backend } = probeBackend(() => ({ result: { messages: [{ info: { id: "m1" } }] } }));
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    agedActive(server, "s-back", "zc-back");
+    server.sessionSummaries.get("s-back")!.unavailable = true;
+
+    await verifySessionAvailability(server);
+
+    expect(server.sessionSummaries.get("s-back")!.unavailable).toBe(false);
+    expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-back"]);
+  });
+
+  it("skips trusted-fresh sessions and sessions with an in-flight turn", async () => {
+    const { backend, probed } = probeBackend(() => ({ error: { message: "gone" } }));
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    // Fresh: active just now — trusted without a probe.
+    server.registerSession("s-fresh", "zc-fresh");
+    server.markSessionActive("s-fresh");
+    // In-flight: aged but a turn is running for its zcode session.
+    agedActive(server, "s-busy", "zc-busy");
+    server.pendingTurns.set(1, { zcodeSid: "zc-busy", cancelled: false });
+
+    await verifySessionAvailability(server);
+
+    expect(probed).toEqual([]);
+    expect(server.sessionSummaries.get("s-fresh")!.unavailable).toBeFalsy();
+    expect(server.sessionSummaries.get("s-busy")!.unavailable).toBeFalsy();
+    expect(sessionsPayload(server).map((s) => s.sessionId)).toEqual(["s-fresh", "s-busy"]);
   });
 });

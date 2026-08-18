@@ -29,6 +29,7 @@ import { WebSocketServer } from "ws";
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import type { RemoteConfig } from "./config.js";
+import { verifySessionAvailability } from "./session-liveness.js";
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
 const HEARTBEAT_MS = 10_000;
@@ -54,17 +55,20 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 
 /**
  * Session summaries for the hub's discovery API. Only sessions with real
- * interaction (`hasActivity`) are pushed: an editor restart auto-resumes its
- * stored placeholder, materializing an empty backend session — pushing that
- * would make remote clients list (and open) a conversation that never
- * happened. The hub replaces the whole list on every register, so a session
- * that gains activity shows up within one heartbeat (~10s).
+ * interaction (`hasActivity`) that this backend can still serve (not
+ * `unavailable`) are pushed: an editor restart auto-resumes its stored
+ * placeholder, materializing an empty backend session — pushing that would
+ * make remote clients list (and open) a conversation that never happened —
+ * and a leaked bridge whose backend lost a session to a newer bridge must
+ * not keep advertising a copy that opens empty. The hub replaces the whole
+ * list on every register, so both gaining activity and becoming serveable
+ * again show up within one heartbeat (~10s); see session-liveness.ts.
  */
 export function sessionsPayload(
   server: ZcodeAcpServer,
 ): Array<{ sessionId: string; title?: string; updatedAt: number }> {
   return Array.from(server.sessionSummaries.entries())
-    .filter(([, s]) => s.hasActivity)
+    .filter(([, s]) => s.hasActivity && !s.unavailable)
     .map(([sessionId, s]) => ({
       sessionId,
       ...(s.title !== undefined ? { title: s.title } : {}),
@@ -184,6 +188,16 @@ export async function startRemoteEndpoint(
 
   const registerOnce = async (): Promise<void> => {
     if (stopped || authRejected) return;
+    // Availability check before every heartbeat: sessions this backend can no
+    // longer serve (leaked-bridge scenario) are dropped from the payload, and
+    // previously-dropped ones that answer again are restored. Never throws;
+    // wrapped anyway so a surprise failure can't fall into the hub-spawn
+    // catch below (which would misread it as "hub unreachable").
+    try {
+      await verifySessionAvailability(server);
+    } catch {
+      /* best-effort */
+    }
     try {
       const res = await postJson(`http://127.0.0.1:${config.hubPort}/api/register`, payload());
       if (res.status === 401) {
