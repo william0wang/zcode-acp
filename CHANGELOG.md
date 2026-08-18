@@ -9,19 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0] - 2026-08-18
 
+### Added
+
+- Replayed `<task-notification>` blocks (background task / sub-agent
+  completion notices injected by the harness as standalone user messages)
+  now arrive as collapsed `tool_call` updates (`_meta.zcode.collapsed` kind
+  `task-notification`) with the decoded `<summary>` line as the title,
+  instead of a wall of XML pseudo-user text.
+
+### Fixed
+
+- Replayed tool calls now carry their payload: history tool parts hold the
+  invocation input and result text under `state`, but the replay only sent
+  title/status — expanding a replayed Read/Edit/Bash call in a remote client
+  showed an empty body. The tool_call update now attaches input (JSON or raw
+  string) and the backend-truncated output as content blocks, and takes the
+  title/status from `state` (the previous top-level reads never matched, so
+  titles fell back to the bare tool name).
+
 ### Changed
 
-- Remote discovery now advertises sessions under their **backend session ids**
-  (`sess_*`) instead of per-editor ACP placeholder ids, and the hub dedupes
-  sessions across instances (freshest `updatedAt` wins, then newest
-  instance). Every bridge of the same project derives the same id for the
-  same conversation, so a leaked bridge's copy can no longer surface as a
-  duplicate entry that opens empty; the hub's dedupe picks the bridge
-  actually driving the session. The listing keeps two gates: conversations
-  must be currently running (live in the advertising bridge) and accessible
-  (resolvable and resumable through it). A `session/list` RPC per heartbeat
-  enriches live entries with the store's authoritative title and a
-  cross-bridge `updatedAt`, degrading to summaries-only on failure.
+- Remote discovery session entries are now deduped across instances at the
+  hub (freshest `updatedAt` wins, then newest instance). Several bridges of
+  the same project can hold the same live conversation — a leaked bridge's
+  copy can no longer surface as a duplicate entry that opens empty; the
+  hub's dedupe picks the bridge actually driving the session. The listing
+  keeps two gates: conversations must be currently running (live in the
+  advertising bridge) and accessible (resolvable and resumable through it).
+  A `session/list` RPC per heartbeat enriches live entries with the store's
+  authoritative title and a cross-bridge `updatedAt`, degrading to
+  summaries-only on failure. Advertised ids stay the editor-facing ACP
+  session ids so a remote attach shares the editor tab's live stream.
 - Removed the 0.5.1 heartbeat availability probe (`session-liveness.ts`) and
   the `unavailable` summary flag: live measurements showed the backend
   serves full `session/messages` in 35–120ms (the probe's 3s timeout branch

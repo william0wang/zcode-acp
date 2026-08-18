@@ -285,7 +285,9 @@ describe("running-scoped discovery payload (collectSessions)", () => {
     server.markSessionActive("s-live"); // summary updatedAt ≈ Date.now() > 900
 
     const out = await collectSessions(server);
-    expect(out.map((s) => s.sessionId)).toEqual(["sess_live"]);
+    // Advertised id is the editor-facing acpSid, not the backend sess_* id —
+    // a remote attach under it shares the editor tab's notification stream.
+    expect(out.map((s) => s.sessionId)).toEqual(["s-live"]);
     // Enrichment: the store's title wins, updatedAt is the max of both.
     expect(out[0]).toMatchObject({ title: "Store title" });
     expect(out[0]!.updatedAt).toBeGreaterThan(900);
@@ -300,7 +302,7 @@ describe("running-scoped discovery payload (collectSessions)", () => {
 
     const out = await collectSessions(server);
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ sessionId: "sess_mine", title: "Bridge title" });
+    expect(out[0]).toMatchObject({ sessionId: "s-tab", title: "Bridge title" });
   });
 
   it("a store updatedAt newer than the summary (another bridge drove it) is kept", async () => {
@@ -311,7 +313,7 @@ describe("running-scoped discovery payload (collectSessions)", () => {
     server.sessionSummaries.get("s-tab")!.updatedAt = 100;
 
     expect((await collectSessions(server))[0]).toMatchObject({
-      sessionId: "sess_x",
+      sessionId: "s-tab",
       updatedAt: 5000,
     });
   });
@@ -326,7 +328,7 @@ describe("running-scoped discovery payload (collectSessions)", () => {
     // Placeholder summary with activity but no registered backend session.
     server.markSessionActive("s-pending");
 
-    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["zc2"]);
+    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["s-live"]);
   });
 
   it("degrades to summaries-only when session/list fails", async () => {
@@ -335,7 +337,17 @@ describe("running-scoped discovery payload (collectSessions)", () => {
     server.registerSession("s-live", "zc2");
     server.markSessionActive("s-live");
 
-    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["zc2"]);
+    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["s-live"]);
+  });
+
+  it("a session known only under its backend id is advertised under that id", async () => {
+    const server = new ZcodeAcpServer();
+    // No editor placeholder for this conversation: the bridge itself holds it
+    // under the backend id (remote-attached via pass-through resume).
+    server.registerSession("sess_direct", "sess_direct");
+    server.markSessionActive("sess_direct");
+
+    expect((await collectSessions(server)).map((s) => s.sessionId)).toEqual(["sess_direct"]);
   });
 
   it("an omitted title/hasActivity never leaks onto the wire", async () => {

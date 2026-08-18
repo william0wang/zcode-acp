@@ -146,9 +146,10 @@ GET /api/instances/{id}/fs/…    → read-only session files (list + raw bytes,
 ```
 
 `sessions` lists the project's **currently running** conversations (live
-editor tabs and remote attachments) under backend session ids — opening one
-by id resumes it on demand, and the hub dedupes sessions shared by several
-bridges of the same project.
+editor tabs and remote attachments) under the same ACP session ids the
+editor uses — attaching by id joins the conversation's live notification
+stream, and the hub dedupes sessions shared by several bridges of the same
+project.
 
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the

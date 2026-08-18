@@ -74,11 +74,15 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   registered bridge's loopback port and prunes unreachable ones before
   answering. A plain `GET` returns the heartbeat-based view, which can list a
   hard-killed bridge for up to the 30s heartbeat TTL.
-- `sessions[].sessionId` is a **backend session id** (`sess_…`): pass it to
-  `session/load` after connecting — the bridge resumes the session on demand,
-  it does not need to be open in the editor. `title` comes from the backend
-  session store; sessions that never completed a turn have no title and are
-  not listed.
+- `sessions[].sessionId` is the **ACP session id the editor uses** for that
+  conversation (placeholder ids are stable across bridges — Zed stores them
+  and the durable alias store records them). Attaching under it via
+  `session/load` puts the remote client on the same notification stream as
+  the editor tab: turns driven from either side stream live to both. A
+  conversation with no editor placeholder is advertised under its backend
+  id (`sess_…`), still loadable via pass-through resume. `title` comes from
+  the backend session store; sessions that never completed a turn have no
+  title and are not listed.
 - `sessions` is gated on two rules: the conversation must be **currently
   running** (a live registration in the advertising bridge — an open editor
   tab, or a remote attachment that ran a turn) and **accessible** (every
@@ -88,13 +92,10 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   cross-bridge `updatedAt`.
 - Entries are **deduped across instances**: several bridges of the same
   project (e.g. a leaked old process plus the current one) can all hold the
-  same live conversation; the hub keeps one copy per session — the instance
-  whose copy has the freshest `updatedAt` (i.e. the bridge actually driving
-  it). Attach to whichever instance the entry appears under.
-- One caveat when the SAME conversation is open as an editor tab AND loaded
-  remotely: the two clients hold different session ids for it, so each sees
-  its own turns live and the other's only after a re-load. Browsing and
-  driving either side still works; only cross-side live mirroring is affected.
+  same live conversation under the same id; the hub keeps one copy per
+  session — the instance whose copy has the freshest `updatedAt` (i.e. the
+  bridge actually driving it). Attach to whichever instance the entry
+  appears under.
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 

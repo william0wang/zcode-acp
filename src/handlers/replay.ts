@@ -272,7 +272,7 @@ function stripSystemReminders(text: string): string {
  * pseudo-user text. tool_call is the only ACP update kind every editor
  * (Zed, JetBrains, …) renders folded by default — a plain text chunk with a
  * `_meta` hint only helps clients that opt in. The full text always rides in
- * the tool_call's content block, so nothing is lost. Two shapes today:
+ * the tool_call's content block, so nothing is lost. Three shapes today:
  *
  * - context-handoff: the "This session is being continued from a previous
  *   conversation…" summaries, one per compaction (a long session can carry
@@ -280,14 +280,18 @@ function stripSystemReminders(text: string): string {
  * - tool-transcript: "Called the X tool with the following input: {…}\nResult
  *   of calling…" — tool_use/tool_result pairs the harness rewrites into
  *   plain text on resume, one message per historical tool call.
+ * - task-notification: "<task-notification>…" blocks the harness injects when
+ *   a background task (build, sub-agent) finishes — standalone user messages
+ *   whose useful part is just the <summary> line.
  *
  * Clients that already understand `_meta.zcode.collapsed` keep working: the
  * kind rides the tool_call's `_meta` as before.
  */
 const CONTEXT_HANDOFF = /^\s*This session is being continued from a previous conversation/;
 const TOOL_TRANSCRIPT = /^\s*Called the (\w+) tool with the following input:\s*(\{[^\n]*\})/;
+const TASK_NOTIFICATION = /^\s*<task-notification>/;
 
-type CollapseKind = "context-handoff" | "tool-transcript";
+type CollapseKind = "context-handoff" | "tool-transcript" | "task-notification";
 
 function collapsedMeta(kind: CollapseKind): { zcode: { collapsed: true; kind: CollapseKind } } {
   return { zcode: { collapsed: true, kind } };
@@ -308,6 +312,21 @@ function transcriptTitle(tool: string, inputJson: string): string {
   return `${tool} tool`;
 }
 
+/** <summary> line of a task-notification, entities decoded, capped at 60. */
+function notificationTitle(text: string): string {
+  const summary = /<summary>([^<]*)<\/summary>/.exec(text)?.[1];
+  if (summary) {
+    const decoded = summary
+      .replace(/&quot;/g, '"')
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .trim();
+    if (decoded) return decoded.length > 60 ? decoded.slice(0, 57) + "…" : decoded;
+  }
+  return "Background task";
+}
+
 /**
  * Classify a user text part as harness plumbing, returning the collapsed
  * tool_call title + kind, or null for real user speech.
@@ -317,6 +336,9 @@ function collapseUserText(text: string): { title: string; kind: CollapseKind } |
   const tool = TOOL_TRANSCRIPT.exec(text);
   if (tool) {
     return { title: transcriptTitle(tool[1]!, tool[2]!), kind: "tool-transcript" };
+  }
+  if (TASK_NOTIFICATION.test(text)) {
+    return { title: notificationTitle(text), kind: "task-notification" };
   }
   return null;
 }
@@ -389,19 +411,39 @@ export async function replayMessages(
         const tp = p as {
           id?: string;
           tool?: string;
-          title?: string;
-          status?: string;
+          state?: {
+            title?: string;
+            status?: string;
+            input?: unknown;
+            output?: unknown;
+          };
         };
-        const title = tp.title ?? tp.tool ?? "tool call";
+        const st = tp.state ?? {};
         const histToolName = tp.tool ?? "";
+        // History tool parts carry their payload under `state` — the
+        // invocation input and the full (backend-truncated) result text.
+        // Attach both as content blocks so expanding a replayed call shows
+        // what was read/edited/ran; without content the row expands empty.
+        const content: Array<{ type: "content"; content: { type: "text"; text: string } }> = [];
+        if (st.input !== undefined && st.input !== null) {
+          const inputText =
+            typeof st.input === "string" ? st.input : JSON.stringify(st.input, null, 2);
+          if (inputText) {
+            content.push({ type: "content", content: { type: "text", text: inputText } });
+          }
+        }
+        if (typeof st.output === "string" && st.output) {
+          content.push({ type: "content", content: { type: "text", text: st.output } });
+        }
         await cx.notify("session/update", {
           sessionId: acpSid,
           update: {
             sessionUpdate: "tool_call",
             toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
-            title,
+            title: st.title ?? histToolName ?? "tool call",
             kind: "other",
-            status: (tp.status as acp.ToolCallStatus) ?? "completed",
+            status: (st.status as acp.ToolCallStatus) ?? "completed",
+            ...(content.length > 0 ? { content } : {}),
             ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
           },
         });

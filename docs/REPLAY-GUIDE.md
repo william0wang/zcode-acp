@@ -108,9 +108,14 @@ update's `_meta`:
   rewrites into text on resume, one per historical tool call. Title is
   `X · <first string value of the input JSON>` (e.g.
   `Read · /src/main.go`), capped at 60 characters; falls back to `X tool`.
+- `kind: "task-notification"` — `<task-notification>` blocks the harness
+  injects when a background task (build, sub-agent) finishes, delivered as
+  standalone user messages. Title is the block's decoded `<summary>` line
+  (e.g. `Background command "Build release APK" completed (exit code 0)`),
+  capped at 60 characters; falls back to `Background task`.
 - Harness noise that carries no value (TodoWrite/Read usage nudges) is
   stripped before replay — you never see it.
-- Render both kinds as an ordinary collapsed tool card keyed by `toolCallId`;
+- Render all kinds as an ordinary collapsed tool card keyed by `toolCallId`;
   the text is complete behind the expand. Unknown `kind`s: render collapsed
   too. These updates never collide with live tool_call ids (they carry the
   `histfold_` prefix).

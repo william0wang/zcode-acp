@@ -64,16 +64,23 @@ function tryListen(server: Server, port: number): Promise<boolean> {
  *   conversation of the project (dozens of same-titled test runs included),
  *   so deriving membership from `session/list` floods the list with
  *   duplicates; the list only ENRICHES members with the store's authoritative
- *   title and cross-bridge updatedAt (which also steers the hub's dedupe
+ *   title and a cross-bridge updatedAt (which also steers the hub's dedupe
  *   toward the instance actually driving the session).
  * - Accessible: every member is a registered acp→zcode mapping here, so a
  *   remote `session/load` resolves and resumes it on demand. Lazy
  *   placeholders without a backend session never ran a turn and stay
  *   invisible.
  *
- * Advertised ids are BACKEND session ids (sess_*): every bridge of the same
- * project derives the same id for the same conversation, which is what lets
- * the hub dedupe across instances.
+ * Advertised ids are the ACP session ids the EDITOR uses (placeholder ids,
+ * stable across bridges via Zed's own storage and the durable alias store) —
+ * NOT raw backend session ids. A remote client that attaches under the same
+ * id as the editor tab shares the conversation's notification stream, so
+ * turns driven from either side stream live to both; advertising backend ids
+ * instead silently split the two views (Zed stopped seeing remote-driven
+ * turns). Sessions known here only under a backend id (no placeholder) are
+ * advertised under that backend id — still loadable via pass-through resume.
+ * Bridges of the same project derive the same id for the same conversation,
+ * which is what lets the hub dedupe across instances.
  *
  * A failed `session/list` degrades to summaries-only so a backend hiccup
  * never blanks the discovery list.
@@ -81,9 +88,9 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 export async function collectSessions(
   server: ZcodeAcpServer,
 ): Promise<Array<{ sessionId: string; title?: string; updatedAt: number }>> {
-  // zcodeSid → freshest live summary (an editor tab and a remote attachment
+  // zcodeSid → freshest live entry (an editor tab and a remote attachment
   // can hold two acpSids for the same conversation).
-  const live = new Map<string, { title?: string; updatedAt: number }>();
+  const live = new Map<string, { sessionId: string; title?: string; updatedAt: number }>();
   for (const [acpSid, summary] of server.sessionSummaries) {
     if (!summary.hasActivity) continue;
     const zcodeSid = server.resolveSid(acpSid);
@@ -91,6 +98,7 @@ export async function collectSessions(
     const prev = live.get(zcodeSid);
     if (prev && summary.updatedAt <= prev.updatedAt) continue;
     live.set(zcodeSid, {
+      sessionId: acpSid,
       ...(summary.title !== undefined ? { title: summary.title } : {}),
       updatedAt: summary.updatedAt,
     });
@@ -124,10 +132,12 @@ export async function collectSessions(
           const cur = live.get(s.sessionId);
           if (!cur) continue; // not running here — the store entry is history
           // The store is the title authority (adoptStoredTitle reads it) and
-          // its updatedAt moves when ANY bridge drives the session.
+          // its updatedAt moves when ANY bridge drives the session. The
+          // advertised id stays the local acpSid the entry was keyed under.
           const storeTitle = typeof s.title === "string" && s.title ? s.title : undefined;
           const title = storeTitle ?? cur.title;
           live.set(s.sessionId, {
+            sessionId: cur.sessionId,
             ...(title !== undefined ? { title } : {}),
             updatedAt: Math.max(cur.updatedAt, toMillis(s.updatedAt)),
           });
@@ -138,9 +148,7 @@ export async function collectSessions(
     }
   }
 
-  return Array.from(live.entries())
-    .map(([sessionId, v]) => ({ sessionId, ...v }))
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return Array.from(live.values()).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /** session/list timestamps: ms epoch (observed) or ISO string (defensive). */

@@ -326,6 +326,33 @@ describe("replayMessages collapsed harness blocks", () => {
     expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(text);
   });
 
+  it("collapses task-notifications with the decoded summary as title", async () => {
+    const { cx, updates } = collectCx();
+    const text =
+      "<task-notification>\n<task-id>exec_bed88298</task-id>\n" +
+      "<tool-use-id>call_1a3782c9</tool-use-id>\n" +
+      "<output-file>/tmp/call-stdout.log</output-file>\n<status>completed</status>\n" +
+      '<summary>Background command "Build debug Android APK for testing" completed (exit code 0)</summary>\n' +
+      "</task-notification>";
+    await replayMessages(cx, "s", [msg("n1", "user", text)]);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe('Background command "Build debug Android APK for testing" …');
+    expect(u.toolCallId).toBe("histfold_n1");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(text);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("task-notification");
+  });
+
+  it("falls back to a generic title when a task-notification has no summary", async () => {
+    const { cx, updates } = collectCx();
+    const text = "<task-notification>\n<task-id>exec_x</task-id>\n</task-notification>";
+    await replayMessages(cx, "s", [msg("n2", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.title).toBe("Background task");
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("task-notification");
+  });
+
   it("caps long title values at 60 characters", async () => {
     const { cx, updates } = collectCx();
     const long = "/".repeat(100);
@@ -358,5 +385,82 @@ describe("replayMessages collapsed harness blocks", () => {
     expect(kinds).toEqual(["tool_call", "user_message_chunk", "tool_call"]);
     expect(updates[0]!.update!.toolCallId).toBe("histfold_h1");
     expect(updates[2]!.update!.toolCallId).toBe("histfold_h2");
+  });
+});
+
+describe("replayMessages tool history parts", () => {
+  function collectCx(): {
+    cx: { notify: (method: string, params: unknown) => Promise<void> };
+    updates: Array<{ update?: { sessionUpdate?: string } } & Record<string, unknown>>;
+  } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      cx: {
+        notify: async (_method: string, params: unknown) => {
+          updates.push(params as Record<string, unknown>);
+        },
+      },
+      updates,
+    };
+  }
+
+  it("attaches input and output as content so the call expands non-empty", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            id: "part_1",
+            tool: "Read",
+            state: {
+              status: "completed",
+              title: "Read REMOTE-CLIENTS.md",
+              input: { file_path: "/docs/REMOTE-CLIENTS.md" },
+              output: "1\t# Remote Clients…",
+            },
+          },
+        ],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.toolCallId).toBe("part_1");
+    expect(u.title).toBe("Read REMOTE-CLIENTS.md");
+    expect(u.status).toBe("completed");
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content).toHaveLength(2);
+    expect(content[0]!.content.text).toContain("file_path");
+    expect(content[1]!.content.text).toBe("1\t# Remote Clients…");
+    expect((u._meta as { claudeCode: { toolName: string } }).claudeCode.toolName).toBe("Read");
+  });
+
+  it("keeps a string input as-is and tolerates missing input/output", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", id: "part_2", tool: "Bash", state: { input: "ls -la" } }],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content).toHaveLength(1);
+    expect(content[0]!.content.text).toBe("ls -la");
+    expect(u.title).toBe("Bash"); // no state.title → tool name fallback
+  });
+
+  it("omits content entirely when the part has no payload", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", id: "part_3", tool: "TodoWrite" }],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.content).toBeUndefined();
+    expect(u.title).toBe("TodoWrite");
   });
 });
