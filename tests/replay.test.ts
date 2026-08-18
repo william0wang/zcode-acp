@@ -12,6 +12,7 @@ import {
   MAX_REPLAY_LIMIT,
   fullSlice,
   readTailLimit,
+  replayMessages,
   sliceBefore,
   sliceTail,
 } from "../src/handlers/replay.js";
@@ -263,5 +264,99 @@ describe("replay batch lock", () => {
     releaseBatch();
     await Promise.all([batch, send]);
     expect(events).toEqual(["batch-start", "batch-end", "send"]);
+  });
+});
+
+describe("replayMessages collapsed harness blocks", () => {
+  function collectCx(): {
+    cx: { notify: (method: string, params: unknown) => Promise<void> };
+    updates: Array<{ update?: { sessionUpdate?: string } } & Record<string, unknown>>;
+  } {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      cx: {
+        notify: async (_method: string, params: unknown) => {
+          updates.push(params as Record<string, unknown>);
+        },
+      },
+      updates,
+    };
+  }
+
+  const HANDOFF_TEXT =
+    "This session is being continued from a previous conversation that ran out " +
+    "of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. …";
+
+  const READ_TEXT =
+    'Called the Read tool with the following input: {"file_path":"/tmp/ws/src/a.go"}\n' +
+    "Result of calling the Read tool:\npackage main";
+
+  it("replays a context handoff as a collapsed tool_call, not a user message", async () => {
+    const { cx, updates } = collectCx();
+    const n = await replayMessages(cx, "s", [msg("h1", "user", HANDOFF_TEXT)]);
+    expect(n).toBe(1);
+    expect(updates).toHaveLength(1);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Context handoff");
+    expect(u.toolCallId).toBe("histfold_h1");
+    expect(u.status).toBe("completed");
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content[0]!.content.text).toBe(HANDOFF_TEXT);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("context-handoff");
+  });
+
+  it("replays a textualized tool call with a path-bearing title", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [msg("t1", "user", READ_TEXT)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.sessionUpdate).toBe("tool_call");
+    expect(u.title).toBe("Read · /tmp/ws/src/a.go");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(READ_TEXT);
+    expect((u._meta as { zcode: { kind: string } }).zcode.kind).toBe("tool-transcript");
+  });
+
+  it("falls back to the bare tool name when the input is not JSON", async () => {
+    const { cx, updates } = collectCx();
+    const text =
+      "Called the Grep tool with the following input: {not json at all}\nResult of calling…";
+    await replayMessages(cx, "s", [msg("t2", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.title).toBe("Grep tool");
+    expect((u.content as Array<{ content: { text: string } }>)[0]!.content.text).toBe(text);
+  });
+
+  it("caps long title values at 60 characters", async () => {
+    const { cx, updates } = collectCx();
+    const long = "/".repeat(100);
+    const text = `Called the Read tool with the following input: {"file_path":"${long}"}\n…`;
+    await replayMessages(cx, "s", [msg("t3", "user", text)]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect((u.title as string).length).toBeLessThanOrEqual("Read · ".length + 60);
+  });
+
+  it("keeps real user and agent speech as message chunks (regression)", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      msg("u9", "user", "real question"),
+      msg("a9", "assistant", "answer"),
+    ]);
+    expect(updates.map((p) => p.update!.sessionUpdate)).toEqual([
+      "user_message_chunk",
+      "agent_message_chunk",
+    ]);
+  });
+
+  it("emits one collapsed tool_call per compaction", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      msg("h1", "user", HANDOFF_TEXT),
+      msg("u1", "user", "hi"),
+      msg("h2", "user", HANDOFF_TEXT),
+    ]);
+    const kinds = updates.map((p) => p.update!.sessionUpdate);
+    expect(kinds).toEqual(["tool_call", "user_message_chunk", "tool_call"]);
+    expect(updates[0]!.update!.toolCallId).toBe("histfold_h1");
+    expect(updates[2]!.update!.toolCallId).toBe("histfold_h2");
   });
 });

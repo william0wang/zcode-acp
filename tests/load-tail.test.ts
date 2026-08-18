@@ -325,7 +325,7 @@ describe("context handoff collapse marker", () => {
     };
   }
 
-  it("flags the continuation summary with a collapse hint and keeps full text", async () => {
+  it("delivers the continuation summary as a collapsed tool_call", async () => {
     const history = hist();
     history[6] = {
       info: { id: "u3", role: "user" },
@@ -345,14 +345,30 @@ describe("context handoff collapse marker", () => {
 
     await loadSession(server, loadParams(), cx);
 
-    const handoff = sent.find(
+    // The handoff must NOT arrive as user speech — it replays as a folded
+    // tool_call (the only form every ACP editor collapses by default).
+    const asUserText = sent.some(
       (p) =>
         p.update?.sessionUpdate === "user_message_chunk" &&
         (p.update?.content?.text ?? "").includes("continued from a previous"),
     );
+    expect(asUserText).toBe(false);
+    const handoff = sent.find(
+      (p) =>
+        p.update?.sessionUpdate === "tool_call" &&
+        JSON.stringify(p.update ?? {}).includes("continued from a previous"),
+    );
     expect(handoff).toBeDefined();
-    expect(handoff!._meta).toEqual({ zcode: { collapsed: true, kind: "context-handoff" } });
-    expect(handoff!.update!.content!.text).toContain("The summary below covers");
+    const update = handoff!.update as unknown as {
+      title?: string;
+      toolCallId?: string;
+      _meta?: { zcode?: { collapsed?: boolean; kind?: string } };
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.title).toBe("Context handoff");
+    expect(update.toolCallId).toBe("histfold_u3");
+    expect(update._meta).toEqual({ zcode: { collapsed: true, kind: "context-handoff" } });
+    expect(update.content![0]!.content!.text).toContain("The summary below covers");
   });
 
   it("ordinary user and agent text carries no _meta", async () => {

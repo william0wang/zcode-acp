@@ -268,16 +268,57 @@ function stripSystemReminders(text: string): string {
 }
 
 /**
- * Harness context-handoff summaries ("This session is being continued from a
- * previous conversation…") are informative plumbing: replayed IN FULL but
- * flagged via `_meta.zcode.collapsed` so capable clients render them folded
- * behind an expand control instead of as a wall of pseudo-user text. Clients
- * that ignore `_meta` (e.g. Zed) display the text unchanged.
+ * Harness plumbing that replays as a COLLAPSED tool_call instead of a wall of
+ * pseudo-user text. tool_call is the only ACP update kind every editor
+ * (Zed, JetBrains, …) renders folded by default — a plain text chunk with a
+ * `_meta` hint only helps clients that opt in. The full text always rides in
+ * the tool_call's content block, so nothing is lost. Two shapes today:
+ *
+ * - context-handoff: the "This session is being continued from a previous
+ *   conversation…" summaries, one per compaction (a long session can carry
+ *   dozens).
+ * - tool-transcript: "Called the X tool with the following input: {…}\nResult
+ *   of calling…" — tool_use/tool_result pairs the harness rewrites into
+ *   plain text on resume, one message per historical tool call.
+ *
+ * Clients that already understand `_meta.zcode.collapsed` keep working: the
+ * kind rides the tool_call's `_meta` as before.
  */
 const CONTEXT_HANDOFF = /^\s*This session is being continued from a previous conversation/;
+const TOOL_TRANSCRIPT = /^\s*Called the (\w+) tool with the following input:\s*(\{[^\n]*\})/;
 
-function handoffMeta(): { zcode: { collapsed: true; kind: "context-handoff" } } {
-  return { zcode: { collapsed: true, kind: "context-handoff" } };
+type CollapseKind = "context-handoff" | "tool-transcript";
+
+function collapsedMeta(kind: CollapseKind): { zcode: { collapsed: true; kind: CollapseKind } } {
+  return { zcode: { collapsed: true, kind } };
+}
+
+/** First string value of the tool-input JSON, capped for a one-line title. */
+function transcriptTitle(tool: string, inputJson: string): string {
+  try {
+    const input = JSON.parse(inputJson) as Record<string, unknown>;
+    const first = Object.values(input).find((v): v is string => typeof v === "string");
+    if (first) {
+      const value = first.length > 60 ? first.slice(0, 57) + "…" : first;
+      return `${tool} · ${value}`;
+    }
+  } catch {
+    /* non-JSON input — fall through */
+  }
+  return `${tool} tool`;
+}
+
+/**
+ * Classify a user text part as harness plumbing, returning the collapsed
+ * tool_call title + kind, or null for real user speech.
+ */
+function collapseUserText(text: string): { title: string; kind: CollapseKind } | null {
+  if (CONTEXT_HANDOFF.test(text)) return { title: "Context handoff", kind: "context-handoff" };
+  const tool = TOOL_TRANSCRIPT.exec(text);
+  if (tool) {
+    return { title: transcriptTitle(tool[1]!, tool[2]!), kind: "tool-transcript" };
+  }
+  return null;
 }
 
 /**
@@ -307,16 +348,30 @@ export async function replayMessages(
           text = stripSystemReminders(text);
           if (!text) continue;
         }
-        const collapsed = role === "user" && CONTEXT_HANDOFF.test(text);
-        await cx.notify("session/update", {
-          sessionId: acpSid,
-          update: {
-            sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk",
-            content: { type: "text", text },
-            messageId: mid,
-          },
-          ...(collapsed ? { _meta: handoffMeta() } : {}),
-        });
+        const collapse = role === "user" ? collapseUserText(text) : null;
+        if (collapse) {
+          await cx.notify("session/update", {
+            sessionId: acpSid,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: `histfold_${mid}`,
+              title: collapse.title,
+              kind: "other",
+              status: "completed",
+              content: [{ type: "content", content: { type: "text", text } }],
+              _meta: collapsedMeta(collapse.kind),
+            },
+          });
+        } else {
+          await cx.notify("session/update", {
+            sessionId: acpSid,
+            update: {
+              sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk",
+              content: { type: "text", text },
+              messageId: mid,
+            },
+          });
+        }
       } else if (ptype === "reasoning") {
         const rp = p as { text?: string; content?: string };
         const text = rp.text ?? rp.content ?? "";
