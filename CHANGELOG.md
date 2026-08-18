@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-18
+
+### Changed
+
+- Remote discovery is now project-scoped: the heartbeat payload lists the
+  project's whole titled conversation history from the backend session store
+  (merged with the in-memory live summaries), not just the conversations
+  open as editor tabs in this bridge's lifetime. Conversations of a project
+  become visible to remote clients as soon as any of its bridges is running,
+  instead of only after their tab is opened in the editor. Listed ids are
+  backend session ids (`sess_*`) so every bridge of the same project derives
+  the same id, and a remote `session/load` with such an id resumes the
+  session on demand. The hub dedupes sessions across instances (freshest
+  `updatedAt` wins, then newest instance), which also subsumes the leaked-
+  bridge duplicate the 0.5.1 probe guarded against. `session/list` failures
+  degrade to live-summaries-only so the discovery list never blanks.
+- Removed the 0.5.1 heartbeat availability probe (`session-liveness.ts`) and
+  the `unavailable` summary flag: live measurements showed the backend
+  serves full `session/messages` in 35–120ms (the probe's 3s timeout branch
+  never fired in production logs), and taking a session over in a second
+  backend does not invalidate the first backend's copy — the probe's premise
+  did not hold and its per-heartbeat RPCs were pure overhead. Duplicate
+  protection now lives in the hub's cross-instance dedupe.
+
 ## [0.6.0] - 2026-08-18
 
 ### Added

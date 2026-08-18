@@ -145,6 +145,12 @@ WS   /acp?instance=<id>         → proxied to that bridge's endpoint
 GET /api/instances/{id}/fs/…    → read-only session files (list + raw bytes, ADR-0004)
 ```
 
+`sessions` is project-scoped: each bridge lists the project's whole titled
+conversation history from the backend store (backend session ids), so a
+conversation is visible remotely as soon as any bridge of its project runs —
+opening one by id resumes it on demand. The hub dedupes sessions shared by
+several bridges of the same project.
+
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
 security boundary. A proxied connection stays bound to one instance; switching

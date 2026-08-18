@@ -30,7 +30,6 @@ import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import { createFileHandler } from "./file-endpoint.js";
 import type { RemoteConfig } from "./config.js";
-import { verifySessionAvailability } from "./session-liveness.js";
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
 const HEARTBEAT_MS = 10_000;
@@ -55,26 +54,96 @@ function tryListen(server: Server, port: number): Promise<boolean> {
 }
 
 /**
- * Session summaries for the hub's discovery API. Only sessions with real
- * interaction (`hasActivity`) that this backend can still serve (not
- * `unavailable`) are pushed: an editor restart auto-resumes its stored
- * placeholder, materializing an empty backend session — pushing that would
- * make remote clients list (and open) a conversation that never happened —
- * and a leaked bridge whose backend lost a session to a newer bridge must
- * not keep advertising a copy that opens empty. The hub replaces the whole
- * list on every register, so both gaining activity and becoming serveable
- * again show up within one heartbeat (~10s); see session-liveness.ts.
+ * Session summaries for the hub's discovery API — the project's WHOLE
+ * conversation history, not just the tabs this bridge's editor lifetime
+ * happens to have open (a tab-scoped list made conversations of untouched
+ * projects invisible to remote clients until someone clicked them open).
+ *
+ * The backend session store is machine-global, so `session/list` returns
+ * every project's sessions; we keep the ones under this bridge's project cwd
+ * (excluding subagent sessions and untitled never-used ones) and merge in the
+ * in-memory `sessionSummaries` for sessions this bridge drives — their
+ * updatedAt reflects live turns and is fresher than the store's.
+ *
+ * Advertised ids are BACKEND session ids (sess_*): every bridge of the same
+ * project derives the same id for the same conversation, which is what lets
+ * the hub dedupe across instances. A remote `session/load` with such an id
+ * resumes the session on demand (resolveResumeTarget passes unknown ids
+ * through to the resume RPC). Lazy placeholders without a backend session
+ * stay invisible — they never ran a turn.
+ *
+ * A failed `session/list` degrades to summaries-only so a backend hiccup
+ * never blanks the discovery list.
  */
-export function sessionsPayload(
+export async function collectSessions(
   server: ZcodeAcpServer,
-): Array<{ sessionId: string; title?: string; updatedAt: number }> {
-  return Array.from(server.sessionSummaries.entries())
-    .filter(([, s]) => s.hasActivity && !s.unavailable)
-    .map(([sessionId, s]) => ({
-      sessionId,
-      ...(s.title !== undefined ? { title: s.title } : {}),
-      updatedAt: s.updatedAt,
-    }));
+): Promise<Array<{ sessionId: string; title?: string; updatedAt: number }>> {
+  const byZcodeSid = new Map<string, { sessionId: string; title?: string; updatedAt: number }>();
+  const backend = server.backend;
+  if (backend && !backend.isDead) {
+    try {
+      // The backend filters by workspace server-side (verified live: a bogus
+      // path returns zero sessions); the equality check below stays as a
+      // belt-and-suspenders guard against echo-style responses.
+      const cwd = server.projectCwd();
+      const resp = await backend.request(
+        server.nextId(),
+        "session/list",
+        { workspace: { workspacePath: cwd, workspaceKey: cwd } },
+        10_000,
+      );
+      if (!resp.error) {
+        const sessions =
+          (
+            (resp.result ?? {}) as {
+              sessions?: Array<{
+                sessionId?: string;
+                title?: string;
+                updatedAt?: unknown;
+                workspace?: { workspacePath?: string };
+              }>;
+            }
+          ).sessions ?? [];
+        for (const s of sessions) {
+          if (!s.sessionId || s.sessionId.startsWith("sess_subagent")) continue;
+          if (s.workspace?.workspacePath !== cwd) continue;
+          // No title = the session never produced content (hasActivity parity).
+          if (typeof s.title !== "string" || !s.title) continue;
+          byZcodeSid.set(s.sessionId, {
+            sessionId: s.sessionId,
+            title: s.title,
+            updatedAt: toMillis(s.updatedAt),
+          });
+        }
+      }
+    } catch {
+      /* best-effort: fall through to summaries-only */
+    }
+  }
+  for (const [acpSid, summary] of server.sessionSummaries) {
+    if (!summary.hasActivity) continue;
+    const zcodeSid = server.resolveSid(acpSid);
+    if (!zcodeSid) continue; // pure placeholder — no backend session behind it
+    const prev = byZcodeSid.get(zcodeSid);
+    if (prev && summary.updatedAt <= prev.updatedAt) continue;
+    const title = summary.title ?? prev?.title;
+    byZcodeSid.set(zcodeSid, {
+      sessionId: zcodeSid,
+      ...(title !== undefined ? { title } : {}),
+      updatedAt: summary.updatedAt,
+    });
+  }
+  return Array.from(byZcodeSid.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** session/list timestamps: ms epoch (observed) or ISO string (defensive). */
+function toMillis(v: unknown): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
 }
 
 async function postJson(url: string, body: unknown, timeoutMs = 3000): Promise<Response> {
@@ -144,13 +213,13 @@ export async function startRemoteEndpoint(
   let authRejected = false;
   let spawnThrottledUntil = 0;
 
-  const payload = () => ({
+  const payload = (sessions: Array<{ sessionId: string; title?: string; updatedAt: number }>) => ({
     token: config.token,
     id: instanceId,
     port,
     pid: process.pid,
     workspace: server.workspaceLabel(),
-    sessions: sessionsPayload(server),
+    sessions,
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,
@@ -189,20 +258,26 @@ export async function startRemoteEndpoint(
     }
   };
 
+  // Last-good session list: an unexpected collectSessions failure must not
+  // blank the discovery payload, so we keep advertising the previous one.
+  let lastSessions: Array<{ sessionId: string; title?: string; updatedAt: number }> = [];
+
   const registerOnce = async (): Promise<void> => {
     if (stopped || authRejected) return;
-    // Availability check before every heartbeat: sessions this backend can no
-    // longer serve (leaked-bridge scenario) are dropped from the payload, and
-    // previously-dropped ones that answer again are restored. Never throws;
-    // wrapped anyway so a surprise failure can't fall into the hub-spawn
-    // catch below (which would misread it as "hub unreachable").
+    // Project-scoped session list before every heartbeat (session/list merge,
+    // ~100-300ms). Never throws; wrapped anyway so a surprise failure can't
+    // fall into the hub-spawn catch below (which would misread it as "hub
+    // unreachable").
     try {
-      await verifySessionAvailability(server);
+      lastSessions = await collectSessions(server);
     } catch {
-      /* best-effort */
+      /* keep lastSessions */
     }
     try {
-      const res = await postJson(`http://127.0.0.1:${config.hubPort}/api/register`, payload());
+      const res = await postJson(
+        `http://127.0.0.1:${config.hubPort}/api/register`,
+        payload(lastSessions),
+      );
       if (res.status === 401) {
         authRejected = true;
         warn(

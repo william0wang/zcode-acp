@@ -74,20 +74,25 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   registered bridge's loopback port and prunes unreachable ones before
   answering. A plain `GET` returns the heartbeat-based view, which can list a
   hard-killed bridge for up to the 30s heartbeat TTL.
-- `sessions[].sessionId` is the ACP session id: pass it to `session/load`
-  after connecting. `title` is adopted from the backend for resumed sessions
-  and set after a fresh session's first turn — it can still be absent for a
-  session that has never completed a turn.
-- `sessions` only lists sessions with real interaction. Editors restart into a
-  stored placeholder and materialize an empty backend session — those stay
-  hidden and appear within one heartbeat (~10s) after their first prompt (or
-  a titled resume/load).
-- `sessions` is also **availability-verified**: before every heartbeat the
-  bridge probes its idle sessions against its own backend, and a session it
-  can no longer serve (e.g. the project restarted under a newer bridge while
-  the old process leaked) is dropped from the list within one heartbeat
-  (~10s) instead of lingering as an entry that opens empty. It reappears if
-  the bridge can serve it again. Treat list membership as "openable".
+- `sessions[].sessionId` is a **backend session id** (`sess_…`): pass it to
+  `session/load` after connecting — the bridge resumes the session on demand,
+  it does not need to be open in the editor. `title` comes from the backend
+  session store; sessions that never completed a turn have no title and are
+  not listed.
+- `sessions` is **project-scoped** (since 0.7.0): it lists the project's whole
+  titled conversation history from the shared backend store, not just the
+  conversations currently open as editor tabs. A conversation you last used
+  days ago is listable and openable immediately, as long as some bridge for
+  that project is running.
+- Entries are **deduped across instances**: several bridges of the same
+  project (e.g. a leaked old process plus the current one) all derive the
+  same list; the hub keeps one copy per session — the instance whose copy has
+  the freshest `updatedAt` (i.e. the bridge actually driving it). Attach to
+  whichever instance the entry appears under.
+- One caveat when the SAME conversation is open as an editor tab AND loaded
+  remotely: the two clients hold different session ids for it, so each sees
+  its own turns live and the other's only after a re-load. Browsing and
+  driving either side still works; only cross-side live mirroring is affected.
 - Poll every 3–5s. There is no push notification for registry changes yet.
 - Fields are **additive-only** across releases — ignore fields you don't know.
 

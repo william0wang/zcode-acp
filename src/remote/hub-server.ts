@@ -246,6 +246,26 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           }
         }
       }
+      // Cross-instance session dedupe: every bridge of a workspace lists the
+      // same shared backend session store, so one conversation can appear on
+      // several instances. Keep exactly one copy — the freshest session
+      // updatedAt (the bridge actually driving the conversation wins; a
+      // leaked older bridge's stale copy loses), tie-broken by the
+      // newest-started instance — so clients see each conversation once and
+      // attach where it is live.
+      const winners = new Map<string, { updatedAt: number; instance: InstanceEntry }>();
+      for (const entry of instances.values()) {
+        for (const s of entry.sessions) {
+          const prev = winners.get(s.sessionId);
+          if (
+            !prev ||
+            s.updatedAt > prev.updatedAt ||
+            (s.updatedAt === prev.updatedAt && entry.startedAt > prev.instance.startedAt)
+          ) {
+            winners.set(s.sessionId, { updatedAt: s.updatedAt, instance: entry });
+          }
+        }
+      }
       const list = Array.from(instances.values())
         .sort((a, b) => a.startedAt - b.startedAt)
         .map((e) => ({
@@ -254,7 +274,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           pid: e.pid,
           startedAt: e.startedAt,
           workspace: e.workspace,
-          sessions: e.sessions,
+          sessions: e.sessions.filter((s) => winners.get(s.sessionId)?.instance === e),
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(list));

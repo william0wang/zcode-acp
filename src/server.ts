@@ -109,20 +109,17 @@ export class ZcodeAcpServer {
   readonly clients = new ClientRegistry();
   /**
    * Lightweight session summaries for the remote hub's discovery API
-   * (acp_sid → { title, updatedAt, hasActivity, unavailable }). In-memory only
-   * — the hub holds no business state and the bridge dies with its editor, so
+   * (acp_sid → { title, updatedAt, hasActivity }). In-memory only — the hub
+   * holds no business state and the bridge dies with its editor, so
    * persistence would buy nothing. Maintained by `touchSessionSummary` at
    * session registration, title set, and turn completion. `hasActivity` gates
    * the discovery payload: an editor restart auto-resumes its stored
    * placeholder, materializing an empty backend session — never-used sessions
-   * stay invisible to remote clients until first real use. `unavailable` is
-   * set by the heartbeat's availability probe (session-liveness.ts) when this
-   * backend can no longer serve the session (e.g. a restarted project took it
-   * over via a new bridge) and clears when it answers messages again.
+   * stay invisible to remote clients until first real use.
    */
   readonly sessionSummaries = new Map<
     string,
-    { title?: string; updatedAt: number; hasActivity?: boolean; unavailable?: boolean }
+    { title?: string; updatedAt: number; hasActivity?: boolean }
   >();
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
@@ -219,8 +216,6 @@ export class ZcodeAcpServer {
       // A title only exists once the session produced content (auto-title on
       // first end_turn, or a stored title adopted on resume/load).
       hasActivity: existing?.hasActivity || title !== undefined,
-      // Keep the heartbeat-liveness verdict across mapping/title touches.
-      unavailable: existing?.unavailable,
     });
   }
 
@@ -239,11 +234,16 @@ export class ZcodeAcpServer {
   }
 
   /**
-   * Best-effort workspace label for the hub discovery payload: first known
-   * session cwd, else the bridge process cwd.
+   * The bridge's project directory: first known session cwd, else the bridge
+   * process cwd (Zed spawns the server with the worktree root as cwd).
    */
-  workspaceLabel(): string {
+  projectCwd(): string {
     return this.sessionCwds.values().next().value ?? process.cwd();
+  }
+
+  /** Best-effort workspace label for the hub discovery payload. */
+  workspaceLabel(): string {
+    return this.projectCwd();
   }
 
   /**
