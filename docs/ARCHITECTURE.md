@@ -197,12 +197,13 @@ API only because the ZCode backend itself sends them for inference.
 
 ### `remote/` — Remote access (opt-in via `ZCODE_ACP_REMOTE=1`)
 
-| File            | Responsibility                                                                                                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `broadcast.ts`  | ClientRegistry + broadcast proxy: notify fans out to all clients; request is first-response-wins with loser `$/cancel_request`                               |
-| `config.ts`     | ENV parsing (gate, mandatory token, hub/bridge ports)                                                                                                        |
-| `endpoint.ts`   | Loopback ACP endpoint (SDK AcpServer transport, port auto-increment) + hub registration/heartbeat                                                            |
-| `hub-server.ts` | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, on-demand `?probe=1` liveness, idle exit, version self-upgrade |
+| File               | Responsibility                                                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `broadcast.ts`     | ClientRegistry + broadcast proxy: notify fans out to all clients; request is first-response-wins with loser `$/cancel_request`                               |
+| `config.ts`        | ENV parsing (gate, mandatory token, hub/bridge ports)                                                                                                        |
+| `endpoint.ts`      | Loopback ACP endpoint (SDK AcpServer transport, port auto-increment) + hub registration/heartbeat                                                            |
+| `file-endpoint.ts` | Read-only `GET /fs/list` + `GET /fs/file` on the loopback server (ADR-0004): Session Root scoping, byte/line windows, streaming                              |
+| `hub-server.ts`    | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, on-demand `?probe=1` liveness, idle exit, version self-upgrade |
 
 When enabled, the same `AgentApp` serves the stdio editor and a loopback
 WebSocket endpoint. Every connection (editor or remote) joins the broadcast
@@ -225,6 +226,11 @@ drops bridges that stopped registering — the fallback for hard kills — and
 `GET /api/instances?probe=1` actively TCP-probes each registered loopback port
 on demand, so a client refresh gets an immediately-honest list with no
 background probing cost.
+
+Session file access (ADR-0004) rides the same loopback server: the bridge
+serves read-only `GET /fs/list` + `GET /fs/file` scoped to each session's cwd,
+and the hub byte-proxies them at `/api/instances/{id}/fs/*` — no new port, and
+the hub still holds no path semantics.
 
 ## Key State Machines
 

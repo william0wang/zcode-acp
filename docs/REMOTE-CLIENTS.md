@@ -181,6 +181,43 @@ exactly:
   later. Only transport-level failures reject the request.
 - Cached ~10s server-side (same caches as the `/quota` command).
 
+## Session files (read-only)
+
+Browse and download files of a session's project — served by the bridge,
+byte-proxied by the hub, guarded by the same token as everything else
+(ADR-0004). Capability probe: `initialize` returns
+`agentCapabilities._meta.zcode.fs === true`.
+
+```text
+GET {hub}/api/instances/{id}/fs/list?sessionId=…&path=<rel>    one directory level
+GET {hub}/api/instances/{id}/fs/file?sessionId=…&path=<rel>    file bytes
+    &offset=…&length=…     byte window → 206 + Content-Range
+    &line=…&limit=…        text window (defaults 1 / 200, cap 5000)
+```
+
+- `path` resolves against the session's root cwd — the directory the session
+  was created or loaded with. Absolute paths work only when they land inside
+  it; `..` segments and symlinks pointing outside the root are rejected
+  (403).
+- `list` returns `{ root, entries: [{name, kind: "file"|"dir"|"symlink",
+size, mtime}], truncated }`. Dotfiles are included — filter client-side.
+  Entries sort dirs-first in byte order; `truncated: true` marks more than
+  2000 entries. Symlinks report placeholder stats (`size: 0`); reading
+  through one resolves and scope-checks the target.
+- `file` streams with `Content-Length` and a Content-Type inferred from the
+  extension (`application/octet-stream` fallback) — `<a download>`,
+  `<img src>`, and `fetch` streaming all work directly. `HEAD` is supported.
+- Byte and line windows are mutually exclusive (400). A line window returns
+  `text/plain` with `X-Zcode-First-Line` set to the first served line;
+  memory is O(limit), so it works on arbitrarily large logs.
+- Errors: `400` bad params · `403` unknown session / path escapes the root ·
+  `404` not found / unknown instance · `416` offset beyond EOF · `502`
+  bridge port unreachable. A `404` right after a bridge upgrade is the hub
+  self-upgrading to learn the route — retry.
+- Read-only by design, and the token remains the security boundary as
+  everywhere else; the session root contains accidents (wrong path joins),
+  not attackers.
+
 ## Slash-command handling
 
 Only the commands the bridge advertises via `available_commands_update` (plus

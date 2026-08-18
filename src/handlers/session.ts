@@ -360,6 +360,9 @@ export async function resumeSession(
   }
 
   server.registerSession(acpSid, zcodeSid);
+  // The load's cwd becomes the session root for remote file access (same as
+  // session/new) — without this, a loaded session has no readable root.
+  server.sessionCwds.set(acpSid, cwd);
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
@@ -407,6 +410,8 @@ export async function loadSession(
     server.backendLoadedSessions.add(acpSid);
   }
   server.registerSession(acpSid, zcodeSid);
+  // Same as resumeSession: record the cwd as the session root for file access.
+  server.sessionCwds.set(acpSid, cwd);
   log(`session/load → ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);

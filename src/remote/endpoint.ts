@@ -28,6 +28,7 @@ import { WebSocketServer } from "ws";
 
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
+import { createFileHandler } from "./file-endpoint.js";
 import type { RemoteConfig } from "./config.js";
 import { verifySessionAvailability } from "./session-liveness.js";
 
@@ -98,10 +99,12 @@ export async function startRemoteEndpoint(
   const acpHttpHandler = createNodeHttpHandler(acpServer);
   const wss = new WebSocketServer({ noServer: true });
   const upgradeHandler = createNodeWebSocketUpgradeHandler(acpServer, wss);
+  const fileHandler = createFileHandler(server);
 
   const httpServer = createServer((req, res) => {
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
     if (path === "/acp") acpHttpHandler(req, res);
+    else if (path.startsWith("/fs/")) fileHandler(req, res);
     else {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found");

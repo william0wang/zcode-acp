@@ -59,3 +59,16 @@ _Avoid_: round, exchange, message (a turn contains many messages)
 An opaque handle identifying the oldest replayed Turn, used to page further
 back into history. Valid only while the history it points into is unchanged.
 _Avoid_: token (collides with the auth token), offset, bookmark
+
+**Session Root**:
+The working directory (cwd) a session was created or loaded with. The scope
+boundary for remote file access: a client may only read inside the Session
+Root of a session it can address by session id.
+_Avoid_: project (no such unit in the bridge model), workspace root (Workspace
+is a display label, not a boundary)
+
+**Workspace**:
+The display label a bridge reports to the Hub for instance discovery (the
+first known session cwd). Purely informational — it is not a permission
+boundary and may not cover every session root on that instance.
+_Avoid_: project, workspace root
