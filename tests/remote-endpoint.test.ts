@@ -355,10 +355,9 @@ describe("running-scoped discovery payload (collectSessions)", () => {
     server.registerSession("s", "zc");
     server.markSessionActive("s");
 
-    expect(Object.keys((await collectSessions(server))[0]!).sort()).toEqual([
-      "sessionId",
-      "updatedAt",
-    ]);
+    const [entry] = await collectSessions(server);
+    expect(Object.keys(entry!).sort()).toEqual(["sessionId", "status", "updatedAt"]);
+    expect(entry!.status).toBe("idle"); // no pending turn
   });
 });
 

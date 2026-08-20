@@ -46,10 +46,12 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint             | Auth     | Purpose                                                      |
-| -------------------- | -------- | ------------------------------------------------------------ |
-| `GET /api/health`    | none     | Liveness probe; `200` body `ok`.                             |
-| `GET /api/instances` | required | Registered bridge instances. Add `?probe=1` to verify first. |
+| Endpoint                         | Auth     | Purpose                                                                                      |
+| -------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| `GET /api/health`                | none     | Liveness probe; `200` body `ok`.                                                             |
+| `GET /api/instances`             | required | Registered bridge instances. Add `?probe=1` to verify first.                                 |
+| `GET /api/instances/{id}/status` | required | Real-time per-session running status of one bridge.                                          |
+| `GET /api/quota`                 | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -63,7 +65,14 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
     "pid": 72341,
     "startedAt": 1723800000000,
     "workspace": "/Users/me/proj",
-    "sessions": [{ "sessionId": "5f0c…", "title": "Fix login bug", "updatedAt": 1723800012000 }]
+    "sessions": [
+      {
+        "sessionId": "5f0c…",
+        "title": "Fix login bug",
+        "status": "running",
+        "updatedAt": 1723800012000
+      }
+    ]
   }
 ]
 ```
@@ -83,6 +92,9 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   id (`sess_…`), still loadable via pass-through resume. `title` comes from
   the backend session store once the backend has titled it; sessions whose
   first turn is still running carry the provisional prompt-derived title.
+- `sessions[].status` is a coarse `"running" | "idle"` indicator riding the
+  heartbeat (up to ~10s stale; absent on older bridges — treat as unknown).
+  For the live value poll [`/api/instances/{id}/status`](#session-running-status).
 - **Prompt echo**: when any client sends `session/prompt`, the bridge
   broadcasts the user's text to every OTHER attached client as a
   `user_message_chunk` (messageId prefixed `uprompt_`). Your own prompts are
@@ -145,16 +157,28 @@ ws(s)://<hub-host>/acp?instance=<id>&token=<token>
    (model / mode / thought level), slash commands in the prompt text —
    see [PROTOCOL.md](PROTOCOL.md).
 
-## Account quota (`account/usage_stats`)
+## Account quota
 
-Non-standard, additive (Proposal 0002). Plan quota is **account-level**, so it
-is a pull-only request — callable any time after `initialize`, no session
-required. Fetch once after attach and on demand; quota changes are slow, there
-is no push.
+Two equivalent channels; prefer plain HTTP — it needs no ACP connection:
 
-The response mirrors the `zcode-quota` CLI card's data model — one GLM section
-plus one Opencode Go section — so clients can reproduce the CLI layout
-exactly:
+```text
+GET {hub}/api/quota → 200, the JSON body documented below (Cache-Control: no-store)
+```
+
+The hub queries the usage APIs directly — quota belongs to the machine's
+configured credentials, not to any bridge instance (ADR-0005) — and caches the
+result ~30s server-side, so polling is cheap. A `502` means the upstream query
+failed; retry later.
+
+The ACP method is `account/usage_stats` (Proposal 0002), useful when a
+conversation is already attached. Plan quota is **account-level**, so it is a
+pull-only request — callable any time after `initialize`, no session required.
+Fetch once after attach and on demand; quota changes are slow, there is no
+push.
+
+Both channels return the same payload, mirroring the `zcode-quota` CLI card's
+data model — one GLM section plus one Opencode Go section — so clients can
+reproduce the CLI layout exactly:
 
 ```json
 → { "id": 7, "method": "account/usage_stats", "params": {} }
@@ -197,6 +221,41 @@ exactly:
   render the same status line the CLI would (e.g. auth expired) and retry
   later. Only transport-level failures reject the request.
 - Cached ~10s server-side (same caches as the `/quota` command).
+
+## Session running status
+
+Two layers (ADR-0005), both plain HTTP — no ACP connection needed:
+
+- **Heartbeat**: every `sessions[]` entry in `/api/instances` carries
+  `status: "running" | "idle"`. Free with the list you already poll, but up
+  to ~10s stale (the bridge re-registers every 10s).
+- **Real-time**: `GET {hub}/api/instances/{id}/status` proxies the bridge's
+  in-memory view — assembled without any backend RPC, safe to poll
+  aggressively (1–2s) for a task board or detail view:
+
+```json
+{
+  "sessions": [
+    {
+      "sessionId": "5f0c…",
+      "title": "Fix login bug",
+      "status": "running",
+      "updatedAt": 1723800012000
+    }
+  ]
+}
+```
+
+- Membership matches discovery: live, accessible sessions only (`hasActivity`
+  and a backend mapping). An empty `sessions` array means the bridge holds no
+  live conversation.
+- A cancelled turn still counts as `running` until its loop unwinds — the
+  conversation is busy; treat `idle` as the only "finished" signal.
+- `status` is the real-time field. `title` and `updatedAt` come from the
+  bridge's in-memory summary, so the heartbeat's store-enriched values in
+  `/api/instances` may be fresher for cross-bridge conversations.
+- Errors: `401` bad token, `404` unknown instance, `502` bridge unreachable.
+  `HEAD` is supported.
 
 ## Session files (read-only)
 
@@ -301,12 +360,13 @@ The stdio editor and every remote client are peers on the same sessions:
 
 ## Failure & recovery
 
-| Symptom                                | Cause                                                                                                                                                                                                                                                                    | Client action                                                                                       |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| WS closes                              | bridge exited (editor closed) or network drop                                                                                                                                                                                                                            | Poll `/api/instances`; if the instance is gone, its sessions are gone too — drop it from the UI.    |
-| Instance missing from `/api/instances` | Heartbeats stopped >30s, or `?probe=1` found the bridge port unreachable                                                                                                                                                                                                 | Remove the instance from the UI.                                                                    |
-| Connect fails for a while              | Hub process died; a bridge re-spawns it on the next heartbeat (typically ≤10s, worst case ~1min under the spawn throttle). Also expected for a few seconds after a bridge upgrade: the hub notices a newer bridge, restarts, and is re-spawned from the upgraded install | Retry with backoff.                                                                                 |
-| Disconnect mid-turn                    | Mobile network flap, background suspension                                                                                                                                                                                                                               | The turn continues server-side. Reconnect and `session/load` — history replay is the recovery path. |
+| Symptom                                  | Cause                                                                                                                                                                                                                                                                    | Client action                                                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| WS closes                                | bridge exited (editor closed) or network drop                                                                                                                                                                                                                            | Poll `/api/instances`; if the instance is gone, its sessions are gone too — drop it from the UI.    |
+| Instance missing from `/api/instances`   | Heartbeats stopped >30s, or `?probe=1` found the bridge port unreachable                                                                                                                                                                                                 | Remove the instance from the UI.                                                                    |
+| `/api/instances/{id}/status` answers 502 | The instance is registered but its bridge port is unreachable — it is dying; the heartbeat TTL or your next `?probe=1` refresh will drop it                                                                                                                              | Fall back to the heartbeat `status` field, then re-discover.                                        |
+| Connect fails for a while                | Hub process died; a bridge re-spawns it on the next heartbeat (typically ≤10s, worst case ~1min under the spawn throttle). Also expected for a few seconds after a bridge upgrade: the hub notices a newer bridge, restarts, and is re-spawned from the upgraded install | Retry with backoff.                                                                                 |
+| Disconnect mid-turn                      | Mobile network flap, background suspension                                                                                                                                                                                                                               | The turn continues server-side. Reconnect and `session/load` — history replay is the recovery path. |
 
 Updates emitted while you are disconnected are not individually re-delivered;
 `session/load` replay is the catch-up mechanism.

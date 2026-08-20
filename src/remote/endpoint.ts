@@ -29,7 +29,16 @@ import { WebSocketServer } from "ws";
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import { createFileHandler } from "./file-endpoint.js";
+import { createStatusHandler, runningZcodeSids, type SessionRunStatus } from "./status-endpoint.js";
 import type { RemoteConfig } from "./config.js";
+
+/** One heartbeat/discovery session entry (ADR-0005 adds `status`). */
+interface AdvertisedSession {
+  sessionId: string;
+  title?: string;
+  updatedAt: number;
+  status: SessionRunStatus;
+}
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
 const HEARTBEAT_MS = 10_000;
@@ -85,12 +94,11 @@ function tryListen(server: Server, port: number): Promise<boolean> {
  * A failed `session/list` degrades to summaries-only so a backend hiccup
  * never blanks the discovery list.
  */
-export async function collectSessions(
-  server: ZcodeAcpServer,
-): Promise<Array<{ sessionId: string; title?: string; updatedAt: number }>> {
+export async function collectSessions(server: ZcodeAcpServer): Promise<AdvertisedSession[]> {
   // zcodeSid → freshest live entry (an editor tab and a remote attachment
   // can hold two acpSids for the same conversation).
   const live = new Map<string, { sessionId: string; title?: string; updatedAt: number }>();
+  const running = runningZcodeSids(server);
   for (const [acpSid, summary] of server.sessionSummaries) {
     if (!summary.hasActivity) continue;
     const zcodeSid = server.resolveSid(acpSid);
@@ -148,7 +156,12 @@ export async function collectSessions(
     }
   }
 
-  return Array.from(live.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+  // `status` rides along on every heartbeat so /api/instances carries a
+  // coarse running indicator without a per-instance status round-trip
+  // (heartbeat granularity: up to 10s stale; /status serves it live).
+  return Array.from(live.entries())
+    .sort(([, a], [, b]) => b.updatedAt - a.updatedAt)
+    .map(([zcodeSid, s]) => ({ ...s, status: running.has(zcodeSid) ? "running" : "idle" }));
 }
 
 /** session/list timestamps: ms epoch (observed) or ISO string (defensive). */
@@ -184,11 +197,13 @@ export async function startRemoteEndpoint(
   const wss = new WebSocketServer({ noServer: true });
   const upgradeHandler = createNodeWebSocketUpgradeHandler(acpServer, wss);
   const fileHandler = createFileHandler(server);
+  const statusHandler = createStatusHandler(server);
 
   const httpServer = createServer((req, res) => {
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
     if (path === "/acp") acpHttpHandler(req, res);
     else if (path.startsWith("/fs/")) fileHandler(req, res);
+    else if (path === "/status") statusHandler(req, res);
     else {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found");
@@ -228,7 +243,7 @@ export async function startRemoteEndpoint(
   let authRejected = false;
   let spawnThrottledUntil = 0;
 
-  const payload = (sessions: Array<{ sessionId: string; title?: string; updatedAt: number }>) => ({
+  const payload = (sessions: AdvertisedSession[]) => ({
     token: config.token,
     id: instanceId,
     port,
@@ -275,7 +290,7 @@ export async function startRemoteEndpoint(
 
   // Last-good session list: an unexpected collectSessions failure must not
   // blank the discovery payload, so we keep advertising the previous one.
-  let lastSessions: Array<{ sessionId: string; title?: string; updatedAt: number }> = [];
+  let lastSessions: AdvertisedSession[] = [];
 
   const registerOnce = async (): Promise<void> => {
     if (stopped || authRejected) return;

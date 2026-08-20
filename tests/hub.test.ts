@@ -4,13 +4,22 @@
  * idle-exit policy.
  */
 
+import { createServer, type Server } from "node:http";
 import net from "node:net";
 
 import { WebSocket, WebSocketServer } from "ws";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { startHub, type HubHandle } from "../src/remote/hub-server.js";
+// The quota endpoint must not touch the real usage APIs in tests.
+const { accountUsageStatsMock } = vi.hoisted(() => ({
+  accountUsageStatsMock: vi.fn(),
+}));
+vi.mock("../src/handlers/account.js", () => ({
+  accountUsageStats: accountUsageStatsMock,
+}));
+
+import { resetQuotaCacheForTest, startHub, type HubHandle } from "../src/remote/hub-server.js";
 
 const TOKEN = "test-hub-token";
 const BASE_PORT = 18400; // bridge ports start here; ephemeral hub uses port 0
@@ -61,6 +70,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
     new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
   ]);
 }
+
+const QUOTA_FIXTURE = {
+  glm: { kind: "success", level: "Max", items: [] },
+  opencode: { kind: "not_configured" },
+};
 
 describe("hub discovery API", () => {
   it("answers health without auth", async () => {
@@ -322,6 +336,161 @@ describe("hub WS proxy", () => {
       await withTimeout(closed, 3000, "ws reject");
       expect(client.readyState).not.toBe(WebSocket.OPEN);
     }
+  });
+});
+
+describe("hub quota endpoint", () => {
+  const quotaUrl = (hub: HubHandle) => `http://127.0.0.1:${hub.port}/api/quota`;
+
+  beforeEach(() => {
+    accountUsageStatsMock.mockReset();
+    resetQuotaCacheForTest();
+  });
+
+  it("rejects /api/quota without or with a wrong token", async () => {
+    const hub = await startTestHub();
+    expect((await fetch(quotaUrl(hub))).status).toBe(401);
+    expect(
+      (await fetch(quotaUrl(hub), { headers: { Authorization: "Bearer wrong" } })).status,
+    ).toBe(401);
+    expect(accountUsageStatsMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the usage-stats payload verbatim", async () => {
+    const hub = await startTestHub();
+    accountUsageStatsMock.mockResolvedValueOnce(QUOTA_FIXTURE);
+    const res = await fetch(quotaUrl(hub), { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(await res.json()).toEqual(QUOTA_FIXTURE);
+    expect(accountUsageStatsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves the cached copy within the TTL", async () => {
+    const hub = await startTestHub();
+    accountUsageStatsMock.mockResolvedValue(QUOTA_FIXTURE);
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const first = await fetch(quotaUrl(hub), { headers });
+    const second = await fetch(quotaUrl(hub), { headers });
+    expect(await first.json()).toEqual(QUOTA_FIXTURE);
+    expect(await second.json()).toEqual(QUOTA_FIXTURE);
+    expect(accountUsageStatsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 502 when the quota query fails, without caching the failure", async () => {
+    const hub = await startTestHub();
+    accountUsageStatsMock.mockRejectedValueOnce(new Error("upstream down"));
+    const res = await fetch(quotaUrl(hub), { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(502);
+
+    accountUsageStatsMock.mockResolvedValueOnce(QUOTA_FIXTURE);
+    const retry = await fetch(quotaUrl(hub), { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(retry.status).toBe(200);
+  });
+
+  it("falls through to 404 for non-GET methods", async () => {
+    const hub = await startTestHub();
+    const res = await fetch(quotaUrl(hub), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(404);
+    expect(accountUsageStatsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("hub status proxy", () => {
+  /** Fake bridge loopback HTTP server serving GET /status. */
+  function startStatusBridge(body: string): Promise<{ server: Server; port: number }> {
+    return new Promise((resolve) => {
+      const server = createServer((req, res) => {
+        if (req.method === "GET" && req.url === "/status") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(body);
+        } else {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("not found");
+        }
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+      });
+    });
+  }
+
+  async function registerBridge(hub: HubHandle, port: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port })),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  it("byte-proxies /api/instances/{id}/status to the bridge", async () => {
+    const hub = await startTestHub();
+    const bridge = track(
+      await startStatusBridge(
+        JSON.stringify({ sessions: [{ sessionId: "s1", status: "running" }] }),
+      ),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await registerBridge(hub, bridge.port);
+
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    expect(await res.json()).toEqual({ sessions: [{ sessionId: "s1", status: "running" }] });
+  });
+
+  it("rejects the status proxy without a token", async () => {
+    const hub = await startTestHub();
+    expect((await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/status`)).status).toBe(
+      401,
+    );
+  });
+
+  it("answers 404 for an unknown instance", async () => {
+    const hub = await startTestHub();
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances/nope/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("answers 502 when the bridge is unreachable", async () => {
+    const hub = await startTestHub();
+    await registerBridge(hub, BASE_PORT); // nothing listens there
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/status`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(502);
+  });
+});
+
+describe("hub discovery status field", () => {
+  it("passes a valid session status through and strips an invalid one", async () => {
+    const hub = await startTestHub();
+    const post = (sessions: unknown) =>
+      fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(registerBody({ sessions })),
+      });
+
+    await post([{ sessionId: "s1", title: "hello", updatedAt: 1, status: "running" }]);
+    const list = () =>
+      listInstances(hub).then(
+        (r) => r.json() as Promise<Array<{ sessions: Array<Record<string, unknown>> }>>,
+      );
+    expect((await list())[0]!.sessions[0]).toMatchObject({ sessionId: "s1", status: "running" });
+
+    await post([{ sessionId: "s1", title: "hello", updatedAt: 1, status: "bogus" }]);
+    expect((await list())[0]!.sessions[0]!["status"]).toBeUndefined();
   });
 });
 

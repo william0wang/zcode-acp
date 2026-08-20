@@ -2,10 +2,13 @@
  * zcode-acp-hub — machine-level singleton for remote access.
  *
  * The hub is the ONLY public entry point (the port a tunnel maps). It does
- * exactly three things (ADR-0002): token auth, instance discovery, and
- * byte-level WebSocket proxying from a remote client to one bridge's loopback
- * ACP endpoint. It holds no session state and understands no ACP — a proxied
- * connection stays bound to one instance for its whole lifetime.
+ * token auth, instance discovery, and byte-level WebSocket proxying from a
+ * remote client to one bridge's loopback ACP endpoint (ADR-0002), plus two
+ * plain-HTTP conveniences that spare clients a full ACP round-trip (ADR-0005):
+ * a proxied per-instance /status, and an account-level /api/quota queried
+ * directly (quota belongs to the machine's credentials, not to any instance).
+ * It holds no session state and understands no ACP — a proxied connection
+ * stays bound to one instance for its whole lifetime.
  *
  * Bridges register via POST /api/register every 10s (the registration doubles
  * as the heartbeat; entries older than the heartbeat TTL are pruned). A client
@@ -30,6 +33,7 @@ import net from "node:net";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
+import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 
 export interface HubOptions {
   port: number;
@@ -52,6 +56,8 @@ interface SessionSummary {
   sessionId: string;
   title?: string;
   updatedAt: number;
+  /** Coarse running indicator from the bridge heartbeat (ADR-0005); absent on older bridges. */
+  status?: "running" | "idle";
 }
 
 interface InstanceEntry {
@@ -116,15 +122,55 @@ function validSessions(raw: unknown): SessionSummary[] | null {
   if (!Array.isArray(raw)) return null;
   const out: SessionSummary[] = [];
   for (const s of raw) {
-    const rec = s as { sessionId?: unknown; title?: unknown; updatedAt?: unknown };
+    const rec = s as {
+      sessionId?: unknown;
+      title?: unknown;
+      updatedAt?: unknown;
+      status?: unknown;
+    };
     if (typeof rec?.sessionId !== "string") return null;
     out.push({
       sessionId: rec.sessionId,
       ...(typeof rec.title === "string" ? { title: rec.title } : {}),
       updatedAt: typeof rec.updatedAt === "number" ? rec.updatedAt : Date.now(),
+      // Unknown values drop the field entirely (older bridges send none).
+      ...(rec.status === "running" || rec.status === "idle" ? { status: rec.status } : {}),
     });
   }
   return out;
+}
+
+/**
+ * Cached quota for GET /api/quota. Quota is account-level — it belongs to the
+ * machine's configured credentials, not to any bridge instance — so the hub
+ * queries it directly (ADR-0005) instead of proxying an ACP round-trip. The
+ * TTL + single in-flight slot keep polling clients from hammering the
+ * upstream usage APIs.
+ */
+const QUOTA_TTL_MS = 30_000;
+let quotaCache: { result: UsageStatsResult; at: number } | null = null;
+let quotaInflight: Promise<UsageStatsResult> | null = null;
+
+function getQuota(): Promise<UsageStatsResult> {
+  if (quotaCache && Date.now() - quotaCache.at < QUOTA_TTL_MS)
+    return Promise.resolve(quotaCache.result);
+  if (!quotaInflight) {
+    quotaInflight = accountUsageStats()
+      .then((result) => {
+        quotaCache = { result, at: Date.now() };
+        return result;
+      })
+      .finally(() => {
+        quotaInflight = null;
+      });
+  }
+  return quotaInflight;
+}
+
+/** Reset the quota cache (test helper). */
+export function resetQuotaCacheForTest(): void {
+  quotaCache = null;
+  quotaInflight = null;
 }
 
 /**
@@ -280,10 +326,31 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.end(JSON.stringify(list));
       return;
     }
-    // /api/instances/{id}/fs/... — byte-level proxy to the instance's
-    // loopback file endpoint (ADR-0004). The hub routes by instance id only;
-    // sessionId, path semantics, and scope checks stay in the bridge.
-    const fsMatch = url.pathname.match(/^\/api\/instances\/([^/]+)(\/fs\/.*)$/);
+    if (url.pathname === "/api/quota" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      try {
+        const result = await getQuota();
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          // The hub-side TTL is the only caching layer; clients must not see stale copies.
+          "Cache-Control": "no-store",
+        });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("quota query failed");
+      }
+      return;
+    }
+    // /api/instances/{id}/fs/... and /status — byte-level proxy to the
+    // instance's loopback file/status endpoint (ADR-0004, ADR-0005). The hub
+    // routes by instance id only; sessionId, path semantics, and scope checks
+    // stay in the bridge.
+    const fsMatch = url.pathname.match(/^\/api\/instances\/([^/]+)(\/fs\/.*|\/status)$/);
     if (fsMatch && (req.method === "GET" || req.method === "HEAD")) {
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
