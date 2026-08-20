@@ -29,6 +29,7 @@ import { WebSocketServer } from "ws";
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import { createFileHandler } from "./file-endpoint.js";
+import { createSessionCloseHandler } from "./session-close-endpoint.js";
 import { createStatusHandler, runningZcodeSids, type SessionRunStatus } from "./status-endpoint.js";
 import type { RemoteConfig } from "./config.js";
 
@@ -198,12 +199,15 @@ export async function startRemoteEndpoint(
   const upgradeHandler = createNodeWebSocketUpgradeHandler(acpServer, wss);
   const fileHandler = createFileHandler(server);
   const statusHandler = createStatusHandler(server);
+  const sessionCloseHandler = createSessionCloseHandler(server);
 
   const httpServer = createServer((req, res) => {
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+    const closeMatch = path.match(/^\/sessions\/([^/]+)\/close$/);
     if (path === "/acp") acpHttpHandler(req, res);
     else if (path.startsWith("/fs/")) fileHandler(req, res);
     else if (path === "/status") statusHandler(req, res);
+    else if (closeMatch) sessionCloseHandler(req, res, closeMatch[1]!);
     else {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("not found");

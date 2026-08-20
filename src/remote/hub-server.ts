@@ -24,6 +24,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import {
   createServer,
   get as httpGet,
+  request as httpRequest,
   type IncomingMessage,
   type Server,
   type ServerResponse,
@@ -382,6 +383,56 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         }
       });
       req.on("close", () => upstream.destroy());
+      return;
+    }
+    // POST /api/instances/{id}/sessions/{sid}/close — the remote HTTP
+    // surface's first write op (ADR-0006): forward-and-relay to the bridge's
+    // loopback close route. The hub still routes by instance id only; close
+    // semantics (running guard, discovery retirement) stay in the bridge.
+    const closeMatch = url.pathname.match(/^\/api\/instances\/([^/]+)\/sessions\/([^/]+)\/close$/);
+    if (closeMatch && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const entry = instances.get(closeMatch[1]!);
+      if (!entry) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("unknown instance");
+        return;
+      }
+      const upstream = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: entry.port,
+          path: `/sessions/${closeMatch[2]}/close`,
+          method: "POST",
+        },
+        (up) => {
+          const headers = { ...up.headers };
+          delete headers["transfer-encoding"];
+          delete headers.connection;
+          res.writeHead(up.statusCode ?? 502, headers);
+          up.pipe(res);
+        },
+      );
+      upstream.on("error", () => {
+        if (res.headersSent) res.destroy();
+        else {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("bridge unreachable");
+        }
+      });
+      // Abort the upstream only when the CLIENT side dies mid-response.
+      // `req`'s own 'close' fires once the (usually empty) body is drained —
+      // typically BEFORE the relayed response finishes writing — so keying on
+      // it resets the bridge socket on every request (ECONNRESET → 502).
+      res.on("close", () => {
+        if (!res.writableEnded) upstream.destroy();
+      });
+      // Relay any request body through (clients normally send none).
+      req.pipe(upstream);
       return;
     }
     if (

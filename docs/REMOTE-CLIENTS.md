@@ -46,12 +46,13 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint                         | Auth     | Purpose                                                                                      |
-| -------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `GET /api/health`                | none     | Liveness probe; `200` body `ok`.                                                             |
-| `GET /api/instances`             | required | Registered bridge instances. Add `?probe=1` to verify first.                                 |
-| `GET /api/instances/{id}/status` | required | Real-time per-session running status of one bridge.                                          |
-| `GET /api/quota`                 | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
+| Endpoint                                              | Auth     | Purpose                                                                                      |
+| ----------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
+| `GET /api/health`                                     | none     | Liveness probe; `200` body `ok`.                                                             |
+| `GET /api/instances`                                  | required | Registered bridge instances. Add `?probe=1` to verify first.                                 |
+| `GET /api/instances/{id}/status`                      | required | Real-time per-session running status of one bridge.                                          |
+| `POST /api/instances/{id}/sessions/{sessionId}/close` | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).        |
+| `GET /api/quota`                                      | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -256,6 +257,39 @@ Two layers (ADR-0005), both plain HTTP — no ACP connection needed:
   `/api/instances` may be fresher for cross-bridge conversations.
 - Errors: `401` bad token, `404` unknown instance, `502` bridge unreachable.
   `HEAD` is supported.
+
+## Closing a session
+
+```text
+POST {hub}/api/instances/{id}/sessions/{sessionId}/close   → 200 { "ok": true }
+```
+
+Retires a conversation from remote discovery. This addresses a protocol gap:
+ACP has no editor→agent "tab closed" notification, so a conversation retired
+on the editor side stays in this bridge's in-memory summary — and therefore
+in your list — until the bridge restarts. Closing clears the summary.
+
+**Closing is not deletion.** The backend session store, the editor's own
+conversation storage, and the App's tasks-index are untouched; only remote
+visibility changes. Two guards shape the semantics (ADR-0006):
+
+- A session with a **running turn is refused** (`409`) — cancel the turn
+  first.
+- **Self-healing**: if the editor side actually still has the conversation
+  open, its next activity there (any prompt, any load with history)
+  re-marks it active and it REAPPEARS in discovery within one heartbeat.
+  So a wrongly closed conversation recovers on its own, while an
+  editor-side-retired one stays gone. A bridge restart auto-resume alone
+  does NOT resurrect a closed session — real use does.
+
+Errors: `401` bad token, `404` unknown session (or instance), `409` running,
+`502` bridge unreachable. Takes effect immediately in
+`/api/instances/{id}/status` and within one heartbeat (≤10s) in
+`/api/instances`.
+
+Cross-instance note: if the same conversation is also registered by another
+bridge of the project, the hub's dedupe re-attaches it under that instance —
+close it there too.
 
 ## Session files (read-only)
 

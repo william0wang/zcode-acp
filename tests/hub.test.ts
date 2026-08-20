@@ -494,6 +494,88 @@ describe("hub discovery status field", () => {
   });
 });
 
+describe("hub session close proxy", () => {
+  /** Fake bridge loopback HTTP server accepting POST /sessions/{id}/close. */
+  function startCloseBridge(): Promise<{ server: Server; port: number }> {
+    return new Promise((resolve) => {
+      const server = createServer((req, res) => {
+        const sid = new URL(req.url ?? "/", "http://127.0.0.1").pathname.split("/")[2];
+        if (req.method === "POST" && req.url === `/sessions/${sid}/close`) {
+          req.resume();
+          res.writeHead(sid === "s-busy" ? 409 : 200, { "Content-Type": "application/json" });
+          res.end(sid === "s-busy" ? "session is running" : '{"ok":true}');
+        } else {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("not found");
+        }
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+      });
+    });
+  }
+
+  async function registerBridge(hub: HubHandle, port: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port })),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  it("forwards the close POST and relays the bridge's response", async () => {
+    const hub = await startTestHub();
+    const bridge = track(
+      await startCloseBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await registerBridge(hub, bridge.port);
+
+    const ok = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s1/close`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true });
+
+    const busy = await fetch(
+      `http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s-busy/close`,
+      { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+    );
+    expect(busy.status).toBe(409);
+  });
+
+  it("guards the close proxy like the read routes", async () => {
+    const hub = await startTestHub();
+    const close = (sid: string, token: string | null) =>
+      fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/${sid}/close`, {
+        method: "POST",
+        ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      });
+
+    expect((await close("s1", null)).status).toBe(401); // no token
+    expect((await close("s1", "wrong")).status).toBe(401); // bad token
+    expect((await close("s1", TOKEN)).status).toBe(404); // unknown instance
+    // Non-POST falls through to the catch-all 404.
+    const get = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s1/close`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(get.status).toBe(404);
+  });
+
+  it("answers 502 when the bridge is unreachable", async () => {
+    const hub = await startTestHub();
+    await registerBridge(hub, BASE_PORT); // nothing listens there
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s1/close`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(502);
+  });
+});
+
 describe("hub idle exit", () => {
   it("exits after the idle window with no instances and no proxies", async () => {
     let exited = false;
