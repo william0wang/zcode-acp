@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-08-20
+
+### Fixed
+
+- Interaction forwards settle exactly once: a throw during the forward
+  (adapter on malformed params, a failing notification send) now degrades to
+  a decline reply instead of leaving the zcode request unanswered, leaking
+  the reannounce-dedup entry, and refreshing the turn loop's no-progress
+  timer until the turn hangs. The turn loop also contains
+  handleServerRequests throws instead of dying.
+- Hub: expose `X-Zcode-First-Line` via `Access-Control-Expose-Headers` so
+  cross-origin file viewers can read the line-window header; guard the WS
+  upgrade dial window against a client socket that dies mid-dial.
+- `dispatchConfigChanged` looks config options up by id instead of array
+  index (the build order was a hidden contract).
+- `waitForTurnIdle` gains a 30 s lock-watching grace: past it, a successful
+  probe counts as released, so a turn finishing between probes or backend
+  error-message drift no longer spins the full timeout into a false
+  `__lockTimeout`.
+- `pendingTurns` keyed `number | string` (JSON-RPC ids); corrected two
+  stopSent comments that claimed cross-turn dedup.
+
 ## [0.11.0] - 2026-08-20
 
 ### Added
