@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-20
+
+### Added
+
+- Remote session close (ADR-0006): `POST /api/instances/{id}/sessions/{sessionId}/close`
+  retires a conversation from remote discovery once the editor tab that owned it
+  is gone. The hub byte-proxies to the bridge's loopback
+  `POST /sessions/{id}/close`, which drops the in-memory summary so the session
+  vanishes from `/status` and the next heartbeat. A session with a running turn
+  answers `409` (cancel the turn first); an unknown session answers `404`. The
+  bridge cannot observe which sessions still exist on the editor side, so close
+  is self-healing instead of destructive: any later prompt or `session/load`
+  that touches the conversation re-arms the entry and it reappears in discovery
+  — an editor-side tab that is actually alive cannot be closed out from under
+  it.
+
 ## [0.8.0] - 2026-08-20
 
 ### Added
