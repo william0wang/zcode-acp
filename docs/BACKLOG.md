@@ -30,19 +30,21 @@ when a concrete ACP/editor need appears.
 | `session/subagents`                                                             | Query the list of sub-agents for a session                  | Sub-agent info is parsed from the `Agent` tool result (`_meta.subagent`); sufficient for now                           |
 | `session/events`                                                                | Pull-mode event history (complement to `session/subscribe`) | Not used; could support event replay/gap-fill                                                                          |
 | `session/usage`                                                                 | Per-session token usage                                     | Context bar uses `session.updated` usage payload instead                                                               |
-| `workspace/hooks/trustGrant`                                                    | Server→client request: approve hook trust                   | Not answered by the bridge (requeued, no owner); if the backend blocks a turn on it, turns could hang — watch for this |
-| `interaction/browserList` / `interaction/browserExecute`                        | Server→client requests: browser automation via the client   | Not answered; only meaningful once an ACP client has a browser surface                                                 |
-| `interaction/requestProviderRuntimeHeaders`                                     | Server→client request: provider runtime headers             | Not answered                                                                                                           |
+| `workspace/hooks/trustGrant`                                                    | Server→client request: approve hook trust                   | Auto-errored by the unknown-request fallback (`server-requests.ts` `handleOne`) during turns; `session/send` carries a 15s timeout so nothing hangs. If hook trust ever needs real UX, map it onto ACP `session/request_permission` |
+| `interaction/browserList` / `interaction/browserExecute`                        | Server→client requests: browser automation via the client   | Auto-errored by the fallback above; only meaningful once an ACP client has a browser surface                                                 |
+| `interaction/requestProviderRuntimeHeaders`                                     | Server→client request: provider runtime headers             | Auto-errored by the fallback above                                                                                     |
 | `workspace/updateInteractionPreferences` / `workspace/updateModelIoPreferences` | Client preference updates                                   | Not used                                                                                                               |
 
-### New `session/send` params (0.16+, unwired)
+### New `session/send` params (0.16+)
 
-The `session/send` schema grew fields the bridge does not forward:
+`attachments` is already wired: ACP image content blocks are extracted
+(`extractAttachments`) and forwarded as `kind:"image"` entries (`localPath`
+for `file://` uris, `dataBase64` otherwise). The remaining fields are not
+forwarded:
 
-- `attachments` — file/image attachments (`artifact://`, `data:` URLs,
-  browser screenshots via `node_repl_images`)
 - `toolDenylist` — per-message tool deny list
-- `runtimeModel` — per-message model override
+- `runtimeModel` — per-message model override (redundant with the bridge's
+  `session/setModel` / config-option switching)
 - `browserAmbientContext` — browser context for the turn
 - `expectedRevision` / `expectedProviderRevision` / `expectedModelRuntimeRevision`
   — optimistic concurrency guards
