@@ -377,17 +377,27 @@ async function handleOne(
   }
   if (dedupKey) pending.set(dedupKey, { zcodeIds: [zcodeReqId] });
 
+  // Settle-once: whatever happens during the forward, zcode must get exactly
+  // one reply and the dedup entry must resolve. An unanswered request makes
+  // the backend reannounce forever, and every reannounce refreshes the turn
+  // loop's no-progress timer — the 120s timeout never fires and the turn
+  // hangs. Any throw degrades to decline instead of propagating.
   let zcodeResp: ZcodeInteractionResponse;
-  if (ask) {
-    zcodeResp = await handleAskUserQuestion(
-      server,
-      cx,
-      acpSid,
-      params as ZcodeInteractionUserInputParams,
-      turn,
-    );
-  } else {
-    zcodeResp = await handleSinglePermission(server, cx, acpSid, params, epm, perm, turn);
+  try {
+    if (ask) {
+      zcodeResp = await handleAskUserQuestion(
+        server,
+        cx,
+        acpSid,
+        params as ZcodeInteractionUserInputParams,
+        turn,
+      );
+    } else {
+      zcodeResp = await handleSinglePermission(server, cx, acpSid, params, epm, perm, turn);
+    }
+  } catch (e) {
+    warn(`  ⚠ interaction forward threw, declining: ${e instanceof Error ? e.message : String(e)}`);
+    zcodeResp = { action: "decline", reason: "bridge error during forward" };
   }
 
   // Reply to the first zcode id + all reannounced ones, and cache for late reannounces.

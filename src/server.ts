@@ -89,8 +89,12 @@ export class ZcodeAcpServer {
    * are deleted on first use.
    */
   readonly sessionCwds = new Map<string, string>();
-  /** Currently running turns, keyed by the ACP request id. */
-  readonly pendingTurns = new Map<number, PendingTurn>();
+  /**
+   * Currently running turns, keyed by the ACP request id (JSON-RPC ids may be
+   * numbers or strings; set/delete always use the same value, so the wider
+   * key type is only for honesty).
+   */
+  readonly pendingTurns = new Map<number | string, PendingTurn>();
   /**
    * Per-session (zcodeSid) preempt lock: a promise chain that serializes the
    * "register self + preempt others" critical section in prompt(). Prevents

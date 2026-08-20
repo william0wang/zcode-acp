@@ -157,7 +157,14 @@ async function main(): Promise<void> {
       // starts — the prompting client renders it locally, the others only
       // ever see the agent's output.
       echoUserPromptToOthers(server, ctx.client, ctx.params);
-      return prompt(server, ctx.params, server.clients.broadcast(), ctx.requestId as number);
+      // JSON-RPC requests always carry a non-null id; the SDK types it as the
+      // wider JsonRpcId, hence the narrowing cast.
+      return prompt(
+        server,
+        ctx.params,
+        server.clients.broadcast(),
+        ctx.requestId as number | string,
+      );
     })
     .onRequest("session/set_config_option", (ctx) =>
       setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),

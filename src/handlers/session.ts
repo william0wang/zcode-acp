@@ -470,7 +470,7 @@ export async function prompt(
   server: ZcodeAcpServer,
   params: acp.PromptRequest,
   cx: acp.AgentContext,
-  requestId: number,
+  requestId: number | string,
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
 
@@ -829,8 +829,9 @@ export async function cancel(
   // Cancel ALL matching turns for this session (not just the first). While a
   // prior turn is still finalising, pendingTurns holds both it and any newer
   // prompt waiting on the backend's prompt lock; breaking on the first match
-  // could leave the live one running. The stopSent guard dedupes the backend
-  // stop call across turns and repeated cancels.
+  // could leave the live one running. Each turn guards its own stopSent, so
+  // multiple matching turns may each fire session/stop once — the backend
+  // treats stop as idempotent, so the duplicate is harmless.
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
       turn.cancelled = true;
@@ -944,14 +945,14 @@ function withPreemptLock(
 export function preemptInFlightTurn(
   server: ZcodeAcpServer,
   zcodeSid: string,
-  selfRequestId: number,
+  selfRequestId: number | string,
 ): boolean {
   // Cancel ALL matching turns (mirrors cancel()): pendingTurns can hold more
   // than one entry for this session — e.g. an already-cancelled turn still
   // finalising plus the live one. Breaking on the first match could hit the
   // stale entry and leave the live turn running, so the new prompt's send
-  // would retry against a busy backend for 30s and fail. The stopSent guard
-  // dedupes the backend stop call across turns.
+  // would retry against a busy backend for 30s and fail. Each turn guards its
+  // own stopSent; duplicate stops are idempotent on the backend.
   let found = false;
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid !== zcodeSid || reqId === selfRequestId) continue;
@@ -1201,7 +1202,15 @@ async function runEventTurn(
     // Drain + handle server→client requests (interaction/*). Refreshes the
     // no-progress timer when any are handled. Pass `turn` so interaction
     // requests become turn-cancel aware (user stop aborts pending popups).
-    if (await handleServerRequests(server, backend, cx, acpSid, turn)) {
+    // Best-effort containment: a throw here would kill the turn loop (and the
+    // prompt response with it); warn and keep draining instead.
+    let handled = false;
+    try {
+      handled = await handleServerRequests(server, backend, cx, acpSid, turn);
+    } catch (e) {
+      warn(`handleServerRequests threw: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    if (handled) {
       lastProgress = Date.now();
     }
 
