@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-08-20
+
+### Fixed
+
+- Plan/todo panel lag: the backend writes the projection's todos
+  asynchronously after the tool-result event, so a single read at result-time
+  races that write and intermittently sees the stale list.
+  `dispatchPlanIfChanged` now re-checks once after a 600 ms delay when the
+  todos signature is unchanged, before giving up.
+- Tests covering the 0.11.1 audit-fix batch (settle-once, turn-idle grace,
+  plan re-check) in `tests/audit-fixes.test.ts`.
+
 ## [0.11.1] - 2026-08-20
 
 ### Fixed
