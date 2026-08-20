@@ -264,6 +264,12 @@ export async function setMode(
  * the lock isn't held yet, so a probe succeeds immediately (false "released").
  * With expectLock=true, we first require observing "prompt is running" once
  * (proving the turn truly started) before trusting a later success.
+ *
+ * `graceMs` bounds that lock-watching phase: if the lock is still unseen past
+ * the grace, a successful probe counts as released. Without it, a turn that
+ * finishes between two probes — or a backend whose lock error message drifted
+ * away from "prompt is running" (version drift) — spins the full timeout and
+ * reports a false failure.
  */
 export async function waitForTurnIdle(
   server: ZcodeAcpServer,
@@ -271,6 +277,7 @@ export async function waitForTurnIdle(
   timeoutMs: number,
   probeMethod: string,
   expectLock: boolean,
+  graceMs = 30_000,
 ): Promise<boolean> {
   const backend = server.ensureBackend();
   const t0 = Date.now();
@@ -309,6 +316,12 @@ export async function waitForTurnIdle(
         );
         return true;
       }
+      if (Date.now() - t0 >= graceMs) {
+        log(
+          `  [probe] #${probeCount} @${elapsed}s: NON-LOCK error, grace expired → released (err="${errMsg.slice(0, 50)}")`,
+        );
+        return true;
+      }
       log(
         `  [probe] #${probeCount} @${elapsed}s: NON-LOCK error, lockSeen=false → wait for lock (err="${errMsg.slice(0, 50)}")`,
       );
@@ -317,6 +330,10 @@ export async function waitForTurnIdle(
     }
     if (lockSeen) {
       log(`  [probe] #${probeCount} @${elapsed}s: probe success after lock → released`);
+      return true;
+    }
+    if (Date.now() - t0 >= graceMs) {
+      log(`  [probe] #${probeCount} @${elapsed}s: probe success, grace expired → released`);
       return true;
     }
     log(

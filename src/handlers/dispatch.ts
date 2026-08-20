@@ -99,9 +99,18 @@ async function dispatchConfigChanged(
     // events routed through a registered turn loop always have it.
     const zcodeSid = server.resolveSid(acpSid) ?? null;
     const options = await buildConfigOptions(server, zcodeSid);
-    if (ev.model) options[0].currentValue = formatModelValue(ev.model.providerId, ev.model.modelId);
-    if (ev.mode !== undefined) options[1].currentValue = ev.mode;
-    if (ev.thought !== undefined) options[2].currentValue = ev.thought;
+    // Find by id — the array order buildConfigOptions returns is not a
+    // contract; index-based writes would silently hit the wrong option if
+    // that order ever changed (emitModeViaConfigOption already does this).
+    const setById = (id: string, value: string) => {
+      const opt = options.find((o) => o.id === id);
+      if (opt) opt.currentValue = value;
+    };
+    if (ev.model) {
+      setById("model", formatModelValue(ev.model.providerId, ev.model.modelId));
+    }
+    if (ev.mode !== undefined) setById("mode", ev.mode);
+    if (ev.thought !== undefined) setById("thought", ev.thought);
     await sendSessionUpdate(cx, acpSid, {
       sessionUpdate: "config_option_update",
       configOptions: options,
