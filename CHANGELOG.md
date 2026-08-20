@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-20
+
+### Added
+
+- Plain-HTTP endpoints for remote clients, replacing the full ACP WebSocket
+  round-trip for account quota and session running status (ADR-0005).
+  `GET /api/quota` on the hub queries the usage APIs directly — quota is an
+  account-level concern, so it works with zero bridges alive — with a ~30s
+  TTL cache and in-flight dedupe; the response body is identical to the
+  `account/usage_stats` ACP method, which stays available for attached
+  editors. The bridge serves `GET /status` (in-memory `pendingTurns`
+  derivation, no backend RPC, safe to poll at 1–2s), byte-proxied by the
+  hub at `GET /api/instances/{id}/status`; the heartbeat's `sessions[]`
+  also carries a coarse `status: "running" | "idle"` so `/api/instances`
+  renders a running indicator for free. Both layers are additive — an
+  older hub drops the field, an older bridge omits it.
+
 ## [0.7.1] - 2026-08-18
 
 ### Fixed
