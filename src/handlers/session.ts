@@ -1658,16 +1658,26 @@ async function dispatchEditDiff(
  * waiting for turn completion — the turn-completion diff would otherwise lag
  * behind by the rest of the model's output.
  *
+ * The backend writes the projection's todos asynchronously AFTER the
+ * tool-result event, so a single read at result-time races that write and
+ * intermittently sees the stale list (the editor's todo panel then lags until
+ * the next tool completes). When the signature is unchanged, re-check once
+ * after a short delay before giving up.
+ *
  * Uses a lightweight `session/read` (no session/messages fetch). Failures are
  * logged and swallowed: plan staleness is cosmetic, not worth crashing the turn.
  */
-async function dispatchPlanIfChanged(
+const PLAN_RECHECK_DELAY_MS = 600;
+
+// Exported for unit tests (plan recheck timing).
+export async function dispatchPlanIfChanged(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   zcodeSid: string,
   differ: ProjectionDiffer,
   chunkMsgId: string,
+  recheck = true,
 ): Promise<void> {
   try {
     const backend = server.ensureBackend();
@@ -1683,6 +1693,24 @@ async function dispatchPlanIfChanged(
     };
     const todos = flattenTodos(read.todos, read.todoGroups);
     const events = differ.diffPlan(todos);
+    if (events.length === 0) {
+      if (!recheck) return;
+      const timer = setTimeout(() => {
+        void dispatchPlanIfChanged(
+          server,
+          cx,
+          acpSid,
+          zcodeSid,
+          differ,
+          chunkMsgId,
+          false,
+        ).catch(() => {
+          /* best-effort: cosmetic staleness only */
+        });
+      }, PLAN_RECHECK_DELAY_MS);
+      timer.unref?.();
+      return;
+    }
     for (const iev of events) {
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
