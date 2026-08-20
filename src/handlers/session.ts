@@ -1696,17 +1696,11 @@ export async function dispatchPlanIfChanged(
     if (events.length === 0) {
       if (!recheck) return;
       const timer = setTimeout(() => {
-        void dispatchPlanIfChanged(
-          server,
-          cx,
-          acpSid,
-          zcodeSid,
-          differ,
-          chunkMsgId,
-          false,
-        ).catch(() => {
-          /* best-effort: cosmetic staleness only */
-        });
+        void dispatchPlanIfChanged(server, cx, acpSid, zcodeSid, differ, chunkMsgId, false).catch(
+          () => {
+            /* best-effort: cosmetic staleness only */
+          },
+        );
       }, PLAN_RECHECK_DELAY_MS);
       timer.unref?.();
       return;
