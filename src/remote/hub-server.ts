@@ -97,6 +97,9 @@ function setCors(res: ServerResponse): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+  // Custom response headers JS may read cross-origin; without this the file
+  // viewer's line-window fetches cannot see X-Zcode-First-Line at all.
+  res.setHeader("Access-Control-Expose-Headers", "X-Zcode-First-Line");
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown> | null> {
@@ -246,7 +249,19 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // Dial the bridge's loopback endpoint before accepting the client side,
     // so a dead bridge fails the upgrade instead of half-opening a pipe.
     const bridge = new WebSocket(`ws://127.0.0.1:${entry.port}/acp`);
+    // The client socket can die while we dial; without this guard
+    // handleUpgrade would run against a dead socket.
+    let clientGone = false;
+    const onClientGone = () => {
+      clientGone = true;
+      bridge.terminate();
+    };
+    socket.once("close", onClientGone);
+    socket.once("error", onClientGone);
     bridge.once("open", () => {
+      if (clientGone) return; // terminated above; "open" can no longer fire
+      socket.removeListener("close", onClientGone);
+      socket.removeListener("error", onClientGone);
       wss.handleUpgrade(req, socket, head, (client) => startProxy(client, bridge));
     });
     bridge.once("error", (e) => {
