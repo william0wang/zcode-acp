@@ -13,6 +13,11 @@
  * the same requestId/toolCallId. The first request forwards to the client;
  * reannounces either get the cached result (if it arrived) or just record
  * their zcode id for a later unified reply.
+ *
+ * Reconnect resend: a client-side request fired while a remote client was
+ * offline never reaches it. Undecided waits are tracked (ActiveInteraction)
+ * and re-sent to a client when its session/load / session/resume completes —
+ * the re-send joins the existing first-response-wins race.
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -38,6 +43,7 @@ import {
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
+import type { ClientLike } from "../remote/broadcast.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -95,6 +101,152 @@ export function getPendingInteractions(server: ZcodeAcpServer): Map<string, Dedu
   (server as unknown as { _pendingInteractions: Map<string, DedupEntry> })._pendingInteractions =
     fresh;
   return fresh;
+}
+
+/**
+ * One in-flight client interaction request (`session/request_permission` or
+ * `elicitation/create`) whose answer is still pending.
+ *
+ * A request fired while a remote client was offline never reaches it, and the
+ * broadcast race snapshots its client list once — a client attaching mid-wait
+ * is invisible to it. Tracking each wait here lets `resendPendingInteractions`
+ * fire a targeted re-send at a client that just (re)connected; the re-send
+ * joins this race (first response wins, losing clients get `$/cancel_request`
+ * so their dialogs dismiss).
+ */
+interface ActiveInteraction {
+  readonly method: string;
+  readonly params: unknown;
+  readonly label: string;
+  /** Abort controller per in-flight client attempt; aborting dismisses that client's dialog. */
+  readonly controllers: Set<AbortController>;
+  /** Set once any attempt answered or the wait was interrupted — no further attempts join. */
+  settled: boolean;
+  /** In-flight attempt count; reaching zero without a winner rejects the race. */
+  inFlight: number;
+  firstError: unknown;
+  readonly promise: Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (err: unknown) => void;
+}
+
+/** Per-server active interaction registry (lazy-initialised). */
+function getActiveInteractions(server: ZcodeAcpServer): Set<ActiveInteraction> {
+  const holder = server as unknown as { _activeInteractions?: Set<ActiveInteraction> };
+  if (holder._activeInteractions) return holder._activeInteractions;
+  const fresh = new Set<ActiveInteraction>();
+  holder._activeInteractions = fresh;
+  return fresh;
+}
+
+/** Create the unresolved race entry for one interaction wait. */
+function createActiveInteraction(
+  method: string,
+  params: unknown,
+  label: string,
+): ActiveInteraction {
+  let resolve!: (value: unknown) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<unknown>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return {
+    method,
+    params,
+    label,
+    controllers: new Set(),
+    settled: false,
+    inFlight: 0,
+    firstError: undefined,
+    promise,
+    resolve,
+    reject,
+  };
+}
+
+/**
+ * Fire one attempt of an interaction race. The first attempt goes through the
+ * broadcast proxy (itself a first-response-wins race across the currently
+ * connected clients); later attempts are targeted re-sends at clients that
+ * attached mid-wait. The first attempt to answer resolves the race and aborts
+ * every other attempt's controller; when all in-flight attempts fail instead,
+ * the race rejects with the first error (surfaces like a single-client failure).
+ */
+function fireInteractionAttempt(
+  entry: ActiveInteraction,
+  send: (options: acp.SendRequestOptions) => Promise<unknown>,
+): void {
+  const ctrl = new AbortController();
+  entry.controllers.add(ctrl);
+  entry.inFlight++;
+  // send() may throw synchronously (broken/just-closed connection); funnel
+  // that into the rejection path — the reconnect re-send calls this from a
+  // timer callback, where a sync throw would crash the bridge.
+  let attempt: Promise<unknown>;
+  try {
+    attempt = send({ cancellationSignal: ctrl.signal });
+  } catch (err) {
+    attempt = Promise.reject(err);
+  }
+  attempt.then(
+    (value) => {
+      entry.inFlight--;
+      entry.controllers.delete(ctrl);
+      if (entry.settled) return;
+      entry.settled = true;
+      for (const other of entry.controllers) other.abort();
+      entry.controllers.clear();
+      entry.resolve(value);
+    },
+    (err) => {
+      entry.inFlight--;
+      entry.controllers.delete(ctrl);
+      if (entry.firstError === undefined) entry.firstError = err;
+      if (!entry.settled && entry.inFlight === 0) {
+        entry.settled = true;
+        entry.reject(entry.firstError);
+      }
+    },
+  );
+}
+
+/**
+ * Delay before a reconnect re-send fires. The resend is triggered by the
+ * client's session/load / session/resume completing; the pause lets that
+ * response plus the replay updates land first, so the popup renders on a
+ * settled session view instead of racing the replay (clients commonly reset
+ * dialog state when a load starts).
+ */
+const RESEND_DELAY_MS = 300;
+
+/**
+ * Re-send this session's still-undecided interaction requests to a client that
+ * just (re)connected, so an agent question that fired while the client was
+ * offline becomes answerable there. Fire-and-forget, best-effort: each re-send
+ * joins the existing first-response-wins race; if another client answers first,
+ * the re-send is cancelled and the reconnected client's dialog (if any) drops.
+ */
+export function resendPendingInteractions(
+  server: ZcodeAcpServer,
+  client: ClientLike,
+  acpSid: string,
+): void {
+  const active = getActiveInteractions(server);
+  if (active.size === 0) return;
+  for (const entry of [...active]) {
+    if (entry.settled) continue;
+    const sid = (entry.params as { sessionId?: string }).sessionId;
+    if (sid !== acpSid) continue;
+    log(`  ⟳ ${entry.label} still unanswered, re-sending to reconnected client (sid=${acpSid})`);
+    const timer = setTimeout(() => {
+      if (entry.settled) return;
+      fireInteractionAttempt(entry, (options) =>
+        client.request(entry.method, entry.params, options),
+      );
+    }, RESEND_DELAY_MS);
+    timer.unref?.();
+  }
 }
 
 /**
@@ -314,6 +466,7 @@ async function handleSinglePermission(
     `  ⟳ ${toolName || "permission"}, forwarding session/request_permission (acp_id=${acpReqId})`,
   );
   const acpResp = await requestWithTimeout(
+    server,
     cx,
     "session/request_permission",
     acpParams,
@@ -428,7 +581,7 @@ export async function handleAskUserQuestion(
  * `decline` on any failure so the caller can degrade gracefully.
  */
 async function handleAskUserViaElicitation(
-  _server: ZcodeAcpServer,
+  server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   params: ZcodeInteractionUserInputParams,
@@ -451,6 +604,7 @@ async function handleAskUserViaElicitation(
     `  ⟳ AskUserQuestion forwarding elicitation/create (form, ${Object.keys(formParams.requestedSchema.properties).length} fields)`,
   );
   const acpResp = await requestWithTimeout(
+    server,
     cx,
     "elicitation/create",
     formParams,
@@ -496,7 +650,7 @@ async function emitAskToolCall(
 
 /** Send one requestPermission and await the response. */
 async function askOnce(
-  _server: ZcodeAcpServer,
+  server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpParams: {
     options: unknown[];
@@ -508,9 +662,10 @@ async function askOnce(
   _label: string,
   turn?: PendingTurn,
 ): Promise<unknown> {
-  const acpReqId = _server.nextId();
+  const acpReqId = server.nextId();
   log(`  ⟳ AskUserQuestion forwarding session/request_permission (acp_id=${acpReqId})`);
   const resp = await requestWithTimeout(
+    server,
     cx,
     "session/request_permission",
     acpParams,
@@ -575,12 +730,17 @@ type InteractionResult = unknown | typeof INTERRUPTED;
  * Send a client-side request and wait for the response. By default waits
  * indefinitely (see {@link INTERACTION_TIMEOUT_MS}). Resolves to the client
  * response, `null` if the client returned null/errored, or {@link INTERRUPTED}
- * if the wait was broken by connection close / env timeout / turn cancel. The
- * underlying `cx.request` promise stays pending after an interrupt (the SDK has
- * no abort) but is no longer awaited; it settles naturally when the client
- * eventually responds or the connection closes.
+ * if the wait was broken by connection close / env timeout / turn cancel.
+ *
+ * The client request runs inside a tracked first-response-wins race (see
+ * {@link ActiveInteraction}): the broadcast proxy races the clients connected
+ * at fire time, and `resendPendingInteractions` can add targeted attempts at
+ * clients that attach mid-wait. After the wait settles (answered OR
+ * interrupted — the caller replies decline), the entry is dropped and every
+ * still-open attempt is aborted, dismissing the leftover dialogs.
  */
 async function requestWithTimeout(
+  server: ZcodeAcpServer,
   cx: acp.AgentContext,
   method: string,
   params: unknown,
@@ -596,13 +756,19 @@ async function requestWithTimeout(
   const disposers: Array<() => void> = [];
   const settled = { done: false };
 
-  // Build the racers. The primary is the client request itself.
+  // Primary racer: the tracked interaction race (broadcast attempt + any
+  // reconnect re-sends). Failures surface as null, matching a single client
+  // request that errors.
+  const active = getActiveInteractions(server);
+  const entry = createActiveInteraction(method, params, label);
+  active.add(entry);
   const racers: Array<Promise<InteractionResult>> = [
-    cx.request(method, params as never).catch((e: unknown) => {
+    entry.promise.catch((e: unknown) => {
       warn(`  ⚠ ${label} failed: ${e instanceof Error ? e.message : String(e)}`);
       return null;
     }),
   ];
+  fireInteractionAttempt(entry, (options) => cx.request(method, params as never, options));
 
   // Connection-close detection: replaces the old finite timeout as the crash
   // guard. `cx.signal` is an AbortSignal that fires when the stream closes;
@@ -661,10 +827,10 @@ async function requestWithTimeout(
   }
 
   const winner = await Promise.race(racers);
-  // Mark settled BEFORE disposing: the primary racer (the client request)
-  // resolves without touching settled.done, so a later `closed.then(fire)`
-  // would otherwise pass its guard and emit a spurious "aborted (client
-  // connection closed)" warn long after a normal completion.
+  // Mark settled BEFORE disposing: a non-primary racer can win while the
+  // interaction race is still open, and a later `closed.then(fire)` would
+  // otherwise pass its guard and emit a spurious "aborted (client connection
+  // closed)" warn long after a normal completion.
   settled.done = true;
   // Tear down every racer's timer/listener so the losers don't leak. The
   // turn-cancel interval is the critical one: without this it fires forever.
@@ -674,6 +840,15 @@ async function requestWithTimeout(
     } catch {
       /* best-effort cleanup */
     }
+  }
+  // The interaction is decided either way (answered, or interrupted — the
+  // caller replies decline): unregister it and dismiss dialogs still open on
+  // clients that never answered (abort → `$/cancel_request`).
+  active.delete(entry);
+  if (!entry.settled) {
+    entry.settled = true;
+    for (const ctrl of entry.controllers) ctrl.abort();
+    entry.controllers.clear();
   }
   return winner;
 }

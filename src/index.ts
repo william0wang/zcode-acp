@@ -36,6 +36,7 @@ import {
 } from "./handlers/extensions.js";
 import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadEarlier } from "./handlers/replay.js";
+import { resendPendingInteractions } from "./handlers/server-requests.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
 import { trackConnections } from "./remote/broadcast.js";
@@ -125,11 +126,16 @@ async function main(): Promise<void> {
     .onRequest("session/resume", async (ctx) => {
       const result = await resumeSession(server, ctx.params, server.clients.broadcast());
       sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
+      // A client that (re)connects catches up via resume/load; any interaction
+      // request still waiting for an answer is re-sent to it so a question
+      // fired while it was offline becomes answerable there.
+      resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
       return result;
     })
     .onRequest("session/load", async (ctx) => {
       const result = await loadSession(server, ctx.params, server.clients.broadcast());
       sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
+      resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
       return result;
     })
     // Tail-replay pagination (non-standard; Proposal 0001) — params stay

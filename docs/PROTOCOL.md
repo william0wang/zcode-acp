@@ -562,6 +562,15 @@ mechanisms based on client capabilities:
 `clientCapabilities.elicitation.form`. The server detects it with
 `server.supportsElicitationForm()`.
 
+**Reconnect resend**: interaction requests are one-shot and raced across the
+clients connected when they fire (first response wins). A client that was
+offline at that moment never sees them — so when a client completes
+`session/load` / `session/resume` (the reconnect catch-up), the bridge re-sends
+that session's still-unanswered interaction requests to it (after a short
+delay, so the replay renders first). The re-send joins the existing race: if
+another client answers first, the reconnected client receives `$/cancel_request`
+and should drop the dialog.
+
 **elicitation form example** (AskUserQuestion):
 
 ```json
