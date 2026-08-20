@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-20
+
+### Added
+
+- Reconnect resend of undecided interactions: a `session/request_permission` /
+  `elicitation/create` fired while a remote client was offline (or dropped
+  mid-wait) is re-sent to that client once its `session/load` /
+  `session/resume` completes — the reconnect catch-up — after a 300 ms delay
+  so the replay renders first. Every interaction wait is now tracked as a
+  cross-attempt first-response-wins race: the re-send joins it, and losing
+  attempts are aborted (`$/cancel_request`), dismissing leftover dialogs on
+  the other clients. A wait interrupted by turn cancel or timeout now also
+  dismisses the client's still-open popup. Protocol behaviour documented in
+  docs/PROTOCOL.md (interaction routing).
+
 ## [0.10.0] - 2026-08-20
 
 ### Removed
