@@ -431,8 +431,8 @@ Session state update (usage, etc.).
 
 ### Steer lifecycle events
 
-When `session/steer` appends instructions to a running turn, the backend emits
-a pair of lifecycle events (available in app-server 0.15.2+). The bridge does
+When a user input is steered into (queued behind) a running turn, the backend
+emits a pair of lifecycle events (app-server 0.15.2+). The bridge does
 not currently translate these — they are tracked as a future enhancement (see
 [`BACKLOG.md`](./BACKLOG.md)).
 
@@ -661,23 +661,16 @@ Fork a new session from a checkpoint.
 }
 ```
 
-### `session/rewind`
+### `session/rewind` — removed in 0.16+
 
-Rewind to a checkpoint.
-
-**Request:**
-
-```json
-{
-  "id": 9,
-  "method": "session/rewind",
-  "params": {
-    "sessionId": "sess_abc123",
-    "target": { "kind": "latestCheckpoint" },
-    "expectedRevision": 42
-  }
-}
-```
+`session/rewind` (and `session/rewindCascade`) existed up to app-server
+0.15.x. The 0.16 app-server removed them from its RPC dispatch (verified
+against 0.16.3: `-32601 Method not found`) — rewind moved to the v4
+conversation API (`v4/conversation/fileRewindPreview` and friends), which the
+bridge does not speak. The bridge's `session/rewind` /
+`session/rewindCascade` ACP extensions and the `/rewind` slash command were
+removed accordingly. `session/fork` (branch from checkpoint) remains the
+bridge-side alternative.
 
 ### `session/goal`
 
@@ -715,22 +708,14 @@ Compact the conversation history.
 }
 ```
 
-### `session/steer`
+### `session/steer` — removed in 0.16+
 
-Append instructions to a running turn.
-
-**Request:**
-
-```json
-{
-  "id": 12,
-  "method": "session/steer",
-  "params": {
-    "sessionId": "sess_abc123",
-    "content": "Please use TypeScript instead of JavaScript"
-  }
-}
-```
+`session/steer` existed up to app-server 0.15.x. The 0.16 app-server removed
+it from its RPC dispatch (verified against 0.16.3: `-32601 Method not found`);
+steering moved to the v4 command/conversation API. The bridge's
+`session/steer` ACP extension and the `/steer` slash command were removed
+accordingly. Queued inputs still surface as `turn.steerQueued` /
+`turn.steerDrained` events (see above).
 
 ### `session/setMode`
 
@@ -921,11 +906,12 @@ UI closes on cancellation.
 Cancels a background task. The bridge additionally marks the corresponding ACP
 tool card as `failed` with `_meta.backgroundTask.cancelled = true`.
 
-| ZCode CLI version | session/subscribe | Extension methods   | Notes                          |
-| ----------------- | ----------------- | ------------------- | ------------------------------ |
-| >= 0.15.0         | Supported         | All supported       | Full functionality             |
-| >= 0.14.8         | Supported         | Partially supported | workspace/* unavailable        |
-| 0.14.5 ~ 0.14.7   | Not supported     | Not supported       | Incompatible with this project |
+| ZCode CLI version | session/subscribe | Extension methods       | Notes                                                                                                                                                        |
+| ----------------- | ----------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| >= 0.16.0         | Supported         | All except steer/rewind | `session/steer`, `session/rewind`, `session/rewindCascade` removed upstream (v4 API); bridge dropped its passthroughs and `/steer`, `/rewind` slash commands |
+| >= 0.15.0         | Supported         | All supported           | Full functionality                                                                                                                                           |
+| >= 0.14.8         | Supported         | Partially supported     | workspace/* unavailable                                                                                                                                      |
+| 0.14.5 ~ 0.14.7   | Not supported     | Not supported           | Incompatible with this project                                                                                                                               |
 
 ## Additional backend methods (not wired into the bridge)
 

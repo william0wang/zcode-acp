@@ -29,12 +29,9 @@ import {
   compact,
   fork,
   goal,
-  rewind,
-  rewindCascade,
   setMode,
   setModel,
   setThoughtLevel,
-  steer,
   updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
 import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
@@ -161,14 +158,14 @@ async function main(): Promise<void> {
     )
     // ZCode-specific extensions (non-standard ACP methods). Use a passthrough
     // zod parser so all param fields survive into the handler.
+    // session/steer, session/rewind, session/rewindCascade were removed in
+    // zcode app-server 0.16+ (steer/rewind moved to the v4 conversation API);
+    // the bridge dropped its passthroughs accordingly.
     .onRequest("session/fork", extParams, (ctx) => fork(server, ctx.params))
-    .onRequest("session/rewind", extParams, (ctx) => rewind(server, ctx.params))
-    .onRequest("session/rewindCascade", extParams, (ctx) => rewindCascade(server, ctx.params))
     .onRequest("session/goal", extParams, (ctx) => goal(server, ctx.params))
     .onRequest("session/compact", extParams, (ctx) =>
       compact(server, ctx.params, server.clients.broadcast()),
     )
-    .onRequest("session/steer", extParams, (ctx) => steer(server, ctx.params))
     .onRequest("session/cancelBackgroundTask", extParams, (ctx) =>
       cancelBackgroundTask(server, ctx.params),
     )

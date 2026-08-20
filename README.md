@@ -304,11 +304,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 
 ## Version Compatibility
 
-| ZCode CLI version |   Support    | Notes                                    |
-| :---------------: | :----------: | ---------------------------------------- |
-|   **>= 0.15.0**   |     Full     | All extension methods available          |
-|   **>= 0.14.8**   |     Full     | Event-stream push, all extension methods |
-|   **< 0.14.8**    | Incompatible | Event-stream subscription unavailable    |
+| ZCode CLI version |   Support    | Notes                                                                                                                                                                                                 |
+| :---------------: | :----------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+|   **>= 0.16.0**   |     Full     | Steer/rewind removed upstream (moved to the v4 conversation API); bridge dropped the `session/steer`, `session/rewind`, `session/rewindCascade` extensions and the `/steer`, `/rewind` slash commands |
+|   **>= 0.15.0**   |     Full     | All extension methods available                                                                                                                                                                       |
+|   **>= 0.14.8**   |     Full     | Event-stream push, all extension methods                                                                                                                                                              |
+|   **< 0.14.8**    | Incompatible | Event-stream subscription unavailable                                                                                                                                                                 |
 
 ## Documentation
 

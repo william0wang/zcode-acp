@@ -2,7 +2,7 @@
  * Slash-command interception inside `session/prompt`.
  *
  * When the prompt text starts with `/`, dispatch the matching ZCode method
- * directly (compact/goal/fork/rewind/steer/model/mode/thought), emit a short
+ * directly (compact/goal/fork/model/mode/thought), emit a short
  * feedback `agent_message_chunk`, and return `end_turn` — never reaching the
  * normal turn loop.
  *
@@ -43,7 +43,7 @@ import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
-import { compact, fork, goal, rewind, steer } from "./extensions.js";
+import { compact, fork, goal } from "./extensions.js";
 
 /**
  * ZCode built-in commands that require the TUI command center or interactive
@@ -188,15 +188,6 @@ export async function handleSlashCommand(
           forkedSessionId?: string;
         };
         return ok(`✓ forked new session: ${result.forkedSessionId ?? "?"}`);
-      }
-      case "rewind": {
-        await rewind(server, { sessionId: acpSid });
-        return ok("✓ rewound workspace to checkpoint");
-      }
-      case "steer": {
-        if (!arg) throw new RequestError(-32602, "/steer requires content");
-        await steer(server, { sessionId: acpSid, content: arg });
-        return ok("✓ appended instruction to the running turn");
       }
       case "model": {
         if (!arg) throw new RequestError(-32602, "/model requires a model id");

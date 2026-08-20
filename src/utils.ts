@@ -47,10 +47,10 @@ export const ZCODE_CREDS_PATH = path.join(
  * Slash commands surfaced to the editor. Each maps to a ZCode session method
  * that the server forwards when the user types the command.
  *
- * Commands handled by the bridge (compact/goal/fork/rewind/steer/model/mode/
- * thought/quota/mcp) are intercepted in `handleSlashCommand`. Commands handled
- * by the ZCode backend (init) and plugin commands (code-review etc.) pass
- * through to `session/send` — the backend resolves them before the model.
+ * Commands handled by the bridge (compact/goal/fork/model/mode/thought/quota/
+ * mcp) are intercepted in `handleSlashCommand`. Commands handled by the ZCode
+ * backend (init) and plugin commands (code-review etc.) pass through to
+ * `session/send` — the backend resolves them before the model.
  *
  * Discovered Skills (arco-design, tdd, etc.) are also appended to the command
  * list at startup via `buildAllCommands()` — they pass through as normal text
@@ -64,12 +64,6 @@ export const SLASH_COMMANDS = [
     input: { hint: "goal description" },
   },
   { name: "fork", description: "Fork the session at the latest checkpoint" },
-  { name: "rewind", description: "Rewind workspace files to the latest checkpoint" },
-  {
-    name: "steer",
-    description: "Append an instruction to a running turn",
-    input: { hint: "content" },
-  },
   {
     name: "mode",
     description: "Switch permission mode (plan/build/edit/yolo)",

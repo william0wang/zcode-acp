@@ -36,7 +36,7 @@ src/
 │   ├── session.ts        session/new, session/prompt (turn loop), load, resume
 │   ├── slash.ts          Slash-command interception (/compact, /mcp, etc.)
 │   ├── account.ts        account/usage_stats — plan quota for remote clients
-│   ├── extensions.ts     ZCode extensions (fork, rewind, compact, steer, …)
+│   ├── extensions.ts     ZCode extensions (fork, compact, goal, model, mode, …)
 │   ├── dispatch.ts       InternalEvent → ACP session/update dispatch
 │   ├── replay.ts         Tail replay: load limit, load_earlier pagination
 │   ├── io.ts             Client notification helpers

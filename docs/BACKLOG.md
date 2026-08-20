@@ -3,28 +3,76 @@
 Backend RPC methods and event types exposed by the ZCode CLI (`zcode app-server`)
 that are **not yet wired into the bridge**, tracked for potential future support.
 
-Last audited against **app-server 0.15.2** (bundled in ZCode desktop 3.4.2,
-2026-07-22). Method names were extracted from the bundled `zcode.cjs`.
+Last audited against **app-server 0.16.3** (bundled in ZCode desktop 3.8.1,
+2026-08-09). Method names were extracted from the bundled `zcode.cjs` dispatch
+switch and verified with live RPC calls.
+
+## Removed upstream in 0.16 (verified live: `-32601`)
+
+| Method                  | Replacement                                          | Bridge action                                       |
+| ----------------------- | ---------------------------------------------------- | --------------------------------------------------- |
+| `session/steer`         | v4 command/conversation API                          | Dropped the ACP extension + `/steer` slash command  |
+| `session/rewind`        | `v4/conversation/fileRewindPreview` + v4 rewind flow | Dropped the ACP extension + `/rewind` slash command |
+| `session/rewindCascade` | v4 rewind flow                                       | Dropped the ACP extension                           |
+
+`session/fork` (branch from checkpoint) is the remaining v3 alternative for
+rewind-like UX. The backend still emits `rewind.triggered` /
+`checkpoint.created` events, so a client can observe rewinds initiated
+elsewhere.
 
 ## Candidate methods (optional enhancements)
 
-These are available in the backend but have no ACP-side counterpart yet. Pick
-them up when a concrete ACP/editor need appears.
+Available in the backend but with no ACP-side counterpart yet. Pick them up
+when a concrete ACP/editor need appears.
 
-| Method | Purpose | Current bridge behavior |
-|--------|---------|-------------------------|
-| `session/subagents` | Query the list of sub-agents for a session | Sub-agent info is parsed from the `Agent` tool result (`_meta.subagent`); sufficient for now |
-| `session/events` | Pull-mode event history (complement to `session/subscribe`) | Not used; could support event replay/gap-fill |
-| `session/usage` | Per-session token usage | Context bar uses `session.updated` usage payload instead |
-| `session/close` | Explicitly close a session (vs `session/stop` which ends a turn) | Not used; sessions close on process exit |
+| Method                                                                          | Purpose                                                     | Current bridge behavior                                                                                                |
+| ------------------------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `session/subagents`                                                             | Query the list of sub-agents for a session                  | Sub-agent info is parsed from the `Agent` tool result (`_meta.subagent`); sufficient for now                           |
+| `session/events`                                                                | Pull-mode event history (complement to `session/subscribe`) | Not used; could support event replay/gap-fill                                                                          |
+| `session/usage`                                                                 | Per-session token usage                                     | Context bar uses `session.updated` usage payload instead                                                               |
+| `workspace/hooks/trustGrant`                                                    | Server→client request: approve hook trust                   | Not answered by the bridge (requeued, no owner); if the backend blocks a turn on it, turns could hang — watch for this |
+| `interaction/browserList` / `interaction/browserExecute`                        | Server→client requests: browser automation via the client   | Not answered; only meaningful once an ACP client has a browser surface                                                 |
+| `interaction/requestProviderRuntimeHeaders`                                     | Server→client request: provider runtime headers             | Not answered                                                                                                           |
+| `workspace/updateInteractionPreferences` / `workspace/updateModelIoPreferences` | Client preference updates                                   | Not used                                                                                                               |
+
+### New `session/send` params (0.16+, unwired)
+
+The `session/send` schema grew fields the bridge does not forward:
+
+- `attachments` — file/image attachments (`artifact://`, `data:` URLs,
+  browser screenshots via `node_repl_images`)
+- `toolDenylist` — per-message tool deny list
+- `runtimeModel` — per-message model override
+- `browserAmbientContext` — browser context for the turn
+- `expectedRevision` / `expectedProviderRevision` / `expectedModelRuntimeRevision`
+  — optimistic concurrency guards
+- `automationId` / `offPeakTaskId` / `offPeakRunType` — scheduled/off-peak tasks
 
 ### New event types (undocumented in PROTOCOL.md)
 
-| Event | Status field | Notes |
-|-------|--------------|-------|
-| `turn.steerQueued` | — | Emitted when a `session/steer` is queued behind a running turn. Enhances steer UI feedback |
-| `turn.steerDrained` | — | Emitted when queued steer instructions are drained into the turn |
-| `turn.terminal` | `status: success \| interrupted \| failed`, `resultType?`, `durationMs`, `...usage` | Terminal turn lifecycle event; currently the bridge relies on `turn.completed`/`turn.failed` |
+| Event                                    | Notes                                                                      |
+| ---------------------------------------- | -------------------------------------------------------------------------- |
+| `checkpoint.created`                     | Checkpoint lifecycle; pairs with `rewind.triggered`                        |
+| `rewind.triggered`                       | A rewind happened (e.g. initiated elsewhere)                               |
+| `streamRecovery.updated`                 | Stream recovery progress — potentially useful for the replay/gap-fill path |
+| `turn.attachments.resolved`              | Attachment resolution telemetry                                            |
+| `usage.delta`                            | Streaming usage updates                                                    |
+| `turn.steerQueued` / `turn.steerDrained` | Steer lifecycle (queue/drain of steered inputs)                            |
+| `turn.terminal`                          | Terminal turn lifecycle; bridge relies on `turn.completed`/`turn.failed`   |
+
+## v4 protocol family (strategic)
+
+0.16 ships a parallel **v4** API used by the desktop client, alongside the v3
+`session/*` surface this bridge speaks:
+
+`v4/connection/flow`, `v4/controller/{subscribe,resync,unsubscribe}`,
+`v4/conversation/{subscribe,resync,unsubscribe,rowsRange,plans,fileChanges,
+fileRewindPreview,usage}`, `v4/attachment/{begin,chunk,commit,abort,read}`,
+`v4/usage/stats`, `v4/commands/query`, `v4/command`.
+
+Steer/rewind now live here. If the bridge ever needs them back, implementing
+the minimal v4 conversation subset (or `v4/command`) is the path; expect the
+v3 surface to stay in maintenance mode.
 
 ## Not planned (client/config layer)
 
@@ -32,28 +80,36 @@ These methods belong to the desktop client or workspace configuration layer and
 have no ACP equivalent. Listed for completeness only — the bridge does not
 intend to surface them.
 
-`automation/create`, `automation/list`, `automation/delete` (scheduled tasks),
-`usage/stats` (token analytics; the account-level plan quota it does NOT cover
-is exposed via the bridge's own `account/usage_stats` — see Proposal 0002),
-`workspace/readState`, `workspace/upsertModelProvider`,
-`workspace/removeModelProvider`, `workspace/updateProviderRegistry`,
-`workspace/setDefaultModel`, `workspace/setDefaultThoughtLevel`,
-`workspace/setDefaultMode`, `workspace/generateText`, `mcp/list`,
-`plugins/list`, `plugins/setEnabled`, `plugins/overview`, `plugins/describe`,
-`plugins/marketplace/*`.
+`automation/*` (scheduled tasks), `usage/stats` (token analytics; the
+account-level plan quota it does NOT cover is exposed via the bridge's own
+`account/usage_stats` — see Proposal 0002), `workspace/readState`,
+`workspace/upsertModelProvider`, `workspace/removeModelProvider`,
+`workspace/updateProviderRegistry`, `workspace/setDefaultModel`,
+`workspace/setDefaultThoughtLevel`, `workspace/setDefaultMode`,
+`workspace/generateText`, `workspace/cancelGenerateText`, `mcp/list`,
+`plugins/*` (the bridge reads plugin commands from disk instead).
 
 ## Verification method
 
 The bundled CLI is minified, so a literal `grep "session/rewind"` returns 0
-hits even when the method is fully supported — method names are split across
-variable references. To audit reliably:
+hits even when the method is fully supported — and vice versa, string absence
+proves nothing. To audit reliably:
 
 ```sh
 cd /Applications/ZCode.app/Contents/Resources/glm
-# Full RPC enum: search for the method-dispatch table (Key:"ns/name" pairs)
-python3 -c "import re; ..."   # see commit that added this file
-# Word-level presence is more reliable for verifying a method still exists:
-grep -oiF "rewind" zcode.cjs | wc -l   # 357 → definitely present
+# 1. Extract the RPC dispatch switch (all `case XX.method:` labels).
+#    The `default:` branch throws -32601, so a method with no case is gone.
+python3 - <<'EOF'
+import re
+src = open('zcode.cjs', encoding='utf-8', errors='replace').read()
+i = src.find('case rr.sessionCreate')
+start = src.rfind('switch', 0, i)
+cases = re.findall(r'case (?:rr|Pc)\.([a-zA-Z]+)', src[start:start+20000])
+print(' '.join(dict.fromkeys(cases)))
+EOF
+# 2. Confirm with a live call — the envelope has NO `jsonrpc` field:
+#    {"id":1,"method":"session/steer","params":{...}} → -32601 means removed.
 ```
 
-Never conclude a method was removed from a single string-literal search.
+Never conclude a method was removed from a single string-literal search; a
+missing dispatch case plus a live `-32601` is the proof.

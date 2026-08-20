@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-20
+
+### Removed
+
+- `session/steer`, `session/rewind`, `session/rewindCascade` ACP extensions
+  and the `/steer`, `/rewind` slash commands. The zcode app-server removed
+  these RPC methods in 0.16+ (verified live against 0.16.3: `-32601 Method
+not found`); steer/rewind moved to the v4 conversation API, which the
+  bridge does not speak. External usage was near zero (no standard ACP client
+  calls these non-standard methods), and on 0.16+ they only ever returned
+  errors. `session/fork` remains the checkpoint-branching alternative.
+  Docs refreshed to a 0.16.3 audit: PROTOCOL.md version table, BACKLOG.md
+  (new `session/send` params, `workspace/hooks/trustGrant`,
+  `interaction/browser*`, v4 protocol family), README compatibility matrix.
+
 ## [0.9.0] - 2026-08-20
 
 ### Added

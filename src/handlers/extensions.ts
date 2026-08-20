@@ -2,8 +2,10 @@
  * ZCode-specific session method handlers (non-standard ACP extensions).
  *
  * Thin passthroughs for the extended session/* methods (0.14.8+):
- * fork/rewind/rewindCascade/goal/compact/steer/cancelBackgroundTask +
+ * fork/goal/compact/cancelBackgroundTask +
  * 0.15.0+: setThoughtLevel/updateRuntimeModelConfig/setModel/setMode.
+ * (rewind/rewindCascade/steer existed up to 0.15.x; app-server 0.16+ removed
+ * them in favor of the v4 conversation API, so the bridge dropped them.)
  *
  * These share a near-identical shape (resolve sid → build params → forward →
  * check error). Only the genuine per-method differences are spelled out:
@@ -67,42 +69,6 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
   }
   log(`session/fork → ${result.forkedSessionId ?? "?"}`);
   return result;
-}
-
-/** session/rewind → zcode session/rewind: restore workspace files to a checkpoint. */
-export async function rewind(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = await resolveSidOrThrow(server, params);
-  const zcParams: Record<string, unknown> = {
-    sessionId: zcodeSid,
-    target: buildCheckpointTarget(params),
-  };
-  if (params.expectedRevision !== undefined) zcParams.expectedRevision = params.expectedRevision;
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/rewind", zcParams, 15000);
-  if (resp.error) throw new Error(`rewind failed: ${resp.error.message}`);
-  log("session/rewind → ok");
-  return (resp.result ?? {}) as Result;
-}
-
-/** session/rewindCascade → zcode session/rewindCascade: cascade rewind. */
-export async function rewindCascade(
-  server: ZcodeAcpServer,
-  params: ExtensionParams,
-): Promise<Result> {
-  const zcodeSid = await resolveSidOrThrow(server, params);
-  const zcParams: Record<string, unknown> = {
-    sessionId: zcodeSid,
-    target: buildCheckpointTarget(params),
-  };
-  if (params.scope) zcParams.scope = params.scope;
-  if (params.expectedRevision !== undefined) zcParams.expectedRevision = params.expectedRevision;
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/rewindCascade", zcParams, 15000);
-  if (resp.error) throw new Error(`rewindCascade failed: ${resp.error.message}`);
-  log("session/rewindCascade → ok");
-  return (resp.result ?? {}) as Result;
 }
 
 /** session/goal → zcode session/goal: read/set/replace/clear/pause/resume the goal. */
@@ -171,20 +137,6 @@ export async function compact(
   // (the ACP method path ignores this non-standard flag). Mirrors Python's
   // "⚠ 压缩超时" branch in _handle_slash_command.
   return { ...((resp.result ?? {}) as Result), __lockTimeout: !released };
-}
-
-/** session/steer → zcode session/steer: append instructions to a running turn. */
-export async function steer(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = await resolveSidOrThrow(server, params);
-  const content = String(params.content ?? "");
-  if (!content.trim()) throw new Error("steer requires content");
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/steer", { sessionId: zcodeSid, content }, 15000);
-  if (resp.error) throw new Error(`steer failed: ${resp.error.message}`);
-  const result = (resp.result ?? {}) as { kind?: string };
-  log(`session/steer → kind=${result.kind ?? "?"}`);
-  return result;
 }
 
 /** session/cancelBackgroundTask → zcode session/cancelBackgroundTask. */
