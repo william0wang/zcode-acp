@@ -68,12 +68,35 @@ a hardcoded version string — read the message text to identify the root cause.
 **Common causes:**
 
 | Message fragment                 | Cause                                                                                                                                                                                                                                                      |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                                                                                           |
-| `timeout`                        | The per-attempt 10s subscribe deadline elapsed. The bridge retries transient timeouts up to 3× (the backend can be briefly busy finalising a cancelled turn after a preempt / `session/stop`); if all retries fail, the backend was unresponsive for ~30s. |
+| `timeout`                        | The per-attempt 5s subscribe deadline elapsed. The bridge retries transient timeouts once (2 attempts total, ~10.5s worst case); if both fail, the backend was unresponsive for that window.                                                               |
 | `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                                                                                     |
 | `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                                                                                          |
-| session-level business error     | The target session no longer exists or was evicted.                                                                                                                                                                                                        |
+| `Session is not active` (-32004) | The backend evicted the session's resident runtime (idle ~10min, or its LRU cap). The bridge self-heals via `session/resume` (see below).                                                                                                                   |
+
+**`Session is not active` (code -32004) in detail:**
+
+The zcode backend keeps session runtimes ("residents") in memory and evicts
+them after ~10 minutes idle (log event `session.resident_deactivated`,
+`reason: "idle_timeout"`) or under its resident LRU cap. An evicted session
+fails every session-scoped RPC with `-32004` while the session file stays
+intact — the editor still shows its local copy of the conversation, but
+sending a message errors and remote clients replay an empty session.
+
+The bridge self-heals on every entry point:
+
+- `session/prompt` reloads the session via `session/resume` and retries the
+  subscribe once when it sees this error;
+- the "loaded in backend" verification carries a 5-minute TTL
+  (`BACKEND_RESIDENT_TTL_MS`), so `session/load` / `session/resume` re-issue
+  the backend resume RPC instead of trusting a stale in-memory flag;
+- `ensureRealSession` (config/slash/extension entry points) reloads a stale
+  mapping before use, unless a turn is in flight.
+
+If the error still surfaces, the resume itself is failing — check the backend
+log (`~/.zcode/cli/log/zcode-YYYY-MM-DD.jsonl`) for the underlying cause
+(corrupt session file, lock contention from another zcode process).
 
 **Troubleshooting steps:**
 

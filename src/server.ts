@@ -44,6 +44,17 @@ export interface PendingTurn {
   stallRecovered?: boolean;
 }
 
+/**
+ * How long a "loaded in backend" verification stays trusted. The backend
+ * evicts resident runtimes after ~10min idle (observed
+ * `session.resident_deactivated`, idleTimeoutMs 600000) and also keeps a
+ * small LRU cap, after which every session-scoped RPC fails with
+ * "Session is not active" (-32004). Trusting a verification for half the
+ * eviction window makes callers redo the resume RPC well before eviction
+ * can bite.
+ */
+export const BACKEND_RESIDENT_TTL_MS = 5 * 60_000;
+
 export class ZcodeAcpServer {
   /** The ZCode subprocess client (lazy — spawned on first use). */
   backend: ZcodeBackend | null = null;
@@ -128,16 +139,16 @@ export class ZcodeAcpServer {
   /** Session titles already set, to enforce set-once (acp_sid → title). */
   readonly sessionTitles = new Map<string, string>();
   /**
-   * Sessions verified as loaded in the CURRENT backend subprocess — populated
-   * only after a successful session/create or session/resume RPC. A bare
-   * `registerSession` mapping does NOT qualify: the backend answers
-   * `session/messages` only for sessions it has loaded, so `session/load`
-   * must not skip the resume RPC for a mapping that was never loaded (e.g.
-   * re-registered from the durable store by an early ensureRealSession
-   * caller, or left behind by a failed resume) — the replay would silently
-   * come back empty.
+   * Sessions verified as loaded in the CURRENT backend subprocess, with the
+   * verification timestamp — populated only after a successful
+   * session/create or session/resume RPC and refreshed when a turn runs. A
+   * bare `registerSession` mapping does NOT qualify, and neither does an old
+   * timestamp: the backend answers `session/messages` only for sessions with
+   * a live resident runtime, so `session/load` must not skip the resume RPC
+   * for those (the replay would silently come back empty). Use
+   * `markBackendLoaded`/`isBackendSessionLive` instead of touching the map.
    */
-  readonly backendLoadedSessions = new Set<string>();
+  private readonly backendLoadedSessions = new Map<string, number>();
   /**
    * Sessions eligible for auto-title on first end_turn. Only `session/new`
    * populates this — resumed/loaded sessions already carry a title, so their
@@ -209,6 +220,21 @@ export class ZcodeAcpServer {
     this.sessionMap.set(acpSid, zcodeSid);
     this.acpSidByZcodeSid.set(zcodeSid, acpSid);
     this.touchSessionSummary(acpSid);
+  }
+
+  /** Record that a session is loaded in the current backend subprocess (now). */
+  markBackendLoaded(acpSid: string): void {
+    this.backendLoadedSessions.set(acpSid, Date.now());
+  }
+
+  /**
+   * True when the session was verified backend-loaded recently enough that the
+   * backend's resident idle eviction (~10min) can't have dropped it. Stale or
+   * unknown entries count as NOT live so callers redo the session/resume RPC.
+   */
+  isBackendSessionLive(acpSid: string): boolean {
+    const at = this.backendLoadedSessions.get(acpSid);
+    return at !== undefined && Date.now() - at < BACKEND_RESIDENT_TTL_MS;
   }
 
   /** Update a session's discovery summary (title sticky once set). */

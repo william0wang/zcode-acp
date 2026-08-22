@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-08-22
+
+### Fixed
+
+- Sessions evicted from the backend no longer break prompting or load empty:
+  the zcode backend evicts idle resident runtimes (~10min idle timeout plus
+  an LRU cap), after which every session-scoped RPC fails with
+  `Session is not active` (-32004). The bridge now self-heals on every entry
+  point — `session/prompt` reloads via `session/resume` and retries the
+  subscribe once (re-baselining the differ so turn completion doesn't replay
+  history), `session/load`·`resume` stop trusting a stale loaded-verification
+  flag (5-minute TTL, `BACKEND_RESIDENT_TTL_MS`), and `ensureRealSession`
+  reloads stale mappings for config/slash/extension calls (skipped while a
+  turn is in flight, fail-safe on reload failure).
+- Tests for the eviction recovery paths in `tests/session-eviction.test.ts`.
+- Troubleshooting guide: dedicated `Session is not active` (-32004) entry,
+  corrected the subscribe timeout retry numbers.
+
 ## [0.11.2] - 2026-08-20
 
 ### Fixed

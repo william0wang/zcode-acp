@@ -506,13 +506,13 @@ describe("backend-loaded session tracking", () => {
 
     const resume = calls.find((c) => c.method === "session/resume");
     expect(resume?.params).toMatchObject({ sessionId: "sess_old" });
-    expect(server.backendLoadedSessions.has("s-old")).toBe(true);
+    expect(server.isBackendSessionLive("s-old")).toBe(true);
   });
 
   it("session/load skips the resume RPC once the session is verified loaded", async () => {
     const server = new ZcodeAcpServer();
     server.registerSession("s-live", "sess_live");
-    server.backendLoadedSessions.add("s-live");
+    server.markBackendLoaded("s-live");
     const { backend, calls } = fakeBackend();
     server.backend = backend;
 
@@ -530,6 +530,6 @@ describe("backend-loaded session tracking", () => {
 
     await ensureRealSession(server, resp.sessionId);
 
-    expect(server.backendLoadedSessions.has(resp.sessionId)).toBe(true);
+    expect(server.isBackendSessionLive(resp.sessionId)).toBe(true);
   });
 });

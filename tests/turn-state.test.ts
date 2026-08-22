@@ -78,7 +78,7 @@ function setup(backend: ZcodeBackend): ZcodeAcpServer {
   const server = new ZcodeAcpServer();
   server.backend = backend;
   server.registerSession("sess_ts", "zs_ts");
-  server.backendLoadedSessions.add("sess_ts");
+  server.markBackendLoaded("sess_ts");
   return server;
 }
 

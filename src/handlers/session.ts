@@ -130,7 +130,29 @@ export async function newSession(
  */
 export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string): Promise<string> {
   const existing = server.resolveSid(acpSid);
-  if (existing) return existing;
+  if (existing) {
+    // The mapping exists, but the backend may have evicted the resident
+    // runtime since it was loaded (~10min idle timeout + LRU cap): every
+    // session-scoped RPC would then fail with "Session is not active"
+    // (-32004). Reload via session/resume when the verification went stale
+    // and no turn is in flight (a running turn proves the resident is live).
+    // Fail-safe: a failed reload just returns the mapping — the subsequent
+    // RPC surfaces the backend's real error, same as before this guard.
+    if (server.isBackendSessionLive(acpSid)) return existing;
+    const turnInFlight = [...server.pendingTurns.values()].some((t) => t.zcodeSid === existing);
+    if (!turnInFlight) {
+      try {
+        log(`ensureRealSession: ${acpSid} possibly evicted from backend — reloading`);
+        await reloadBackendSession(server, acpSid, existing);
+      } catch (e) {
+        log(
+          `ensureRealSession: reload failed, continuing with existing mapping ` +
+            `(${e instanceof Error ? e.message : String(e)})`,
+        );
+      }
+    }
+    return existing;
+  }
   let pending = server.pendingSessions.get(acpSid);
   if (!pending) {
     // Placeholder from a previous bridge lifetime: recover it from the durable
@@ -188,7 +210,7 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     server.pendingSessions.delete(acpSid);
     server.registerSession(acpSid, sid);
     // session/create loads the session into this backend process.
-    server.backendLoadedSessions.add(acpSid);
+    server.markBackendLoaded(acpSid);
     // Keep the durable alias in sync so a later bridge restart can still
     // resume this session via the placeholder id.
     recordMaterializedSession(acpSid, sid, pending.cwd);
@@ -281,10 +303,11 @@ async function adoptStoredTitle(
  * the editor may resume it anyway (panel reopen, bridge restart) — resolving it
  * here prevents an otherwise unavoidable "Session not found". Resolution order:
  *   1. in-memory mapping → live only if verified loaded in this backend
- *      subprocess (`backendLoadedSessions`); a bare mapping may have been
- *      re-registered from the durable store without a resume, and the backend
- *      only serves messages for sessions it has loaded — those must fall
- *      through to the resume RPC or the replay comes back empty;
+ *      subprocess RECENTLY (`isBackendSessionLive`); a bare mapping may have
+ *      been re-registered from the durable store without a resume, and the
+ *      backend also evicts idle resident runtimes (~10min) — either way it
+ *      only serves messages for sessions with a live resident, so those must
+ *      fall through to the resume RPC or the replay comes back empty;
  *   2. pending placeholder → materialize it (an empty session, matching the
  *      pre-lazy behavior where a never-used session/new always resumed);
  *   3. durable store → a placeholder from a previous bridge lifetime: with a
@@ -300,7 +323,7 @@ async function resolveResumeTarget(
 ): Promise<{ zcodeSid: string; alreadyLive: boolean }> {
   const mapped = server.resolveSid(acpSid);
   if (mapped) {
-    return { zcodeSid: mapped, alreadyLive: server.backendLoadedSessions.has(acpSid) };
+    return { zcodeSid: mapped, alreadyLive: server.isBackendSessionLive(acpSid) };
   }
   if (server.pendingSessions.has(acpSid)) {
     return { zcodeSid: await ensureRealSession(server, acpSid), alreadyLive: true };
@@ -356,7 +379,7 @@ export async function resumeSession(
     await syncProviderRegistry(server, cwd);
     await resumeBackendSession(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
-    server.backendLoadedSessions.add(acpSid);
+    server.markBackendLoaded(acpSid);
   }
 
   server.registerSession(acpSid, zcodeSid);
@@ -407,7 +430,7 @@ export async function loadSession(
     await syncProviderRegistry(server, cwd);
     await resumeBackendSession(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
-    server.backendLoadedSessions.add(acpSid);
+    server.markBackendLoaded(acpSid);
   }
   server.registerSession(acpSid, zcodeSid);
   // Same as resumeSession: record the cwd as the session root for file access.
@@ -560,7 +583,28 @@ export async function prompt(
   // — this call site is outside the try/finally below.
   let snapshot: ZcodeSnapshot;
   try {
-    snapshot = await listener.subscribe(() => server.nextId());
+    try {
+      snapshot = await listener.subscribe(() => server.nextId());
+    } catch (e) {
+      // The backend evicts idle resident runtimes (~10min) and can drop them
+      // under its LRU cap even sooner — an evicted session fails every
+      // session-scoped RPC with code -32004 "Session is not active" although
+      // the session file is intact. Recover by reloading it (session/resume
+      // is idempotent) and retrying the subscribe once; any other error, or
+      // a second failure, propagates to the editor.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/session is not active/i.test(msg)) throw e;
+      log(`prompt: session ${zcodeSid} no longer active in backend — reloading via session/resume`);
+      await reloadBackendSession(server, params.sessionId, zcodeSid);
+      // The pre-subscribe fetchMessages ran against the evicted session and
+      // came back empty — re-baseline the differ so turn completion doesn't
+      // diff-replay the whole history as new output.
+      differ.markSeen(await fetchMessages(server, zcodeSid));
+      snapshot = await listener.subscribe(() => server.nextId());
+    }
+    // A successful subscribe proves the resident runtime is live — refresh
+    // the verification so concurrent/later entry points skip a reload.
+    server.markBackendLoaded(params.sessionId);
   } catch (e) {
     server.pendingTurns.delete(requestId);
     await emitTurnState(false);
@@ -768,8 +812,10 @@ export async function prompt(
     server.pendingTurns.delete(requestId);
     // Turn end = session activity — refresh the discovery summary and mark the
     // session discoverable regardless of outcome (end_turn, cancelled, retries
-    // exhausted).
+    // exhausted). Also refresh the backend-loaded verification: the resident
+    // runtime was demonstrably live through this turn.
     server.markSessionActive(params.sessionId);
+    server.markBackendLoaded(params.sessionId);
     // Report "running" only while no other turn for the session took over
     // (preempt): the preempting turn's own running:true must survive.
     const stillBusy = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
@@ -1145,6 +1191,28 @@ async function resumeBackendSession(
     );
     await sleep(1000);
   }
+}
+
+/**
+ * Reload a session into the backend subprocess via `session/resume` — the
+ * recovery path after the backend evicted the resident runtime (idle timeout
+ * / LRU). Same param shape as session/load·resume (workspace from the
+ * recorded session cwd, runtimeModel overlay for stale history models).
+ * Marks the session backend-loaded on success.
+ */
+async function reloadBackendSession(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  const zcParams: Record<string, unknown> = {
+    sessionId: zcodeSid,
+    workspace: workspaceFor(server.sessionCwds.get(acpSid) ?? process.cwd()),
+  };
+  const runtimeModel = buildResumeRuntimeModel();
+  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
+  await resumeBackendSession(server, zcParams);
+  server.markBackendLoaded(acpSid);
 }
 
 /** Get or create the session-level ProjectionDiffer (persists across turns). */
