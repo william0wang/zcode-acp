@@ -508,12 +508,19 @@ export async function loadSession(
   );
 
   // Replay the existing todo list as an initial plan so a loaded session shows
-  // its todos immediately (filter to PlanUpdate only — text/tools were already
-  // replayed above and the differ hasn't mark_seen'd this history).
+  // its todos immediately.
   try {
     const snapshot = await buildSnapshot(server, zcodeSid);
     const loadDiffer = getOrCreateDiffer(server, zcodeSid);
-    const planEvents = loadDiffer.diff(snapshot).filter((e) => e.kind === "PlanUpdate");
+    // Keep the shared differ's full diff for its mark-seen side effect on the
+    // replayed history (next turn-completion diff must not re-emit it).
+    loadDiffer.diff(snapshot);
+    // Emit the CURRENT todos on every load: the shared differ only fires on
+    // CHANGE since its lastPlanSig already matches after any prior client's
+    // diff — a re-attaching client (the mobile app always re-attaches) would
+    // otherwise never learn a plan a previous client already saw. A throwaway
+    // differ starts at the "__none__" sentinel, so diffPlan always emits.
+    const planEvents = new ProjectionDiffer().diffPlan(snapshot.todos ?? []);
     for (const iev of planEvents) {
       await dispatchEvent(server, cx, acpSid, iev, `load_${randomUUID().slice(0, 8)}`);
     }

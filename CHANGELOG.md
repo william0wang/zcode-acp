@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-08-22
+
+### Fixed
+
+- `session/load` always replays the current todo list: the shared
+  per-session differ only fires PlanUpdate on plan CHANGE, so a re-attaching
+  client (the mobile app always re-attaches) never learned a plan a previous
+  client had already seen. The load path now runs a throwaway differ whose
+  "__none__" sentinel makes diffPlan always emit, while the shared differ's
+  full diff still runs for its mark-seen side effect (turn completion must
+  not re-emit replayed history).
+- Regression test in `tests/load-plan-replay.test.ts` (fails without the
+  fix: a second load emits no PlanUpdate).
+
 ## [0.11.4] - 2026-08-22
 
 ### Fixed
