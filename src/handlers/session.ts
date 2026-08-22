@@ -50,6 +50,41 @@ function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: stri
 }
 
 /**
+ * A client-supplied cwd is only ever trusted for `session/new` — creating a
+ * session is the editor declaring its worktree. "/" is never a project root:
+ * remote clients fall back to it when their instance list is stale, and a
+ * session root decides what the /fs file endpoint exposes.
+ */
+function sanitizeClientCwd(client: string | undefined): string | null {
+  return client && client !== "/" ? client : null;
+}
+
+/**
+ * The authoritative Session Root for an EXISTING session: what the bridge
+ * already recorded (set at creation, or refreshed from the backend's resume
+ * result). Client cwds are NOT consulted — a remote client must not be able
+ * to widen or move a session's file scope by sending its own cwd. A
+ * previously-polluted "/" entry counts as unknown so the next resume
+ * repopulates it from the backend.
+ */
+function authoritativeSessionCwd(server: ZcodeAcpServer, acpSid: string): string {
+  const existing = server.sessionCwds.get(acpSid);
+  return existing && existing !== "/" ? existing : process.cwd();
+}
+
+/**
+ * Extract the backend-recorded workspace from a session/resume result
+ * (`result.session.workspace.workspacePath`). This is the session's own
+ * project directory as the backend sees it — the value remote file access
+ * is scoped to. Returns null when absent or malformed.
+ */
+function workspaceFromResumeResult(result: unknown): string | null {
+  const ws = (result as { session?: { workspace?: { workspacePath?: unknown } } } | null)?.session
+    ?.workspace?.workspacePath;
+  return typeof ws === "string" && ws !== "" && ws !== "/" ? ws : null;
+}
+
+/**
  * Push the provider registry to the backend so third-party providers (those in
  * config.json) are recognised. The V4 backend doesn't auto-load them from
  * config.json — without this RPC a session switching to a third-party model
@@ -93,7 +128,9 @@ export async function newSession(
   server: ZcodeAcpServer,
   params: acp.NewSessionRequest,
 ): Promise<acp.NewSessionResponse> {
-  const cwd = params.cwd ?? process.cwd();
+  // Creation is the one moment a client's cwd is trusted (the editor
+  // declaring its worktree); "/" is still rejected as a degenerate root.
+  const cwd = sanitizeClientCwd(params.cwd) ?? process.cwd();
   // Placeholder id — the client addresses this session with it until the
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();
@@ -167,7 +204,7 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     if (record) {
       pending = { cwd: record.cwd };
       server.pendingSessions.set(acpSid, pending);
-      server.sessionCwds.set(acpSid, record.cwd);
+      if (record.cwd !== "/") server.sessionCwds.set(acpSid, record.cwd);
     }
   }
   if (!pending) throw new Error(`session ${acpSid} not found`);
@@ -347,8 +384,12 @@ export async function resumeSession(
   cx: acp.AgentContext,
 ): Promise<acp.ResumeSessionResponse> {
   const acpSid = params.sessionId;
-  const cwd = params.cwd ?? process.cwd();
   if (!acpSid) throw new Error("sessionId required");
+  // The Session Root never comes from the client (params.cwd is ignored):
+  // start from what the bridge recorded, then let the backend's own resume
+  // result correct it below — a remote client must not move a session's
+  // file scope by sending its own cwd.
+  let cwd = authoritativeSessionCwd(server, acpSid);
 
   // Lazy placeholders (session/new) resolve to their real backend session
   // here; alreadyLive targets skip the resume RPC because the session is live
@@ -377,14 +418,18 @@ export async function resumeSession(
     // third-party model in its history, and the backend needs the provider
     // registered to even process the resume turn.
     await syncProviderRegistry(server, cwd);
-    await resumeBackendSession(server, zcParams);
+    const resumeResult = await resumeBackendSession(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
+    // The backend's session record is the root authority: adopt its
+    // workspace as the session root (heals any stale/polluted entry).
+    const backendWs = workspaceFromResumeResult(resumeResult);
+    if (backendWs) cwd = backendWs;
   }
 
   server.registerSession(acpSid, zcodeSid);
-  // The load's cwd becomes the session root for remote file access (same as
-  // session/new) — without this, a loaded session has no readable root.
+  // The session root for remote file access — backend-authoritative (see
+  // above); without this, a loaded session has no readable root.
   server.sessionCwds.set(acpSid, cwd);
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
@@ -410,8 +455,12 @@ export async function loadSession(
   cx: acp.AgentContext,
 ): Promise<acp.LoadSessionResponse> {
   const acpSid = params.sessionId;
-  const cwd = params.cwd ?? process.cwd();
   if (!acpSid) throw new Error("sessionId required");
+  // The Session Root never comes from the client (params.cwd is ignored):
+  // start from what the bridge recorded, then let the backend's own resume
+  // result correct it below — a remote client must not move a session's
+  // file scope by sending its own cwd.
+  let cwd = authoritativeSessionCwd(server, acpSid);
 
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
@@ -428,12 +477,16 @@ export async function loadSession(
     // third-party model in its history, and the backend needs the provider
     // registered to process it.
     await syncProviderRegistry(server, cwd);
-    await resumeBackendSession(server, zcParams);
+    const resumeResult = await resumeBackendSession(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
+    // The backend's session record is the root authority: adopt its
+    // workspace as the session root (heals any stale/polluted entry).
+    const backendWs = workspaceFromResumeResult(resumeResult);
+    if (backendWs) cwd = backendWs;
   }
   server.registerSession(acpSid, zcodeSid);
-  // Same as resumeSession: record the cwd as the session root for file access.
+  // Same as resumeSession: backend-authoritative session root for file access.
   server.sessionCwds.set(acpSid, cwd);
   log(`session/load → ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
@@ -1166,11 +1219,14 @@ function fileUriToPath(uri: string): string {
  * can land in that gap and time out without the backend ever seeing it. A single
  * retry — issued after the startup window has elapsed — succeeds. Non-timeout
  * errors (Invalid params, session not found) fail fast.
+ *
+ * Returns the response's result object on success — callers extract the
+ * backend-authoritative session workspace from it. Throws on failure.
  */
 async function resumeBackendSession(
   server: ZcodeAcpServer,
   zcParams: Record<string, unknown>,
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const backend = server.ensureBackend();
   const MAX_ATTEMPTS = 2;
   const ATTEMPT_TIMEOUT_MS = 15_000;
@@ -1181,7 +1237,7 @@ async function resumeBackendSession(
       zcParams,
       ATTEMPT_TIMEOUT_MS,
     );
-    if (!resp.error) return;
+    if (!resp.error) return (resp.result ?? {}) as Record<string, unknown>;
     const isTimeout = resp.error.message === "timeout";
     if (!isTimeout || attempt === MAX_ATTEMPTS) {
       throw new Error(`zcode resume failed: ${resp.error.message ?? ""}`);
@@ -1191,6 +1247,7 @@ async function resumeBackendSession(
     );
     await sleep(1000);
   }
+  throw new Error("zcode resume failed: exhausted retries");
 }
 
 /**

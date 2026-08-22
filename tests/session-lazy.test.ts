@@ -278,8 +278,10 @@ describe("resumeSession with lazy placeholders", () => {
     const resumes = calls.filter((c) => c.method === "session/resume");
     expect(resumes).toHaveLength(1);
     expect(resumes[0].params).toMatchObject({ sessionId: "sess_real_1", mcpServers });
-    // The resume cwd becomes the session root for remote file access.
-    expect(server.sessionCwds.get("sess_real_1")).toBe("/tmp/ws");
+    // The client cwd does NOT become the session root (backend-authoritative
+    // only); with no recorded root and no workspace in the resume result the
+    // bridge falls back to its process cwd.
+    expect(server.sessionCwds.get("sess_real_1")).toBe(process.cwd());
   });
 
   it("resumes an already-materialized placeholder without backend resume", async () => {
@@ -383,8 +385,8 @@ describe("loadSession with lazy placeholders", () => {
 
     const resume = calls.find((c) => c.method === "session/resume");
     expect(resume?.params).toMatchObject({ sessionId: "sess_real" });
-    // Same as resumeSession: the load cwd is recorded as the session root.
-    expect(server.sessionCwds.get("sess_real")).toBe("/tmp/ws");
+    // Same as resumeSession: the client cwd is NOT recorded as the root.
+    expect(server.sessionCwds.get("sess_real")).toBe(process.cwd());
   });
 });
 

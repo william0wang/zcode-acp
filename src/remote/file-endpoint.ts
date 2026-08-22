@@ -124,8 +124,20 @@ async function sessionRoot(
     sendText(res, 403, "unknown session");
     return null;
   }
+  // Defense in depth: a session root of "/" is never legitimate (projects
+  // live in subdirectories; "/" could only come from a polluted cwd record).
+  // Serving it would expose the whole filesystem to remote clients.
+  if (cwd === "/") {
+    sendText(res, 403, "session root unavailable");
+    return null;
+  }
   try {
-    return await realpath(cwd);
+    const real = await realpath(cwd);
+    if (real === "/") {
+      sendText(res, 403, "session root unavailable");
+      return null;
+    }
+    return real;
   } catch {
     sendText(res, 404, "session root unavailable");
     return null;

@@ -43,6 +43,8 @@ interface Fixture {
   /** Sibling dir outside the session root (for escape fixtures). */
   outside: string;
   endpoint: { port: number; stop(): Promise<void> };
+  /** The bridge's server state (for polluting cwd records in tests). */
+  server: ZcodeAcpServer;
 }
 
 async function spawnFixture(): Promise<Fixture> {
@@ -82,6 +84,7 @@ async function spawnFixture(): Promise<Fixture> {
     dir,
     outside,
     endpoint: endpoint!,
+    server,
   };
 }
 
@@ -119,6 +122,17 @@ describe("session files over the hub proxy", () => {
 
     const bad = await fsFetch(base, "/list?sessionId=s-fs&path=README.md");
     expect(bad.status).toBe(404);
+  });
+
+  it("refuses to serve a session whose recorded root is /", async () => {
+    const { base, server } = await spawnFixture();
+    // A polluted cwd record must never widen file access to the filesystem
+    // root — defense in depth behind the load-side guards.
+    server.sessionCwds.set("s-polluted", "/");
+    const res = await fsFetch(base, "/list?sessionId=s-polluted");
+    expect(res.status).toBe(403);
+    const file = await fsFetch(base, "/file?sessionId=s-polluted&path=etc/passwd");
+    expect(file.status).toBe(403);
   });
 
   it("streams whole files with a Content-Type from the extension", async () => {

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-08-22
+
+### Fixed
+
+- Session file roots are backend-authoritative: `session/load`·`resume` no
+  longer adopt the client's cwd as the session root (a remote App derived
+  its cwd from the hub instance list and fell back to "/" whenever that list
+  was stale, hijacking the /fs file browser to the filesystem root and — via
+  `projectCwd()` — poisoning the instance's advertised workspace for every
+  later load). The root now comes from what the bridge recorded at creation,
+  corrected by the backend's own `session/resume` result
+  (`session.workspace.workspacePath`); a client cwd is only consulted at
+  `session/new`, and "/" is never accepted as a root anywhere.
+- `/fs` defense in depth: a session whose recorded root resolves to "/" is
+  refused (403) — a polluted record can never widen remote file access to
+  the whole filesystem.
+- `projectCwd()` picks the most recently active session's cwd (insertion
+  order was arbitrary across load timing) and skips "/" entries entirely.
+- Tests: `tests/session-cwd.test.ts` (client-cwd trust boundary, backend
+  workspace adoption, polluted-entry healing) + a /fs root-"/" refusal case
+  in `tests/remote-file-endpoint.test.ts`.
+
 ## [0.11.3] - 2026-08-22
 
 ### Fixed

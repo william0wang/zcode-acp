@@ -264,11 +264,26 @@ export class ZcodeAcpServer {
   }
 
   /**
-   * The bridge's project directory: first known session cwd, else the bridge
-   * process cwd (Zed spawns the server with the worktree root as cwd).
+   * The bridge's project directory: the cwd of the most recently active
+   * session, else the bridge process cwd (Zed spawns the server with the
+   * worktree root as cwd). Recent-activity wins over Map order — insertion
+   * order is arbitrary across load/resume timing, and a single polluted
+   * entry ("/") must never decide the label for every session. Roots of "/"
+   * are skipped entirely: they can only come from a client fallback, never a
+   * real worktree.
    */
   projectCwd(): string {
-    return this.sessionCwds.values().next().value ?? process.cwd();
+    let best = "";
+    let bestAt = -1;
+    for (const [acpSid, cwd] of this.sessionCwds) {
+      if (!cwd || cwd === "/") continue;
+      const at = this.sessionSummaries.get(acpSid)?.updatedAt ?? 0;
+      if (at > bestAt) {
+        best = cwd;
+        bestAt = at;
+      }
+    }
+    return best || process.cwd();
   }
 
   /** Best-effort workspace label for the hub discovery payload. */
