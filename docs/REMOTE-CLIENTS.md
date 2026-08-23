@@ -53,6 +53,7 @@ ACP editor ────── stdio ──────────┘
 | `GET /api/instances/{id}/status`                      | required | Real-time per-session running status of one bridge.                                          |
 | `POST /api/instances/{id}/sessions/{sessionId}/close` | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).        |
 | `GET /api/quota`                                      | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
+| `POST /api/upgrade`                                   | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).           |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -290,6 +291,33 @@ Errors: `401` bad token, `404` unknown session (or instance), `409` running,
 Cross-instance note: if the same conversation is also registered by another
 bridge of the project, the hub's dedupe re-attaches it under that instance —
 close it there too.
+
+## Hub self-upgrade
+
+```text
+POST {hub}/api/upgrade   → 200 { "ok": true, "restarting": false, "reason": "up-to-date",
+                                    "runningVersion": "0.11.6", "diskVersion": "0.11.6" }
+```
+
+Lets a remote client pick up a hub that was rebuilt on the machine (e.g. code
+edited and `pnpm build` run through a remote agent session). The client only
+**triggers** the check — the restart decision is entirely the hub's own. The
+hub restarts onto the on-disk code only when it judges that code NEWER than
+itself, by either signal:
+
+- the on-disk `package.json` version is newer than the version frozen into
+  the running process at start, **or**
+- any `.js` under `dist/` has an mtime later than process start (a rebuild,
+  even without a version bump).
+
+When `restarting` is `true`, the hub exits ~500ms after replying, re-spawns
+itself from the on-disk dist, and bridges re-register on their next heartbeat
+(≤10s). Poll `GET /api/health` until it answers again, then refresh
+`/api/instances` and reconnect. A respawned hub starts after the newest dist
+mtime, so the condition self-negates — no restart loops, and an OLDER on-disk
+version never triggers anything.
+
+Errors: `401` bad token. `GET` (or any other method) falls through to `404`.
 
 ## Session files (read-only)
 

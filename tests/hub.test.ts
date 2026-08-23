@@ -4,8 +4,11 @@
  * idle-exit policy.
  */
 
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -20,6 +23,7 @@ vi.mock("../src/handlers/account.js", () => ({
 }));
 
 import { resetQuotaCacheForTest, startHub, type HubHandle } from "../src/remote/hub-server.js";
+import { AGENT_INFO } from "../src/utils.js";
 
 const TOKEN = "test-hub-token";
 const BASE_PORT = 18400; // bridge ports start here; ephemeral hub uses port 0
@@ -659,5 +663,145 @@ describe("hub version self-upgrade", () => {
     expect(exited).toBe(false);
     const health = await fetch(`http://127.0.0.1:${hub.port}/api/health`);
     expect(health.status).toBe(200);
+  });
+});
+
+describe("hub /api/upgrade (self-decided restart)", () => {
+  const upgradeUrl = (hub: HubHandle) => `http://127.0.0.1:${hub.port}/api/upgrade`;
+  const auth = { Authorization: `Bearer ${TOKEN}` };
+
+  /**
+   * Fixture on-disk code: package.json + dist/remote/hub-server.js. Written
+   * BEFORE the hub starts, so its mtimes sit below the hub's startedAt —
+   * exactly like a build that predates the running process.
+   */
+  async function writeCodeFixture(
+    version: string,
+  ): Promise<{ packageJson: string; distDir: string }> {
+    const root = await mkdtemp(path.join(tmpdir(), "hub-upgrade-"));
+    const packageJson = path.join(root, "package.json");
+    const distDir = path.join(root, "dist");
+    await mkdir(path.join(distDir, "remote"), { recursive: true });
+    await writeFile(packageJson, JSON.stringify({ version }));
+    await writeFile(path.join(distDir, "remote", "hub-server.js"), "// code\n");
+    return { packageJson, distDir };
+  }
+
+  /** Poll a flag until true or fail (the restart fires ~500ms after replying). */
+  async function until(flag: () => boolean, label: string): Promise<void> {
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (flag()) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 50);
+      }),
+      5000,
+      label,
+    );
+  }
+
+  it("rejects /api/upgrade without or with a wrong token", async () => {
+    const hub = await startTestHub();
+    expect((await fetch(upgradeUrl(hub), { method: "POST" })).status).toBe(401);
+    expect(
+      (await fetch(upgradeUrl(hub), { method: "POST", headers: { Authorization: "Bearer nope" } }))
+        .status,
+    ).toBe(401);
+  });
+
+  it("stays put when the on-disk code matches the running version", async () => {
+    const paths = await writeCodeFixture(AGENT_INFO.version);
+    let restarted = false;
+    const hub = await startTestHub({
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      restarting: false,
+      reason: "up-to-date",
+      runningVersion: AGENT_INFO.version,
+      diskVersion: AGENT_INFO.version,
+    });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
+  });
+
+  it("does not restart onto an OLDER on-disk version", async () => {
+    const paths = await writeCodeFixture("0.0.1");
+    let restarted = false;
+    const hub = await startTestHub({
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(await res.json()).toMatchObject({ restarting: false, reason: "up-to-date" });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+  });
+
+  it("restarts onto a newer on-disk version", async () => {
+    const paths = await writeCodeFixture("9999.0.0");
+    let restarted = false;
+    const hub = await startTestHub({
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      restarting: true,
+      reason: "version",
+      runningVersion: AGENT_INFO.version,
+      diskVersion: "9999.0.0",
+    });
+    await until(() => restarted, "hub restart onto newer version");
+  });
+
+  it("restarts when dist was rebuilt without a version bump", async () => {
+    const paths = await writeCodeFixture(AGENT_INFO.version);
+    let restarted = false;
+    const hub = await startTestHub({
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    // Let startedAt settle strictly below the rewrite's mtime, then "rebuild".
+    await new Promise((r) => setTimeout(r, 20));
+    await writeFile(path.join(paths.distDir, "remote", "hub-server.js"), "// rebuilt\n");
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(await res.json()).toMatchObject({ restarting: true, reason: "mtime" });
+    await until(() => restarted, "hub restart onto rebuilt dist");
+  });
+
+  it("checks the real repo layout safely when nothing is injected", async () => {
+    let restarted = false;
+    const hub = await startTestHub({
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    // Under vitest the defaults resolve to the repo root: package.json reads
+    // the same version frozen into AGENT_INFO, and src/ holds no .js files —
+    // so the answer must be a calm no-op, never a crash.
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ restarting: false, reason: "up-to-date" });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
   });
 });

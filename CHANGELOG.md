@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-08-23
+
+### Added
+
+- `POST /api/upgrade`: a remote client can trigger the hub's own staleness
+  check; the hub restarts onto the on-disk code only when it judges that code
+  newer than itself (a newer `package.json` version frozen-at-start
+  comparison, or any `dist/**/*.js` mtime later than process start — so a
+  rebuild without a version bump counts). The client never decides the
+  restart. The daemon re-spawns itself from disk before exiting; bridges
+  re-register on their next heartbeat, and a respawned hub starts after the
+  newest dist mtime so the check cannot loop.
+
 ## [0.11.6] - 2026-08-23
 
 ### Added

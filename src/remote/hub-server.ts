@@ -7,6 +7,9 @@
  * plain-HTTP conveniences that spare clients a full ACP round-trip (ADR-0005):
  * a proxied per-instance /status, and an account-level /api/quota queried
  * directly (quota belongs to the machine's credentials, not to any instance).
+ * POST /api/upgrade lets a client TRIGGER a self-decided restart: the hub
+ * re-checks whether the on-disk build is newer than the running process and,
+ * only if so, re-spawns itself onto it — the decision is never the client's.
  * It holds no session state and understands no ACP — a proxied connection
  * stays bound to one instance for its whole lifetime.
  *
@@ -21,6 +24,8 @@
  */
 
 import { createHash, timingSafeEqual } from "node:crypto";
+import type { Dirent } from "node:fs";
+import { readdir, readFile, stat } from "node:fs/promises";
 import {
   createServer,
   get as httpGet,
@@ -30,6 +35,8 @@ import {
   type ServerResponse,
 } from "node:http";
 import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
@@ -46,6 +53,19 @@ export interface HubOptions {
   idleExitMs?: number;
   /** WebSocket keepalive ping interval (default 30s; tunnels drop idle links). */
   pingIntervalMs?: number;
+  /**
+   * Fires when the hub decided it should restart onto newer on-disk code
+   * (a newer bridge registered, or POST /api/upgrade found the dist newer).
+   * The standalone daemon re-spawns a replacement before exiting (see
+   * bin/hub.ts); falls back to onIdleExit when unset.
+   */
+  onRestart?: () => void;
+  /**
+   * Override the on-disk locations /api/upgrade checks against (tests point
+   * these at fixtures). Defaults: this package's package.json and the dist
+   * directory this module runs from.
+   */
+  codePaths?: { packageJson: string; distDir: string };
 }
 
 export interface HubHandle {
@@ -198,6 +218,81 @@ function portOpen(port: number, timeoutMs: number): Promise<boolean> {
 }
 
 /**
+ * Where /api/upgrade looks for on-disk code: root package.json + dist/.
+ */
+function defaultCodePaths(): { packageJson: string; distDir: string } {
+  // dist/remote/hub-server.js → ../../package.json and dist/ (src/ in dev
+  // has no .js files, so the mtime signal simply stays silent there).
+  return {
+    packageJson: fileURLToPath(new URL("../../package.json", import.meta.url)),
+    distDir: fileURLToPath(new URL("../", import.meta.url)),
+  };
+}
+
+/** Newest mtime among .js files under dir (recursive); null when none found. */
+async function newestJsMtime(dir: string): Promise<number | null> {
+  let newest: number | null = null;
+  const walk = async (current: string): Promise<void> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return; // unreadable subtree — skip it, don't fail the check
+    }
+    for (const entry of entries) {
+      const p = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(p);
+      else if (entry.isFile() && entry.name.endsWith(".js")) {
+        try {
+          // Floor to whole ms: APFS mtimes carry sub-ms fractions while
+          // Date.now() truncates, and a same-ms write/start pair would
+          // otherwise look "newer" than a hub started after it.
+          const mtime = Math.floor((await stat(p)).mtimeMs);
+          if (newest === null || mtime > newest) newest = mtime;
+        } catch {
+          /* raced deletion */
+        }
+      }
+    }
+  };
+  await walk(dir);
+  return newest;
+}
+
+/**
+ * /api/upgrade staleness check: is the code on DISK newer than this running
+ * process? Either signal suffices — the on-disk package.json version beats
+ * the version frozen into this process at start (a release upgrade), or any
+ * .js under dist was written after process start (a rebuild, even without a
+ * version bump). A respawned process starts after the newest dist mtime, so
+ * the condition self-negates: no restart loops.
+ */
+async function diskCodeIsNewer(
+  paths: { packageJson: string; distDir: string },
+  startedAt: number,
+): Promise<{
+  newer: boolean;
+  reason: "version" | "mtime" | "up-to-date";
+  diskVersion: string | null;
+}> {
+  let diskVersion: string | null = null;
+  try {
+    const pkg = JSON.parse(await readFile(paths.packageJson, "utf8")) as { version?: unknown };
+    if (typeof pkg.version === "string") diskVersion = pkg.version;
+  } catch {
+    /* unreadable package.json — the mtime signal still applies */
+  }
+  if (diskVersion && compareVersions(diskVersion, AGENT_INFO.version) > 0) {
+    return { newer: true, reason: "version", diskVersion };
+  }
+  const newest = await newestJsMtime(paths.distDir);
+  if (newest !== null && newest > startedAt) {
+    return { newer: true, reason: "mtime", diskVersion };
+  }
+  return { newer: false, reason: "up-to-date", diskVersion };
+}
+
+/**
  * Start the hub. Resolves once listening; rejects on bind failure (including
  * EADDRINUSE when another hub already owns the port).
  */
@@ -210,11 +305,29 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     idleExitMs = IDLE_EXIT_MS,
     pingIntervalMs = PING_INTERVAL_MS,
     onIdleExit,
+    onRestart,
+    codePaths = defaultCodePaths(),
   } = options;
+
+  /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
+  const startedAt = Date.now();
 
   const instances = new Map<string, InstanceEntry>();
   const proxyPairs = new Set<{ client: WebSocket; bridge: WebSocket }>();
   const timers: Array<ReturnType<typeof setInterval>> = [];
+
+  /**
+   * Reply first, then gracefully stop (close() releases the port) and hand
+   * over. `close` is declared below and hoisted — it only runs inside the
+   * timer, long after this scope is fully initialised.
+   */
+  const restartSoon = (message: string): void => {
+    log(message);
+    const restart = setTimeout(() => {
+      void close().finally(() => (onRestart ?? onIdleExit)?.());
+    }, 500);
+    restart.unref();
+  };
 
   let idleSince: number | null = null;
 
@@ -362,6 +475,34 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       return;
     }
+    // POST /api/upgrade — a remote client may TRIGGER a staleness check but
+    // never decide the restart: the hub compares its frozen running version
+    // and process start time against the on-disk package.json and dist
+    // mtimes, and only restarts onto code it judged newer (diskCodeIsNewer).
+    if (url.pathname === "/api/upgrade" && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const check = await diskCodeIsNewer(codePaths, startedAt);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          restarting: check.newer,
+          reason: check.reason,
+          runningVersion: AGENT_INFO.version,
+          diskVersion: check.diskVersion,
+        }),
+      );
+      if (check.newer) {
+        restartSoon(
+          `hub: on-disk code is newer (${check.reason}: ${check.diskVersion ?? "rebuilt dist"}) — restarting onto it`,
+        );
+      }
+      return;
+    }
     // /api/instances/{id}/fs/... and /status — byte-level proxy to the
     // instance's loopback file/status endpoint (ADR-0004, ADR-0005). The hub
     // routes by instance id only; sessionId, path semantics, and scope checks
@@ -499,13 +640,9 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(stale ? { ok: true, restarting: true } : { ok: true }));
       if (stale) {
-        log(
+        restartSoon(
           `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
         );
-        const restart = setTimeout(() => {
-          void close().finally(() => onIdleExit?.());
-        }, 500);
-        restart.unref();
       }
       return;
     }
