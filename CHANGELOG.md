@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.8] - 2026-08-23
+
+### Added
+
+- `?dl=1` on the file byte path switches `Content-Disposition` from `inline`
+  to `attachment`, so WebViews that implement a DownloadListener (the Android
+  app routes these into the system DownloadManager) download instead of
+  navigating to the file.
+
 ## [0.11.7] - 2026-08-23
 
 ### Added

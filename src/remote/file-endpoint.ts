@@ -94,12 +94,15 @@ function mimeFor(file: string): string {
 /**
  * Content-Disposition for the byte path. The URL's basename is "file" (the
  * real name lives in a query param), so without this header browsers save
- * direct-link downloads nameless. `inline` keeps previewable types rendering
- * in-browser; the filename* form preserves non-ASCII names (RFC 6266/5987).
+ * direct-link downloads nameless. Default `inline` keeps previewable types
+ * rendering in-browser; `?dl=1` switches to `attachment` so WebViews (whose
+ * host implements a DownloadListener) download instead of navigating. The
+ * filename* form preserves non-ASCII names (RFC 6266/5987).
  */
-function contentDisposition(name: string): string {
+function contentDisposition(name: string, attachment: boolean): string {
   const ascii = name.replace(/["\\]/g, "_").replace(/[^\x20-\x7e]/g, "_");
-  return `inline; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  const type = attachment ? "attachment" : "inline";
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }
 
 function sendText(res: ServerResponse, code: number, message: string): void {
@@ -348,7 +351,10 @@ async function handleFile(
     // Same headers the GET would send, no body.
     const headers: Record<string, string> = {
       "Content-Type": mime,
-      "Content-Disposition": contentDisposition(path.basename(file)),
+      "Content-Disposition": contentDisposition(
+        path.basename(file),
+        url.searchParams.get("dl") === "1",
+      ),
     };
     if (hasByte) {
       headers["Content-Range"] = `bytes ${start}-${end}/${s.size}`;
@@ -370,7 +376,10 @@ async function handleFile(
   req.on("close", () => stream.destroy());
   const headers: Record<string, string> = {
     "Content-Type": mime,
-    "Content-Disposition": contentDisposition(path.basename(file)),
+    "Content-Disposition": contentDisposition(
+      path.basename(file),
+      url.searchParams.get("dl") === "1",
+    ),
   };
   if (hasByte) {
     headers["Content-Range"] = `bytes ${start}-${end}/${s.size}`;

@@ -176,6 +176,12 @@ describe("session files over the hub proxy", () => {
     // Line windows are viewer-internal partial views — no download name.
     const win = await fsFetch(base, "/file?sessionId=s-fs&path=README.md&line=1&limit=1");
     expect(win.headers.get("content-disposition")).toBeNull();
+
+    // ?dl=1 forces attachment so WebViews download instead of navigating.
+    const dl = await fsFetch(base, "/file?sessionId=s-fs&path=README.md&dl=1");
+    expect(dl.headers.get("content-disposition")).toBe(
+      `attachment; filename="README.md"; filename*=UTF-8''README.md`,
+    );
   });
 
   it("serves text line windows with X-Zcode-First-Line", async () => {

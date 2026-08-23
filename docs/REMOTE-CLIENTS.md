@@ -331,6 +331,7 @@ GET {hub}/api/instances/{id}/fs/list?sessionId=…&path=<rel>    one directory l
 GET {hub}/api/instances/{id}/fs/file?sessionId=…&path=<rel>    file bytes
     &offset=…&length=…     byte window → 206 + Content-Range
     &line=…&limit=…        text window (defaults 1 / 200, cap 5000)
+    &dl=1                  Content-Disposition: attachment (download, not inline)
 ```
 
 - `path` resolves against the session's root cwd — the directory the session
