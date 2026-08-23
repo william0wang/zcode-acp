@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-08-23
+
+### Added
+
+- Remote file downloads carry a `Content-Disposition` filename: the byte
+  path's URL basename is always "file" (the real name lives in a query
+  param), so browser direct-downloads saved nameless. Responses now send
+  `inline; filename="…"; filename*=UTF-8''…` (RFC 6266/5987 — non-ASCII
+  names survive via the `filename*` form, the ASCII fallback degrades to
+  underscores). Line windows (viewer-internal partial views) stay unnamed.
+
 ## [0.11.5] - 2026-08-22
 
 ### Fixed

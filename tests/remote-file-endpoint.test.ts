@@ -152,6 +152,32 @@ describe("session files over the hub proxy", () => {
     expect(await res.text()).toBe(content.slice(2, 6));
   });
 
+  it("names byte-path downloads via Content-Disposition", async () => {
+    const { base, dir } = await spawnFixture();
+    await writeFile(path.join(dir, "年度报告.md"), "# 总结\n");
+
+    const res = await fsFetch(base, "/file?sessionId=s-fs&path=README.md");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-disposition")).toBe(
+      `inline; filename="README.md"; filename*=UTF-8''README.md`,
+    );
+
+    // Non-ASCII names survive via the RFC 5987 filename* form; the ASCII
+    // fallback degrades to underscores instead of mojibake.
+    const zh = await fsFetch(
+      base,
+      `/file?sessionId=s-fs&path=${encodeURIComponent("年度报告.md")}`,
+    );
+    expect(zh.status).toBe(200);
+    expect(zh.headers.get("content-disposition")).toBe(
+      `inline; filename="____.md"; filename*=UTF-8''${encodeURIComponent("年度报告.md")}`,
+    );
+
+    // Line windows are viewer-internal partial views — no download name.
+    const win = await fsFetch(base, "/file?sessionId=s-fs&path=README.md&line=1&limit=1");
+    expect(win.headers.get("content-disposition")).toBeNull();
+  });
+
   it("serves text line windows with X-Zcode-First-Line", async () => {
     const { base } = await spawnFixture();
     const res = await fsFetch(base, "/file?sessionId=s-fs&path=README.md&line=2&limit=1");
