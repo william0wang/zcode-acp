@@ -608,14 +608,36 @@ export async function prompt(
   // at end_turn, seed a provisional title from the prompt text (auto-title
   // stays authoritative — its set-once gate is the separate sessionTitles).
   server.markSessionActive(params.sessionId);
-  if (server.sessionSummaries.get(params.sessionId)?.title === undefined) {
-    const firstLine = text.trim().split(/\r\n|\r|\n/)[0] ?? "";
-    if (firstLine) {
-      server.touchSessionSummary(
-        params.sessionId,
-        firstLine.length > 60 ? firstLine.slice(0, 57) + "…" : firstLine,
-      );
-    }
+  // Session title: set EXACTLY ONCE, here, from the first prompt of a
+  // freshly created session — immediately, not at end_turn (a preempted
+  // first turn ends "cancelled" and would never be titled; and the
+  // completing prompt must not steal the title). After this, no automatic
+  // path may change the title again: sessionTitles is set-once and a manual
+  // rename is the only later modifier. Resumed/loaded sessions are not
+  // title-eligible — their stored title was adopted on load, or left unset.
+  if (
+    server.titleEligibleSessions.has(params.sessionId) &&
+    text &&
+    !server.sessionTitles.has(params.sessionId)
+  ) {
+    // Title = first non-empty line of the prompt, truncated to 80 chars.
+    // Multi-line prompts must not leak newlines into the session title.
+    // Split on any line break (\r\n, \n, \r) so all platforms are covered.
+    const title =
+      text
+        .split(/\r\n|\r|\n/)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0)
+        ?.slice(0, 80) ?? text.slice(0, 80);
+    server.sessionTitles.set(params.sessionId, title);
+    server.touchSessionSummary(params.sessionId, title);
+    const { updateSessionTitle } = await import("../tasks-index.js");
+    void updateSessionTitle(zcodeSid, title, text);
+    void sendSessionUpdate(cx, params.sessionId, {
+      sessionUpdate: "session_info_update",
+      title,
+      updatedAt: new Date().toISOString(),
+    });
   }
   // Out-of-band running indicator: clients that did not send this prompt
   // (re-attached mobile, second editor) learn the turn started here — the
@@ -794,35 +816,8 @@ export async function prompt(
           preempted,
         );
 
-        // Session title: set once on the first end_turn, but ONLY for freshly
-        // created sessions. Resumed/loaded sessions already carry a title from
-        // their history and must not be overwritten by the first post-load
-        // message. sessionTitles enforces set-once within a session;
-        // titleEligibleSessions gates which sessions are titled at all.
-        if (
-          result.stopReason === "end_turn" &&
-          server.titleEligibleSessions.has(params.sessionId) &&
-          !server.sessionTitles.has(params.sessionId)
-        ) {
-          // Title = first non-empty line of the prompt, truncated to 80 chars.
-          // Multi-line prompts must not leak newlines into the session title.
-          // Split on any line break (\r\n, \n, \r) so all platforms are covered.
-          const title =
-            text
-              .split(/\r\n|\r|\n/)
-              .map((l) => l.trim())
-              .find((l) => l.length > 0)
-              ?.slice(0, 80) ?? text.slice(0, 80);
-          server.sessionTitles.set(params.sessionId, title);
-          server.touchSessionSummary(params.sessionId, title);
-          const { updateSessionTitle } = await import("../tasks-index.js");
-          void updateSessionTitle(zcodeSid, title, text);
-          await sendSessionUpdate(cx, params.sessionId, {
-            sessionUpdate: "session_info_update",
-            title,
-            updatedAt: new Date().toISOString(),
-          });
-        }
+        // (Session title: already set once at the FIRST prompt, before the
+        // turn loop — nothing here may change it again.)
 
         // Auto-compact: if context usage exceeds the threshold, compact before
         // returning so the next prompt has room. Configured via

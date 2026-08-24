@@ -541,18 +541,22 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       req.on("close", () => upstream.destroy());
       return;
     }
-    // POST /api/instances/{id}/sessions/{sid}/close — the remote HTTP
-    // surface's first write op (ADR-0006): forward-and-relay to the bridge's
-    // loopback close route. The hub still routes by instance id only; close
-    // semantics (running guard, discovery retirement) stay in the bridge.
-    const closeMatch = url.pathname.match(/^\/api\/instances\/([^/]+)\/sessions\/([^/]+)\/close$/);
-    if (closeMatch && req.method === "POST") {
+    // POST /api/instances/{id}/sessions/{sid}/close|rename — the remote HTTP
+    // write surface (ADR-0006): forward-and-relay to the bridge's loopback
+    // route. The hub still routes by instance id only; semantics (running
+    // guard / discovery retirement, title validation + pinning + broadcast)
+    // stay in the bridge. Any request body pipes through untouched.
+    const sessionOpMatch = url.pathname.match(
+      /^\/api\/instances\/([^/]+)\/sessions\/([^/]+)\/(close|rename)$/,
+    );
+    if (sessionOpMatch && req.method === "POST") {
+      const [, instId, sid, op] = sessionOpMatch;
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
         res.end("unauthorized");
         return;
       }
-      const entry = instances.get(closeMatch[1]!);
+      const entry = instances.get(instId!);
       if (!entry) {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("unknown instance");
@@ -562,7 +566,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         {
           host: "127.0.0.1",
           port: entry.port,
-          path: `/sessions/${closeMatch[2]}/close`,
+          path: `/sessions/${sid}/${op}`,
           method: "POST",
         },
         (up) => {
@@ -587,7 +591,8 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.on("close", () => {
         if (!res.writableEnded) upstream.destroy();
       });
-      // Relay any request body through (clients normally send none).
+      // Relay any request body through (close sends none, rename carries the
+      // JSON title — chunked, since the hub does not forward headers).
       req.pipe(upstream);
       return;
     }

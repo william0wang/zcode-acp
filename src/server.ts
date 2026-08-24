@@ -150,7 +150,7 @@ export class ZcodeAcpServer {
    */
   private readonly backendLoadedSessions = new Map<string, number>();
   /**
-   * Sessions eligible for auto-title on first end_turn. Only `session/new`
+   * Sessions eligible for the one-shot auto-title. Only `session/new`
    * populates this — resumed/loaded sessions already carry a title, so their
    * first post-load message must NOT overwrite it. (sessionTitles alone can't
    * distinguish "freshly created" from "resumed but not yet titled in-process".)

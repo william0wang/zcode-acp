@@ -140,17 +140,17 @@ function makeStatement(sql: string) {
       },
     };
   }
-  // UPDATE tasks SET updated_at=?, searchable_text=?, meta_json=? WHERE task_id=?
-  // (title_overridden=1 branch: keep user title, still refresh searchable_text)
+  // UPDATE tasks SET updated_at=?, searchable_text=? WHERE task_id=?
+  // (title_overridden=1 branch: keep the user's title everywhere, still
+  // refresh searchable_text)
   if (/^UPDATE tasks SET updated_at=\?, searchable_text/i.test(sql)) {
     return {
-      run(updatedAt: number, searchable: string, metaJson: string, taskId: string) {
+      run(updatedAt: number, searchable: string, taskId: string) {
         let changes = 0;
         for (const r of rows.values()) {
           if (r.task_id === taskId) {
             r.updated_at = updatedAt;
             r.searchable_text = searchable;
-            r.meta_json = metaJson;
             changes++;
           }
         }
@@ -389,9 +389,10 @@ describe("tasks-index session sync", () => {
       expect(r.title).toBe("user kept name");
       // But searchable_text is still updated (not user-controlled).
       expect(r.searchable_text).toBe("search body");
-      // meta_json.title is synced to the auto title for consistency (the App
-      // reads meta_json first, but with title_overridden=1 the column wins).
-      expect(JSON.parse(r.meta_json).title).toBe("auto title");
+      // meta_json is left untouched too — the App may read the title from
+      // either the column or meta_json.title, so writing the auto title into
+      // meta_json could visually revert the user's rename.
+      expect(JSON.parse(r.meta_json).title).not.toBe("auto title");
     });
 
     it("returns false when the session row does not exist", async () => {

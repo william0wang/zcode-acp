@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.9] - 2026-08-24
+
+### Added
+
+- `POST /api/instances/{id}/sessions/{sessionId}/rename` (body `{"title"}`):
+  renames a session from a remote client. The bridge pins the title
+  (`title_overridden=1` in the App's tasks-index), updates discovery, and
+  broadcasts `session_info_update` so attached editors update live. Proxied
+  by the hub alongside the existing close route.
+
+### Changed
+
+- Session titles are now set exactly ONCE, from the first prompt, the moment
+  it is sent — instead of on the first `end_turn`. A message interrupting the
+  first turn can no longer steal the title (the preempted turn ended
+  `cancelled` and never reached the title block). After the one-shot title, no
+  automatic path revises a session title; a manual rename is the only later
+  modifier. `updateSessionTitle` no longer writes the auto title into
+  `meta_json.title` of a user-renamed row (the App may read either field, and
+  the write could visually revert the user's rename).
+
 ## [0.11.8] - 2026-08-23
 
 ### Added

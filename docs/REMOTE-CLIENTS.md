@@ -52,6 +52,7 @@ ACP editor ────── stdio ──────────┘
 | `GET /api/instances`                                  | required | Registered bridge instances. Add `?probe=1` to verify first.                                 |
 | `GET /api/instances/{id}/status`                      | required | Real-time per-session running status of one bridge.                                          |
 | `POST /api/instances/{id}/sessions/{sessionId}/close` | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).        |
+| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                            |
 | `GET /api/quota`                                      | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
 | `POST /api/upgrade`                                   | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).           |
 
@@ -91,9 +92,12 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   `session/load` puts the remote client on the same notification stream as
   the editor tab: turns driven from either side stream live to both. A
   conversation with no editor placeholder is advertised under its backend
-  id (`sess_…`), still loadable via pass-through resume. `title` comes from
-  the backend session store once the backend has titled it; sessions whose
-  first turn is still running carry the provisional prompt-derived title.
+  id (`sess_…`), still loadable via `session/load` pass-through resume. The
+  title is set exactly once by the bridge — from the first line of the first
+  prompt (capped at 80 chars), the moment that prompt is sent — and never
+  changes automatically afterwards; a manual rename is the only later
+  modifier. Sessions born in a previous bridge lifetime get their title from
+  the session store on load/resume.
 - `sessions[].status` is a coarse `"running" | "idle"` indicator riding the
   heartbeat (up to ~10s stale; absent on older bridges — treat as unknown).
   For the live value poll [`/api/instances/{id}/status`](#session-running-status).
@@ -110,9 +114,9 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
   **accessible** (every listed id resolves and resumes through that bridge).
   Retired conversations of the project are NOT listed even though the
   backend store still has them — the store only enriches live entries with
-  the authoritative title and a cross-bridge `updatedAt`. Entries may carry
-  a provisional title (first line of the first prompt, capped at 60 chars)
-  until the backend's own auto-title lands.
+  the stored title and a cross-bridge `updatedAt`. The auto-title is set once
+  at the first prompt (first non-empty line, capped at 80 chars) and is never
+  revised by later turns.
 - Entries are **deduped across instances**: several bridges of the same
   project (e.g. a leaked old process plus the current one) can all hold the
   same live conversation under the same id; the hub keeps one copy per
@@ -291,6 +295,31 @@ Errors: `401` bad token, `404` unknown session (or instance), `409` running,
 Cross-instance note: if the same conversation is also registered by another
 bridge of the project, the hub's dedupe re-attaches it under that instance —
 close it there too.
+
+## Renaming a session
+
+```text
+POST {hub}/api/instances/{id}/sessions/{sessionId}/rename
+     body: { "title": "new name" }                        → 200 { "ok": true, "title": "…" }
+```
+
+The session title is set **once**, automatically, from the first prompt of a
+freshly created session (first non-empty line, capped at 80 chars) — this
+endpoint is the only later modifier. ACP has no client→agent rename channel,
+and an editor-side rename lives in the editor's own storage forever, so the
+remote side is where a rename enters the system.
+
+The bridge applies the rename everywhere: its in-memory title pin (no later
+automatic write can touch it), the discovery summary (live within one
+heartbeat), the ZCode App's tasks-index (`title_overridden=1`, same marker the
+App's own rename sets), and a `session_info_update` broadcast to every
+attached client — the editor tab updates live. The title is normalized like
+the auto-title: flattened to one line, trimmed, capped at 80 chars; an
+all-whitespace title is rejected with `400`.
+
+Errors: `400` missing/empty title or oversized body (>4 KB), `401` bad token,
+`404` unknown session (or instance), `502` bridge unreachable. Renaming during
+a running turn is allowed — titles are no longer turn-coupled.
 
 ## Hub self-upgrade
 

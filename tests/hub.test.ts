@@ -580,6 +580,56 @@ describe("hub session close proxy", () => {
   });
 });
 
+describe("hub session rename proxy", () => {
+  /** Fake bridge loopback HTTP server accepting POST /sessions/{id}/rename. */
+  function startRenameBridge(): Promise<{
+    server: Server;
+    port: number;
+    seen: Array<{ sid: string; body: string }>;
+  }> {
+    return new Promise((resolve) => {
+      const seen: Array<{ sid: string; body: string }> = [];
+      const server = createServer((req, res) => {
+        const sid = new URL(req.url ?? "/", "http://127.0.0.1").pathname.split("/")[2];
+        const chunks: Buffer[] = [];
+        req.on("data", (c: Buffer) => chunks.push(c));
+        req.on("end", () => {
+          seen.push({ sid: sid ?? "", body: Buffer.concat(chunks).toString("utf8") });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end('{"ok":true,"title":"renamed"}');
+        });
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0, seen });
+      });
+    });
+  }
+
+  it("relays the rename POST with its JSON body to the bridge", async () => {
+    const hub = await startTestHub();
+    const bridge = track(
+      await startRenameBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port: bridge.port })),
+    });
+    expect(res.status).toBe(200);
+
+    const ok = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s1/rename`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "my name" }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ ok: true, title: "renamed" });
+    expect(bridge.seen).toEqual([{ sid: "s1", body: '{"title":"my name"}' }]);
+  });
+});
+
 describe("hub idle exit", () => {
   it("exits after the idle window with no instances and no proxies", async () => {
     let exited = false;

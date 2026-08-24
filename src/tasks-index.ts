@@ -215,6 +215,45 @@ export async function upsertSessionTask(opts: {
 }
 
 /**
+ * User-driven rename (remote rename endpoint): pins the title with
+ * title_overridden=1 — the same marker the App's own rename flow sets — so no
+ * later automatic write can touch it. Best-effort: returns false when the row
+ * is missing or the index is unavailable.
+ */
+export async function renameSessionTask(taskId: string, title: string): Promise<boolean> {
+  if (!existsSync(TASKS_INDEX_PATH)) return false;
+  const trimmed = title.trim().slice(0, 80);
+  if (!trimmed) return false;
+  try {
+    const result = await withSqliteRetry((con) => {
+      const row = con.prepare("SELECT meta_json FROM tasks WHERE task_id=?").get(taskId) as
+        { meta_json: string } | undefined;
+      if (!row) return false;
+      let metaJson: string;
+      try {
+        const meta = JSON.parse(row.meta_json ?? "{}") as Record<string, unknown>;
+        meta["title"] = trimmed;
+        metaJson = JSON.stringify(meta);
+      } catch {
+        // meta_json corrupt/unparseable — the App will fall back to the title
+        // column anyway, so keep the stored bytes rather than guessing.
+        metaJson = row.meta_json ?? "{}";
+      }
+      con
+        .prepare(
+          "UPDATE tasks SET title=?, title_overridden=1, updated_at=?, meta_json=? WHERE task_id=?",
+        )
+        .run(trimmed, Date.now(), metaJson, taskId);
+      return true;
+    });
+    return result ?? false;
+  } catch (e) {
+    warn(`tasks-index rename skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/**
  * Update a session's title + searchable_text after the first turn.
  *
  * session/create leaves title empty; once the first prompt completes, set a
@@ -249,10 +288,20 @@ export async function updateSessionTitle(
         .get(taskId) as { title_overridden: number; meta_json: string } | undefined;
       if (!row) return false;
 
+      if (row.title_overridden === 1) {
+        // User renamed manually → the displayed title (title column AND
+        // meta_json.title — the App may read either) must stay untouched;
+        // only refresh searchable_text so search stays useful.
+        con
+          .prepare("UPDATE tasks SET updated_at=?, searchable_text=? WHERE task_id=?")
+          .run(Date.now(), search, taskId);
+        return true;
+      }
+
       // The ZCode App reads title from meta_json first (falling back to the
       // title column only when meta_json fails to parse). If we update only the
       // column, the App keeps showing the stale meta_json title (empty at create
-      // time). So we patch meta_json.title in both branches below.
+      // time). So patch meta_json.title as well.
       let metaJson: string;
       try {
         const meta = JSON.parse(row.meta_json ?? "{}") as Record<string, unknown>;
@@ -262,15 +311,6 @@ export async function updateSessionTitle(
         // meta_json corrupt/unparseable — the App will fall back to the title
         // column anyway, so skip the meta_json write rather than guessing.
         metaJson = row.meta_json ?? "{}";
-      }
-
-      if (row.title_overridden === 1) {
-        // User overrode the title → respect the column value, but still refresh
-        // searchable_text and sync meta_json.title for consistency.
-        con
-          .prepare("UPDATE tasks SET updated_at=?, searchable_text=?, meta_json=? WHERE task_id=?")
-          .run(Date.now(), search, metaJson, taskId);
-        return true;
       }
       con
         .prepare(
