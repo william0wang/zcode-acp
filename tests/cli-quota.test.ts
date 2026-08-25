@@ -1,5 +1,5 @@
 /**
- * Tests for the `zcode-quota` standalone CLI: argv parsing and interval
+ * Tests for the `zcode-acp quota` standalone CLI: argv parsing and interval
  * clamping. The watch loop itself is an I/O loop (sleep + redraw) and is left
  * to manual verification; only the pure helpers are unit-tested.
  *

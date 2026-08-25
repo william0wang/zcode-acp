@@ -6,7 +6,7 @@
  * (SDK AcpServer transport). Each remote connection gets its own JSON-RPC id
  * space; fan-out to all clients is handled by the broadcast registry, not
  * here. This endpoint is intentionally NOT exposed to the network — the hub
- * (`zcode-acp-hub`) is the single public entry and proxies into it.
+ * (`zcode-acp hub`) is the single public entry and proxies into it.
  *
  * The bridge also registers itself with the hub (spawning one if none is
  * listening) and re-registers every 10s as a heartbeat carrying fresh session

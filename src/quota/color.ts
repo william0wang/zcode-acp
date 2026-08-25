@@ -1,5 +1,5 @@
 /**
- * Color progress-bar rendering for the `zcode-quota` CLI.
+ * Color progress-bar rendering for the `zcode-acp quota` CLI.
  *
  * The default CLI view overlays the usage numbers directly onto a heat-colored
  * (green→yellow→red) bar using 24-bit ANSI background colors, so the percentage

@@ -117,7 +117,7 @@ const DETAIL_LABEL_WIDTH = 14;
  * - `color` (default `false`): render the bar as a heat-colored (green→red)
  *   24-bit ANSI bar with the usage numbers overlaid inside (see
  *   {@link pickOverlay}), leaving only the reset time on the right margin.
- *   Only the `zcode-quota` CLI sets this (gated on `stdout.isTTY`); the
+ *   Only the `zcode-acp quota` CLI sets this (gated on `stdout.isTTY`); the
  *   `/quota` slash command never does, so its fenced ```text card stays plain
  *   and copy-paste-safe.
  */

@@ -341,7 +341,7 @@ http://127.0.0.1:<hub-port>/api/health` fails, or `/api/*` returns 401.
 1. 401 means a token mismatch — `ZCODE_ACP_REMOTE_TOKEN` must be identical in
    the bridge env, the hub env (if run manually), and the client request.
 2. A dead hub self-heals: the next bridge heartbeat (≤10s; worst ~1min under
-   the spawn throttle) re-spawns `zcode-acp-hub`. Retry with backoff rather
+   the spawn throttle) re-spawns the hub daemon. Retry with backoff rather
    than restarting anything by hand.
 3. Confirm the ports match: the client must reach `ZCODE_ACP_HUB_PORT`
    (default 8377) through the tunnel, and the tunnel maps exactly that one

@@ -2,7 +2,7 @@
 
 How to attach any out-of-editor client — browser SPA, mobile app, CLI, desktop
 tool — to bridge sessions over the network. This document IS the contract:
-everything here is implemented by `zcode-acp-hub` and the bridge's remote
+everything here is implemented by the hub daemon (`zcode-acp hub`) and the bridge's remote
 endpoint; anything not written here is not part of the contract.
 
 ACP method semantics are defined by the [ACP spec](https://agentclientprotocol.com);
@@ -182,7 +182,7 @@ pull-only request — callable any time after `initialize`, no session required.
 Fetch once after attach and on demand; quota changes are slow, there is no
 push.
 
-Both channels return the same payload, mirroring the `zcode-quota` CLI card's
+Both channels return the same payload, mirroring the `zcode-acp quota` CLI card's
 data model — one GLM section plus one Opencode Go section — so clients can
 reproduce the CLI layout exactly:
 

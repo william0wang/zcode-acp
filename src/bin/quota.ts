@@ -8,12 +8,12 @@
  * credentials and hits the quota HTTP API directly.
  *
  * Usage:
- *   zcode-quota                  one-shot: print the card and exit
- *   zcode-quota -w               watch mode (default 30s refresh)
- *   zcode-quota -w -i 60         watch with a 60s interval
- *   zcode-quota -d               show per-model MCP detail sub-lines
- *   zcode-quota --watch --interval 15
- *   zcode-quota -h | --help      show help
+ *   zcode-acp quota                  one-shot: print the card and exit
+ *   zcode-acp quota -w               watch mode (default 30s refresh)
+ *   zcode-acp quota -w -i 60         watch with a 60s interval
+ *   zcode-acp quota -d               show per-model MCP detail sub-lines
+ *   zcode-acp quota --watch --interval 15
+ *   zcode-acp quota -h | --help      show help
  *
  * The refresh interval has a 10s floor: the in-memory quota cache TTL is 10s,
  * and a shorter interval would just keep returning the cached value.
@@ -65,7 +65,7 @@ export interface CliOptions {
 }
 
 /** Human-readable usage text. */
-const HELP_TEXT = `Usage: zcode-quota [provider] [options]
+const HELP_TEXT = `Usage: zcode-acp quota [provider] [options]
 
 Query usage from the terminal. By default shows both GLM Coding Plan and
 Opencode Go in one card; pass a provider to focus on one.
@@ -92,12 +92,12 @@ Options:
   -h, --help               Show this help and exit.
 
 Examples:
-  zcode-quota                 # both providers, print once and exit (color bars)
-  zcode-quota go              # Opencode Go only (3 windows)
-  zcode-quota glm -w          # GLM only, live monitor every 30s
-  zcode-quota -w -i 60        # both, refresh every 60s
-  zcode-quota -d              # both, include per-model MCP breakdown
-  zcode-quota --plain         # both, classic monochrome bars`;
+  zcode-acp quota                 # both providers, print once and exit (color bars)
+  zcode-acp quota go              # Opencode Go only (3 windows)
+  zcode-acp quota glm -w          # GLM only, live monitor every 30s
+  zcode-acp quota -w -i 60        # both, refresh every 60s
+  zcode-acp quota -d              # both, include per-model MCP breakdown
+  zcode-acp quota --plain         # both, classic monochrome bars`;
 
 /**
  * Clamp a raw interval (seconds, optional) to a valid ms value. Returns the
@@ -168,7 +168,7 @@ export function parseArgs(argv: readonly string[]): CliOptions {
           if (Number.isFinite(n)) interval = n;
         } else if (arg === "glm" || arg === "go") {
           // First positional provider token. Only honor the first; a second
-          // (e.g. `zcode-quota glm go`) is ignored to keep parsing simple.
+          // (e.g. `zcode-acp quota glm go`) is ignored to keep parsing simple.
           if (provider === "all") provider = arg;
         }
         // Other non-flag tokens are ignored (forward-compat / typos).
@@ -351,8 +351,15 @@ async function runOnce(provider: Provider, detail: boolean, color: boolean): Pro
   process.stdout.write(out + "\n");
 }
 
-async function main(): Promise<void> {
-  const opts = parseArgs(process.argv.slice(2));
+/**
+ * CLI entry. Takes the argument list (defaulting to the process argv) so the
+ * Unified CLI dispatcher can pass its own slice (`zcode-acp quota -w` →
+ * `["-w"]`) without the subcommand name leaking in as a provider token.
+ *
+ * Exported for the Unified CLI dispatcher; guarded auto-run below.
+ */
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  const opts = parseArgs(argv);
 
   if (opts.help) {
     process.stdout.write(HELP_TEXT + "\n");
@@ -360,7 +367,7 @@ async function main(): Promise<void> {
   }
 
   if (opts.intervalClamped) {
-    process.stderr.write(`zcode-quota: interval below 10s raised to 10s (cache TTL is 10s)\n`);
+    process.stderr.write(`zcode-acp quota: interval below 10s raised to 10s (cache TTL is 10s)\n`);
   }
 
   // Color is on by default on a real terminal; turn it off when piped/
@@ -380,14 +387,15 @@ async function main(): Promise<void> {
 // Only auto-run when invoked directly (not when imported by tests). In an ESM
 // build there is no `require.main`, so fall back to a heuristic: if argv[1]
 // (the executed script) ends with this file's path, we are the entry point.
+// Backslashes are normalized because argv[1] on Windows is a backslash path.
 const invokedDirectly = (() => {
-  const entry = process.argv[1] ?? "";
+  const entry = (process.argv[1] ?? "").replace(/\\/g, "/");
   return entry.endsWith("bin/quota.js") || entry.endsWith("bin/quota.ts");
 })();
 
 if (invokedDirectly) {
   main().catch((err) => {
-    process.stderr.write(`zcode-quota: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.stderr.write(`zcode-acp quota: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
   });
 }

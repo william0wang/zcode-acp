@@ -1,7 +1,7 @@
 /**
  * Account-level usage stats — Proposal 0002 (`account/usage_stats`).
  *
- * Exposes the combined dual-provider quota behind the `zcode-quota` CLI
+ * Exposes the combined dual-provider quota behind the `zcode-acp quota` CLI
  * (GLM Coding Plan + Opencode Go) to remote clients as a pull-only ACP
  * method, callable any time after `initialize` (no session required — quota
  * is account-level, so it fits no `session/update` kind).

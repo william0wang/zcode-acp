@@ -60,7 +60,7 @@ export function parseRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteC
   };
 }
 
-/** Parse hub-side config for the standalone `zcode-acp-hub` bin. */
+/** Parse hub-side config for the standalone hub entry (`zcode-acp hub`). */
 export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConfig | null {
   const token = (env.ZCODE_ACP_REMOTE_TOKEN ?? "").trim();
   if (!token) {

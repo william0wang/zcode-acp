@@ -1,5 +1,5 @@
 /**
- * zcode-acp-hub — machine-level singleton for remote access.
+ * Hub daemon — machine-level singleton for remote access.
  *
  * The hub is the ONLY public entry point (the port a tunnel maps). It does
  * token auth, instance discovery, and byte-level WebSocket proxying from a

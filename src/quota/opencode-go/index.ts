@@ -1,6 +1,6 @@
 /**
  * Opencode Go usage orchestration — the entry point used by the
- * `zcode-quota` CLI.
+ * `zcode-acp quota` CLI.
  *
  * Flow: credentials (env + config file) → cache check → fetch → redirect/auth
  * check → parse → cache write. Any thrown error degrades to `unavailable`

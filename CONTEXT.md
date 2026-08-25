@@ -12,8 +12,9 @@ session registry, and the turn loops. One editor connection = one bridge.
 _Avoid_: server (ambiguous with the ACP agent role), hub
 
 **Primary Client**:
-The editor connection over stdio that spawned the bridge and owns its
-lifetime (Zed, JetBrains). When it disconnects, the bridge exits.
+The connection over stdio that spawned the bridge and owns its lifetime — an
+editor (Zed, JetBrains) or the Unified CLI's REPL in a terminal.
+When it disconnects, the bridge exits.
 _Avoid_: host, master client
 
 **Remote Client**:
@@ -38,6 +39,15 @@ The machine-level singleton daemon that is the only public entry point for
 remote access. It does token auth, instance discovery, and byte-level
 WebSocket proxying — it holds no session state and understands no ACP.
 _Avoid_: gateway, broker
+
+**Unified CLI**:
+The `zcode-acp` command — the single human-facing command-line entry point.
+Bare invocation opens the **REPL** (interactive agent chat in a terminal);
+every other surface is a subcommand: `quota` (plan usage cards), `hub`
+(running the Hub daemon), and `server` (the editor-facing bridge entry,
+identical to the legacy `zcode-acp-server` bin kept for existing editor
+configs).
+_Avoid_: launcher, wrapper
 
 **Instance**:
 One registered bridge as seen through the Hub. A remote connection binds to

@@ -7,6 +7,9 @@
  * delimited JSON-RPC over a pair of web streams. We convert Node's stdin/
  * stdout to web streams and hand them off. Everything else (request/response
  * correlation, param validation, AbortSignal plumbing) is handled by the SDK.
+ *
+ * Invoked directly (`node dist/index.js`) or via the Unified CLI's `server`
+ * subcommand / the `zcode-acp-server` bin alias (both resolve to `dist/cli.js`).
  */
 
 import { Readable, Writable } from "node:stream";
@@ -67,7 +70,7 @@ function buildAllCommands() {
   return merged;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   // stdout is the outbound channel to the client; stdin is inbound.
   const outbound = Writable.toWeb(process.stdout);
   const inbound = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -214,7 +217,18 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-  process.exit(1);
-});
+// Only auto-run when invoked directly (not when imported by the Unified CLI
+// dispatcher). In an ESM build there is no `require.main`, so fall back to an
+// entry-path heuristic like src/bin/quota.ts uses. Backslashes are normalized
+// because argv[1] on Windows is a backslash path.
+const invokedDirectly = (() => {
+  const entry = (process.argv[1] ?? "").replace(/\\/g, "/");
+  return entry.endsWith("dist/index.js") || entry.endsWith("src/index.ts");
+})();
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(1);
+  });
+}

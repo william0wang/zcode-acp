@@ -58,11 +58,17 @@ src/
 │   ├── config.ts         ENV parsing (gate, mandatory token, hub/bridge ports)
 │   ├── endpoint.ts       Loopback ACP endpoint + hub registration heartbeat
 │   ├── file-endpoint.ts  Read-only /fs/list + /fs/file, session-root scoped (ADR-0004)
-│   └── hub-server.ts     zcode-acp-hub: auth, discovery, byte-level proxy (ACP WS + /fs files), ?probe=1 liveness
+│   └── hub-server.ts     Hub daemon: auth, discovery, byte-level proxy (ACP WS + /fs files), ?probe=1 liveness
 ├── quota/                GLM Coding Plan usage API client (/quota command)
+├── cli.ts                Unified CLI entry (`zcode-acp`): subcommand dispatch
+│                         (bare invocation → REPL) (ADR-0007)
+├── repl/                 Interactive REPL (bare `zcode-acp`): Ink UI + ACP client
+│   ├── model.ts          Pure turn state machine (SessionUpdate → entries)
+│   ├── App.tsx           Ink components (stream, tools, permission picker)
+│   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
-    ├── hub.ts            Standalone zcode-acp-hub daemon entry
-    └── quota.ts          Standalone zcode-quota CLI
+    ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
+    └── quota.ts          Quota cards entry (`zcode-acp quota`)
 ```
 
 **Key boundary**: `backend/` talks to the ZCode subprocess. `handlers/` talks to

@@ -1,6 +1,6 @@
 /**
  * Combined multi-provider quota — the orchestration layer used by the
- * `zcode-quota` CLI when no provider subcommand is given (default mode).
+ * `zcode-acp quota` CLI when no provider subcommand is given (default mode).
  *
  * Queries GLM Coding Plan and Opencode Go in parallel and renders a single
  * merged card with one section per provider. The `/quota` slash command does
@@ -177,8 +177,8 @@ function renderCombinedLines(
   const glmOptsColor: FormatOptions = { ...glmOpts, color };
 
   // Single-provider GLM: behave like the original card (header + divider +
-  // body) minus the fence, so `zcode-quota glm` looks identical to today's
-  // `zcode-quota`.
+  // body) minus the fence, so `zcode-acp quota glm` looks identical to today's
+  // `zcode-acp quota`.
   if (provider === "glm") {
     const lines = renderSingleGlm(glm, glmOptsColor);
     // The separator rides after the (only) section, then nothing follows.
@@ -229,7 +229,7 @@ function renderCombinedLines(
 
 /**
  * Render a single GLM provider as header + divider + body (the classic card,
- * minus the fence). Used for `zcode-quota glm`.
+ * minus the fence). Used for `zcode-acp quota glm`.
  */
 function renderSingleGlm(result: QuotaResult, opts?: FormatOptions): string[] {
   const section = renderGlmSection(result, opts);

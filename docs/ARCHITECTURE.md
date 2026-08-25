@@ -211,7 +211,7 @@ When enabled, the same `AgentApp` serves the stdio editor and a loopback
 WebSocket endpoint. Every connection (editor or remote) joins the broadcast
 registry via `trackConnections`, so one turn's notifications reach all clients
 regardless of who prompted. The bridge registers itself with the machine-level
-`zcode-acp-hub` (`bin/hub.ts`), which is the only public entry point and holds
+the hub daemon (`zcode-acp hub`, `bin/hub.ts`), which is the only public entry point and holds
 no session state (see `docs/adr/0002`). The bridge's lifetime still follows the
 stdio client (ADR-0001); the listener is `unref()`'d so remote clients alone
 never keep the process alive.

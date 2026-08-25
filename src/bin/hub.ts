@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Standalone zcode-acp-hub daemon entry.
+ * Standalone zcode-acp hub daemon entry.
  *
  * Usually spawned detached by the first bridge that enables remote access
  * (see src/remote/endpoint.ts); running it manually is also fine, e.g. under
  * launchd/systemd or directly for debugging:
  *
- *   ZCODE_ACP_REMOTE_TOKEN=<secret> zcode-acp-hub
+ *   ZCODE_ACP_REMOTE_TOKEN=<secret> zcode-acp hub
  *
  * Refuses to start without ZCODE_ACP_REMOTE_TOKEN — the hub is the only public
  * entry point and never runs unauthenticated. Exits 0 on EADDRINUSE: another
@@ -48,7 +48,7 @@ function respawnSelf(): void {
   process.exit(0);
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   const config = parseHubConfig();
   if (!config) process.exit(1);
   const hub = await startHub({
@@ -62,12 +62,23 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void hub.close().then(() => process.exit(0)));
 }
 
-main().catch((err) => {
-  const message = err instanceof Error ? err.message : String(err);
-  if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
-    // Another hub already listens on this port — nothing to do.
-    process.exit(0);
-  }
-  warn(`hub: fatal: ${message}`);
-  process.exit(1);
-});
+// Only auto-run when invoked directly (not when imported by the Unified CLI
+// dispatcher). The hub file itself is also spawned by absolute path from
+// src/remote/endpoint.ts, so dist/bin/hub.js must keep working standalone —
+// including on Windows, where argv[1] is a backslash path.
+const invokedDirectly = (() => {
+  const entry = (process.argv[1] ?? "").replace(/\\/g, "/");
+  return entry.endsWith("bin/hub.js") || entry.endsWith("bin/hub.ts");
+})();
+
+if (invokedDirectly) {
+  main().catch((err) => {
+    const message = err instanceof Error ? err.message : String(err);
+    if ((err as NodeJS.ErrnoException)?.code === "EADDRINUSE") {
+      // Another hub already listens on this port — nothing to do.
+      process.exit(0);
+    }
+    warn(`hub: fatal: ${message}`);
+    process.exit(1);
+  });
+}

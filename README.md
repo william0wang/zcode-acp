@@ -91,7 +91,7 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 | `ZCODE_ACP_DEBUG`                  | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`.                                                                                 |
 | `ZCODE_ACP_REMOTE`                 | _(unset)_       | Set to `1` to enable [remote access](#remote-access) — serve the same sessions to additional ACP clients over WebSocket.                                                                                                                                                                                                                                                                     |
 | `ZCODE_ACP_REMOTE_TOKEN`           | _(unset)_       | Auth token for remote access. **Mandatory** when `ZCODE_ACP_REMOTE=1`; remote stays disabled without it.                                                                                                                                                                                                                                                                                     |
-| `ZCODE_ACP_HUB_PORT`               | `8377`          | Port of the machine-level `zcode-acp-hub`. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                         |
+| `ZCODE_ACP_HUB_PORT`               | `8377`          | Port of the machine-level hub daemon. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                         |
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`     | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`          | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
 
@@ -130,7 +130,7 @@ environment):
 }
 ```
 
-**Hub.** The first bridge with remote enabled spawns `zcode-acp-hub` as a
+**Hub.** The first bridge with remote enabled spawns the hub daemon as a
 detached, machine-level singleton on `ZCODE_ACP_HUB_PORT` (it can also be run
 manually). It does three things only: token auth, instance discovery, and
 byte-level proxying (ACP WebSocket plus read-only session files) — no session
@@ -185,10 +185,34 @@ the tunnel agent runs in its own container) is exactly as safe as the network
 it lands on. Keep the bind loopback unless that interface is private to the
 tunnel agent, and put TLS in front before mapping it anywhere untrusted.
 
-## Standalone Quota CLI
+## Unified CLI (`zcode-acp`)
 
-Besides the ACP server, the package ships a `zcode-quota` bin that queries
-your usage **from the terminal** — no editor or running server needed. By
+Every surface of this package is available under one command — `zcode-acp` —
+installed alongside the `zcode-acp-server` bin your editor configures.
+
+### Interactive REPL
+
+Bare `zcode-acp` opens an interactive terminal chat against this same bridge
+(built with [Ink](https://github.com/vadimdemedes/ink), the same renderer
+Claude Code and Gemini CLI use):
+
+```bash
+zcode-acp            # chat in this directory
+```
+
+Streaming output with code-fence coloring, dim thinking lines, live tool rows,
+and arrow-key permission prompts. `Ctrl-C` cancels a running turn; while idle,
+press it twice to quit. `/exit` leaves; the session itself persists in the
+ZCode backend and is available to your editor.
+
+Without a TTY (pipes, Windows editor shims — where the bin name is lost from
+`argv`), bare `zcode-acp` falls back to the stdio server, so editor configs
+pointing at either bin name keep working. Ask for the REPL explicitly with
+`zcode-acp repl`; without a TTY that errors instead of falling back.
+
+### Quota cards
+
+Check plan usage from the terminal — no editor or running server needed. By
 default it shows both **GLM Coding Plan** and **Opencode Go** in one card;
 pass a provider to focus on one.
 
@@ -198,21 +222,21 @@ cookie — see [Opencode Go setup](#opencode-go-setup) below).
 
 ```bash
 # Both providers (default): GLM + Opencode Go in one card
-zcode-quota
+zcode-acp quota
 
 # Focus on one provider
-zcode-quota glm            # GLM Coding Plan only
-zcode-quota go             # Opencode Go only (rolling + weekly + monthly)
+zcode-acp quota glm        # GLM Coding Plan only
+zcode-acp quota go         # Opencode Go only (rolling + weekly + monthly)
 
 # Live monitor: clear the screen and refresh every 30s (default)
-zcode-quota -w
-zcode-quota go -w          # watch Opencode Go only
+zcode-acp quota -w
+zcode-acp quota go -w      # watch Opencode Go only
 
 # Refresh at a custom interval (seconds; minimum 10)
-zcode-quota --watch --interval 60
+zcode-acp quota --watch --interval 60
 
 # Plain monochrome bars (color is the default on a terminal)
-zcode-quota --plain
+zcode-acp quota --plain
 ```
 
 By default the CLI renders heat-colored (green→yellow→red) progress bars with
@@ -229,7 +253,7 @@ value.
 When the package isn't globally installed, run the built file directly:
 
 ```bash
-node dist/bin/quota.js -w
+node dist/cli.js quota -w
 ```
 
 ### Opencode Go setup
@@ -262,7 +286,27 @@ How to get the values:
    `Fe26.2**`).
 
 Without credentials, the default dual-provider mode silently shows GLM only
-(no error). Running `zcode-quota go` without credentials prints a setup hint.
+(no error). Running `zcode-acp quota go` without credentials prints a setup hint.
+
+### Hub and server subcommands
+
+`zcode-acp hub` runs the remote-access hub daemon manually (normally
+auto-spawned by bridges — see [Remote Access](#remote-access)). `zcode-acp
+server` speaks ACP on stdio — that is what editors invoke through the
+`zcode-acp-server` bin; you rarely need it by hand.
+
+### Upgrading from 0.11
+
+0.12.0 folds the old standalone bins into the unified CLI (see
+[ADR-0007](docs/adr/0007-unified-cli-entry-and-bin-pruning.md)):
+
+| Old (≤0.11)           | New (0.12)              |
+| --------------------- | ----------------------- |
+| `zcode-acp-server`    | unchanged (kept for editor configs) |
+| `zcode-quota [args]`  | `zcode-acp quota [args]` (same flags) |
+| `zcode-acp-hub`       | `zcode-acp hub`         |
+
+Editor configs referencing `zcode-acp-server` keep working unchanged.
 
 ## ACP Registry
 
@@ -298,8 +342,8 @@ The server is organised in layers that mirror the ACP protocol:
 - `interaction/` — bridge ZCode `interaction/*` server requests to ACP, preferring `elicitation/create` and falling back to `session/request_permission` (tool auth, ExitPlanMode, AskUserQuestion)
 - `handlers/` — ACP method handlers (`session/new`, `session/prompt`, ...) and the turn engine
 - `config/` — model / mode / thought-level configOptions and runtime model switching
-- `remote/` — opt-in remote access: loopback ACP endpoint, multi-client broadcast, `zcode-acp-hub` registration
-- `quota/` — GLM Coding Plan / Opencode Go usage API client (`/quota` command, `zcode-quota` bin)
+- `remote/` — opt-in remote access: loopback ACP endpoint, multi-client broadcast, hub registration
+- `quota/` — GLM Coding Plan / Opencode Go usage API client (`/quota` command, `zcode-acp quota` subcommand)
 - `server.ts` — shared state and handler registration
 - `index.ts` — stdio wiring via the ACP SDK
 

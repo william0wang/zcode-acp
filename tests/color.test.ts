@@ -1,5 +1,5 @@
 /**
- * Tests for the 24-bit color progress bar used by the `zcode-quota` CLI's
+ * Tests for the 24-bit color progress bar used by the `zcode-acp quota` CLI's
  * default (heat) mode. The `/quota` slash command never touches this module —
  * it stays on the plain `renderBar`.
  */
