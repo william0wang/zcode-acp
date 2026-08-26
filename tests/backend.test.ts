@@ -215,3 +215,17 @@ describe("ZcodeBackend reader routing (unit)", () => {
     b.close();
   });
 });
+
+describe("ZcodeBackend spawn failure (ENOENT)", () => {
+  it("survives a missing binary: marks dead and fails requests instead of crashing", async () => {
+    // Before the proc 'error' listener, a spawn ENOENT crashed the bridge with
+    // an unhandled 'error' event; now it degrades to a dead backend.
+    const b = new ZcodeBackend(["zcode-acp-test-missing-bin"], process.env);
+    // The spawn 'error' event is asynchronous — let it fire before asserting.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(b.isDead).toBe(true);
+    const resp = await b.request(1, "ping", {}, 500);
+    expect(resp.error).toBeDefined();
+    await b.close();
+  });
+});

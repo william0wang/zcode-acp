@@ -12,11 +12,18 @@ import { describe, expect, it } from "vitest";
 
 import { colorizeCodeFences } from "../src/repl/App.js";
 import {
+  applyCompletion,
+  applyStatusUpdate,
   applyUpdate,
+  completionCandidates,
+  createReplStatus,
   createTurnState,
   finishTurn,
+  formatConfigList,
+  handleLocalCommand,
   parseCommand,
-  splitBulkInput,
+  selectLabel,
+  seedStatusFromNewSession,
   type SessionUpdateLike,
 } from "../src/repl/model.js";
 
@@ -105,23 +112,230 @@ describe("parseCommand", () => {
   });
 });
 
-describe("splitBulkInput", () => {
-  it("splits a multi-line paste into submits plus a trailing buffer", () => {
-    // Three embedded newlines: first line completes the in-progress value,
-    // the middle line must NOT be dropped, the last stays buffered.
-    expect(splitBulkInput("AB", "CD\r\nEF\r\nGH")).toEqual({
-      submits: ["ABCD", "EF"],
-      buffer: "GH",
+describe("applyStatusUpdate", () => {
+  it("folds the command menu from available_commands_update", () => {
+    const next = applyStatusUpdate(createReplStatus(), {
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "model", description: "switch model" },
+        { name: "quota", description: "" },
+      ],
+    } as SessionUpdateLike);
+    expect(next.commands).toEqual([
+      { name: "model", description: "switch model" },
+      { name: "quota", description: "" },
+    ]);
+  });
+
+  it("folds select configs from config_option_update", () => {
+    const next = applyStatusUpdate(createReplStatus(), {
+      sessionUpdate: "config_option_update",
+      configOptions: [
+        {
+          id: "model",
+          type: "select",
+          currentValue: "GLM-5.3",
+          options: [
+            { value: "GLM-5.3", name: "GLM-5.3" },
+            { value: "uuid\\gpt-x", name: "Acme › gpt-x" },
+          ],
+        },
+        {
+          id: "mode",
+          type: "select",
+          currentValue: "build",
+          options: [{ value: "build", name: "build" }],
+        },
+      ],
+    } as SessionUpdateLike);
+    expect(next.model).toEqual({
+      current: "GLM-5.3",
+      options: [
+        { value: "GLM-5.3", name: "GLM-5.3" },
+        { value: "uuid\\gpt-x", name: "Acme › gpt-x" },
+      ],
+    });
+    expect(next.mode?.current).toBe("build");
+  });
+
+  it("updates the current mode from current_mode_update", () => {
+    let status = createReplStatus();
+    status = applyStatusUpdate(status, {
+      sessionUpdate: "current_mode_update",
+      currentModeId: "plan",
+    } as SessionUpdateLike);
+    expect(status.mode).toEqual({ current: "plan", options: [] });
+  });
+
+  it("returns the same reference for unknown update kinds", () => {
+    const status = createReplStatus();
+    expect(
+      applyStatusUpdate(status, { sessionUpdate: "user_message_chunk" } as SessionUpdateLike),
+    ).toBe(status);
+  });
+
+  it("seeds config selects from the session/new response body", () => {
+    // The initial config rides the response, not a notification — a fresh
+    // pending session defaults to the yolo mode per buildConfigOptions.
+    const status = seedStatusFromNewSession(createReplStatus(), {
+      configOptions: [
+        {
+          id: "mode",
+          type: "select",
+          currentValue: "yolo",
+          options: [
+            { value: "plan", name: "plan" },
+            { value: "yolo", name: "yolo" },
+          ],
+        },
+      ],
+    });
+    expect(status.mode).toEqual({
+      current: "yolo",
+      options: [
+        { value: "plan", name: "plan" },
+        { value: "yolo", name: "yolo" },
+      ],
     });
   });
+});
 
-  it("submits the current line when the event ends with a newline", () => {
-    expect(splitBulkInput("", "one-shot\r")).toEqual({ submits: ["one-shot"], buffer: "" });
-    expect(splitBulkInput("AB", "CD\n")).toEqual({ submits: ["ABCD"], buffer: "" });
+describe("formatConfigList / selectLabel", () => {
+  const select = {
+    current: "GLM-5.3",
+    options: [
+      { value: "GLM-5.3", name: "GLM-5.3" },
+      { value: "uuid\\gpt-x", name: "Acme › gpt-x" },
+    ],
+  };
+
+  it("marks the current option and hints values that differ from names", () => {
+    const lines = formatConfigList("/model", select);
+    expect(lines[0]).toBe("/model:");
+    expect(lines[1]).toBe("● GLM-5.3");
+    expect(lines[2]).toBe("  Acme › gpt-x  (uuid\\gpt-x)");
   });
 
-  it("treats a lone newline as submitting the in-progress value", () => {
-    expect(splitBulkInput("AB", "\n")).toEqual({ submits: ["AB"], buffer: "" });
+  it("falls back to a hint line when nothing is advertised", () => {
+    expect(formatConfigList("/model", null)).toEqual(["/model: no options advertised yet"]);
+  });
+
+  it("prefers the option name over the raw value for the status line", () => {
+    expect(selectLabel(select)).toBe("GLM-5.3");
+    expect(selectLabel({ current: "unknown", options: select.options })).toBe("unknown");
+    expect(selectLabel(null)).toBe("");
+  });
+});
+
+describe("handleLocalCommand", () => {
+  it("lists options for the arg-less forms of /model /mode /thought", () => {
+    const status = createReplStatus();
+    status.model = { current: "GLM-5.3", options: [{ value: "GLM-5.3", name: "GLM-5.3" }] };
+    const out = handleLocalCommand("/model", status);
+    expect(out).not.toBeNull();
+    expect(out![0]).toEqual({ kind: "note", text: "/model:" });
+    expect(out![1]).toEqual({ kind: "note", text: "● GLM-5.3" });
+  });
+
+  it("passes the switch forms (with an argument) through as prompts", () => {
+    expect(handleLocalCommand("/model GLM-5.3", createReplStatus())).toBeNull();
+    expect(handleLocalCommand("/mode yolo", createReplStatus())).toBeNull();
+    expect(handleLocalCommand("/thought max", createReplStatus())).toBeNull();
+  });
+
+  it("renders /help from the bridge menu or the fallback list", () => {
+    const withMenu = createReplStatus();
+    withMenu.commands = [{ name: "compact", description: "compact context" }];
+    const fromMenu = handleLocalCommand("/help", withMenu)!;
+    expect(
+      fromMenu.some((e) => e.kind === "note" && e.text.includes("/compact — compact context")),
+    ).toBe(true);
+    const fromFallback = handleLocalCommand("/help", createReplStatus())!;
+    expect(fromFallback.some((e) => e.kind === "note" && e.text.includes("/model —"))).toBe(true);
+  });
+
+  it("leaves plain prompts and unknown commands to the passthrough path", () => {
+    expect(handleLocalCommand("fix the bug", createReplStatus())).toBeNull();
+    expect(handleLocalCommand("/compact", createReplStatus())).toBeNull();
+  });
+});
+
+describe("completionCandidates / applyCompletion", () => {
+  const status = createReplStatus();
+  status.model = {
+    current: "GLM-5.3",
+    options: [
+      { value: "GLM-5.3", name: "GLM-5.3" },
+      { value: "uuid\\gpt-x", name: "Acme › gpt-x" },
+    ],
+  };
+  status.mode = {
+    current: "yolo",
+    options: [{ value: "plan", name: "plan" }],
+  };
+
+  it("offers every fallback command for a bare slash", () => {
+    const out = completionCandidates("/", status)!;
+    expect(out.length).toBeGreaterThan(4);
+    expect(out[0]).toMatchObject({ value: "/help", label: "/help" });
+  });
+
+  it("filters command names by prefix, case-insensitively", () => {
+    const out = completionCandidates("/MO", status)!;
+    expect(out.map((c) => c.value)).toEqual(["/model", "/mode"]);
+  });
+
+  it("returns an empty list (not null) for a non-matching command prefix", () => {
+    expect(completionCandidates("/zzz", status)).toEqual([]);
+  });
+
+  it("lists option values after a config command and its space", () => {
+    const out = completionCandidates("/model ", status)!;
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ value: "GLM-5.3", current: true });
+    expect(out[1]).toMatchObject({ value: "uuid\\gpt-x", description: "uuid\\gpt-x" });
+  });
+
+  it("filters options by value AND by display name", () => {
+    expect(completionCandidates("/model uuid", status)!.map((c) => c.value)).toEqual([
+      "uuid\\gpt-x",
+    ]);
+    expect(completionCandidates("/model acme", status)!.map((c) => c.value)).toEqual([
+      "uuid\\gpt-x",
+    ]);
+    expect(completionCandidates("/mode p", status)!.map((c) => c.value)).toEqual(["plan"]);
+  });
+
+  it("stays out of the way outside completion contexts", () => {
+    expect(completionCandidates("plain prompt", status)).toBeNull();
+    expect(completionCandidates("/compact ", status)).toBeNull(); // not a config command
+    expect(completionCandidates("/model a b", status)).toBeNull(); // past the single arg
+    expect(completionCandidates("/thought ", status)).toBeNull(); // select not advertised
+  });
+
+  it("keeps REPL-local commands in the menu once the bridge advertises its own", () => {
+    const withBridge = createReplStatus();
+    withBridge.commands = [
+      { name: "compact", description: "Compress conversation context" },
+      { name: "model", description: "Switch the session model" },
+    ];
+    const out = completionCandidates("/", withBridge)!;
+    // Local help/exit lead even though the bridge doesn't advertise them.
+    expect(out.map((c) => c.value)).toEqual(["/help", "/exit", "/compact", "/model"]);
+    // /help output uses the same merged menu.
+    const help = handleLocalCommand("/help", withBridge)!;
+    expect(help.some((e) => e.kind === "note" && e.text.includes("/help —"))).toBe(true);
+    expect(help.some((e) => e.kind === "note" && e.text.includes("/compact —"))).toBe(true);
+  });
+
+  it("completes commands with a trailing space and options in place", () => {
+    expect(applyCompletion("/mod", { value: "/model", label: "/model" })).toBe("/model ");
+    expect(applyCompletion("/model gl", { value: "GLM-5.3", label: "GLM-5.3" })).toBe(
+      "/model GLM-5.3",
+    );
+    expect(applyCompletion("/model ", { value: "uuid\\gpt-x", label: "x" })).toBe(
+      "/model uuid\\gpt-x",
+    );
   });
 });
 

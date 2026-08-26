@@ -63,8 +63,12 @@ src/
 ├── cli.ts                Unified CLI entry (`zcode-acp`): subcommand dispatch
 │                         (bare invocation → REPL) (ADR-0007)
 ├── repl/                 Interactive REPL (bare `zcode-acp`): Ink UI + ACP client
-│   ├── model.ts          Pure turn state machine (SessionUpdate → entries)
-│   ├── App.tsx           Ink components (stream, tools, permission picker)
+│   ├── model.ts          Pure turn state machine + idle status fold (commands,
+│   │                     model/mode/thought selects, completion candidates,
+│   │                     local /help & listings)
+│   ├── App.tsx           Ink components (stream, tools, permission picker,
+│   │                     full-width input box with in-box status row,
+│   │                     ↑↓/tab completion menu)
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)

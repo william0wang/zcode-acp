@@ -9,7 +9,7 @@
  * tool_call_update may later change only the status of an existing row.
  */
 
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 /** Alias so tests can build fixtures without importing SDK types directly. */
 export type SessionUpdateLike = SessionUpdate;
@@ -128,20 +128,240 @@ export function parseCommand(text: string): ReplCommand {
 }
 
 /**
- * Segment a bulk stdin event (paste, scripted pty) that embeds CR/LF. Ink maps
- * only a LONE \r to key.return, so a multi-line write arrives as one printable
- * event. The first segment completes the in-progress line (`value` prefix);
- * every middle segment submits standalone; the final segment stays buffered as
- * the new in-progress line. Empty submits are dropped by the caller's trim.
+ * A slash command advertised by the bridge (`available_commands_update`).
  */
-export function splitBulkInput(
-  value: string,
-  input: string,
-): { submits: string[]; buffer: string } {
-  const parts = input.split(/[\r\n]+/);
-  const submits = [value + (parts[0] ?? "")];
-  for (let i = 1; i < parts.length - 1; i++) {
-    submits.push(parts[i] ?? "");
+export interface CommandInfo {
+  name: string;
+  description: string;
+}
+
+/** One select config (model / mode / thought) with its current value. */
+export interface ConfigSelect {
+  current: string;
+  options: Array<{ value: string; name: string }>;
+}
+
+/**
+ * Session-level status surface: the command menu plus the three config
+ * selects, all pushed by the bridge outside the turn stream.
+ */
+export interface ReplStatus {
+  commands: CommandInfo[];
+  model: ConfigSelect | null;
+  mode: ConfigSelect | null;
+  thought: ConfigSelect | null;
+}
+
+export function createReplStatus(): ReplStatus {
+  return { commands: [], model: null, mode: null, thought: null };
+}
+
+/** Commands shown before the bridge's first `available_commands_update`. */
+export const FALLBACK_COMMANDS: CommandInfo[] = [
+  { name: "help", description: "list commands (REPL-local)" },
+  { name: "model", description: "show or switch model" },
+  { name: "mode", description: "show or switch mode" },
+  { name: "thought", description: "show or switch thought level" },
+  { name: "compact", description: "compact conversation context" },
+  { name: "mcp", description: "list configured MCP servers" },
+  { name: "quota", description: "show plan usage card" },
+  { name: "exit", description: "quit the REPL" },
+];
+
+/** REPL-local commands, always offered regardless of what the bridge advertises. */
+const LOCAL_COMMANDS: CommandInfo[] = [
+  { name: "help", description: "list commands (REPL-local)" },
+  { name: "exit", description: "quit the REPL" },
+];
+
+/**
+ * The command menu: bridge-advertised commands (or the fallback list before
+ * the first push) with the REPL-local entries merged in front — without the
+ * merge, /help and /exit vanish from completion and /help output as soon as
+ * the bridge's own list lands (the bridge only advertises ITS commands).
+ */
+export function commandMenu(status: ReplStatus): CommandInfo[] {
+  const advertised = status.commands.length > 0 ? status.commands : FALLBACK_COMMANDS;
+  const locals = LOCAL_COMMANDS.filter((l) => !advertised.some((a) => a.name === l.name));
+  return [...locals, ...advertised];
+}
+
+/**
+ * Fold a status-relevant session update into the status. Called for EVERY
+ * update (idle and in-turn): the config/command pushes that follow a switch
+ * slash-command arrive while that turn is still active. Unknown kinds return
+ * the SAME object reference so callers can skip the rerender.
+ */
+export function applyStatusUpdate(status: ReplStatus, update: SessionUpdate): ReplStatus {
+  switch (update.sessionUpdate) {
+    case "available_commands_update": {
+      const list = (update.availableCommands ?? []).map((c) => ({
+        name: c.name,
+        description: c.description ?? "",
+      }));
+      return { ...status, commands: list };
+    }
+    case "config_option_update": {
+      const next = { ...status };
+      for (const opt of update.configOptions ?? []) {
+        if (opt.id !== "model" && opt.id !== "mode" && opt.id !== "thought") continue;
+        // The union also has boolean/toggle variants; only selects carry options.
+        if (opt.type !== "select") continue;
+        // Select entries are options or one-level groups — flatten groups.
+        const options = (opt.options ?? []).flatMap((o): Array<{ value: string; name: string }> =>
+          "value" in o
+            ? [{ value: o.value, name: o.name ?? o.value }]
+            : (o.options ?? []).map((g) => ({ value: g.value, name: g.name ?? g.value })),
+        );
+        next[opt.id] = { current: opt.currentValue, options };
+      }
+      return next;
+    }
+    case "current_mode_update": {
+      return {
+        ...status,
+        mode: { current: update.currentModeId, options: status.mode?.options ?? [] },
+      };
+    }
+    default:
+      return status;
   }
-  return { submits, buffer: (parts[parts.length - 1] ?? "").replace(/[\r\n]/g, "") };
+}
+
+/** Display label for a select's current value (name over raw value). */
+export function selectLabel(select: ConfigSelect | null): string {
+  if (!select) return "";
+  return select.options.find((o) => o.value === select.current)?.name ?? select.current;
+}
+
+/**
+ * Seed the status from the session/new RESPONSE: the bridge ships the initial
+ * model/mode/thought selects in the response body, not as a follow-up
+ * notification (later changes do push config_option_update notifications).
+ */
+export function seedStatusFromNewSession(
+  status: ReplStatus,
+  response: { configOptions?: SessionConfigOption[] | null },
+): ReplStatus {
+  return applyStatusUpdate(status, {
+    sessionUpdate: "config_option_update",
+    configOptions: response.configOptions ?? [],
+  } as SessionUpdate);
+}
+
+/**
+ * Render a config select as note lines: one per option, current marked with a
+ * bullet. The raw `value` is what the user types after /model etc., so it is
+ * shown whenever it differs from the display name (third-party models).
+ */
+export function formatConfigList(title: string, select: ConfigSelect | null): string[] {
+  if (!select || select.options.length === 0) {
+    return [`${title}: no options advertised yet`];
+  }
+  const lines = [`${title}:`];
+  for (const o of select.options) {
+    const mark = o.value === select.current ? "●" : " ";
+    const hint = o.value !== o.name ? `  (${o.value})` : "";
+    lines.push(`${mark} ${o.name}${hint}`);
+  }
+  return lines;
+}
+
+function helpEntries(status: ReplStatus): ReplEntry[] {
+  const lines = ["commands:"];
+  for (const c of commandMenu(status)) {
+    lines.push(`  /${c.name} — ${c.description}`);
+  }
+  lines.push("/model, /mode, /thought without an argument list options; with one they switch.");
+  return lines.map((text) => ({ kind: "note", text }) as ReplEntry);
+}
+
+/**
+ * REPL-local commands that never reach the bridge: `/help`, and the arg-less
+ * listing form of `/model` `/mode` `/thought` (the bridge rejects those with
+ * -32602). Everything else — including the switch forms with an argument —
+ * returns null and is sent as a prompt (the bridge's slash interception is
+ * the battle-tested path editors use).
+ */
+export function handleLocalCommand(text: string, status: ReplStatus): ReplEntry[] | null {
+  const stripped = text.trim();
+  if (!stripped.startsWith("/")) return null;
+  const spaceIdx = stripped.indexOf(" ");
+  const cmd = (spaceIdx < 0 ? stripped : stripped.slice(0, spaceIdx)).toLowerCase();
+  const hasArg = spaceIdx >= 0 && stripped.slice(spaceIdx + 1).trim().length > 0;
+  if (cmd === "/help") return helpEntries(status);
+  if (cmd === "/model" || cmd === "/mode" || cmd === "/thought") {
+    if (hasArg) return null;
+    const key = cmd.slice(1) as "model" | "mode" | "thought";
+    return formatConfigList(cmd, status[key]).map((text) => ({ kind: "note", text }) as ReplEntry);
+  }
+  return null;
+}
+
+// ---------- interactive completion ----------
+
+/** One entry of the completion menu below/above the input line. */
+export interface CompletionItem {
+  /** Text inserted into the line when chosen (command with "/", or option value). */
+  value: string;
+  /** Display label shown in the menu. */
+  label: string;
+  /** Secondary text (command description, or the raw value when it differs). */
+  description?: string;
+  /** True when this option is the select's current value (● marker). */
+  current?: boolean;
+}
+
+/** Max rows the menu renders — longer lists narrow with the typed prefix. */
+const COMPLETION_LIMIT = 8;
+
+/** Commands whose single argument is completable from the config selects. */
+const CONFIG_COMMANDS = new Set(["model", "mode", "thought"]);
+
+/**
+ * Completion candidates for the current line, or null outside a completion
+ * context:
+ *   - "/par"     → advertised commands matching the prefix ("/" alone = all)
+ *   - "/model v" → model option values/names matching the argument prefix
+ *   - other text, a second space, or a select not yet advertised → null/[]
+ */
+export function completionCandidates(value: string, status: ReplStatus): CompletionItem[] | null {
+  if (!value.startsWith("/")) return null;
+  const spaceIdx = value.indexOf(" ");
+  if (spaceIdx < 0) {
+    const query = value.slice(1).toLowerCase();
+    return commandMenu(status)
+      .filter((c) => c.name.toLowerCase().startsWith(query))
+      .slice(0, COMPLETION_LIMIT)
+      .map((c) => ({ value: `/${c.name}`, label: `/${c.name}`, description: c.description }));
+  }
+  const cmd = value.slice(1, spaceIdx).toLowerCase();
+  if (!CONFIG_COMMANDS.has(cmd)) return null;
+  const arg = value.slice(spaceIdx + 1);
+  if (arg.includes(" ")) return null; // past the single argument
+  const select = status[cmd as "model" | "mode" | "thought"];
+  if (!select) return null;
+  const query = arg.toLowerCase();
+  return select.options
+    .filter(
+      (o) => o.value.toLowerCase().startsWith(query) || o.name.toLowerCase().startsWith(query),
+    )
+    .slice(0, COMPLETION_LIMIT)
+    .map((o) => ({
+      value: o.value,
+      label: o.name,
+      description: o.value !== o.name ? o.value : undefined,
+      current: o.value === select.current,
+    }));
+}
+
+/**
+ * Insert a chosen candidate into the line. Command completions keep a
+ * trailing space so the argument menu opens immediately; option completions
+ * replace the argument in place (`/model <value>`).
+ */
+export function applyCompletion(value: string, item: CompletionItem): string {
+  const spaceIdx = value.indexOf(" ");
+  if (spaceIdx < 0) return `${item.value} `;
+  return `${value.slice(0, spaceIdx + 1)}${item.value}`;
 }

@@ -10,9 +10,16 @@
 import { Box, Static, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
-import { useCallback, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 
-import { splitBulkInput, type ReplEntry, type TurnState } from "./model.js";
+import {
+  applyCompletion,
+  completionCandidates,
+  selectLabel,
+  type ReplEntry,
+  type ReplStatus,
+  type TurnState,
+} from "./model.js";
 
 /** A permission request awaiting the user's choice. */
 export interface PermissionPrompt {
@@ -27,6 +34,8 @@ export interface AppProps {
   turn: TurnState | null;
   /** Pending permission request, null when none. */
   permission: PermissionPrompt | null;
+  /** Session status: command menu + model/mode/thought selects. */
+  status: ReplStatus;
   /** True while the bridge/session is starting up. */
   busy: boolean;
   onSubmit: (text: string) => void;
@@ -101,59 +110,197 @@ function EntryView({ entry }: { entry: ReplEntry }): ReactElement {
 }
 
 /**
+ * Derive ink-style key flags for a single char of a COALESCED multi-key chunk
+ * (fast double-ctrl-c, "\t\t", …). ink delivers such chunks as ONE event with
+ * the raw string and mostly-false flags, so we decompose per char to keep each
+ * key's semantics. Chunks containing ESC (arrow-key sequences) are never
+ * decomposed — the caller leaves those to ink's parser.
+ */
+function derivedKey(ch: string): {
+  return: boolean;
+  tab: boolean;
+  escape: boolean;
+  backspace: boolean;
+  ctrl: boolean;
+  meta: boolean;
+} {
+  return {
+    return: ch === "\r" || ch === "\n",
+    tab: ch === "\t",
+    escape: false,
+    backspace: ch === "\x7f" || ch === "\b",
+    ctrl: ch >= "\x01" && ch <= "\x1a" && ch !== "\r" && ch !== "\n" && ch !== "\t",
+    meta: false,
+  };
+}
+
+/**
  * Self-managed input line. ink-text-input's submit/clear timing proved
  * unreliable under full external rerenders, so the line owns its value and
  * handles plain typing, backspace, and submit directly — first version has
  * no cursor movement or history, which is fine for a REPL.
+ *
+ * While the line is a slash command (or a config command's argument), an
+ * interactive completion menu sits above the box: ↑/↓ move, tab/→ complete
+ * the highlighted candidate, esc dismisses, enter submits the raw line.
  */
 function InputLine({
   busy,
+  status,
   onSubmitText,
 }: {
   busy: boolean;
+  status: ReplStatus;
   onSubmitText: (text: string) => void;
 }): ReactElement {
   const [value, setValue] = useState("");
+  const [selIdx, setSelIdx] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  // Mirror of `value` for event handlers: a decomposed chunk fires several
+  // state updates in one tick, so closures over `value` would see the stale
+  // pre-chunk line (and submit the wrong text on an embedded \r).
+  const valueRef = useRef("");
+  const applyValue = (fn: (v: string) => string): void => {
+    valueRef.current = fn(valueRef.current);
+    setValue(valueRef.current);
+  };
   const submitWith = (text: string): void => {
+    valueRef.current = "";
     setValue("");
+    setDismissed(false);
     if (text.trim()) onSubmitText(text.trim());
   };
-  useInput((inputChar, key) => {
-    if (key.return) {
-      submitWith(value);
-      return;
-    }
-    if (key.backspace || key.delete) {
-      setValue((v) => v.slice(0, -1));
-      return;
-    }
-    if (inputChar && !key.ctrl && !key.meta) {
-      // Bulk stdin writes (pasted text, scripted ptys) arrive as ONE event
-      // that may embed \r/\n — ink only maps a lone \r to key.return. Treat
-      // every embedded CR/LF as a submit boundary; the last segment stays
-      // buffered as the new in-progress line.
-      if (/[\r\n]/.test(inputChar)) {
-        const { submits, buffer } = splitBulkInput(value, inputChar);
-        for (const line of submits) {
-          submitWith(line);
-        }
-        setValue(buffer);
+  const candidates = completionCandidates(value, status);
+  const menu = !dismissed && candidates !== null && candidates.length > 0 ? candidates : null;
+  // New keystroke → new filter: restart the selection and re-open a
+  // previously dismissed menu.
+  useEffect(() => {
+    setSelIdx(0);
+    setDismissed(false);
+  }, [value]);
+
+  const handleChar = (
+    ch: string,
+    k: {
+      return: boolean;
+      tab: boolean;
+      escape: boolean;
+      backspace: boolean;
+      ctrl: boolean;
+      meta: boolean;
+    },
+    nav: { up: boolean; down: boolean; right: boolean } | null,
+  ): void => {
+    if (nav || k.tab) {
+      if (nav?.up) {
+        setSelIdx((i) => Math.max(0, i - 1));
         return;
       }
-      setValue((v) => v + inputChar);
+      if (nav?.down) {
+        setSelIdx((i) => Math.min(menu!.length - 1, i + 1));
+        return;
+      }
+      // tab (or →) completes the highlighted candidate; without a menu tab is
+      // dropped so no literal tab ever lands in the line.
+      if (k.tab || nav?.right) {
+        if (menu) {
+          const item = menu[selIdx] ?? menu[0]!;
+          if (item) applyValue((v) => applyCompletion(v, item));
+        }
+        return;
+      }
     }
+    if (k.escape) {
+      setDismissed(true);
+      return;
+    }
+    if (k.return) {
+      submitWith(valueRef.current);
+      return;
+    }
+    if (k.backspace) {
+      applyValue((v) => v.slice(0, -1));
+      return;
+    }
+    if (ch && !k.ctrl && !k.meta) {
+      applyValue((v) => v + ch);
+    }
+  };
+
+  useInput((inputChar, key) => {
+    // Coalesced printable chunk (paste, rapid keys) — decompose per char so
+    // embedded \r/\n/\t keep submit/tab semantics. Escape-sequence chunks
+    // (arrow keys flushed together) keep ink's parsed flags instead.
+    if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
+      for (const ch of inputChar) {
+        handleChar(ch, derivedKey(ch), null);
+      }
+      return;
+    }
+    handleChar(
+      inputChar,
+      {
+        return: key.return,
+        tab: key.tab,
+        escape: key.escape,
+        backspace: key.backspace || key.delete,
+        ctrl: key.ctrl,
+        meta: key.meta,
+      },
+      key.upArrow || key.downArrow || key.rightArrow
+        ? { up: key.upArrow, down: key.downArrow, right: key.rightArrow }
+        : null,
+    );
   });
+
+  // e.g. "GLM-5.3 · build · max" — lives INSIDE the input box (bottom row),
+  // mirroring the editor dropdown state.
+  const statusLine = [
+    selectLabel(status.model),
+    selectLabel(status.mode),
+    selectLabel(status.thought),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
   return (
-    <Box borderStyle="round" borderColor={busy ? "gray" : "cyan"} paddingX={1}>
-      <Text dimColor>{busy ? "starting… " : "❯ "}</Text>
-      <Text>{value}</Text>
-      <Text dimColor>▏</Text>
+    <Box flexDirection="column">
+      {menu ? (
+        <Box flexDirection="column" paddingLeft={2}>
+          {menu.map((m, i) => (
+            <Text key={`${m.label}:${m.value}`} color={i === selIdx ? "cyan" : undefined}>
+              {i === selIdx ? "❯ " : "  "}
+              {m.current ? "● " : "  "}
+              {m.label}
+              {m.description ? ` — ${m.description}` : ""}
+            </Text>
+          ))}
+          <Text dimColor> ↑↓ select · tab complete · esc dismiss · enter send</Text>
+        </Box>
+      ) : null}
+      <Box
+        borderStyle="round"
+        borderColor={busy ? "gray" : "cyan"}
+        paddingX={1}
+        width="100%"
+        flexDirection="column"
+      >
+        <Box>
+          <Text dimColor>{busy ? "starting… " : "❯ "}</Text>
+          <Text>{value}</Text>
+          <Text dimColor>▏</Text>
+        </Box>
+        <Box justifyContent="space-between" width="100%">
+          <Text dimColor>{statusLine || "type / for commands · tab completes"}</Text>
+          <Text dimColor>{busy ? "" : "enter send · ctrl-c cancels/quits"}</Text>
+        </Box>
+      </Box>
     </Box>
   );
 }
 
 export function App(props: AppProps): ReactElement {
-  const { entries, turn, permission, busy } = props;
+  const { entries, turn, permission, status, busy } = props;
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
 
@@ -169,12 +316,17 @@ export function App(props: AppProps): ReactElement {
       // The picker owns the keyboard; selection state lives there.
       return;
     }
-    if (key.ctrl && inputChar === "c") {
+    // Count ctrl-c presses across both delivery shapes: a lone \x03 arrives
+    // as ("c", ctrl) but rapid presses coalesce into one raw "\x03\x03"
+    // chunk with ctrl=false (ink does not split multi-key chunks).
+    const presses =
+      (key.ctrl && inputChar === "c" ? 1 : 0) + ((inputChar ?? "").match(/\x03/g)?.length ?? 0);
+    if (presses > 0) {
       if (turn) {
         props.onCancelTurn();
         idleIntCount.current = 0;
       } else {
-        idleIntCount.current += 1;
+        idleIntCount.current += presses;
         if (idleIntCount.current >= 2) props.onExit();
       }
       return;
@@ -208,7 +360,7 @@ export function App(props: AppProps): ReactElement {
           onCancel={() => props.onAnswerPermission(null)}
         />
       ) : (
-        <InputLine busy={busy} onSubmitText={submit} />
+        <InputLine busy={busy} status={status} onSubmitText={submit} />
       )}
     </Box>
   );
@@ -228,7 +380,8 @@ function PermissionPicker({
     if (key.upArrow) setIndex((i) => Math.max(0, i - 1));
     else if (key.downArrow) setIndex((i) => Math.min(prompt.options.length - 1, i + 1));
     else if (key.return) onAnswer(prompt.options[index]!.id);
-    else if (key.escape || (key.ctrl && inputChar === "c")) onCancel();
+    else if (key.escape || (key.ctrl && inputChar === "c") || inputChar?.includes("\x03"))
+      onCancel();
   });
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginTop={1}>

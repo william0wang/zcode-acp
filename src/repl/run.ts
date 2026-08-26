@@ -22,10 +22,14 @@ import { createElement } from "react";
 import { AGENT_INFO } from "../utils.js";
 import { App, type AppProps, type PermissionPrompt } from "./App.js";
 import {
+  applyStatusUpdate,
   applyUpdate,
+  createReplStatus,
   createTurnState,
   finishTurn,
+  handleLocalCommand,
   parseCommand,
+  seedStatusFromNewSession,
   type ReplEntry,
   type TurnState,
 } from "./model.js";
@@ -47,6 +51,7 @@ export async function runRepl(): Promise<void> {
   let entries: ReplEntry[] = [];
   let turn: TurnState | null = null;
   let permission: PermissionPrompt | null = null;
+  let status = createReplStatus();
   let busy = true;
   let exited = false;
   // True between a user submit and the stop message. The bridge also pushes
@@ -64,6 +69,7 @@ export async function runRepl(): Promise<void> {
       entries,
       turn,
       permission,
+      status,
       busy,
       onSubmit: (text) => void onSubmit(text),
       onCancelTurn,
@@ -107,6 +113,9 @@ export async function runRepl(): Promise<void> {
   let session: ActiveSession | null = null;
   try {
     session = await cx.buildSession(process.cwd()).start();
+    // The initial config options ride the session/new response body, not a
+    // notification — seed the status from it; later switches push updates.
+    status = seedStatusFromNewSession(status, session.newSessionResponse);
   } catch (err) {
     entries = [
       ...entries,
@@ -135,12 +144,20 @@ export async function runRepl(): Promise<void> {
         entries = [...entries, ...finishTurn(turn ?? createTurnState(), msg.response.stopReason)];
         turn = null;
         drainQueue();
-      } else if (turnActive) {
-        turn = applyUpdate(turn ?? createTurnState(), msg.update);
-        rerender();
+      } else {
+        // Status pushes (command menu, config selects) fold regardless of turn
+        // activity — the update that follows a `/model X` switch arrives while
+        // that slash turn is still open. Turn payloads fold into the turn.
+        const nextStatus = applyStatusUpdate(status, msg.update);
+        const statusChanged = nextStatus !== status;
+        status = nextStatus;
+        if (turnActive) {
+          turn = applyUpdate(turn ?? createTurnState(), msg.update);
+          rerender();
+        } else if (statusChanged) {
+          rerender();
+        }
       }
-      // Idle-time updates outside a user turn are dropped (v1 has no command
-      // palette or mode display to feed them into).
     }
   })();
 
@@ -150,6 +167,15 @@ export async function runRepl(): Promise<void> {
       return;
     }
     entries = [...entries, { kind: "user", text }];
+    // REPL-local commands (help / arg-less listing forms) render here and
+    // never reach the bridge; everything else is a prompt (slash interception
+    // lives bridge-side, same path editors use).
+    const local = handleLocalCommand(text, status);
+    if (local) {
+      entries = [...entries, ...local];
+      rerender();
+      return;
+    }
     if (!session || turnActive) {
       // Follow-ups while a turn is running (or the session is still starting)
       // are queued; the stop handler drains them one at a time. Resetting the
@@ -253,7 +279,7 @@ export async function runRepl(): Promise<void> {
   entries = [
     {
       kind: "note",
-      text: `${AGENT_INFO.name} v${AGENT_INFO.version} — session ready (${process.cwd()}). /exit to quit · ctrl-c cancels a running turn · idle ctrl-c twice quits`,
+      text: `${AGENT_INFO.name} v${AGENT_INFO.version} — session ready (${process.cwd()}). /help lists commands · ctrl-c cancels a running turn · idle ctrl-c twice quits`,
     },
   ];
   rerender();

@@ -19,7 +19,8 @@ in place; see the project board for what's next.
 
 - **Node.js ≥ 22** (the bridge uses `node:sqlite` for tasks-index sync; the
   ZCode CLI runtime also requires Node ≥ 22)
-- The `zcode` CLI installed and on `PATH` (or pointed at via `ZCODE_BIN`)
+- The ZCode CLI: auto-discovered from the desktop app bundle, or on `PATH`,
+  or pointed at via `ZCODE_BIN` (see below)
 - ZCode credentials at `~/.zcode/v2/config.json` (created by the ZCode app)
 
 ## Install
@@ -61,10 +62,12 @@ Restart Zed and pick **ZCode** from the agent dropdown.
 
 ### `ZCODE_BIN` per platform
 
-The ZCode CLI ships inside the desktop app and is not added to `PATH`
-automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
+The CLI is resolved in this order: `ZCODE_BIN` → a `zcode` found on `PATH` →
+the `zcode.cjs` bundled inside the ZCode desktop app (the app does not add it
+to `PATH`). The auto-discovery covers the standard install locations below, so
+most setups need no `ZCODE_BIN` at all — set it only for custom installs:
 
-| Platform    | `ZCODE_BIN` path                                                            |
+| Platform    | bundled `zcode.cjs` path                                                    |
 | ----------- | --------------------------------------------------------------------------- |
 | **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`                  |
 | **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`                     |
@@ -81,19 +84,19 @@ automatically. Point `ZCODE_BIN` at the bundled `zcode.cjs`:
 
 ## Environment variables
 
-| Variable                           | Default         | Purpose                                                                                                                                                                                                                                                                                                                                                                                      |
-| ---------------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ZCODE_BIN`                        | `zcode`         | Path to the ZCode CLI binary or its `.cjs` entry                                                                                                                                                                                                                                                                                                                                             |
-| `ZCODE_NODE`                       | _(discovered)_  | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`)                                                                                                                                                                                                                                                                                                                    |
-| `ZCODE_MODEL`                      | _(from config)_ | Override the active model id                                                                                                                                                                                                                                                                                                                                                                 |
-| `ZCODE_BASE_URL`                   | _(from config)_ | Override the provider base URL                                                                                                                                                                                                                                                                                                                                                               |
-| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _(unset)_       | Absolute token count that triggers automatic context compaction. After each successful turn (`end_turn`), if `contextUsed >= threshold`, the server invokes `session/compact` to free up context before the next prompt. Set to `0` or leave unset to disable (default). Example: `240000` triggers compaction at 240K tokens. The compaction target itself is decided by the ZCode backend. |
-| `ZCODE_ACP_DEBUG`                  | _(unset)_       | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`.                                                                                 |
-| `ZCODE_ACP_REMOTE`                 | _(unset)_       | Set to `1` to enable [remote access](#remote-access) — serve the same sessions to additional ACP clients over WebSocket.                                                                                                                                                                                                                                                                     |
-| `ZCODE_ACP_REMOTE_TOKEN`           | _(unset)_       | Auth token for remote access. **Mandatory** when `ZCODE_ACP_REMOTE=1`; remote stays disabled without it.                                                                                                                                                                                                                                                                                     |
-| `ZCODE_ACP_HUB_PORT`               | `8377`          | Port of the machine-level hub daemon. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                         |
-| `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`     | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
-| `ZCODE_ACP_REMOTE_PORT`            | `8378`          | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
+| Variable                           | Default             | Purpose                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZCODE_BIN`                        | _(auto-discovered)_ | Path to the ZCode CLI binary or its `.cjs` entry. Resolution order: this variable → `zcode` on `PATH` → the desktop-app bundle                                                                                                                                                                                                                                                               |
+| `ZCODE_NODE`                       | _(discovered)_      | Explicit Node binary to run `ZCODE_BIN` with (must support `node:sqlite`)                                                                                                                                                                                                                                                                                                                    |
+| `ZCODE_MODEL`                      | _(from config)_     | Override the active model id                                                                                                                                                                                                                                                                                                                                                                 |
+| `ZCODE_BASE_URL`                   | _(from config)_     | Override the provider base URL                                                                                                                                                                                                                                                                                                                                                               |
+| `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _(unset)_           | Absolute token count that triggers automatic context compaction. After each successful turn (`end_turn`), if `contextUsed >= threshold`, the server invokes `session/compact` to free up context before the next prompt. Set to `0` or leave unset to disable (default). Example: `240000` triggers compaction at 240K tokens. The compaction target itself is decided by the ZCode backend. |
+| `ZCODE_ACP_DEBUG`                  | _(unset)_           | Set to `1` to enable verbose diagnostic logs (event flow, probe loops, status updates). Default is quiet — only warnings (backend pipe errors, command/permission failures, lock timeouts) are emitted. Enable this when diagnosing bridge issues; the logs appear in `Zed.log` prefixed with `[zcode-acp]`.                                                                                 |
+| `ZCODE_ACP_REMOTE`                 | _(unset)_           | Set to `1` to enable [remote access](#remote-access) — serve the same sessions to additional ACP clients over WebSocket.                                                                                                                                                                                                                                                                     |
+| `ZCODE_ACP_REMOTE_TOKEN`           | _(unset)_           | Auth token for remote access. **Mandatory** when `ZCODE_ACP_REMOTE=1`; remote stays disabled without it.                                                                                                                                                                                                                                                                                     |
+| `ZCODE_ACP_HUB_PORT`               | `8377`              | Port of the machine-level hub daemon. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                              |
+| `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`         | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
+| `ZCODE_ACP_REMOTE_PORT`            | `8378`              | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
 
 ## Remote Access
 
@@ -205,6 +208,16 @@ and arrow-key permission prompts. `Ctrl-C` cancels a running turn; while idle,
 press it twice to quit. `/exit` leaves; the session itself persists in the
 ZCode backend and is available to your editor.
 
+The full-width prompt box mirrors the editor's dropdowns: its bottom row shows
+the current `model · mode · thought level`, and typing `/` opens an interactive
+completion menu — `↑`/`↓` move, `tab` (or `→`) completes the highlighted entry,
+`esc` dismisses, `enter` sends. After completing `/model`, `/mode`, or
+`/thought` the same menu lists the config options (the current one marked `●`),
+so switches never need hand-typed ids. The arg-less forms still print a static
+listing; with an argument they switch, over the same slash-command path the
+editor uses. `/help` lists every command the bridge advertises, including
+plugin commands.
+
 Without a TTY (pipes, Windows editor shims — where the bin name is lost from
 `argv`), bare `zcode-acp` falls back to the stdio server, so editor configs
 pointing at either bin name keep working. Ask for the REPL explicitly with
@@ -300,11 +313,11 @@ server` speaks ACP on stdio — that is what editors invoke through the
 0.12.0 folds the old standalone bins into the unified CLI (see
 [ADR-0007](docs/adr/0007-unified-cli-entry-and-bin-pruning.md)):
 
-| Old (≤0.11)           | New (0.12)              |
-| --------------------- | ----------------------- |
-| `zcode-acp-server`    | unchanged (kept for editor configs) |
-| `zcode-quota [args]`  | `zcode-acp quota [args]` (same flags) |
-| `zcode-acp-hub`       | `zcode-acp hub`         |
+| Old (≤0.11)          | New (0.12)                            |
+| -------------------- | ------------------------------------- |
+| `zcode-acp-server`   | unchanged (kept for editor configs)   |
+| `zcode-quota [args]` | `zcode-acp quota [args]` (same flags) |
+| `zcode-acp-hub`      | `zcode-acp hub`                       |
 
 Editor configs referencing `zcode-acp-server` keep working unchanged.
 

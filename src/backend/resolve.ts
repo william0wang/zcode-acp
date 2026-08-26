@@ -83,9 +83,43 @@ function nodeSupportsSqlite(nodeBin: string): boolean {
   }
 }
 
+/**
+ * Well-known desktop-app bundle locations of the shipped `zcode.cjs`
+ * (mirrors the per-platform table in README). The app never adds the CLI to
+ * PATH, so a bare terminal launch of the REPL/editor bridge finds it here.
+ */
+function bundledZcodeCandidates(): string[] {
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
+    return [path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs")];
+  }
+  return [
+    "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
+    path.join(home, "Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"),
+    "/opt/ZCode/resources/glm/zcode.cjs",
+    "/usr/share/zcode/resources/glm/zcode.cjs",
+  ];
+}
+
+/**
+ * Resolution chain for the zcode CLI when ZCODE_BIN is unset: PATH first
+ * (absolute path so the spawn no longer depends on the child's PATH), then
+ * the desktop-app bundle locations. `null` when nothing is found — the caller
+ * falls back to the bare name and lets spawn surface the failure.
+ */
+function discoverZcodeBin(): string | null {
+  const onPath = whichSync("zcode");
+  if (onPath) return onPath;
+  for (const c of bundledZcodeCandidates()) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
 /** Resolve the full argv to launch `zcode app-server --stdio`. */
 export function resolveZcodeCommand(): string[] {
-  const zcodeBin = process.env.ZCODE_BIN ?? "zcode";
+  const zcodeBin = process.env.ZCODE_BIN ?? discoverZcodeBin() ?? "zcode";
   // Non-JS bin (e.g. a `zcode` command or wrapper) → use as-is, rely on its own shebang.
   if (!/\.(cjs|mjs|js)$/.test(zcodeBin)) {
     return [zcodeBin, "app-server", "--stdio"];

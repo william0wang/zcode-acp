@@ -68,6 +68,17 @@ export class ZcodeBackend {
       env,
       detached: true, // own process group → kill(-pid) reaps the whole tree
     });
+    // Spawn failures (ENOENT when the CLI can't be resolved) arrive here
+    // asynchronously — without a listener the bridge dies on an unhandled
+    // 'error' event. Mark the backend dead so requests fail with a JSON-RPC
+    // error instead of crashing the whole process.
+    this.proc.on("error", (err) => {
+      const hint =
+        (err as NodeJS.ErrnoException).code === "ENOENT"
+          ? `${this.proc.spawnfile} not found — install the zcode CLI, put it on PATH, or set ZCODE_BIN`
+          : err.message;
+      this.markReaderDead(`spawn failed: ${hint}`);
+    });
     // Node stream write errors (EPIPE on a closed stdin) are emitted as async
     // 'error' events, NOT thrown synchronously — without a listener the process
     // crashes with an unhandled 'error' event. Catch them here and mark the
