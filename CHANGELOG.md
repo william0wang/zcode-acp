@@ -11,11 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- REPL interactive completion: typing `/` opens a command menu (↑/↓ select,
-  tab or → completes, esc dismisses, enter sends). After completing `/model`,
-  `/mode`, or `/thought` the same menu lists the config options with the
-  current one marked `●`, and a second tab inserts the value — no hand-typed
-  ids. REPL-local `/help` and `/exit` stay in the menu (merged with the
+- REPL interactive completion: typing `/` opens a command menu (↑/↓ move,
+  enter or tab picks the highlighted entry, esc dismisses). Picking `/model`,
+  `/mode`, or `/thought` opens the config options in the same menu (current
+  one marked `●`); the next pick inserts the value and a final enter sends
+  the switch — no hand-typed ids. Enter only sends an exact form: a full
+  non-config command (`/exit`) or a config command with its exact value.
+  REPL-local `/help` and `/exit` stay in the menu (merged with the
   bridge-advertised commands) and in `/help` output.
 - zcode CLI auto-discovery: resolution is now `ZCODE_BIN` → `zcode` on `PATH`
   → the `zcode.cjs` bundled inside the ZCode desktop app (standard install

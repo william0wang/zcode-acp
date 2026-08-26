@@ -15,6 +15,7 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import {
   applyCompletion,
   completionCandidates,
+  isConfigCommand,
   selectLabel,
   type ReplEntry,
   type ReplStatus,
@@ -142,7 +143,8 @@ function derivedKey(ch: string): {
  *
  * While the line is a slash command (or a config command's argument), an
  * interactive completion menu sits above the box: ↑/↓ move, tab/→ complete
- * the highlighted candidate, esc dismisses, enter submits the raw line.
+ * the highlighted candidate, enter picks it when the line is a partial match
+ * (exact input sends instead), esc dismisses.
  */
 function InputLine({
   busy,
@@ -215,6 +217,31 @@ function InputLine({
       return;
     }
     if (k.return) {
+      // With the menu open, Enter PICKS the highlighted candidate — never
+      // sends the raw partial. It only sends when the line already is the
+      // exact runnable form: a full NON-config command ("/help", "/exit") or
+      // a config command with its exact option ("/mode plan"). Config
+      // commands without an argument open their option menu instead of the
+      // static listing, so a switch never needs hand-typed input.
+      if (menu) {
+        const item = menu[selIdx] ?? menu[0]!;
+        const line = valueRef.current;
+        const spaceIdx = line.indexOf(" ");
+        if (spaceIdx < 0) {
+          if (line === item.value && !isConfigCommand(item.value.replace(/^\//, ""))) {
+            submitWith(line);
+          } else {
+            applyValue(() => applyCompletion(line, item));
+          }
+          return;
+        }
+        if (line === `${line.slice(0, spaceIdx + 1)}${item.value}`) {
+          submitWith(line);
+        } else {
+          applyValue(() => applyCompletion(line, item));
+        }
+        return;
+      }
       submitWith(valueRef.current);
       return;
     }
@@ -275,7 +302,7 @@ function InputLine({
               {m.description ? ` — ${m.description}` : ""}
             </Text>
           ))}
-          <Text dimColor> ↑↓ select · tab complete · esc dismiss · enter send</Text>
+          <Text dimColor> ↑/↓ select · tab or enter picks · esc dismiss</Text>
         </Box>
       ) : null}
       <Box

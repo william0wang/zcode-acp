@@ -318,6 +318,11 @@ const COMPLETION_LIMIT = 8;
 /** Commands whose single argument is completable from the config selects. */
 const CONFIG_COMMANDS = new Set(["model", "mode", "thought"]);
 
+/** Whether `cmd` (bare name, no slash) takes a completable config argument. */
+export function isConfigCommand(cmd: string): boolean {
+  return CONFIG_COMMANDS.has(cmd);
+}
+
 /**
  * Completion candidates for the current line, or null outside a completion
  * context:

@@ -210,13 +210,13 @@ ZCode backend and is available to your editor.
 
 The full-width prompt box mirrors the editor's dropdowns: its bottom row shows
 the current `model · mode · thought level`, and typing `/` opens an interactive
-completion menu — `↑`/`↓` move, `tab` (or `→`) completes the highlighted entry,
-`esc` dismisses, `enter` sends. After completing `/model`, `/mode`, or
-`/thought` the same menu lists the config options (the current one marked `●`),
-so switches never need hand-typed ids. The arg-less forms still print a static
-listing; with an argument they switch, over the same slash-command path the
-editor uses. `/help` lists every command the bridge advertises, including
-plugin commands.
+completion menu — `↑`/`↓` move, `enter` picks the highlighted entry (or `tab` /
+`→`; typing the exact form already sends), `esc` dismisses. After picking
+`/model`, `/mode`, or `/thought` the same menu lists the config options (the
+current one marked `●`), so switches never need hand-typed ids. The arg-less
+forms still print a static listing; with an argument they switch, over the same
+slash-command path the editor uses. `/help` lists every command the bridge
+advertises, including plugin commands.
 
 Without a TTY (pipes, Windows editor shims — where the bin name is lost from
 `argv`), bare `zcode-acp` falls back to the stdio server, so editor configs
