@@ -61,9 +61,9 @@ export function heatColor(pct: number): Rgb {
  * Pick the overlay text drawn inside the bar.
  *
  * Returns `"used/total"` when the item carries both absolute counters (e.g. the
- * MCP limit), otherwise `"NN%"` (the rounded used percent). This lets
- * counter-bearing limits show their exact counts in-bar while counter-less
- * limits (5h, Opencode Go windows) show the percent.
+ * MCP limit), otherwise the used percent. GLM percents are integers at parse
+ * time; Opencode Go reports 0.1 steps, so one fractional digit is kept instead
+ * of rounding the precision away (`84.3%`, not `84%`).
  */
 export function pickOverlay(item: {
   usedPercent: number;
@@ -78,7 +78,8 @@ export function pickOverlay(item: {
   ) {
     return `${item.usedCount}/${item.totalCount}`;
   }
-  return `${Math.round(Math.max(0, Math.min(100, item.usedPercent)))}%`;
+  const pct = Math.round(Math.max(0, Math.min(100, item.usedPercent)) * 10) / 10;
+  return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
 }
 
 /** Options for {@link renderColorBar}. */

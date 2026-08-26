@@ -61,12 +61,21 @@ describe("pickOverlay", () => {
     expect(pickOverlay({ usedPercent: 42, totalCount: 1000 })).toBe("42%");
   });
 
-  it("rounds the percent to the nearest integer", () => {
-    expect(pickOverlay({ usedPercent: 72.6 })).toBe("73%");
-    expect(pickOverlay({ usedPercent: 72.4 })).toBe("72%");
+  it("keeps one fractional digit for decimal percents (Opencode Go 0.1 steps)", () => {
+    expect(pickOverlay({ usedPercent: 72.6 })).toBe("72.6%");
+    expect(pickOverlay({ usedPercent: 72.4 })).toBe("72.4%");
+    // More than one decimal rounds to one, not away.
+    expect(pickOverlay({ usedPercent: 72.44 })).toBe("72.4%");
   });
 
-  it("clamps percent outside [0, 100] before rounding", () => {
+  it("renders integer percents bare, including after 1-decimal rounding", () => {
+    expect(pickOverlay({ usedPercent: 73 })).toBe("73%");
+    // Near-boundary decimals collapse to the bare integer, never "100.0%".
+    expect(pickOverlay({ usedPercent: 99.96 })).toBe("100%");
+    expect(pickOverlay({ usedPercent: 0.04 })).toBe("0%");
+  });
+
+  it("clamps percent outside [0, 100] before formatting", () => {
     expect(pickOverlay({ usedPercent: 150 })).toBe("100%");
     expect(pickOverlay({ usedPercent: -10 })).toBe("0%");
   });

@@ -95,9 +95,12 @@ export function formatGoSection(
       return `${m.label.padEnd(5)} ${bar} · ${reset}`;
     }
     const bar = renderBar(w.usagePercent);
+    // Cap at one fractional digit — the dashboard reports 0.1 steps (84.3),
+    // and raw floats would print their full representation.
+    const pct = Math.round(w.usagePercent * 10) / 10;
     // No leading indent — the bar lines align with GLM's so the two sections
     // read as one card. The section header carries the ` Opencode Go` indent.
-    return `${m.label.padEnd(5)} ${bar}  ${padPercent(w.usagePercent)}% · ${reset}`;
+    return `${m.label.padEnd(5)} ${bar}  ${padPercent(pct)}% · ${reset}`;
   });
 
   return { header, body };
