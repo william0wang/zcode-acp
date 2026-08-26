@@ -14,13 +14,24 @@ import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sd
 /** Alias so tests can build fixtures without importing SDK types directly. */
 export type SessionUpdateLike = SessionUpdate;
 
+/** Startup welcome payload — frozen once at session start (scrollback art). */
+export interface WelcomeInfo {
+  version: string;
+  cwd: string;
+  /** Display labels of the seeded config selects ("" when not advertised). */
+  model: string;
+  mode: string;
+  thought: string;
+}
+
 /** One rendered line (or block) in the transcript. */
 export type ReplEntry =
   | { kind: "user"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "assistant"; text: string }
   | { kind: "tool"; id?: string; title: string; status: string }
-  | { kind: "note"; text: string };
+  | { kind: "note"; text: string }
+  | { kind: "welcome"; info: WelcomeInfo };
 
 /** Live snapshot of a turn in progress (null textBuf/thinkBuf = not streaming). */
 export interface TurnState {

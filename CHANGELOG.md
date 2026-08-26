@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-config command (`/exit`) or a config command with its exact value.
   REPL-local `/help` and `/exit` stay in the menu (merged with the
   bridge-advertised commands) and in `/help` output.
+- REPL startup welcome panel: version, session directory, seeded config, and
+  key hints render above the fixed prompt box (agent-CLI style); the first
+  prompt pushes the panel into native scrollback.
 - zcode CLI auto-discovery: resolution is now `ZCODE_BIN` → `zcode` on `PATH`
   → the `zcode.cjs` bundled inside the ZCode desktop app (standard install
   locations for macOS/Windows/Linux). Bare `zcode-acp` works in a terminal

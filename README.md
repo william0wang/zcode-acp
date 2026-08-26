@@ -203,10 +203,13 @@ Claude Code and Gemini CLI use):
 zcode-acp            # chat in this directory
 ```
 
-Streaming output with code-fence coloring, dim thinking lines, live tool rows,
-and arrow-key permission prompts. `Ctrl-C` cancels a running turn; while idle,
-press it twice to quit. `/exit` leaves; the session itself persists in the
-ZCode backend and is available to your editor.
+A startup welcome panel (version, session directory, seeded config, key
+hints) holds the screen above the fixed full-width prompt box; the first
+prompt pushes it into native scrollback. Streaming output has code-fence
+coloring, dim thinking lines, live tool rows, and arrow-key permission
+prompts. `Ctrl-C` cancels a running turn; while idle, press it twice to
+quit. `/exit` leaves; the session itself persists in the ZCode backend and
+is available to your editor.
 
 The full-width prompt box mirrors the editor's dropdowns: its bottom row shows
 the current `model · mode · thought level`, and typing `/` opens an interactive

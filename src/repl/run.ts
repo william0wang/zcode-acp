@@ -30,6 +30,7 @@ import {
   handleLocalCommand,
   parseCommand,
   seedStatusFromNewSession,
+  selectLabel,
   type ReplEntry,
   type TurnState,
 } from "./model.js";
@@ -275,11 +276,18 @@ export async function runRepl(): Promise<void> {
     process.exit(1);
   });
 
-  // Welcome banner as the first transcript entry.
+  // Welcome panel as the first transcript entry — branding, session info,
+  // seeded config, and key hints; pushed into scrollback by the first prompt.
   entries = [
     {
-      kind: "note",
-      text: `${AGENT_INFO.name} v${AGENT_INFO.version} — session ready (${process.cwd()}). /help lists commands · ctrl-c cancels a running turn · idle ctrl-c twice quits`,
+      kind: "welcome",
+      info: {
+        version: AGENT_INFO.version,
+        cwd: process.cwd(),
+        model: selectLabel(status.model),
+        mode: selectLabel(status.mode),
+        thought: selectLabel(status.thought),
+      },
     },
   ];
   rerender();

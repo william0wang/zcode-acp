@@ -20,6 +20,7 @@ import {
   type ReplEntry,
   type ReplStatus,
   type TurnState,
+  type WelcomeInfo,
 } from "./model.js";
 
 /** A permission request awaiting the user's choice. */
@@ -74,6 +75,37 @@ const TOOL_STATUS_ICON: Record<string, string> = {
   failed: "✘",
 };
 
+/**
+ * Startup welcome panel — the agent-CLI-style hero shown until the first
+ * prompt pushes it into scrollback: branding, session info, the seeded
+ * config, and the key hints a first-time user needs.
+ */
+function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
+  const config = [info.model, info.mode, info.thought].filter(Boolean).join(" · ");
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Box>
+        <Text color="cyan" bold>
+          zcode-acp
+        </Text>
+        <Text dimColor> v{info.version}</Text>
+      </Box>
+      <Text dimColor>session · {info.cwd}</Text>
+      {config ? (
+        <Box marginTop={1}>
+          <Text dimColor>● </Text>
+          <Text bold>{config}</Text>
+        </Box>
+      ) : null}
+      <Box flexDirection="column" marginTop={1}>
+        <Text dimColor>{"  /        command menu — ↑/↓ move · enter picks · esc closes"}</Text>
+        <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
+        <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
+      </Box>
+    </Box>
+  );
+}
+
 function EntryView({ entry }: { entry: ReplEntry }): ReactElement {
   switch (entry.kind) {
     case "user":
@@ -107,6 +139,8 @@ function EntryView({ entry }: { entry: ReplEntry }): ReactElement {
       );
     case "note":
       return <Text dimColor>-- {entry.text}</Text>;
+    case "welcome":
+      return <WelcomeView info={entry.info} />;
   }
 }
 
