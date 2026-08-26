@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- REPL session browser and resume: `/sessions` lists this project's previous
+  conversations (title, relative age, short id, other-directory marker) in an
+  interactive picker; choosing one resumes it via `session/load` with the full
+  history replayed into the transcript. The update pump survives the session
+  swap (the disposed placeholder no longer kills the loop) and replay folding
+  is gated on the load response so a slow backend stream can't be truncated.
+- REPL full-screen UI: the app now runs in the alternate screen buffer — the
+  transcript renders in an in-app viewport above the prompt chrome instead of
+  printing to native scrollback. `PageUp`/`PageDown`/`Home`/`End` page back
+  through history (an "N lines hidden" indicator shows while pinned; `End`
+  returns to the live tail). Window resizes re-wrap cleanly instead of
+  smearing scrollback (verified over a pty at 120→80 columns).
+- Remote turns render live in the REPL: `$/zcode/turnState` notifications
+  drive the turn view for prompts started by other clients (mobile app,
+  second editor), which previously never appeared. Permission and question
+  requests answered elsewhere dismiss the local picker via the SDK request
+  abort signal instead of hanging forever.
+
+### Changed
+
+- ExitPlanMode (plan approval) in the REPL now heads as "plan approval" and
+  shows the plan text inline before the Approve/Reject options (the bridge
+  adds a `toolCall.title`); previously it was an unlabeled permission popup.
+
+### Fixed
+
+- Transient turn failures classified as retryable now include
+  `invalid_model_request` / "provider rejected the model request" cause codes
+  and message shapes, so provider-side model rejections auto-retry with
+  backoff instead of surfacing "(Turn execution failed)".
+
 ## [0.13.0] - 2026-08-26
 
 ### Added

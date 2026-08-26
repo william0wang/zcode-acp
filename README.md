@@ -197,19 +197,27 @@ installed alongside the `zcode-acp-server` bin your editor configures.
 
 Bare `zcode-acp` opens an interactive terminal chat against this same bridge
 (built with [Ink](https://github.com/vadimdemedes/ink), the same renderer
-Claude Code and Gemini CLI use):
+Claude Code and Gemini CLI use). It runs as a **full-screen app** (alternate
+screen buffer): the transcript lives in an in-app scrolling viewport above a
+fixed prompt box — nothing prints to the terminal's own scrollback, so window
+resizes re-wrap cleanly instead of smearing history:
 
 ```bash
 zcode-acp            # chat in this directory
 ```
 
 A startup welcome panel (version, session directory, seeded config, key
-hints) holds the screen above the fixed full-width prompt box; the first
-prompt pushes it into native scrollback. Streaming output has code-fence
-coloring, dim thinking lines, live tool rows, and arrow-key permission
-prompts. `Ctrl-C` cancels a running turn; while idle, press it twice to
-quit. `/exit` leaves; the session itself persists in the ZCode backend and
-is available to your editor.
+hints) sits at the tail of the transcript viewport. Streaming output has
+code-fence coloring, dim thinking lines, live tool rows, and arrow-key
+permission prompts. `PageUp`/`PageDown` (or `Home`/`End`) page back through
+history; `End` unpins and follows the live tail again. `Ctrl-C` cancels a
+running turn; while idle, press it twice to quit. `/exit` leaves; the session
+itself persists in the ZCode backend and is available to your editor.
+
+`/sessions` lists this project's previous conversations (title, age, short
+id); pick one with the arrow keys and it is resumed via `session/load` —
+the full history replays into the viewport and you keep chatting where you
+left off.
 
 The full-width prompt box mirrors the editor's dropdowns: its bottom row shows
 the current `model · mode · thought level`, and typing `/` opens an interactive
@@ -220,6 +228,10 @@ current one marked `●`), so switches never need hand-typed ids. The arg-less
 forms still print a static listing; with an argument they switch, over the same
 slash-command path the editor uses. `/help` lists every command the bridge
 advertises, including plugin commands.
+
+While remote access is enabled, turns started from other clients (the mobile
+app, a second editor) render live in the REPL too, and questions or permission
+requests answered elsewhere dismiss the local picker automatically.
 
 Without a TTY (pipes, Windows editor shims — where the bin name is lost from
 `argv`), bare `zcode-acp` falls back to the stdio server, so editor configs

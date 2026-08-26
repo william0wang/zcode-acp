@@ -9,10 +9,26 @@
  * tool_call_update may later change only the status of an existing row.
  */
 
+import stringWidth from "string-width";
+
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 /** Alias so tests can build fixtures without importing SDK types directly. */
 export type SessionUpdateLike = SessionUpdate;
+
+/**
+ * Estimated rendered line count of `text` when wrapped at `width` display
+ * columns (CJK-aware via string-width). Word-wrap vs hard-cut can differ by a
+ * line on pathological words — close enough for viewport slicing.
+ */
+export function estimateLines(text: string, width: number): number {
+  if (width <= 0) return 1;
+  let lines = 0;
+  for (const raw of text.split("\n")) {
+    lines += Math.max(1, Math.ceil(stringWidth(raw) / width));
+  }
+  return lines;
+}
 
 /** Startup welcome payload — frozen once at session start (scrollback art). */
 export interface WelcomeInfo {
@@ -130,12 +146,43 @@ export function finishTurn(state: TurnState, stopReason?: string): ReplEntry[] {
 }
 
 /** REPL meta-commands. Everything else is a prompt. */
-export type ReplCommand = "exit" | null;
+export type ReplCommand = "exit" | "sessions" | null;
 
 export function parseCommand(text: string): ReplCommand {
   const t = text.trim();
   if (t === "/exit" || t === "/quit" || t === "/q") return "exit";
+  if (t === "/sessions") return "sessions";
   return null;
+}
+
+/**
+ * One resumable session as shown by the interactive `/sessions` picker.
+ * Mirrors the ACP `session/list` entry shape without importing SDK types.
+ */
+export interface SessionSummary {
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  updatedAt?: string | null;
+}
+
+/**
+ * Compact relative age for a session's `updatedAt` ("just now", "5m ago",
+ * "2h ago", "3d ago", else the ISO date). Empty for absent/unparsable input.
+ */
+export function relativeTime(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const diff = Date.now() - t;
+  if (diff < 60_000) return "just now";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(t).toISOString().slice(0, 10);
 }
 
 /**
@@ -182,6 +229,7 @@ export const FALLBACK_COMMANDS: CommandInfo[] = [
 /** REPL-local commands, always offered regardless of what the bridge advertises. */
 const LOCAL_COMMANDS: CommandInfo[] = [
   { name: "help", description: "list commands (REPL-local)" },
+  { name: "sessions", description: "list and resume project sessions" },
   { name: "exit", description: "quit the REPL" },
 ];
 
@@ -380,4 +428,67 @@ export function applyCompletion(value: string, item: CompletionItem): string {
   const spaceIdx = value.indexOf(" ");
   if (spaceIdx < 0) return `${item.value} `;
   return `${value.slice(0, spaceIdx + 1)}${item.value}`;
+}
+
+// ---------- AskUserQuestion elicitation form ----------
+
+/** One question parsed from the bridge's AskUserQuestion elicitation form. */
+export interface QuestionForm {
+  /** Content key the answer must ride under (`q_<i>`). */
+  key: string;
+  /** The question text. */
+  title: string;
+  multiSelect: boolean;
+  options: Array<{ value: string; label: string }>;
+}
+
+/**
+ * Parse an `elicitation/create` form payload (the bridge's AskUserQuestion
+ * mapping — see `buildAskUserElicitationForm`) into renderable questions:
+ * `q_<i>` string fields with `oneOf` const/title options (single-select) or
+ * array fields with `items.anyOf` (multi-select).
+ *
+ * The `q_<i>_other` free-text companions are skipped (the picker has a
+ * built-in custom-answer row) and the skip sentinel option is dropped (esc
+ * covers skip). Returns null when the payload has no renderable question.
+ */
+export function parseQuestionForm(params: unknown): QuestionForm[] | null {
+  if (!params || typeof params !== "object") return null;
+  const schema = (params as { requestedSchema?: unknown }).requestedSchema;
+  if (!schema || typeof schema !== "object") return null;
+  const props = (schema as { properties?: unknown }).properties;
+  if (!props || typeof props !== "object") return null;
+
+  const entries = Object.entries(props as Record<string, unknown>)
+    .filter(([key]) => /^q_\d+$/.test(key))
+    .sort((a, b) => Number(a[0].slice(2)) - Number(b[0].slice(2)));
+
+  const forms: QuestionForm[] = [];
+  for (const [key, prop] of entries) {
+    if (!prop || typeof prop !== "object") continue;
+    const p = prop as {
+      title?: unknown;
+      type?: unknown;
+      oneOf?: unknown;
+      items?: { anyOf?: unknown };
+    };
+    if (typeof p.title !== "string") continue;
+    const raw = Array.isArray(p.oneOf)
+      ? p.oneOf
+      : Array.isArray(p.items?.anyOf)
+        ? p.items.anyOf
+        : null;
+    if (raw === null) continue;
+    const options: Array<{ value: string; label: string }> = [];
+    for (const o of raw) {
+      if (!o || typeof o !== "object") continue;
+      const value = (o as { const?: unknown }).const;
+      if (typeof value !== "string" || value === "__skip__") continue;
+      const title = (o as { title?: unknown }).title;
+      options.push({ value, label: typeof title === "string" ? title : value });
+    }
+    if (options.length === 0) continue;
+    forms.push({ key, title: p.title, multiSelect: p.type === "array", options });
+  }
+  return forms.length > 0 ? forms : null;
 }

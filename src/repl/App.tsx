@@ -7,7 +7,7 @@
  * permission request takes over the input area with an arrow-key picker.
  */
 
-import { Box, Static, Text, useInput } from "ink";
+import { Box, Text, useInput, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
@@ -15,18 +15,51 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import {
   applyCompletion,
   completionCandidates,
+  estimateLines,
   isConfigCommand,
+  relativeTime,
   selectLabel,
   type ReplEntry,
   type ReplStatus,
+  type SessionSummary,
   type TurnState,
   type WelcomeInfo,
 } from "./model.js";
 
 /** A permission request awaiting the user's choice. */
 export interface PermissionPrompt {
+  /** Box heading ("permission requested" / "plan approval"). */
+  heading: string;
   title: string;
+  /** Long body shown under the title (e.g. the plan text for ExitPlanMode). */
+  detail?: string;
   options: Array<{ id: string; name: string }>;
+}
+
+/** A question awaiting the user's answer (AskUserQuestion via elicitation). */
+export interface QuestionPrompt {
+  title: string;
+  multiSelect: boolean;
+  options: Array<{ value: string; label: string }>;
+}
+
+/** The interactive `/sessions` picker: resumable project sessions. */
+export interface SessionPick {
+  items: SessionSummary[];
+}
+
+/** A picked question answer: chosen option values plus an optional custom text. */
+export interface QuestionAnswer {
+  picked: string[];
+  custom: string;
+}
+
+/** Display state of the question picker (selection, toggles, custom typing). */
+export interface PickerState {
+  index: number;
+  /** null = option list active; string = custom-answer input in progress. */
+  custom: string | null;
+  toggled: string[];
 }
 
 export interface AppProps {
@@ -36,6 +69,12 @@ export interface AppProps {
   turn: TurnState | null;
   /** Pending permission request, null when none. */
   permission: PermissionPrompt | null;
+  /** Pending AskUserQuestion, null when none (renders instead of the input). */
+  question: QuestionPrompt | null;
+  /** Pending /sessions picker, null when closed. */
+  sessionPick: SessionPick | null;
+  /** Bumped on every terminal resize — remounts <Static> for a full repaint. */
+  resizeTick: number;
   /** Session status: command menu + model/mode/thought selects. */
   status: ReplStatus;
   /** True while the bridge/session is starting up. */
@@ -43,6 +82,9 @@ export interface AppProps {
   onSubmit: (text: string) => void;
   onCancelTurn: () => void;
   onAnswerPermission: (optionId: string | null) => void;
+  onAnswerQuestion: (answer: QuestionAnswer | null) => void;
+  /** null = dismiss the picker without resuming. */
+  onPickSession: (sessionId: string | null) => void;
   onExit: () => void;
 }
 
@@ -100,6 +142,7 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
       <Box flexDirection="column" marginTop={1}>
         <Text dimColor>{"  /        command menu — ↑/↓ move · enter picks · esc closes"}</Text>
         <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
+        <Text dimColor>{"  /sessions list and resume past conversations of this project"}</Text>
         <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
       </Box>
     </Box>
@@ -353,6 +396,7 @@ function InputLine({
         </Box>
         <Box justifyContent="space-between" width="100%">
           <Text dimColor>{statusLine || "type / for commands · tab completes"}</Text>
+          <Text dimColor> </Text>
           <Text dimColor>{busy ? "" : "enter send · ctrl-c cancels/quits"}</Text>
         </Box>
       </Box>
@@ -360,10 +404,46 @@ function InputLine({
   );
 }
 
+/** Rendered height of one transcript entry, including its top margin. */
+function entryHeight(entry: ReplEntry, width: number): number {
+  switch (entry.kind) {
+    case "user":
+      return 1 + estimateLines(entry.text, width);
+    case "welcome":
+      return 1 + 10; // marginTop + branding/session/config/tips block
+    case "tool":
+      return 1;
+    default:
+      return estimateLines(entry.text, width);
+  }
+}
+
+/** Height of the live-turn block (entries + streaming buffers + spinner). */
+function turnHeight(turn: TurnState | null, width: number): number {
+  if (!turn) return 0;
+  let h = turn.entries.reduce((n, e) => n + entryHeight(e, width), 0);
+  if (turn.thinkBuf.trim()) h += 1;
+  if (turn.textBuf) h += estimateLines(turn.textBuf, width);
+  return h + 1; // spinner line
+}
+
 export function App(props: AppProps): ReactElement {
-  const { entries, turn, permission, status, busy } = props;
+  const { entries, turn, permission, question, sessionPick, status, busy } = props;
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
+
+  // Full-screen app layout (alternate screen): the transcript is an in-app
+  // viewport above the input chrome — nothing ever prints to the terminal's
+  // own scrollback, so resizes just re-wrap the whole app cleanly.
+  const cols = process.stdout.columns || 100;
+  const rows = process.stdout.rows || 24;
+  const contentWidth = Math.min(cols, 100);
+  const margin = Math.max(0, Math.floor((cols - contentWidth) / 2));
+
+  // --- scroll state ---
+  // 0 = follow the tail (autoscroll); >0 = lines pinned while the user reads
+  // back. New content does not reset it — end/pageDown returns to the tail.
+  const [scrollOffset, setScrollOffset] = useState(0);
 
   const submit = useCallback(
     (text: string) => {
@@ -372,9 +452,61 @@ export function App(props: AppProps): ReactElement {
     [props],
   );
 
+  // --- picker keyboard state ---
+  // Pickers are PURE VIEWS; all their keys are handled HERE in the app-level
+  // useInput. ink's per-component useInput proved unreliable for components
+  // mounted late via external rerenders (ink.rerender from the run loop):
+  // the freshly-mounted hook sometimes never receives events. The root-level
+  // hook always does.
+  const EMPTY_Q: PickerState = { index: 0, custom: null, toggled: [] };
+  const [q, setQ] = useState<PickerState>(EMPTY_Q);
+  const qRef = useRef<PickerState>(EMPTY_Q);
+  const applyQ = (fn: (s: PickerState) => PickerState): void => {
+    qRef.current = fn(qRef.current);
+    setQ(qRef.current);
+  };
+  useEffect(() => {
+    // New question (or cleared) → fresh selection state.
+    applyQ(() => EMPTY_Q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [question]);
+
+  const [permIndex, setPermIndex] = useState(0);
+  const permIndexRef = useRef(0);
+  useEffect(() => {
+    permIndexRef.current = 0;
+    setPermIndex(0);
+  }, [permission]);
+
+  // /sessions picker selection (mirrored in a ref for the key handler).
+  const [sessIndex, setSessIndex] = useState(0);
+  const sessIndexRef = useRef(0);
+  useEffect(() => {
+    sessIndexRef.current = 0;
+    setSessIndex(0);
+  }, [sessionPick]);
+
   useInput((inputChar, key) => {
+    // Scrollback paging — inert while a picker owns the keyboard.
+    if (key.pageUp || key.pageDown || key.home || key.end) {
+      if (sessionPick || question || permission) return;
+      const viewport = Math.max(3, rows - CHROME_ROWS);
+      if (key.home) setScrollOffset(Number.MAX_SAFE_INTEGER);
+      else if (key.end) setScrollOffset(0);
+      else if (key.pageUp) setScrollOffset((o) => o + Math.floor(viewport * 0.8));
+      else setScrollOffset((o) => Math.max(0, o - Math.floor(viewport * 0.8)));
+      return;
+    }
+    if (sessionPick && sessionPick.items.length > 0) {
+      handleSessionKey(inputChar, key);
+      return;
+    }
+    if (question) {
+      handleQuestionKey(inputChar, key);
+      return;
+    }
     if (permission) {
-      // The picker owns the keyboard; selection state lives there.
+      handlePermissionKey(inputChar, key);
       return;
     }
     // Count ctrl-c presses across both delivery shapes: a lone \x03 arrives
@@ -395,12 +527,161 @@ export function App(props: AppProps): ReactElement {
     idleIntCount.current = 0;
   });
 
+  /** Keys for the active AskUserQuestion picker (state mirrors in qRef). */
+  function handleQuestionKey(inputChar: string | undefined, key: Key): void {
+    if (!question) return;
+    const isSkip =
+      key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03");
+    if (qRef.current.custom !== null) {
+      if (key.return) {
+        props.onAnswerQuestion({ picked: [...qRef.current.toggled], custom: qRef.current.custom });
+        return;
+      }
+      if (isSkip) {
+        applyQ((s) => ({ ...s, custom: null }));
+        return;
+      }
+      if (key.backspace || key.delete) {
+        applyQ((s) => ({ ...s, custom: (s.custom ?? "").slice(0, -1) }));
+        return;
+      }
+      if (
+        inputChar &&
+        !key.ctrl &&
+        !key.meta &&
+        inputChar.length === 1 &&
+        !/[\r\n]/.test(inputChar)
+      ) {
+        applyQ((s) => ({ ...s, custom: (s.custom ?? "") + inputChar }));
+      }
+      return;
+    }
+    if (key.upArrow) {
+      applyQ((s) => ({ ...s, index: Math.max(0, s.index - 1) }));
+      return;
+    }
+    if (key.downArrow) {
+      applyQ((s) => ({ ...s, index: Math.min(question.options.length, s.index + 1) }));
+      return;
+    }
+    if (isSkip) {
+      props.onAnswerQuestion(null); // skip this question
+      return;
+    }
+    const onCustomRow = qRef.current.index === question.options.length;
+    if (key.return || key.tab) {
+      if (onCustomRow) {
+        applyQ((s) => ({ ...s, custom: "" }));
+        return;
+      }
+      if (question.multiSelect) {
+        props.onAnswerQuestion({ picked: [...qRef.current.toggled], custom: "" });
+        return;
+      }
+      props.onAnswerQuestion({
+        picked: [question.options[qRef.current.index]!.value],
+        custom: "",
+      });
+      return;
+    }
+    if (inputChar === " " && question.multiSelect && !onCustomRow) {
+      const value = question.options[qRef.current.index]!.value;
+      applyQ((s) => ({
+        ...s,
+        toggled: s.toggled.includes(value)
+          ? s.toggled.filter((v) => v !== value)
+          : [...s.toggled, value],
+      }));
+    }
+  }
+
+  /** Keys for the /sessions picker (selection mirrored in sessIndexRef). */
+  function handleSessionKey(inputChar: string | undefined, key: Key): void {
+    if (!sessionPick) return;
+    const last = sessionPick.items.length - 1;
+    if (key.upArrow) {
+      sessIndexRef.current = Math.max(0, sessIndexRef.current - 1);
+      setSessIndex(sessIndexRef.current);
+      return;
+    }
+    if (key.downArrow) {
+      sessIndexRef.current = Math.min(last, sessIndexRef.current + 1);
+      setSessIndex(sessIndexRef.current);
+      return;
+    }
+    if (key.return) {
+      props.onPickSession(sessionPick.items[sessIndexRef.current]!.sessionId);
+      return;
+    }
+    if (key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03")) {
+      props.onPickSession(null);
+    }
+  }
+
+  /** Keys for the active permission picker (selection mirrored in permIndexRef). */
+  function handlePermissionKey(inputChar: string | undefined, key: Key): void {
+    if (!permission) return;
+    if (key.upArrow) {
+      permIndexRef.current = Math.max(0, permIndexRef.current - 1);
+      setPermIndex(permIndexRef.current);
+      return;
+    }
+    if (key.downArrow) {
+      permIndexRef.current = Math.min(permission.options.length - 1, permIndexRef.current + 1);
+      setPermIndex(permIndexRef.current);
+      return;
+    }
+    if (key.return) {
+      props.onAnswerPermission(permission.options[permIndexRef.current]!.id);
+      return;
+    }
+    if (key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03")) {
+      props.onAnswerPermission(null);
+    }
+  }
+
+  // Fixed rows reserved for the input chrome (input box + status line +
+  // scroll indicator + safety margin). Everything above is transcript.
+  const CHROME_ROWS = 6;
+  const viewportRows = Math.max(3, rows - CHROME_ROWS - turnHeight(turn, contentWidth));
+  // Render only the visible tail of the transcript: cost per frame stays
+  // constant no matter how long the session grows. `scrollOffset` pins older
+  // lines while the user reads back; overflow:hidden crops the top edge.
+  const heights = entries.map((e) => entryHeight(e, contentWidth));
+  const total = heights.reduce((a, b) => a + b, 0);
+  const maxOffset = Math.max(0, total - viewportRows);
+  const offset = Math.min(scrollOffset, maxOffset);
+  let start = entries.length;
+  for (let avail = viewportRows - offset; start > 0; start--) {
+    const h = heights[start - 1]!;
+    if (avail - h < 0) break;
+    avail -= h;
+  }
+  if (start > 0 && viewportRows - offset > 0) start--; // partial top entry
+  const visible = entries.slice(start);
+
   return (
-    <Box flexDirection="column">
-      <Static items={entries}>{(entry, i) => <EntryView key={i} entry={entry} />}</Static>
+    <Box flexDirection="column" height={rows} width={cols}>
+      <Box
+        flexDirection="column"
+        marginLeft={margin}
+        width={contentWidth}
+        height={viewportRows}
+        overflow="hidden"
+        justifyContent="flex-end"
+      >
+        {visible.map((entry, i) => (
+          <EntryView key={start + i} entry={entry} />
+        ))}
+      </Box>
+      {offset > 0 ? (
+        <Box marginLeft={margin} width={contentWidth}>
+          <Text dimColor> ↑ {offset} lines hidden — pageDown or end returns to the live tail</Text>
+        </Box>
+      ) : null}
 
       {turn ? (
-        <Box flexDirection="column">
+        <Box flexDirection="column" marginLeft={margin} width={contentWidth}>
           {turn.entries.map((e, i) => (
             <EntryView key={i} entry={e} />
           ))}
@@ -414,42 +695,78 @@ export function App(props: AppProps): ReactElement {
         </Box>
       ) : null}
 
-      {permission ? (
-        <PermissionPicker
-          prompt={permission}
-          onAnswer={props.onAnswerPermission}
-          onCancel={() => props.onAnswerPermission(null)}
-        />
-      ) : (
-        <InputLine busy={busy} status={status} onSubmitText={submit} />
-      )}
+      <Box marginLeft={margin} width={contentWidth}>
+        {sessionPick ? (
+          <SessionPicker pick={sessionPick} index={sessIndex} cwd={process.cwd()} />
+        ) : permission ? (
+          <PermissionPicker prompt={permission} index={permIndex} />
+        ) : question ? (
+          <QuestionPicker prompt={question} state={q} />
+        ) : (
+          <InputLine busy={busy} status={status} onSubmitText={submit} />
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+/**
+ * `/sessions` picker: resumable sessions of the current project, newest last
+ * (the backend orders by activity). Enter resumes; esc dismisses.
+ */
+function SessionPicker({
+  pick,
+  index,
+  cwd,
+}: {
+  pick: SessionPick;
+  index: number;
+  cwd: string;
+}): ReactElement {
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text bold>sessions · {cwd}</Text>
+      {pick.items.map((s, i) => {
+        const title = s.title?.trim() || "untitled";
+        const age = relativeTime(s.updatedAt);
+        const elsewhere = s.cwd && s.cwd !== cwd ? ` · ${s.cwd}` : "";
+        return (
+          <Box key={s.sessionId} paddingLeft={1}>
+            <Text color={i === index ? "cyan" : undefined}>
+              {i === index ? "❯ " : "  "}
+              {title}
+            </Text>
+            <Text dimColor>
+              {" "}
+              {age ? `· ${age}` : ""}· {s.sessionId.slice(0, 8)}
+              {elsewhere}
+            </Text>
+          </Box>
+        );
+      })}
+      <Text dimColor>↑/↓ select · enter resume · esc cancel</Text>
     </Box>
   );
 }
 
 function PermissionPicker({
   prompt,
-  onAnswer,
-  onCancel,
+  index,
 }: {
   prompt: PermissionPrompt;
-  onAnswer: (optionId: string) => void;
-  onCancel: () => void;
+  index: number;
 }): ReactElement {
-  const [index, setIndex] = useState(0);
-  useInput((inputChar, key) => {
-    if (key.upArrow) setIndex((i) => Math.max(0, i - 1));
-    else if (key.downArrow) setIndex((i) => Math.min(prompt.options.length - 1, i + 1));
-    else if (key.return) onAnswer(prompt.options[index]!.id);
-    else if (key.escape || (key.ctrl && inputChar === "c") || inputChar?.includes("\x03"))
-      onCancel();
-  });
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginTop={1}>
-      <Text bold>permission requested</Text>
+      <Text bold>{prompt.heading}</Text>
       <Text>{prompt.title}</Text>
+      {prompt.detail ? (
+        <Box marginTop={1}>
+          <Text>{colorizeCodeFences(prompt.detail.trimEnd())}</Text>
+        </Box>
+      ) : null}
       {prompt.options.map((opt, i) => (
-        <Box key={opt.id} paddingLeft={1}>
+        <Box key={opt.id} paddingLeft={1} marginTop={i === 0 && prompt.detail ? 1 : 0}>
           <Text color={i === index ? "cyan" : undefined}>
             {i === index ? "❯ " : "  "}
             {opt.name}
@@ -457,6 +774,57 @@ function PermissionPicker({
         </Box>
       ))}
       <Text dimColor>↑/↓ select · enter confirm · esc cancel</Text>
+    </Box>
+  );
+}
+
+/**
+ * AskUserQuestion picker: the question text as the heading (NOT a permission
+ * shell), options below, and a built-in custom-answer row. Single-select:
+ * enter picks. Multi-select: space toggles, enter confirms. esc/ctrl-c skips
+ * the question (its key is omitted from the form response).
+ */
+function QuestionPicker({
+  prompt,
+  state,
+}: {
+  prompt: QuestionPrompt;
+  state: PickerState;
+}): ReactElement {
+  const customRow = prompt.options.length; // index of the custom row
+  return (
+    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
+      <Text bold>❓ {prompt.title}</Text>
+      {prompt.options.map((opt, i) => (
+        <Box key={opt.value} paddingLeft={1}>
+          <Text color={i === state.index ? "cyan" : undefined}>
+            {i === state.index ? "❯ " : "  "}
+            {prompt.multiSelect ? (state.toggled.includes(opt.value) ? "[●] " : "[ ] ") : ""}
+            {opt.label}
+          </Text>
+        </Box>
+      ))}
+      {state.custom !== null ? (
+        <Box paddingLeft={1}>
+          <Text color="cyan">❯ ✎ </Text>
+          <Text>{state.custom}</Text>
+          <Text dimColor>▏</Text>
+        </Box>
+      ) : (
+        <Box paddingLeft={1}>
+          <Text
+            color={state.index === customRow ? "cyan" : undefined}
+            dimColor={state.index !== customRow}
+          >
+            {state.index === customRow ? "❯ " : "  "}✎ type a custom answer…
+          </Text>
+        </Box>
+      )}
+      <Text dimColor>
+        {prompt.multiSelect
+          ? "↑/↓ move · space toggle · enter confirm · esc skip"
+          : "↑/↓ move · enter pick · esc skip"}
+      </Text>
     </Box>
   );
 }

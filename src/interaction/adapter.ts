@@ -134,7 +134,7 @@ export function exitPlanModeToAcpPermission(
 ): {
   options: PermissionOption[];
   sessionId: string;
-  toolCall: { toolCallId: string; rawInput: unknown };
+  toolCall: { toolCallId: string; title?: string; rawInput: unknown };
 } {
   return {
     options: [
@@ -142,7 +142,11 @@ export function exitPlanModeToAcpPermission(
       { kind: "reject_once", name: "Reject — keep planning", optionId: "reject" },
     ],
     sessionId: acpSid,
-    toolCall: { toolCallId: params.toolCallId ?? "", rawInput: params.input },
+    toolCall: {
+      toolCallId: params.toolCallId ?? "",
+      title: "Exit plan mode",
+      rawInput: params.input,
+    },
   };
 }
 

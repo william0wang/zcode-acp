@@ -22,6 +22,8 @@ import {
   formatConfigList,
   handleLocalCommand,
   parseCommand,
+  relativeTime,
+  parseQuestionForm,
   selectLabel,
   seedStatusFromNewSession,
   type SessionUpdateLike,
@@ -109,6 +111,31 @@ describe("parseCommand", () => {
     expect(parseCommand("/q")).toBe("exit");
     expect(parseCommand("fix the bug")).toBe(null);
     expect(parseCommand("")).toBe(null);
+  });
+
+  it("recognizes the sessions picker command", () => {
+    expect(parseCommand("/sessions")).toBe("sessions");
+    expect(parseCommand(" /sessions ")).toBe("sessions");
+    expect(parseCommand("/session")).toBe(null);
+    expect(parseCommand("/sessions now")).toBe(null);
+  });
+});
+
+describe("relativeTime", () => {
+  it("renders compact ages for recent timestamps", () => {
+    const now = Date.now();
+    const iso = (msAgo: number): string => new Date(now - msAgo).toISOString();
+    expect(relativeTime(iso(5_000))).toBe("just now");
+    expect(relativeTime(iso(5 * 60_000))).toBe("5m ago");
+    expect(relativeTime(iso(3 * 3_600_000))).toBe("3h ago");
+    expect(relativeTime(iso(2 * 86_400_000))).toBe("2d ago");
+  });
+
+  it("falls back to the date and tolerates missing input", () => {
+    expect(relativeTime(null)).toBe("");
+    expect(relativeTime(undefined)).toBe("");
+    expect(relativeTime("not-a-date")).toBe("");
+    expect(relativeTime("2024-01-15T10:00:00.000Z")).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 });
 
@@ -277,7 +304,9 @@ describe("completionCandidates / applyCompletion", () => {
   it("offers every fallback command for a bare slash", () => {
     const out = completionCandidates("/", status)!;
     expect(out.length).toBeGreaterThan(4);
-    expect(out[0]).toMatchObject({ value: "/help", label: "/help" });
+    // Locals absent from the fallback list (e.g. /sessions) lead the merge.
+    expect(out[0]).toMatchObject({ value: "/sessions", label: "/sessions" });
+    expect(out.map((c) => c.value)).toContain("/help");
   });
 
   it("filters command names by prefix, case-insensitively", () => {
@@ -320,8 +349,8 @@ describe("completionCandidates / applyCompletion", () => {
       { name: "model", description: "Switch the session model" },
     ];
     const out = completionCandidates("/", withBridge)!;
-    // Local help/exit lead even though the bridge doesn't advertise them.
-    expect(out.map((c) => c.value)).toEqual(["/help", "/exit", "/compact", "/model"]);
+    // Local help/sessions/exit lead even though the bridge doesn't advertise them.
+    expect(out.map((c) => c.value)).toEqual(["/help", "/sessions", "/exit", "/compact", "/model"]);
     // /help output uses the same merged menu.
     const help = handleLocalCommand("/help", withBridge)!;
     expect(help.some((e) => e.kind === "note" && e.text.includes("/help —"))).toBe(true);
@@ -351,5 +380,69 @@ describe("colorizeCodeFences", () => {
     const idx = out.indexOf("const x = 1;");
     const esc = String.fromCharCode(27);
     expect(out.slice(idx - 6, idx)).toContain(esc + "[");
+  });
+});
+
+describe("parseQuestionForm", () => {
+  const form = (props: Record<string, unknown>) => ({
+    mode: "form",
+    sessionId: "s1",
+    message: "Please answer the question.",
+    requestedSchema: { type: "object", properties: props, required: [] },
+  });
+
+  it("parses single-select oneOf questions and drops the skip sentinel", () => {
+    const out = parseQuestionForm(
+      form({
+        q_0: {
+          type: "string",
+          title: "Which language?",
+          oneOf: [
+            { const: "Rust", title: "Rust" },
+            { const: "Go", title: "Go" },
+            { const: "__skip__", title: "Skip this question" },
+          ],
+        },
+        q_0_other: { type: "string", title: "↳ or type a custom value" },
+      }),
+    )!;
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ key: "q_0", title: "Which language?", multiSelect: false });
+    expect(out[0]!.options).toEqual([
+      { value: "Rust", label: "Rust" },
+      { value: "Go", label: "Go" },
+    ]);
+  });
+
+  it("parses multi-select array questions with anyOf items", () => {
+    const out = parseQuestionForm(
+      form({
+        q_0: {
+          type: "array",
+          title: "Pick toppings",
+          items: {
+            anyOf: [
+              { const: "a", title: "Anchovies" },
+              { const: "m", title: "Mushrooms" },
+            ],
+          },
+        },
+      }),
+    )!;
+    expect(out[0]).toMatchObject({ key: "q_0", multiSelect: true });
+    expect(out[0]!.options[0]).toEqual({ value: "a", label: "Anchovies" });
+  });
+
+  it("orders questions numerically and rejects unusable payloads", () => {
+    const out = parseQuestionForm(
+      form({
+        q_1: { type: "string", title: "Second?", oneOf: [{ const: "y" }] },
+        q_0: { type: "string", title: "First?", oneOf: [{ const: "x" }] },
+      }),
+    )!;
+    expect(out.map((f) => f.key)).toEqual(["q_0", "q_1"]);
+    expect(parseQuestionForm(null)).toBeNull();
+    expect(parseQuestionForm({ mode: "url" })).toBeNull();
+    expect(parseQuestionForm(form({ q_0: { type: "string", title: "No options" } }))).toBeNull();
   });
 });

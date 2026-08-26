@@ -29,6 +29,7 @@ describe("isTransientTurnError", () => {
 
   it("matches other whitelisted cause codes", () => {
     for (const code of [
+      "invalid_model_request",
       "provider_not_configured",
       "rate_limit",
       "timeout",
@@ -39,6 +40,23 @@ describe("isTransientTurnError", () => {
     ]) {
       expect(isTransientTurnError({ cause: { code } })).toBe(true);
     }
+  });
+
+  it("matches the provider-rejection message shape", () => {
+    // The reported interrupt: cause code invalid_model_request with the
+    // "Provider rejected the model request" message — retry rather than die.
+    const err = {
+      code: "UNKNOWN_ERROR",
+      message: "Turn execution failed",
+      cause: {
+        code: "invalid_model_request",
+        message: "Provider rejected the model request. (Turn execution failed)",
+      },
+    };
+    expect(isTransientTurnError(err)).toBe(true);
+    expect(
+      isTransientTurnError({ cause: { message: "provider rejected the model request" } }),
+    ).toBe(true);
   });
 
   it("matches via message keyword when code is absent/unrecognised", () => {

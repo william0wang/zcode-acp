@@ -23,6 +23,9 @@ importers:
       react:
         specifier: ^19.2.8
         version: 19.2.8
+      string-width:
+        specifier: ^8.2.2
+        version: 8.2.2
       ws:
         specifier: ^8.21.3
         version: 8.21.3

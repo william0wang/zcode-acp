@@ -381,6 +381,7 @@ export function formatTurnError(error: unknown): string {
  */
 const TRANSIENT_CAUSE_CODES = new Set([
   "model_request_failed",
+  "invalid_model_request", // provider rejected the request — often plan/quota or brief provider-side rejection
   "provider_not_configured",
   "rate_limit",
   "timeout",
@@ -406,6 +407,8 @@ const TRANSIENT_MSG_KEYWORDS = [
   "etimedout",
   "temporarily unavailable",
   "service unavailable",
+  "rejected the model request",
+  "provider rejected",
   "retry",
 ];
 
