@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-26
+
+### Added
+
+- REPL interactive completion: typing `/` opens a command menu (↑/↓ select,
+  tab or → completes, esc dismisses, enter sends). After completing `/model`,
+  `/mode`, or `/thought` the same menu lists the config options with the
+  current one marked `●`, and a second tab inserts the value — no hand-typed
+  ids. REPL-local `/help` and `/exit` stay in the menu (merged with the
+  bridge-advertised commands) and in `/help` output.
+- zcode CLI auto-discovery: resolution is now `ZCODE_BIN` → `zcode` on `PATH`
+  → the `zcode.cjs` bundled inside the ZCode desktop app (standard install
+  locations for macOS/Windows/Linux). Bare `zcode-acp` works in a terminal
+  without editor-provided env; `ZCODE_BIN` is only needed for custom installs.
+
+### Changed
+
+- REPL prompt renders as a full-width rounded box; the `model · mode ·
+thought` status row moved inside the box (bottom), with a right-aligned
+  key-hint.
+
+### Fixed
+
+- The bridge no longer crashes with an unhandled `'error'` event when the
+  zcode CLI cannot be spawned (ENOENT): the spawn failure now fails requests
+  with a JSON-RPC error and logs an actionable hint (install/PATH/`ZCODE_BIN`).
+- Rapid double ctrl-c — the two keys can arrive coalesced in one input chunk,
+  which ink delivers without `ctrl` set — now exits the idle REPL; a
+  multi-line paste submits every line instead of dropping the first (stale
+  closure read the pre-chunk value).
+- Opencode Go quota percentages keep 0.1 precision (72.6% no longer renders
+  as 73%).
+
+## [0.12.0] - 2026-08-25
+
+### Added
+
+- Unified CLI entry `zcode-acp` (ADR-0007): bare invocation opens an
+  interactive Ink REPL (streaming output, tool rows, arrow-key permission
+  picker, config parity with editor dropdowns); `hub` and `quota` moved under
+  it as subcommands. The old standalone `zcode-acp-hub` and `zcode-quota`
+  bins were removed. Without a TTY (pipes, Windows editor shims) a bare
+  invocation falls back to the stdio ACP server so editor configs keep
+  working; `zcode-acp repl` errors instead of silently falling back.
+
 ## [0.11.9] - 2026-08-24
 
 ### Added
@@ -69,7 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-session differ only fires PlanUpdate on plan CHANGE, so a re-attaching
   client (the mobile app always re-attaches) never learned a plan a previous
   client had already seen. The load path now runs a throwaway differ whose
-  "__none__" sentinel makes diffPlan always emit, while the shared differ's
+  "**none**" sentinel makes diffPlan always emit, while the shared differ's
   full diff still runs for its mark-seen side effect (turn completion must
   not re-emit replayed history).
 - Regression test in `tests/load-plan-replay.test.ts` (fails without the
