@@ -65,14 +65,14 @@ src/
 ├── repl/                 Interactive REPL (bare `zcode-acp`): Ink UI + ACP client
 │   ├── model.ts          Pure turn state machine + idle status fold (commands,
 │   │                     model/mode/thought selects, completion candidates,
-│   │                     local /help & listings)
-│   ├── App.tsx           Ink components (stream, tools, permission picker,
-│   │                     full-width input box with in-box status row,
-│   │                     ↑↓/tab completion menu, question form picker)
+│   │                     editor wrap/caret math, local /help & listings)
+│   ├── App.tsx           Ink components — native-scrollback transcript
+│   │                     (<Static>, Claude Code model) + compact dynamic
+│   │                     footer (live-turn tail, queue panel, permission/
+│   │                     question/session pickers, completion menu, wrapped
+│   │                     input box). No alternate screen, no wheel capture.
 │   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
 │   │                     Ctrl-B/F/A/E/U chords) — no React, testable
-│   ├── mouse.ts          Mouse-wheel capture: xterm SGR mouse filter between
-│   │                     process.stdin and ink's stdin (full-screen mode)
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
@@ -118,15 +118,19 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
-- **REPL owns stdin through the mouse filter**: full-screen mode routes all
-  keyboard input via `createFilteredStdin` (`src/repl/mouse.ts`) and hands ink
-  the FAKE stream; `process.stdin` must not gain a second consumer or raw
-  mouse bytes corrupt whichever reader misses them. New input sources attach
-  to `render({stdin})`, never to `process.stdin`.
-- **REPL render state lives in run.ts, not React**: `forceRedraw()` remounts
-  the whole App, wiping component state. Anything that must survive a repaint
-  (prompt-line editor, transcript scroll offset, queue, entries) belongs to run.ts's external
-  store passed via snapshot props.
+- **REPL renders via native scrollback**: completed entries go through ink
+  `<Static>` once and belong to the terminal (scroll/selection/search all
+  native; history survives exit). Only the dynamic footer rerenders. Do NOT
+  reintroduce alt-screen viewports, wheel capture, or in-app scroll offsets —
+  that model was removed for being unfixably fragile.
+- **Height estimates ≠ ink layout**: ink wraps `<Text>` at word boundaries;
+  `estimateLines()` hard-cuts at column width. Never trust the numbers alone —
+  dynamic blocks (live-turn tail, queue panel) are contained by bottom-anchored
+  `overflow:hidden` boxes sized to the estimate so drift crops invisibly
+  inside instead of stretching the footer past the fold.
+- **REPL render state lives in run.ts, not React**: App re-renders from fresh
+  snapshots; anything that must persist across them (prompt-line editor,
+  queue, entries) belongs to run.ts's external store passed via snapshot props.
 
 ## Docs to read before sensitive changes
 

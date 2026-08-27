@@ -8,10 +8,11 @@
  * input area with an arrow-key picker.
  */
 
-import { Box, Text, useInput, type Key } from "ink";
+import { Box, Static, Text, useInput, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import stringWidth from "string-width";
 
 import {
   applyCompletion,
@@ -21,8 +22,11 @@ import {
   isConfigArgumentMenu,
   isConfigCommand,
   isOneShotCommandValue,
+  locateCaret,
+  pickerWindow,
   relativeTime,
   selectLabel,
+  wrapEditorLine,
   type ReplEntry,
   type ReplStatus,
   type SessionSummary,
@@ -80,7 +84,7 @@ export interface PickerState {
 }
 
 export interface AppProps {
-  /** Completed transcript entries (history). */
+  /** Completed transcript entries — printed once into native scrollback. */
   entries: ReplEntry[];
   /** Live turn in progress, null when idle. */
   turn: TurnState | null;
@@ -92,26 +96,20 @@ export interface AppProps {
   sessionPick: SessionPick | null;
   /** Prompts accepted but waiting for the running turn to finish. */
   queued: string[];
-  /** Bumped on every terminal resize — forces a full-frame repaint. */
-  resizeTick: number;
-  /**
-   * Pinned-older-lines viewport offset. Lives in run.ts's external store,
-   * NOT in component state: the state MUST survive forceRedraw()'s
-   * unmount+fresh-render cycles or every forced repaint silently resets
-   * scrollback (and wipes a wheel/paging position with it).
-   */
-  scrollOffset: number;
-  /** Move the scroll offset by a signed amount (clamped at >= 0). */
-  onScrollDelta: (deltaLines: number) => void;
-  /** Snap back to the live tail (submit / explicit return-to-tail). */
-  onScrollReset: () => void;
   /** Session status: command menu + model/mode/thought selects. */
   status: ReplStatus;
   /** True while the bridge/session is starting up. */
   busy: boolean;
   /**
-   * The prompt line's editor state (text + caret), owned by run.ts like the
-   * other cross-repaint state — a Ctrl-L remount must never eat a draft.
+   * True while a /sessions resume is replaying history. Replayed updates
+   * fold silently into run.ts's buffers — rendering per message made big
+   * sessions freeze the UI, so App just shows this one-line progress hint.
+   */
+  replaying: boolean;
+  /**
+   * The prompt line's editor state (text + caret), owned by run.ts's
+   * external store so submit paths can reset it and rerender snapshots
+   * stay pure functions of that state.
    */
   editor: LineEditor;
   /** Apply one pure editor op to the prompt line and repaint. */
@@ -132,8 +130,6 @@ export interface AppProps {
   onAnswerQuestion: (answer: QuestionAnswer | null) => void;
   /** null = dismiss the picker without resuming. */
   onPickSession: (sessionId: string | null) => void;
-  /** Force a full-frame repaint (Ctrl-L) after terminal buffer corruption. */
-  onRedraw: () => void;
   onExit: () => void;
 }
 
@@ -202,7 +198,6 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
         <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
         <Text dimColor>{"  /sessions list and resume past conversations of this project"}</Text>
         <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
-        <Text dimColor>{"  ctrl-l   repaint the screen (after terminal scroll glitches)"}</Text>
       </Box>
     </Box>
   );
@@ -311,7 +306,7 @@ function InputLine({
   onSubmitText: (text: string) => void;
 }): ReactElement {
   // `ed` mirrors props.editor for the render below; edits go through
-  // applyEdit so the state survives Ctrl-L's unmount+fresh-render cycles.
+  // applyEdit so run.ts's store stays the single source of truth.
   const ed = editor;
   const [selIdx, setSelIdx] = useState(0);
   const [dismissed, setDismissed] = useState(false);
@@ -557,26 +552,48 @@ function InputLine({
         width="100%"
         flexDirection="column"
       >
-        <Box>
-          <Text dimColor>{busy ? "starting… " : "❯ "}</Text>
-          {(() => {
-            // Block cursor on the character at the caret (a space past the
-            // end) — makes ←/→ editing visible, unlike the old tail-pinned ▏.
-            const parts = Array.from(ed.text);
-            const before = parts.slice(0, ed.caret).join("");
-            const atCaret = parts.slice(ed.caret, ed.caret + 1).join("");
-            const after = parts.slice(ed.caret + 1).join("");
-            return (
-              <>
-                <Text>{before}</Text>
-                <Text backgroundColor="white" color="black">
-                  {atCaret || " "}
-                </Text>
-                {after ? <Text>{after}</Text> : null}
-              </>
-            );
-          })()}
-        </Box>
+        {(() => {
+          // Multi-row prompt: text hard-wraps at the inner width and the
+          // block cursor sits on its OWN visual row — soft-wrap via implicit
+          // ink layout used to strand the caret visually on the first row.
+          const prefix = busy ? "starting… " : "❯ ";
+          const prefixCols = stringWidth(prefix);
+          const inner = Math.max(4, cols - 2 - prefixCols);
+          const rows = wrapEditorLine(ed.text, inner);
+          const pos = locateCaret(ed.text, ed.caret, inner);
+          return (
+            <Box flexDirection="column">
+              {rows.map((r, i) => {
+                const indent = i === 0 ? prefix : " ".repeat(prefixCols);
+                if (i !== pos.row) {
+                  return (
+                    <Box key={r.start}>
+                      <Text dimColor>{indent}</Text>
+                      {r.text ? <Text>{r.text}</Text> : <Text> </Text>}
+                    </Box>
+                  );
+                }
+                // Block cursor on the character at the caret (a space past
+                // the end) — makes ←/→ editing visible.
+                const parts = Array.from(r.text);
+                const split = Math.max(0, Math.min(parts.length, pos.rowOffset));
+                const before = parts.slice(0, split).join("");
+                const atCaret = parts.slice(split, split + 1).join("");
+                const after = parts.slice(split + 1).join("");
+                return (
+                  <Box key={r.start}>
+                    <Text dimColor>{indent}</Text>
+                    <Text>{before}</Text>
+                    <Text backgroundColor="white" color="black">
+                      {atCaret || " "}
+                    </Text>
+                    {after ? <Text>{after}</Text> : null}
+                  </Box>
+                );
+              })}
+            </Box>
+          );
+        })()}
         <Box justifyContent="space-between" width="100%">
           <Text dimColor>{leftLine || "type / for commands · tab completes"}</Text>
           <Text dimColor> </Text>
@@ -587,18 +604,17 @@ function InputLine({
   );
 }
 
-/** Rendered height of one transcript entry, including its top margin. */
+/**
+ * Rendered height of one live-turn entry (local twin of the old viewport
+ * entryHeight): feeds turnHeight's cap math only.
+ */
 function entryHeight(entry: ReplEntry, width: number): number {
   switch (entry.kind) {
     case "user":
-      return 1 + estimateLines(entry.text, width);
+      return 1 + estimateLines(`> ${entry.text}`, width);
     case "welcome":
-      // Must track <WelcomeView> below (marginTop + branding/session/config/
-      // tips block): CHROME_ROWS-style viewport math silently drifts if the
-      // component grows a row without this number following.
       return 1 + 11;
     case "tool":
-      // Tool rows wrap when the title is long — count them like text.
       return estimateLines(`• ${entry.title} (${entry.status})`, width);
     default:
       return estimateLines(entry.text, width);
@@ -627,29 +643,14 @@ export function App(props: AppProps): ReactElement {
   const { entries, turn, permission, question, sessionPick, queued, status, busy } = props;
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
-  // Throttle for page-key-triggered forced repaints (key repeat guard).
-  const lastRedrawAt = useRef(0);
 
-  // Full-screen app layout (alternate screen): the transcript is an in-app
-  // viewport above the input chrome — nothing ever prints to the terminal's
-  // own scrollback, so resizes just re-wrap the whole app cleanly.
-  // Full terminal width — no centered reading column; every region spans cols.
+  // Native-scrollback layout: full terminal width — no centered reading
+  // column. `rows` still matters for capping the live-turn tail so the input
+  // box can't be pushed off-screen mid-stream; there is no viewport math.
   const cols = process.stdout.columns || 100;
   const rows = process.stdout.rows || 24;
 
-  // --- scroll state ---
-  // Value comes from run.ts's external store (see AppProps); this component
-  // only reads it and requests deltas/resets.
-  const scrollOffset = props.scrollOffset;
-
-  const submit = useCallback(
-    (text: string) => {
-      // Own messages must be visible immediately — leave pinned scrollback.
-      props.onScrollReset();
-      props.onSubmit(text);
-    },
-    [props],
-  );
+  const submit = useCallback((text: string) => props.onSubmit(text), [props]);
 
   // --- picker keyboard state ---
   // Pickers are PURE VIEWS; all their keys are handled HERE in the app-level
@@ -686,32 +687,6 @@ export function App(props: AppProps): ReactElement {
   }, [sessionPick]);
 
   useInput((inputChar, key) => {
-    // Ctrl-L — vim-convention full repaint. Terminals that scroll into their
-    // own buffer while an alternate-screen app runs (Warp notably) can garble
-    // the screen without the app ever hearing about it; ink only writes
-    // diffs, so a manual forced repaint is the recovery path.
-    if ((key.ctrl && inputChar === "l") || (inputChar ?? "").includes("\x0c")) {
-      props.onRedraw();
-      return;
-    }
-    // Scrollback paging — inert while a picker owns the keyboard. Each page
-    // key also forces a throttled full repaint: the typical moment for it is
-    // right after scrolling the terminal's own buffer (Warp garbles the
-    // alternate screen there and ink's diffs can't heal it).
-    if (key.pageUp || key.pageDown || key.home || key.end) {
-      if (sessionPick || question || permission) return;
-      const viewport = Math.max(3, rows - CHROME_ROWS);
-      if (key.home) props.onScrollDelta(Number.MAX_SAFE_INTEGER);
-      else if (key.end) props.onScrollReset();
-      else if (key.pageUp) props.onScrollDelta(Math.floor(viewport * 0.8));
-      else props.onScrollDelta(-Math.floor(viewport * 0.8));
-      const now = Date.now();
-      if (now - lastRedrawAt.current > 400) {
-        lastRedrawAt.current = now;
-        props.onRedraw();
-      }
-      return;
-    }
     if (sessionPick && sessionPick.items.length > 0) {
       handleSessionKey(inputChar, key);
       return;
@@ -724,11 +699,11 @@ export function App(props: AppProps): ReactElement {
       handlePermissionKey(inputChar, key);
       return;
     }
-    // Esc with prompts waiting: interrupt the running turn — the stop
-    // handler drains the queue, so the next queued message starts at once.
-    // With the completion menu open, the menu takes this esc instead
+    // Esc interrupts the running turn — with or without queued follow-ups;
+    // the stop handler drains the queue, so a next queued message starts at
+    // once. With the completion menu open, the menu takes this esc instead
     // (dismiss); a second esc reaches here and interrupts.
-    if (key.escape && turn && queued.length > 0 && !props.isMenuOpen()) {
+    if (key.escape && turn && !props.isMenuOpen()) {
       props.onCancelTurn();
       return;
     }
@@ -862,62 +837,47 @@ export function App(props: AppProps): ReactElement {
     }
   }
 
-  // Fixed rows reserved for the input chrome (input box + status line +
-  // scroll indicator + safety margin). Everything above is transcript.
-  const CHROME_ROWS = 6;
   // The queued-prompts panel sits between the turn block and the input box.
   const queuedShown = Math.min(queued.length, 3);
   const queueRows = queued.length > 0 ? queuedShown + (queued.length > 3 ? 1 : 0) + 1 : 0;
-  // A completion menu sits directly above the input box and is 1 (hint) +
-  // COMPLETION_LIMIT rows tall. When it opens, the frame MUST still fit the
-  // terminal: dynamic output taller than `rows` makes ink's frame write
-  // overflow the alternate screen, and the menu's top row — inserted nearest
-  // the budget line — lands off-position and goes invisible (users read that
-  // as "arrow keys need two presses": the first just scrolls the highlight
-  // into view). Fold those rows out of the transcript viewport while open.
-  const editorText = props.editor.text;
-  const menuOpen = (completionCandidates(editorText, props.status)?.length ?? 0) > 0;
-  const viewportRows = Math.max(
-    3,
-    rows - CHROME_ROWS - queueRows - turnHeight(turn, cols) - (menuOpen ? COMPLETION_LIMIT + 1 : 0),
-  );
-  // Render only the visible tail of the transcript: cost per frame stays
-  // constant no matter how long the session grows. `scrollOffset` pins older
-  // lines while the user reads back; overflow:hidden crops the top edge.
-  const heights = entries.map((e) => entryHeight(e, cols));
-  const total = heights.reduce((a, b) => a + b, 0);
-  const maxOffset = Math.max(0, total - viewportRows);
-  const offset = Math.min(scrollOffset, maxOffset);
-  let start = entries.length;
-  for (let avail = viewportRows - offset; start > 0; start--) {
-    const h = heights[start - 1]!;
-    if (avail - h < 0) break;
-    avail -= h;
-  }
-  if (start > 0 && viewportRows - offset > 0) start--; // partial top entry
-  const visible = entries.slice(start);
+
+  // The live-turn block is capped at half the screen: the input box must
+  // stay visible while a long reply streams, and non-alt-screen ink can't
+  // pin anything — a taller dynamic footer would push it below the fold.
+  // Older turn entries crop from the top (bottom-anchored + overflow:hidden);
+  // the full transcript lands in <Static> on stop.
+  const MAX_TURN_ROWS = Math.max(6, Math.floor(rows / 2));
+  // Bottom-anchored overflow:hidden also absorbs ink word-wrap vs hard-cut
+  // estimate drift INSIDE this box: an undercounted row crops invisibly off
+  // the top instead of stretching the footer past the fold.
+  const turnBudget = Math.min(turnHeight(turn, cols), MAX_TURN_ROWS);
 
   return (
-    <Box flexDirection="column" height={rows} width={cols}>
-      <Box
-        flexDirection="column"
-        width={cols}
-        height={viewportRows}
-        overflow="hidden"
-        justifyContent="flex-end"
-      >
-        {visible.map((entry, i) => (
-          <EntryView key={start + i} entry={entry} />
-        ))}
-      </Box>
-      {offset > 0 ? (
-        <Box width={cols}>
-          <Text dimColor> ↑ {offset} lines hidden — pageDown or end returns to the live tail</Text>
-        </Box>
+    <Box flexDirection="column" width={cols}>
+      {/* Completed entries print ONCE into the terminal's own scrollback and
+          are never re-rendered — native smooth scroll, selection, search all
+          work, and history survives exit. */}
+      <Static items={entries}>
+        {(entry, index) => (
+          <Box key={index} flexDirection="column" width={cols}>
+            <EntryView entry={entry} />
+          </Box>
+        )}
+      </Static>
+      {props.replaying ? (
+        <Text dimColor>
+          <Spinner type="dots" /> restoring history…
+        </Text>
       ) : null}
 
       {turn ? (
-        <Box flexDirection="column" width={cols}>
+        <Box
+          flexDirection="column"
+          width={cols}
+          height={turnBudget}
+          overflow="hidden"
+          justifyContent="flex-end"
+        >
           {turn.entries.map((e, i) => (
             <EntryView key={i} entry={e} />
           ))}
@@ -932,7 +892,13 @@ export function App(props: AppProps): ReactElement {
       ) : null}
 
       {queued.length > 0 ? (
-        <Box flexDirection="column" width={cols}>
+        <Box
+          flexDirection="column"
+          width={cols}
+          height={queueRows}
+          overflow="hidden"
+          justifyContent="flex-end"
+        >
           {queued.slice(0, 3).map((text, i) => (
             <Text key={`${i}:${text}`} dimColor>
               ⏸ queued · {text.length > cols - 16 ? `${text.slice(0, cols - 17)}…` : text}
@@ -981,17 +947,24 @@ function SessionPicker({
   index: number;
   cwd: string;
 }): ReactElement {
+  const win = pickerWindow(pick.items, index);
+  const above = win.start;
+  const below = pick.items.length - (win.start + win.slice.length);
   return (
     <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} marginTop={1}>
-      <Text bold>sessions · {cwd}</Text>
-      {pick.items.map((s, i) => {
+      <Text bold>
+        sessions · {cwd} · {Math.min(index + 1, pick.items.length)}/{pick.items.length}
+      </Text>
+      {above > 0 ? <Text dimColor> … {above} newer above</Text> : null}
+      {win.slice.map((s, i) => {
+        const abs = win.start + i;
         const title = s.title?.trim() || "untitled";
         const age = relativeTime(s.updatedAt);
         const elsewhere = s.cwd && s.cwd !== cwd ? ` · ${s.cwd}` : "";
         return (
           <Box key={s.sessionId} paddingLeft={1}>
-            <Text color={i === index ? "cyan" : undefined}>
-              {i === index ? "❯ " : "  "}
+            <Text color={abs === index ? "cyan" : undefined}>
+              {abs === index ? "❯ " : "  "}
               {title}
             </Text>
             <Text dimColor>
@@ -1002,6 +975,7 @@ function SessionPicker({
           </Box>
         );
       })}
+      {below > 0 ? <Text dimColor> … {below} older below</Text> : null}
       <Text dimColor>↑/↓ select · enter resume · esc cancel</Text>
     </Box>
   );

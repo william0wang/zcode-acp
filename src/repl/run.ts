@@ -47,7 +47,6 @@ import {
   type SessionSummary,
   type TurnState,
 } from "./model.js";
-import { createFilteredStdin, MOUSE_DISABLE, MOUSE_ENABLE, type FilteredStdin } from "./mouse.js";
 import { createLineEditor, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
@@ -71,9 +70,6 @@ export async function runRepl(): Promise<void> {
   // Non-null while the /sessions picker is open (run-side holds the list; the
   // App owns the row index).
   let sessionPick: SessionPick | null = null;
-  // Bumped on every terminal resize so the App remounts <Static> and repaints
-  // the whole transcript at the new width.
-  let resizeTick = 0;
   let status = createReplStatus();
   let busy = true;
   let exited = false;
@@ -95,37 +91,24 @@ export async function runRepl(): Promise<void> {
   let loadSettled = true;
   let replayTurn: TurnState | null = null;
   const REPLAY_QUIET_MS = 10;
+  // Resume loads only the last N messages (turn-aligned, ADR-0003 tail
+  // replay). Full replay of a huge session would flood the native
+  // scrollback with thousands of lines in one burst — a bounded recent tail
+  // gives context without the wall-of-text scroll jump.
+  const RESUME_TAIL_LIMIT = 50;
   const sleep = (ms: number): Promise<null> =>
     new Promise((resolve) => setTimeout(() => resolve(null), ms));
   // Prompts submitted while another turn runs (or before the session is
   // ready); drained one per stop, FIFO.
   const promptQueue: string[] = [];
 
-  // Full-screen app: ink takes over the whole terminal (alternate screen
-  // buffer). The transcript lives in an in-app viewport — nothing prints to
-  // the terminal's own scrollback, which is what makes resizes clean.
-  //
-  // ZCODE_ACP_REPL_INLINE=1 opts out: renders inline over the block history
-  // instead. Escape hatch for terminals whose alt-screen handling corrupts
-  // ink frames — Warp turns every full-frame clear (\x1b[2J) into
-  // scroll-into-scrollback for apps outside its CLI-agent whitelist, so the
-  // screen fills with duplicated content on resize/scroll (warp#9838, fixed
-  // upstream only for whitelisted agents via warp#9877).
-  const inline = process.env.ZCODE_ACP_REPL_INLINE === "1";
-  // --- scroll state (external store, survives forceRedraw remounts) ---
-  // 0 = follow the tail; >0 = transcript lines pinned while the user reads
-  // back. Wheel capture and in-app keys both funnel through applyScroll.
-  let scrollOffset = 0;
-  const applyScroll = (delta: number): void => {
-    scrollOffset = Math.max(0, scrollOffset + delta);
-  };
-  // Mouse-wheel inertness mirrors the key path: pickers/forms own scrolling
-  // targets below the transcript, so wheel notches do nothing there either.
-  const scrollGuarded = (): boolean =>
-    sessionPick !== null || question !== null || permission !== null;
+  // Native-scrollback model: completed entries print once via ink <Static>
+  // and become the terminal's own history (native smooth scroll, selection,
+  // search — the Claude Code pattern). Only a compact dynamic footer below
+  // (live-turn tail, queue panel, completion menu, input box) ever repaints.
 
-  // --- prompt line editor (external store, same rationale as scrollOffset):
-  // a Ctrl-L remount must never eat a half-typed message.
+  // --- prompt line editor (external store): the App re-renders from fresh
+  // snapshots, so draft text must live out here to survive rerenders.
   let editor: LineEditor = createLineEditor();
 
   // --- completion-menu visibility mirror ---
@@ -162,43 +145,7 @@ export async function runRepl(): Promise<void> {
   quotaTimer = setInterval(() => void refreshQuota(), QUOTA_TTL_MS);
   quotaTimer.unref();
 
-  // --- mouse wheel capture (full-screen mode only) ---
-  // Arming xterm mouse reporting (?1000/?1002/?1006) makes the TERMINAL stop
-  // scrolling its own buffer on wheel — the exact gesture that loses the
-  // alt-screen frame in Warp — and delivers \x1b[<64/65;c;rM notches to us
-  // instead, which page the in-app transcript viewport. Inline mode keeps
-  // native scrollback (correct interaction there); non-TTY (tests) has
-  // nothing to arm. DECSET modes persist across the alternate-buffer toggles
-  // inside forceRedraw(), so arming once at startup is enough.
-  const WHEEL_STEP_LINES = 3;
-  let wheelCapture: FilteredStdin | null = null;
-  if (!inline && process.stdin.isTTY) {
-    wheelCapture = createFilteredStdin((dir) => {
-      if (exited) return;
-      if (scrollGuarded()) return;
-      applyScroll(dir === "up" ? WHEEL_STEP_LINES : -WHEEL_STEP_LINES);
-      rerender();
-    });
-    try {
-      process.stdout.write(MOUSE_ENABLE);
-    } catch {
-      // best-effort; without it the wheel just scrolls the host buffer again
-    }
-    // Belt-and-braces for exit paths that bypass cleanup(): leftover armed
-    // reporting would leave the user's shell unusable (mouse eats selection).
-    process.on("exit", () => {
-      try {
-        process.stdout.write(MOUSE_DISABLE);
-      } catch {
-        // ignore
-      }
-    });
-  }
-  const renderOpts = {
-    exitOnCtrlC: false,
-    alternateScreen: !inline,
-    stdin: wheelCapture?.stream,
-  };
+  const renderOpts = { exitOnCtrlC: false };
   let ink = render(createElement(App, snapshot()), renderOpts);
   function snapshot(): AppProps {
     return {
@@ -208,22 +155,9 @@ export async function runRepl(): Promise<void> {
       question,
       sessionPick,
       queued: [...promptQueue],
-      resizeTick,
-      scrollOffset,
-      onScrollDelta: (deltaLines: number) => {
-        if (exited) return;
-        applyScroll(deltaLines);
-        // Simple diff repaint suffices for ordinary moves; the key handler's
-        // throttled forceRedraw covers the buffer-corruption recovery case.
-        rerender();
-      },
-      onScrollReset: () => {
-        if (exited) return;
-        scrollOffset = 0;
-        rerender();
-      },
       status,
       busy,
+      replaying: replayMode,
       editor,
       applyEdit: (op) => {
         if (exited) return;
@@ -246,28 +180,11 @@ export async function runRepl(): Promise<void> {
         resolve?.(answer);
       },
       onPickSession: (sid) => sessionPickResolver?.(sid),
-      onRedraw: () => void forceRedraw(),
       onExit: () => cleanup(0),
     };
   }
   function rerender(): void {
     if (!exited) ink.rerender(createElement(App, snapshot()));
-  }
-  /**
-   * Forced full-frame repaint for terminal buffer corruption (Warp scrollback
-   * notably). Public-API only: unmount tears down the alternate screen and a
-   * fresh render paints its first frame whole — ink's diff renderer can't do
-   * this, its frame cache still matches what it believes is on screen. The
-   * sleep between the two matters: back-to-back ?1049l/?1049h written in one
-   * tick get coalesced by GPU terminals (Warp), which then never rebuilds
-   * its alternate-screen layer and the repaint is lost.
-   */
-  async function forceRedraw(): Promise<void> {
-    if (exited) return;
-    ink.unmount();
-    await sleep(80);
-    if (exited) return;
-    ink = render(createElement(App, snapshot()), renderOpts);
   }
 
   // --- Permission bridging: agent request → picker → response ---
@@ -487,8 +404,11 @@ export async function runRepl(): Promise<void> {
         const statusChanged = nextStatus !== status;
         status = nextStatus;
         if (replayMode && replayTurn) {
+          // Fold silently: replayed history isn't rendered per message
+          // (thousands of full-frame renders froze input on big sessions).
+          // App shows one static "restoring history…" row instead; the drain
+          // below paints the whole transcript once.
           replayTurn = applyUpdate(replayTurn, msg.update);
-          rerender();
         } else if (turnActive) {
           turn = applyUpdate(turn ?? createTurnState(), msg.update);
           rerender();
@@ -654,13 +574,27 @@ export async function runRepl(): Promise<void> {
     replayTurn = createTurnState();
     replayMode = true;
     loadSettled = false;
+    // Paint the restoring-history hint BEFORE the (long) load round-trip.
+    rerender();
+    let resumeMeta: {
+      replayedMessages?: number;
+      totalMessages?: number;
+      hasMore?: boolean;
+    } | null = null;
     try {
       const resp = (await cx.request("session/load", {
         sessionId: picked.sessionId,
         cwd: process.cwd(),
         mcpServers: [],
-      })) as { configOptions?: acp.SessionConfigOption[] | null };
+        // Tail replay (ADR-0003): bounded recent history instead of the full
+        // transcript — the REPL scrollback doesn't need 10k lines at once.
+        _meta: { zcode: { limit: RESUME_TAIL_LIMIT } },
+      })) as {
+        configOptions?: acp.SessionConfigOption[] | null;
+        replayMeta?: { replayedMessages?: number; totalMessages?: number; hasMore?: boolean };
+      };
       status = seedStatusFromNewSession(status, resp);
+      resumeMeta = resp.replayMeta ?? null;
     } catch (err) {
       replayMode = false;
       replayTurn = null;
@@ -677,57 +611,30 @@ export async function runRepl(): Promise<void> {
       loadSettled = true;
     }
     const title = picked.title?.trim() || picked.sessionId.slice(0, 8);
-    entries = [...entries, { kind: "note", text: `resumed "${title}" — history restored above` }];
+    const m = resumeMeta;
+    const truncated =
+      m?.hasMore && typeof m.replayedMessages === "number" && typeof m.totalMessages === "number"
+        ? ` — showing last ${m.replayedMessages} of ${m.totalMessages} messages`
+        : "";
+    entries = [
+      ...entries,
+      { kind: "note", text: `resumed "${title}"${truncated || " — history restored above"}` },
+    ];
     rerender();
   }
 
-  // Terminal resize: lines painted at the old width soft-wrap differently
-  // under the new one, so ink's diff repaint alone leaves the frame
-  // misplaced. Full-screen mode clears and repaints EVERYTHING at the new
-  // size — the full-screen-TUI answer. Inline mode skips the clear: \x1b[2J
-  // is exactly the Warp duplicated-content trigger the mode exists to avoid,
-  // and ink diffs heal the width change well enough for an escape hatch.
+  // Terminal resize: the dynamic footer re-wraps at the new width via a
+  // plain rerender. Already-printed scrollback keeps its old wrapping —
+  // that's exactly how native-history CLIs (Claude Code et al.) behave.
   const onResize = (): void => {
     if (exited) return;
-    if (!inline) {
-      try {
-        process.stdout.write("\x1b[2J\x1b[1;1H");
-      } catch {
-        // best-effort; the repaint below still re-renders the dynamic area
-      }
-    }
-    resizeTick++;
     rerender();
   };
   if (process.stdout.isTTY) process.stdout.on("resize", onResize);
 
-  /**
-   * Release the filtered stdin and disarm ?1000/?1002/?1006 reporting. One
-   * teardown for both exit paths; every caller wraps it — disposal failures
-   * must never skip the rest of shutdown.
-   */
-  function teardownMouse(): void {
-    try {
-      wheelCapture?.dispose();
-    } catch {
-      // ignore
-    }
-    if (wheelCapture !== null) {
-      try {
-        process.stdout.write(MOUSE_DISABLE);
-      } catch {
-        // ignore
-      }
-    }
-  }
-
   function cleanup(code: number): void {
     if (exited) return;
     exited = true;
-    // Release real stdin and disarm mouse reporting before the unmount's
-    // terminal-restore writes — a wheel notch racing ?1049l would land on an
-    // already-torn-down UI.
-    teardownMouse();
     try {
       if (quotaTimer !== null) clearInterval(quotaTimer);
       quotaTimer = null;
@@ -774,7 +681,6 @@ export async function runRepl(): Promise<void> {
   child.once("exit", (code) => {
     if (exited) return;
     exited = true;
-    teardownMouse();
     ink.unmount();
     process.stderr.write(
       `bridge exited unexpectedly (code ${code})\n${stderrTail.trim() ? `stderr tail:\n${stderrTail}` : ""}\n`,

@@ -54,7 +54,136 @@ export function estimateLines(text: string, width: number): number {
   return lines;
 }
 
-/** Startup welcome payload — frozen once at session start (scrollback art). */
+/**
+ * One visual row of the wrapped input line: the code-point slice [start, next)
+ * of the editor text, hard-cut at `width` display columns (terminal-style soft
+ * wrap — same convention estimateLines assumes) with "\n" forcing a break.
+ */
+export interface EditorRow {
+  text: string;
+  /** Code-point offset of this row's first character within the editor text. */
+  start: number;
+}
+
+export interface CaretPosition {
+  row: number;
+  /** Display column of the caret within its row. */
+  col: number;
+  /** Code-point offset of the caret relative to its row's start. */
+  rowOffset: number;
+  totalRows: number;
+}
+
+/**
+ * Hard-wrap the (logically single-line, "\n"-tolerant) editor text into visual
+ * rows of at most `width` display columns. CJK-aware via string-width; a
+ * character wider than a whole row still occupies its own row.
+ */
+export function wrapEditorLine(text: string, width: number): EditorRow[] {
+  if (width <= 0) return [{ text, start: 0 }];
+  const rows: EditorRow[] = [];
+  let current = "";
+  let start = 0;
+  let used = 0;
+  const cps = Array.from(text);
+  cps.forEach((ch, i) => {
+    if (ch === "\n") {
+      rows.push({ text: current, start });
+      current = "";
+      start = i + 1;
+      used = 0;
+      return;
+    }
+    const w = stringWidth(ch);
+    if (used > 0 && used + w > width) {
+      rows.push({ text: current, start });
+      current = "";
+      start = i;
+      used = 0;
+    }
+    current += ch;
+    used += w;
+  });
+  if (current || text.endsWith("\n") || text === "") rows.push({ text: current, start });
+  // A "\n" at the exact end already closed an empty trailing row above.
+  return rows.length > 0 ? rows : [{ text: "", start: 0 }];
+}
+
+/** Locate the caret within wrapEditorLine's layout. O(caret), fine for prompts. */
+export function locateCaret(text: string, caret: number, width: number): CaretPosition {
+  const clamped = Math.max(0, Math.min(Array.from(text).length, caret));
+  const rows = wrapEditorLine(text, width);
+  // Width-based placement alone would misplace the caret when wide chars
+  // straddle a cut boundary, so anchor on each row's start offset instead.
+  const rowIndexAtStart = new Map<number, number>();
+  rows.forEach((r, idx) => rowIndexAtStart.set(r.start, idx));
+  let row = 0;
+  let col = 0;
+  let rowOffset = 0;
+  Array.from(text)
+    .slice(0, clamped)
+    .forEach((ch, i) => {
+      const mapped = rowIndexAtStart.get(i);
+      if (mapped !== undefined) {
+        row = mapped;
+        col = 0;
+        rowOffset = 0;
+      }
+      col += stringWidth(ch);
+      rowOffset += 1;
+    });
+  // Caret sitting exactly on a row's start offset belongs to THAT row's head
+  // (start-of-next-line), not past the previous row's last column.
+  const atBoundary = rowIndexAtStart.get(clamped);
+  if (clamped > 0 && atBoundary !== undefined) {
+    return { row: atBoundary, col: 0, rowOffset: 0, totalRows: rows.length };
+  }
+  return {
+    row: Math.min(row, rows.length - 1),
+    col,
+    rowOffset,
+    totalRows: rows.length,
+  };
+}
+
+/**
+ * Widest prompt prefix the input box ever shows ("starting… " while the
+ * bridge session initializes). Text-row reservation for the app layout uses
+ * this narrowest inner width so reserved rows NEVER undercount what
+ * InputLine actually renders — an undercount makes ink's frame overflow the
+ * terminal (see the completion-menu note in App.tsx).
+ */
+const INPUT_PREFIX_COLS = stringWidth("starting… ");
+
+/** Visual text rows of the input editor at terminal width `cols`. */
+export function editorTextRows(text: string, cols: number): number {
+  const inner = Math.max(4, cols - 2 - INPUT_PREFIX_COLS);
+  return wrapEditorLine(text, inner).length;
+}
+
+/**
+ * Rows the whole bordered input box occupies: 2 border + status row + text.
+ * Used by both the layout fold (App) and as InputLine's own height — keep in
+ * one place so they can never drift apart.
+ */
+export function inputBoxRows(editorText: string, cols: number): number {
+  return editorTextRows(editorText, cols) + 3;
+}
+/**
+ * Sliding viewport over a picker's full item list: pinned to the head while
+ * the selection fits in the first window, then the selection rides the
+ * window's bottom edge one row per step until the list tail clamps it.
+ * Pickers stay short no matter how many sessions/options exist — rendering
+ * the full list would blow up the dynamic footer and jolt the scrollback.
+ */
+export function pickerWindow<T>(items: T[], index: number, max = 8): { slice: T[]; start: number } {
+  if (items.length === 0) return { slice: [], start: 0 };
+  const size = Math.min(Math.max(1, max), items.length);
+  const clampedIndex = Math.max(0, Math.min(index, items.length - 1));
+  const start = Math.min(Math.max(0, clampedIndex - size + 1), items.length - size);
+  return { slice: items.slice(start, start + size), start };
+}
+
 export interface WelcomeInfo {
   version: string;
   cwd: string;
