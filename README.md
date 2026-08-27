@@ -209,8 +209,15 @@ zcode-acp            # chat in this directory
 A startup welcome panel (version, session directory, seeded config, key
 hints) sits at the tail of the transcript viewport. Streaming output has
 code-fence coloring, dim thinking lines, live tool rows, and arrow-key
-permission prompts. `PageUp`/`PageDown` (or `Home`/`End`) page back through
-history; `End` unpins and follows the live tail again. `Ctrl-C` cancels a
+permission prompts. The prompt line is a caret editor — `←`/`→` (or
+Ctrl-B/Ctrl-F) move inside the typed text, Backspace/Delete edit at the
+caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears the line, and a
+block cursor marks the position; completion keeps precedence while its menu is
+open. The **mouse wheel** pages through history too — the REPL
+arms xterm mouse reporting so the terminal itself no longer scrolls over the
+UI (shift-drag still selects text). `PageUp`/`PageDown` (or `Home`/`End`) page
+back through history; `End` unpins and follows the live tail again.
+`Ctrl-C` cancels a
 running turn; while idle, press it twice to quit. `Ctrl-L` forces a full
 repaint — the recovery if a terminal (Warp notably) garbles the screen while
 scrolling its own buffer. `/exit` leaves; the session
@@ -224,9 +231,11 @@ interrupts the running turn and sends the next queued message right away.
 
 Warp note: Warp's alt-screen handling corrupts ink full-screen frames on
 resize/scroll for apps outside its CLI-agent whitelist (warp#9838 — fixed
-upstream only for whitelisted agents). If the screen fills with duplicated or
-lost content there, either turn off **Settings → Appearance → Full-screen
-Apps → Use custom padding in alt-screen**, or start the REPL with
+upstream only for whitelisted agents). Mouse-wheel capture removes the common
+trigger (the wheel no longer scrolls Warp's buffer at all); non-wheel paths
+(Cmd+Up, dragging the scrollbar) can still trip it, so `Ctrl-L` remains the
+recovery. You can also turn off **Settings → Appearance → Full-screen Apps →
+Use custom padding in alt-screen**, or start the REPL with
 `ZCODE_ACP_REPL_INLINE=1` to render inline over the native scrollback like
 Claude Code does, skipping the alternate screen entirely.
 

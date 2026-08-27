@@ -45,6 +45,8 @@ import {
   type SessionSummary,
   type TurnState,
 } from "./model.js";
+import { createFilteredStdin, MOUSE_DISABLE, MOUSE_ENABLE, type FilteredStdin } from "./mouse.js";
+import { createLineEditor, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
   const serverJs = fileURLToPath(new URL("../index.js", import.meta.url));
@@ -108,7 +110,59 @@ export async function runRepl(): Promise<void> {
   // screen fills with duplicated content on resize/scroll (warp#9838, fixed
   // upstream only for whitelisted agents via warp#9877).
   const inline = process.env.ZCODE_ACP_REPL_INLINE === "1";
-  const renderOpts = { exitOnCtrlC: false, alternateScreen: !inline };
+  // --- scroll state (external store, survives forceRedraw remounts) ---
+  // 0 = follow the tail; >0 = transcript lines pinned while the user reads
+  // back. Wheel capture and in-app keys both funnel through applyScroll.
+  let scrollOffset = 0;
+  const applyScroll = (delta: number): void => {
+    scrollOffset = Math.max(0, scrollOffset + delta);
+  };
+  // Mouse-wheel inertness mirrors the key path: pickers/forms own scrolling
+  // targets below the transcript, so wheel notches do nothing there either.
+  const scrollGuarded = (): boolean =>
+    sessionPick !== null || question !== null || permission !== null;
+
+  // --- prompt line editor (external store, same rationale as scrollOffset):
+  // a Ctrl-L remount must never eat a half-typed message.
+  let editor: LineEditor = createLineEditor();
+
+  // --- mouse wheel capture (full-screen mode only) ---
+  // Arming xterm mouse reporting (?1000/?1002/?1006) makes the TERMINAL stop
+  // scrolling its own buffer on wheel — the exact gesture that loses the
+  // alt-screen frame in Warp — and delivers \x1b[<64/65;c;rM notches to us
+  // instead, which page the in-app transcript viewport. Inline mode keeps
+  // native scrollback (correct interaction there); non-TTY (tests) has
+  // nothing to arm. DECSET modes persist across the alternate-buffer toggles
+  // inside forceRedraw(), so arming once at startup is enough.
+  const WHEEL_STEP_LINES = 3;
+  let wheelCapture: FilteredStdin | null = null;
+  if (!inline && process.stdin.isTTY) {
+    wheelCapture = createFilteredStdin((dir) => {
+      if (exited) return;
+      if (scrollGuarded()) return;
+      applyScroll(dir === "up" ? WHEEL_STEP_LINES : -WHEEL_STEP_LINES);
+      rerender();
+    });
+    try {
+      process.stdout.write(MOUSE_ENABLE);
+    } catch {
+      // best-effort; without it the wheel just scrolls the host buffer again
+    }
+    // Belt-and-braces for exit paths that bypass cleanup(): leftover armed
+    // reporting would leave the user's shell unusable (mouse eats selection).
+    process.on("exit", () => {
+      try {
+        process.stdout.write(MOUSE_DISABLE);
+      } catch {
+        // ignore
+      }
+    });
+  }
+  const renderOpts = {
+    exitOnCtrlC: false,
+    alternateScreen: !inline,
+    stdin: wheelCapture?.stream,
+  };
   let ink = render(createElement(App, snapshot()), renderOpts);
   function snapshot(): AppProps {
     return {
@@ -119,8 +173,27 @@ export async function runRepl(): Promise<void> {
       sessionPick,
       queued: [...promptQueue],
       resizeTick,
+      scrollOffset,
+      onScrollDelta: (deltaLines: number) => {
+        if (exited) return;
+        applyScroll(deltaLines);
+        // Simple diff repaint suffices for ordinary moves; the key handler's
+        // throttled forceRedraw covers the buffer-corruption recovery case.
+        rerender();
+      },
+      onScrollReset: () => {
+        if (exited) return;
+        scrollOffset = 0;
+        rerender();
+      },
       status,
       busy,
+      editor,
+      applyEdit: (op) => {
+        if (exited) return;
+        editor = op(editor);
+        rerender();
+      },
       onSubmit: (text) => void onSubmit(text),
       onCancelTurn,
       onAnswerPermission: (id) => permissionResolver?.(id),
@@ -586,6 +659,21 @@ export async function runRepl(): Promise<void> {
   function cleanup(code: number): void {
     if (exited) return;
     exited = true;
+    // Release real stdin and disarm mouse reporting before the unmount's
+    // terminal-restore writes — a wheel notch racing ?1049l would land on an
+    // already-torn-down UI.
+    try {
+      wheelCapture?.dispose();
+    } catch {
+      // ignore
+    }
+    if (wheelCapture !== null) {
+      try {
+        process.stdout.write(MOUSE_DISABLE);
+      } catch {
+        // ignore
+      }
+    }
     try {
       process.stdout.off("resize", onResize);
     } catch {
@@ -626,6 +714,18 @@ export async function runRepl(): Promise<void> {
   child.once("exit", (code) => {
     if (exited) return;
     exited = true;
+    try {
+      wheelCapture?.dispose();
+    } catch {
+      // ignore
+    }
+    if (wheelCapture !== null) {
+      try {
+        process.stdout.write(MOUSE_DISABLE);
+      } catch {
+        // ignore
+      }
+    }
     ink.unmount();
     process.stderr.write(
       `bridge exited unexpectedly (code ${code})\n${stderrTail.trim() ? `stderr tail:\n${stderrTail}` : ""}\n`,

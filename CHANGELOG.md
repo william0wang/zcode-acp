@@ -21,6 +21,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through history (an "N lines hidden" indicator shows while pinned; `End`
   returns to the live tail). Window resizes re-wrap cleanly instead of
   smearing scrollback (verified over a pty at 120→80 columns).
+- REPL captures the mouse wheel in full-screen mode: xterm mouse reporting
+  (?1000/?1002/?1006) is armed so the terminal no longer scrolls its own
+  buffer over the UI — the exact gesture that loses the alternate-screen
+  frame in Warp (warp#9838) — and wheel notches page the in-app viewport
+  instead (+3/-3 lines per notch). Mouse bytes are stripped from stdin before
+  ink sees them, and reporting is disarmed on every exit path. Shift-drag
+  still selects text; `ZCODE_ACP_REPL_INLINE=1` keeps native scrollback.
+- The prompt line is a caret editor: `←`/`→` (or Ctrl-B/Ctrl-F) move within
+  the typed text instead of only delete-and-retype, Backspace/Delete edit at
+  the caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears it, and a
+  block cursor shows the position. Completion keeps precedence when its menu
+  is open (`→` completes rather than moves).
+- The transcript scroll offset and the prompt-line draft moved to the REPL's
+  external store: both now survive `Ctrl-L`'s unmount+fresh-render cycles
+  instead of silently resetting on every forced repaint (for the scroll
+  offset this also made paging keys look dead under a garbled buffer —
+  pinned, then wiped by their own repaint; for the prompt it ate a
+  half-typed message).
 - Remote turns render live in the REPL: `$/zcode/turnState` notifications
   drive the turn view for prompts started by other clients (mobile app,
   second editor), which previously never appeared. Permission and question

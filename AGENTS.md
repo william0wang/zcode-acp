@@ -69,6 +69,8 @@ src/
 │   ├── App.tsx           Ink components (stream, tools, permission picker,
 │   │                     full-width input box with in-box status row,
 │   │                     ↑↓/tab completion menu)
+│   ├── mouse.ts          Mouse-wheel capture: xterm SGR mouse filter between
+│   │                     process.stdin and ink's stdin (full-screen mode)
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
@@ -114,6 +116,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **REPL owns stdin through the mouse filter**: full-screen mode routes all
+  keyboard input via `createFilteredStdin` (`src/repl/mouse.ts`) and hands ink
+  the FAKE stream; `process.stdin` must not gain a second consumer or raw
+  mouse bytes corrupt whichever reader misses them. New input sources attach
+  to `render({stdin})`, never to `process.stdin`.
+- **REPL render state lives in run.ts, not React**: `forceRedraw()` remounts
+  the whole App, wiping component state. Anything that must survive a repaint
+  (prompt-line editor, transcript scroll offset, queue, entries) belongs to run.ts's external
+  store passed via snapshot props.
 
 ## Docs to read before sensitive changes
 

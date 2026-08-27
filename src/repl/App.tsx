@@ -25,6 +25,19 @@ import {
   type TurnState,
   type WelcomeInfo,
 } from "./model.js";
+import {
+  backspaceAtCaret,
+  caretLeft,
+  caretRight,
+  caretToEnd,
+  caretToStart,
+  createLineEditor,
+  ctrlChord,
+  deleteAtCaret,
+  insertAtCaret,
+  replaceText,
+  type LineEditor,
+} from "./input-buffer.js";
 
 /** A permission request awaiting the user's choice. */
 export interface PermissionPrompt {
@@ -77,10 +90,28 @@ export interface AppProps {
   queued: string[];
   /** Bumped on every terminal resize — remounts <Static> for a full repaint. */
   resizeTick: number;
+  /**
+   * Pinned-older-lines viewport offset. Lives in run.ts's external store,
+   * NOT in component state: the state MUST survive forceRedraw()'s
+   * unmount+fresh-render cycles or every forced repaint silently resets
+   * scrollback (and wipes a wheel/paging position with it).
+   */
+  scrollOffset: number;
+  /** Move the scroll offset by a signed amount (clamped at >= 0). */
+  onScrollDelta: (deltaLines: number) => void;
+  /** Snap back to the live tail (submit / explicit return-to-tail). */
+  onScrollReset: () => void;
   /** Session status: command menu + model/mode/thought selects. */
   status: ReplStatus;
   /** True while the bridge/session is starting up. */
   busy: boolean;
+  /**
+   * The prompt line's editor state (text + caret), owned by run.ts like the
+   * other cross-repaint state — a Ctrl-L remount must never eat a draft.
+   */
+  editor: LineEditor;
+  /** Apply one pure editor op to the prompt line and repaint. */
+  applyEdit: (op: (e: LineEditor) => LineEditor) => void;
   onSubmit: (text: string) => void;
   onCancelTurn: () => void;
   onAnswerPermission: (optionId: string | null) => void;
@@ -204,6 +235,9 @@ function derivedKey(ch: string): {
   tab: boolean;
   escape: boolean;
   backspace: boolean;
+  forwardDelete: boolean;
+  left: boolean;
+  right: boolean;
   ctrl: boolean;
   meta: boolean;
 } {
@@ -212,6 +246,11 @@ function derivedKey(ch: string): {
     tab: ch === "\t",
     escape: false,
     backspace: ch === "\x7f" || ch === "\b",
+    // Arrow / Delete keys always arrive as escape sequences and are handled
+    // by ink's parser, never inside a decomposed printable chunk.
+    forwardDelete: false,
+    left: false,
+    right: false,
     ctrl: ch >= "\x01" && ch <= "\x1a" && ch !== "\r" && ch !== "\n" && ch !== "\t",
     meta: false,
   };
@@ -220,48 +259,56 @@ function derivedKey(ch: string): {
 /**
  * Self-managed input line. ink-text-input's submit/clear timing proved
  * unreliable under full external rerenders, so the line owns its value and
- * handles plain typing, backspace, and submit directly — first version has
- * no cursor movement or history, which is fine for a REPL.
+ * handles plain typing, caret-aware editing (←/→ or Ctrl-B/F to move,
+ * Backspace/Delete at the caret, Ctrl-A/E line jumps, Ctrl-U clear), and
+ * submit directly.
  *
  * While the line is a slash command (or a config command's argument), an
  * interactive completion menu sits above the box: ↑/↓ move, tab/→ complete
  * the highlighted candidate, enter picks it when the line is a partial match
- * (exact input sends instead), esc dismisses.
+ * (exact input sends instead), esc dismisses. ←/→ only move the caret when
+ * they are not acting as menu/completion keys.
  */
 function InputLine({
   busy,
   status,
+  editor,
+  applyEdit,
   onSubmitText,
 }: {
   busy: boolean;
   status: ReplStatus;
+  editor: LineEditor;
+  applyEdit: (op: (e: LineEditor) => LineEditor) => void;
   onSubmitText: (text: string) => void;
 }): ReactElement {
-  const [value, setValue] = useState("");
+  // `ed` mirrors props.editor for the render below; edits go through
+  // applyEdit so the state survives Ctrl-L's unmount+fresh-render cycles.
+  const ed = editor;
   const [selIdx, setSelIdx] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  // Mirror of `value` for event handlers: a decomposed chunk fires several
-  // state updates in one tick, so closures over `value` would see the stale
+  // Mirror of `ed` for event handlers: a decomposed chunk fires several
+  // state updates in one tick, so closures over `ed` would see the stale
   // pre-chunk line (and submit the wrong text on an embedded \r).
-  const valueRef = useRef("");
+  const edRef = useRef(editor);
+  edRef.current = editor;
+  // Completion paths replace the whole line — adopt with caret at the end.
   const applyValue = (fn: (v: string) => string): void => {
-    valueRef.current = fn(valueRef.current);
-    setValue(valueRef.current);
+    applyEdit((e) => replaceText(fn(e.text)));
   };
   const submitWith = (text: string): void => {
-    valueRef.current = "";
-    setValue("");
+    applyEdit(() => createLineEditor());
     setDismissed(false);
     if (text.trim()) onSubmitText(text.trim());
   };
-  const candidates = completionCandidates(value, status);
+  const candidates = completionCandidates(ed.text, status);
   const menu = !dismissed && candidates !== null && candidates.length > 0 ? candidates : null;
   // New keystroke → new filter: restart the selection and re-open a
   // previously dismissed menu.
   useEffect(() => {
     setSelIdx(0);
     setDismissed(false);
-  }, [value]);
+  }, [ed.text]);
 
   const handleChar = (
     ch: string,
@@ -270,6 +317,9 @@ function InputLine({
       tab: boolean;
       escape: boolean;
       backspace: boolean;
+      forwardDelete: boolean;
+      left: boolean;
+      right: boolean;
       ctrl: boolean;
       meta: boolean;
     },
@@ -284,13 +334,12 @@ function InputLine({
         setSelIdx((i) => Math.min(menu!.length - 1, i + 1));
         return;
       }
-      // tab (or →) completes the highlighted candidate; without a menu tab is
-      // dropped so no literal tab ever lands in the line.
-      if (k.tab || nav?.right) {
-        if (menu) {
-          const item = menu[selIdx] ?? menu[0]!;
-          if (item) applyValue((v) => applyCompletion(v, item));
-        }
+      // tab (or →) completes the highlighted candidate when a menu is open.
+      // Without one, → falls through to caret movement below so it stays a
+      // plain editing key; bare tabs are still dropped.
+      if ((k.tab || nav?.right) && menu) {
+        const item = menu[selIdx] ?? menu[0]!;
+        if (item) applyValue((v) => applyCompletion(v, item));
         return;
       }
     }
@@ -307,7 +356,7 @@ function InputLine({
       // static listing, so a switch never needs hand-typed input.
       if (menu) {
         const item = menu[selIdx] ?? menu[0]!;
-        const line = valueRef.current;
+        const line = edRef.current.text;
         const spaceIdx = line.indexOf(" ");
         if (spaceIdx < 0) {
           if (line === item.value && !isConfigCommand(item.value.replace(/^\//, ""))) {
@@ -324,15 +373,41 @@ function InputLine({
         }
         return;
       }
-      submitWith(valueRef.current);
+      submitWith(edRef.current.text);
       return;
     }
+    // Caret-aware edits. ←/→ arrive as escape-sequence chunks (never inside
+    // coalesced printable chunks), so they ride the k flags below.
     if (k.backspace) {
-      applyValue((v) => v.slice(0, -1));
+      applyEdit(backspaceAtCaret);
       return;
+    }
+    if (k.forwardDelete) {
+      applyEdit(deleteAtCaret);
+      return;
+    }
+    if (k.left) {
+      applyEdit(caretLeft);
+      return;
+    }
+    if (k.right && !menu) {
+      applyEdit(caretRight);
+      return;
+    }
+    // Readline-standard Ctrl chords: B/F move by char, A/E jump to the
+    // line's ends, U kills the whole line. Accept both delivery shapes —
+    // the letter (single keypress) and the raw control byte (coalesced
+    // chunks) — see ctrlChord().
+    if (k.ctrl) {
+      const chord = ctrlChord(ch);
+      if (chord === "b") return void applyEdit(caretLeft);
+      if (chord === "f") return void applyEdit(caretRight);
+      if (chord === "a") return void applyEdit(caretToStart);
+      if (chord === "e") return void applyEdit(caretToEnd);
+      if (chord === "u") return void applyEdit(() => createLineEditor());
     }
     if (ch && !k.ctrl && !k.meta) {
-      applyValue((v) => v + ch);
+      applyEdit((cur) => insertAtCaret(cur, ch));
     }
   };
 
@@ -352,7 +427,10 @@ function InputLine({
         return: key.return,
         tab: key.tab,
         escape: key.escape,
-        backspace: key.backspace || key.delete,
+        backspace: key.backspace,
+        forwardDelete: key.delete,
+        left: key.leftArrow,
+        right: key.rightArrow,
         ctrl: key.ctrl,
         meta: key.meta,
       },
@@ -399,8 +477,23 @@ function InputLine({
       >
         <Box>
           <Text dimColor>{busy ? "starting… " : "❯ "}</Text>
-          <Text>{value}</Text>
-          <Text dimColor>▏</Text>
+          {(() => {
+            // Block cursor on the character at the caret (a space past the
+            // end) — makes ←/→ editing visible, unlike the old tail-pinned ▏.
+            const parts = Array.from(ed.text);
+            const before = parts.slice(0, ed.caret).join("");
+            const atCaret = parts.slice(ed.caret, ed.caret + 1).join("");
+            const after = parts.slice(ed.caret + 1).join("");
+            return (
+              <>
+                <Text>{before}</Text>
+                <Text backgroundColor="white" color="black">
+                  {atCaret || " "}
+                </Text>
+                {after ? <Text>{after}</Text> : null}
+              </>
+            );
+          })()}
         </Box>
         <Box justifyContent="space-between" width="100%">
           <Text dimColor>{statusLine || "type / for commands · tab completes"}</Text>
@@ -460,14 +553,14 @@ export function App(props: AppProps): ReactElement {
   const rows = process.stdout.rows || 24;
 
   // --- scroll state ---
-  // 0 = follow the tail (autoscroll); >0 = lines pinned while the user reads
-  // back. New content does not reset it — end/pageDown returns to the tail.
-  const [scrollOffset, setScrollOffset] = useState(0);
+  // Value comes from run.ts's external store (see AppProps); this component
+  // only reads it and requests deltas/resets.
+  const scrollOffset = props.scrollOffset;
 
   const submit = useCallback(
     (text: string) => {
       // Own messages must be visible immediately — leave pinned scrollback.
-      setScrollOffset(0);
+      props.onScrollReset();
       props.onSubmit(text);
     },
     [props],
@@ -523,10 +616,10 @@ export function App(props: AppProps): ReactElement {
     if (key.pageUp || key.pageDown || key.home || key.end) {
       if (sessionPick || question || permission) return;
       const viewport = Math.max(3, rows - CHROME_ROWS);
-      if (key.home) setScrollOffset(Number.MAX_SAFE_INTEGER);
-      else if (key.end) setScrollOffset(0);
-      else if (key.pageUp) setScrollOffset((o) => o + Math.floor(viewport * 0.8));
-      else setScrollOffset((o) => Math.max(0, o - Math.floor(viewport * 0.8)));
+      if (key.home) props.onScrollDelta(Number.MAX_SAFE_INTEGER);
+      else if (key.end) props.onScrollReset();
+      else if (key.pageUp) props.onScrollDelta(Math.floor(viewport * 0.8));
+      else props.onScrollDelta(-Math.floor(viewport * 0.8));
       const now = Date.now();
       if (now - lastRedrawAt.current > 400) {
         lastRedrawAt.current = now;
@@ -762,7 +855,13 @@ export function App(props: AppProps): ReactElement {
         ) : question ? (
           <QuestionPicker prompt={question} state={q} />
         ) : (
-          <InputLine busy={busy} status={status} onSubmitText={submit} />
+          <InputLine
+            busy={busy}
+            status={status}
+            editor={props.editor}
+            applyEdit={props.applyEdit}
+            onSubmitText={submit}
+          />
         )}
       </Box>
     </Box>
