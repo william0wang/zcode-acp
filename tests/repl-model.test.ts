@@ -22,6 +22,8 @@ import {
   formatConfigList,
   formatQuotaLine,
   handleLocalCommand,
+  isConfigArgumentMenu,
+  isOneShotCommandValue,
   parseCommand,
   relativeTime,
   parseQuestionForm,
@@ -285,6 +287,40 @@ describe("handleLocalCommand", () => {
   it("leaves plain prompts and unknown commands to the passthrough path", () => {
     expect(handleLocalCommand("fix the bug", createReplStatus())).toBeNull();
     expect(handleLocalCommand("/compact", createReplStatus())).toBeNull();
+  });
+});
+
+describe("isConfigArgumentMenu", () => {
+  it("is true only while typing a config command's argument", () => {
+    expect(isConfigArgumentMenu("/model ")).toBe(true);
+    expect(isConfigArgumentMenu("/model glm")).toBe(true);
+    expect(isConfigArgumentMenu("/MODE p")).toBe(true); // case-insensitive command
+    expect(isConfigArgumentMenu("/thought max")).toBe(true);
+  });
+
+  it("is false for command-name menus and non-slash text", () => {
+    expect(isConfigArgumentMenu("/model")).toBe(false);
+    expect(isConfigArgumentMenu("/sessions proj")).toBe(false);
+    expect(isConfigArgumentMenu("/skill-x arg")).toBe(false);
+    expect(isConfigArgumentMenu("model v")).toBe(false);
+    expect(isConfigArgumentMenu("")).toBe(false);
+  });
+});
+
+describe("isOneShotCommandValue", () => {
+  it("marks argument-free commands that run on pick", () => {
+    expect(isOneShotCommandValue("/exit")).toBe(true);
+    expect(isOneShotCommandValue("/HELP")).toBe(true); // case-insensitive command
+    expect(isOneShotCommandValue("/sessions")).toBe(true);
+    expect(isOneShotCommandValue("/compact")).toBe(true);
+  });
+
+  it("leaves config, skills, arguments and plain text as fill-then-confirm", () => {
+    expect(isOneShotCommandValue("/model")).toBe(false); // opens its option menu
+    expect(isOneShotCommandValue("/skill-x")).toBe(false);
+    expect(isOneShotCommandValue("/mcp extra")).toBe(false); // carries an argument
+    expect(isOneShotCommandValue("exit")).toBe(false); // no slash
+    expect(isOneShotCommandValue("")).toBe(false);
   });
 });
 

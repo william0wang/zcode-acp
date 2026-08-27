@@ -250,10 +250,13 @@ the current `model · mode · thought level`, and typing `/` opens an interactiv
 completion menu — `↑`/`↓` move, `enter` picks the highlighted entry (or `tab` /
 `→`; typing the exact form already sends), `esc` dismisses. After picking
 `/model`, `/mode`, or `/thought` the same menu lists the config options (the
-current one marked `●`), so switches never need hand-typed ids. The arg-less
-forms still print a static listing; with an argument they switch, over the same
-slash-command path the editor uses. `/help` lists every command the bridge
-advertises, including plugin commands.
+current one marked `●`) and **enter on a row switches immediately** — no second
+confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`,
+`/compact`, `/mcp`, `/quota`) run on pick as well; every other completion
+(skills, plugins) only fills the line, since those usually expect arguments.
+The arg-less forms still print a static listing over the same slash-command
+path the editor uses. `/help` lists every command the bridge advertises,
+including plugin commands.
 
 While remote access is enabled, turns started from other clients (the mobile
 app, a second editor) render live in the REPL too, and questions or permission

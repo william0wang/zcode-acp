@@ -15,9 +15,12 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 
 import {
   applyCompletion,
+  COMPLETION_LIMIT,
   completionCandidates,
   estimateLines,
+  isConfigArgumentMenu,
   isConfigCommand,
+  isOneShotCommandValue,
   relativeTime,
   selectLabel,
   type ReplEntry,
@@ -389,6 +392,22 @@ function InputLine({
         const item = menu[selIdx] ?? menu[0]!;
         const line = edRef.current.text;
         const spaceIdx = line.indexOf(" ");
+        // One-shot commands ("/exit", "/help", "/compact", ...) run ON PICK:
+        // the highlighted row already names the whole action. Other
+        // command-name menus — skills, plugins, unknown advertised commands —
+        // keep fill semantics: their bare form usually expects an argument,
+        // and sending must stay the user's explicit act.
+        if (spaceIdx < 0 && isOneShotCommandValue(item.value)) {
+          submitWith(item.value);
+          return;
+        }
+        // Config argument menus execute ON PICK too ("/model x" switches
+        // right away): the highlighted row already states the full decision,
+        // so fill-then-confirm would only add a redundant enter.
+        if (spaceIdx >= 0 && isConfigArgumentMenu(line)) {
+          submitWith(`${line.slice(0, spaceIdx + 1)}${item.value}`);
+          return;
+        }
         if (spaceIdx < 0) {
           if (line === item.value && !isConfigCommand(item.value.replace(/^\//, ""))) {
             submitWith(line);
@@ -492,16 +511,43 @@ function InputLine({
     // bordered input box stops spanning the terminal.
     <Box flexDirection="column" width="100%">
       {menu ? (
+        // Rows are pre-colored as ONE plain string (chalk) instead of a
+        // <Text color> wrapper — whole-string rows always diff as clean
+        // full-line replacements. The block ALWAYS paints COMPLETION_LIMIT
+        // slots (blanks beyond the candidate count), so filtering changes
+        // only line CONTENT, never height: ink's frame update erases the
+        // previous frame's line count upward and rewrites, and a height
+        // change misplaces that sequence — the top candidate row used to
+        // land off-position and go invisible until the selection moved.
         <Box flexDirection="column" paddingLeft={2}>
-          {menu.map((m, i) => (
-            <Text key={`${m.label}:${m.value}`} color={i === selIdx ? "cyan" : undefined}>
-              {i === selIdx ? "❯ " : "  "}
-              {m.current ? "● " : "  "}
-              {m.label}
-              {m.description ? ` — ${m.description}` : ""}
-            </Text>
-          ))}
-          <Text dimColor> ↑/↓ select · tab or enter picks · esc dismiss</Text>
+          {Array.from({ length: COMPLETION_LIMIT }, (_, i) => {
+            const m = menu[i];
+            if (!m) {
+              return <Text key={`slot:${i}`}> </Text>;
+            }
+            const desc = m.description ? ` — ${m.description}` : "";
+            const body = `${m.current ? "● " : "  "}${m.label}${desc}`;
+            return (
+              <Text key={`${i}:${m.label}:${m.value}`}>
+                {i === selIdx ? color.cyan(`❯ ${body}`) : `  ${body}`}
+              </Text>
+            );
+          })}
+          <Text dimColor>
+            {(() => {
+              // Hint follows the HIGHLIGHTED row: one-shot commands announce
+              // that enter runs them, config menus that it switches, and
+              // everything else keeps pick-to-fill.
+              if (isConfigArgumentMenu(ed.text)) {
+                return " ↑/↓ select · enter switches now · tab fills · esc dismiss";
+              }
+              const picked = menu[selIdx] ?? menu[0];
+              if (picked && isOneShotCommandValue(picked.value)) {
+                return " ↑/↓ select · enter runs it now · tab fills · esc dismiss";
+              }
+              return " ↑/↓ select · tab or enter picks · esc dismiss";
+            })()}
+          </Text>
         </Box>
       ) : null}
       <Box
@@ -822,7 +868,19 @@ export function App(props: AppProps): ReactElement {
   // The queued-prompts panel sits between the turn block and the input box.
   const queuedShown = Math.min(queued.length, 3);
   const queueRows = queued.length > 0 ? queuedShown + (queued.length > 3 ? 1 : 0) + 1 : 0;
-  const viewportRows = Math.max(3, rows - CHROME_ROWS - queueRows - turnHeight(turn, cols));
+  // A completion menu sits directly above the input box and is 1 (hint) +
+  // COMPLETION_LIMIT rows tall. When it opens, the frame MUST still fit the
+  // terminal: dynamic output taller than `rows` makes ink's frame write
+  // overflow the alternate screen, and the menu's top row — inserted nearest
+  // the budget line — lands off-position and goes invisible (users read that
+  // as "arrow keys need two presses": the first just scrolls the highlight
+  // into view). Fold those rows out of the transcript viewport while open.
+  const editorText = props.editor.text;
+  const menuOpen = (completionCandidates(editorText, props.status)?.length ?? 0) > 0;
+  const viewportRows = Math.max(
+    3,
+    rows - CHROME_ROWS - queueRows - turnHeight(turn, cols) - (menuOpen ? COMPLETION_LIMIT + 1 : 0),
+  );
   // Render only the visible tail of the transcript: cost per frame stays
   // constant no matter how long the session grows. `scrollOffset` pins older
   // lines while the user reads back; overflow:hidden crops the top edge.

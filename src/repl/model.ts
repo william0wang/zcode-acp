@@ -399,8 +399,13 @@ export interface CompletionItem {
   current?: boolean;
 }
 
-/** Max rows the menu renders — longer lists narrow with the typed prefix. */
-const COMPLETION_LIMIT = 8;
+/**
+ * Max rows the menu renders — longer lists narrow with the typed prefix.
+ * Also the FIXED slot count of the rendered menu block (blanks beyond the
+ * candidate count): constant height keeps ink's frame updates equal-size,
+ * which is what keeps the top highlight visible (see App.tsx menu block).
+ */
+export const COMPLETION_LIMIT = 8;
 
 /** Commands whose single argument is completable from the config selects. */
 const CONFIG_COMMANDS = new Set(["model", "mode", "thought"]);
@@ -408,6 +413,35 @@ const CONFIG_COMMANDS = new Set(["model", "mode", "thought"]);
 /** Whether `cmd` (bare name, no slash) takes a completable config argument. */
 export function isConfigCommand(cmd: string): boolean {
   return CONFIG_COMMANDS.has(cmd);
+}
+
+/**
+ * True when the line sits in a config command's argument menu ("/model v…").
+ * There the highlighted option IS the decision — enter executes the switch
+ * directly. Every other completion context (command names, skill commands,
+ * plugins) only FILLS the line; sending stays the user's explicit choice.
+ * Only meaningful when a completion menu is open (line starts with "/").
+ */
+export function isConfigArgumentMenu(value: string): boolean {
+  if (!value.startsWith("/")) return false;
+  const spaceIdx = value.indexOf(" ");
+  if (spaceIdx < 0) return false;
+  return CONFIG_COMMANDS.has(value.slice(1, spaceIdx).toLowerCase());
+}
+
+/**
+ * Bare command names whose whole action needs no input ("exit", "help", ...):
+ * enter ON PICK runs them directly, like config argument menus. Anything not
+ * listed here — skills, plugin commands, unknown advertised names — keeps
+ * fill semantics because its bare form usually expects an argument, and
+ * sending must stay the user's explicit act.
+ */
+const ONE_SHOT_COMMANDS = new Set(["help", "sessions", "exit", "compact", "mcp", "quota"]);
+
+/** Whether the "/"-prefixed single-token line executes immediately when picked. */
+export function isOneShotCommandValue(value: string): boolean {
+  if (!value.startsWith("/") || value.indexOf(" ") >= 0) return false;
+  return ONE_SHOT_COMMANDS.has(value.slice(1).toLowerCase());
 }
 
 /**

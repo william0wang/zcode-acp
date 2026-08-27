@@ -54,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `elicitation.form` capability, declared in the REPL's `initialize`
   handshake (the ACP SDK never sends one on a client's behalf, so the REPL
   sends it itself).
+- Config argument menus (`/model`, `/mode`, `/thought`) now execute the
+  switch on pick: pressing enter on a highlighted option sends the full
+  command immediately (the prompt line hints "enter switches now"). One-shot
+  commands — `/exit`, `/help`, `/sessions`, `/compact`, `/mcp`, `/quota` —
+  run on pick too ("enter runs it now"). Every other completion context —
+  skills, plugins, unknown advertised commands — still only fills the line,
+  because those usually expect arguments and sending must stay an explicit
+  act.
 
 ### Changed
 
@@ -67,6 +75,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The completion menu's top row and its highlight are reliably visible again
+  (verified over a pty): the frame could grow taller than the terminal once a
+  menu opened — its rows were never subtracted from the viewport budget — so
+  ink's alternate-screen write landed past the screen edge and the freshly
+  inserted FIRST candidate (with the selection marker) went invisible. The
+  perceived bug was "up/down need two presses": the first press merely moved
+  the highlight into view. The menu now paints a fixed slot count, its rows
+  come out of the transcript budget while open, and each row is pre-colored
+  as a single chalk string so ink's diff always rewrites whole lines.
 - Resuming a session no longer force-pins it to the first config.json model:
   the bridge used to attach a `runtimeModel` overlay (first enabled provider's
   first model) on every resume/load, silently overriding whatever model the
