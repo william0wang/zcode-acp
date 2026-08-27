@@ -50,14 +50,53 @@ import {
 import { createLineEditor, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
-  // Crash containment: an unexpected throw must never kill the REPL
-  // silently (or take the terminal down with an unprinted stack). A fatal
-  // exception prints plainly and exits; rejected promises are logged but
-  // non-fatal — the SDK resolves raced/aborted request promises late by
+  // Crash containment: an unexpected throw is SURFACED, never fatal — it
+  // prints to stderr (stack included), lands as a dim note in the
+  // transcript, and the REPL keeps running. A circuit breaker is the only
+  // exit: if errors keep firing within the window the render tree itself is
+  // almost certainly broken and every frame would throw again — shutting
+  // down then beats a spinning error loop. Rejected promises are always
+  // log-only; the SDK resolves raced/aborted request promises late by
   // design, and those settle as rejections we deliberately ignore.
+  const CRASH_WINDOW_MS = 10_000;
+  const CRASH_LIMIT = 5;
+  let crashTimes: number[] = [];
+  let repaintQueued = false;
   process.on("uncaughtException", (err) => {
-    warn(`repl crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-    process.exit(1);
+    const now = Date.now();
+    crashTimes = crashTimes.filter((t) => now - t < CRASH_WINDOW_MS);
+    crashTimes.push(now);
+    const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    warn(`repl absorbed an error (${crashTimes.length}/${CRASH_LIMIT} recent): ${detail}`);
+    if (crashTimes.length >= CRASH_LIMIT) {
+      warn("repl: too many errors in a row — UI is likely broken, shutting down");
+      try {
+        child.stdin?.end();
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ignore
+        }
+        process.exit(1);
+      }, 1500).unref();
+      return;
+    }
+    const msg =
+      (err instanceof Error ? err.message : String(err)).split("\n")[0] || "unknown error";
+    entries = [...entries, { kind: "note", text: `error absorbed: ${msg}` }];
+    // Repaint on a later tick: if the throw happened INSIDE a rerender,
+    // re-entering ink synchronously from this handler would just rethrow.
+    if (!repaintQueued && !exited) {
+      repaintQueued = true;
+      setTimeout(() => {
+        repaintQueued = false;
+        rerender();
+      }, 50);
+    }
   });
   process.on("unhandledRejection", (reason) => {
     warn(
