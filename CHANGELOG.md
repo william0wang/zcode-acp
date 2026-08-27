@@ -9,115 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- REPL session browser and resume: `/sessions` lists this project's previous
-  conversations (title, relative age, short id, other-directory marker) in an
-  interactive picker; choosing one resumes it via `session/load` with the full
-  history replayed into the transcript. The update pump survives the session
-  swap (the disposed placeholder no longer kills the loop) and replay folding
-  is gated on the load response so a slow backend stream can't be truncated.
-- REPL full-screen UI: the app now runs in the alternate screen buffer — the
-  transcript renders in an in-app viewport above the prompt chrome instead of
-  printing to native scrollback. `PageUp`/`PageDown`/`Home`/`End` page back
-  through history (an "N lines hidden" indicator shows while pinned; `End`
-  returns to the live tail). Window resizes re-wrap cleanly instead of
-  smearing scrollback (verified over a pty at 120→80 columns).
-- REPL captures the mouse wheel in full-screen mode: xterm mouse reporting
-  (?1000/?1002/?1006) is armed so the terminal no longer scrolls its own
-  buffer over the UI — the exact gesture that loses the alternate-screen
-  frame in Warp (warp#9838) — and wheel notches page the in-app viewport
-  instead (+3/-3 lines per notch). Mouse bytes are stripped from stdin before
-  ink sees them, and reporting is disarmed on every exit path. Shift-drag
-  still selects text; `ZCODE_ACP_REPL_INLINE=1` keeps native scrollback.
-- The prompt line shows the plan-quota usage inline: a compact
-  `5h NN% · wk NN%` suffix (token windows only) appended to the status row,
-  fetched at startup and refreshed every 10 minutes; it hides itself when the
-  fetch fails or auth expires, and the full `/quota` card is unchanged.
-- The prompt line is a caret editor: `←`/`→` (or Ctrl-B/Ctrl-F) move within
-  the typed text instead of only delete-and-retype, Backspace/Delete edit at
-  the caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears it, and a
-  block cursor shows the position. Completion keeps precedence when its menu
-  is open (`→` completes rather than moves).
-- The transcript scroll offset and the prompt-line draft moved to the REPL's
-  external store: both now survive `Ctrl-L`'s unmount+fresh-render cycles
-  instead of silently resetting on every forced repaint (for the scroll
-  offset this also made paging keys look dead under a garbled buffer —
-  pinned, then wiped by their own repaint; for the prompt it ate a
-  half-typed message).
-- Remote turns render live in the REPL: `$/zcode/turnState` notifications
-  drive the turn view for prompts started by other clients (mobile app,
-  second editor), which previously never appeared. Permission and question
-  requests answered elsewhere dismiss the local picker via the SDK request
-  abort signal instead of hanging forever.
-- Interactive AskUserQuestion support in the REPL: the bridge's form
-  elicitation renders as an arrow-key picker (single/multi-select plus a
-  custom-answer row per question; `esc` skips). This needs a client-side
-  `elicitation.form` capability, declared in the REPL's `initialize`
-  handshake (the ACP SDK never sends one on a client's behalf, so the REPL
-  sends it itself).
-- Config argument menus (`/model`, `/mode`, `/thought`) now execute the
-  switch on pick: pressing enter on a highlighted option sends the full
-  command immediately (the prompt line hints "enter switches now"). One-shot
-  commands — `/exit`, `/help`, `/sessions`, `/compact`, `/mcp`, `/quota` —
-  run on pick too ("enter runs it now"). Every other completion context —
-  skills, plugins, unknown advertised commands — still only fills the line,
-  because those usually expect arguments and sending must stay an explicit
-  act.
+- Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
+  bridge the editor uses, including slash-command completion with an
+  interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
+  argument-free commands running on pick, and a welcome panel.
+- REPL renders via **native scrollback**: completed messages print once
+  through ink `<Static>` and belong to the terminal — native smooth
+  scrolling, selection/copy, and search work unchanged and history survives
+  exit. Only a compact dynamic footer repaints: live-turn tail (capped at
+  half the screen), queued-prompt panel, completion menu, prompt box.
+- The prompt line wraps across rows with CJK-aware caret placement
+  (`wrapEditorLine` + `locateCaret`); input-box growth is reserved in the
+  layout so the frame never overflows the terminal.
+- `/sessions` picker slides an 8-row window over the full session list
+  (position counter plus "N newer above / older below" hints) instead of
+  printing every entry; arrows move across the complete list either way.
+- Resuming a session replays only its recent tail — last 50 messages,
+  turn-aligned via ADR-0003 `_meta.zcode.limit` tail replay — instead of
+  dumping full history into scrollback; when truncated, the resume note says
+  exactly what was loaded (`showing last 50 of 1234 messages`).
+- Pasted or dragged-in content is handled safely: contiguous printable runs
+  apply as ONE editor op (`planChunkOps`), control/escape junk is stripped
+  before it reaches editor state (`sanitizeInputChunk`), prompts cap at
+  20k chars, and unexpected internal errors never kill the UI — they surface
+  as an `error absorbed` note while the REPL keeps running (a 5-in-10s
+  circuit breaker shuts down only if errors fire every frame).
+- Remote turns render live in the REPL (`$/zcode/turnState`), permission and
+  question requests answered elsewhere dismiss the local picker via the SDK
+  abort signal, AskUserQuestion renders as a structured form picker, and
+  ExitPlanMode heads as "plan approval" with the plan text inline.
+- The prompt-line status row carries a compact plan-quota readout
+  (`5h NN% · wk NN%`) refreshed every 10 minutes; failures hide silently.
 
 ### Changed
 
-- ExitPlanMode (plan approval) in the REPL now heads as "plan approval" and
-  shows the plan text inline before the Approve/Reject options (the bridge
-  adds a `toolCall.title`); previously it was an unlabeled permission popup.
-- An open completion menu takes precedence over the queued-prompt interrupt:
-  with a turn running and prompts queued, `esc` now dismisses the menu first
-  (a second press interrupts the turn); previously both fired at once, so one
-  keypress silently cancelled the running turn.
+- `esc` interrupts a running turn whether or not prompts are queued (an open
+  completion menu still takes precedence); queued follow-ups drain one per
+  stop through the same command parsing as direct submits, so a queued
+  `/help` or `/exit` keeps working.
+- Config argument menus execute on pick ("enter switches now"), one-shot
+  commands run on pick ("enter runs it now"); other completions only fill.
 
 ### Fixed
 
-- The completion menu's top row and its highlight are reliably visible again
-  (verified over a pty): the frame could grow taller than the terminal once a
-  menu opened — its rows were never subtracted from the viewport budget — so
-  ink's alternate-screen write landed past the screen edge and the freshly
-  inserted FIRST candidate (with the selection marker) went invisible. The
-  perceived bug was "up/down need two presses": the first press merely moved
-  the highlight into view. The menu now paints a fixed slot count, its rows
-  come out of the transcript budget while open, and each row is pre-colored
-  as a single chalk string so ink's diff always rewrites whole lines.
-- Resuming a session no longer force-pins it to the first config.json model:
-  the bridge used to attach a `runtimeModel` overlay (first enabled provider's
-  first model) on every resume/load, silently overriding whatever model the
-  session actually ran on (e.g. GLM-5.3-Flash → GLM-5.3). Resume is now
-  faithful — the session keeps its own selection — with the overlay demoted to
-  a one-retry fallback when the faithful resume fails outright, and a repair
-  step that switches to the default model only when the session's model is no
-  longer enabled.
-- Transient turn failures classified as retryable now include
-  `invalid_model_request` / "provider rejected the model request" cause codes
-  and message shapes, so provider-side model rejections auto-retry with
-  backoff instead of surfacing "(Turn execution failed)".
-- REPL input box spans the terminal width again: the chrome container is a
-  row flex box, so the unwidthed subtree shrink-wrapped to its longest line
-  and the bordered prompt rendered ~40 columns wide at any terminal size.
-- REPL `Ctrl-L` forces a full-frame repaint (unmount + fresh render) — the
-  recovery for terminals that garble the alternate screen when scrolling
-  their own buffer, notably Warp; ink's diff renderer never rewrites
-  unchanged lines on its own. The repaint also fires (throttled) on the
-  paging keys, and a short gap separates the alternate-screen exit/enter so
-  GPU terminals can't coalesce the pair away and skip the repaint.
-- `ZCODE_ACP_REPL_INLINE=1` renders the REPL inline over native scrollback
-  instead of the alternate screen — escape hatch for Warp, which turns every
-  ink full-frame clear (`\x1b[2J`) into scroll-into-block-history for apps
-  outside its CLI-agent whitelist, filling the screen with duplicated content
-  on resize/scroll (warp#9838; fixed upstream only for whitelisted agents).
-- Prompts typed while a turn is running are now visible queue members: a
-  `⏸ queued` panel above the prompt box lists every pending message (the
-  message also lands in the transcript the moment it is submitted), and `esc`
-  with prompts waiting interrupts the running turn so the next one starts
-  immediately.
-- Live-turn height estimation no longer undershoots wrapped thinking lines
-  and long tool rows; the underestimate let the frame exceed the terminal and
-  ink clipped from the bottom, taking the input box off-screen mid-stream.
+- Pressing ↓ with no completion menu open no longer zombifies the whole UI:
+  the setState updater dereferenced a null menu during render, unmounting
+  React's tree under ink without any crash signal (found by review,
+  reproduced over pty).
+- Long pastes no longer crash the REPL: each pasted character used to
+  trigger a synchronous ink rerender inside one tick, tripping React's
+  nested-update limit ("Maximum update depth exceeded") — reproduced via
+  pty with the exact stack.
+- Cold-start race: picking a `/sessions` entry while the placeholder
+  `session/new` handshake was still in flight let the late fresh session
+  overwrite the resumed one; the placeholder is now discarded.
+- Resume no longer force-pins a session to the first config.json model
+  (faithful model preservation, overlay demoted to one-retry fallback).
 
 ## [0.13.0] - 2026-08-26
 

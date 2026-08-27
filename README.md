@@ -197,53 +197,43 @@ installed alongside the `zcode-acp-server` bin your editor configures.
 
 Bare `zcode-acp` opens an interactive terminal chat against this same bridge
 (built with [Ink](https://github.com/vadimdemedes/ink), the same renderer
-Claude Code and Gemini CLI use). It runs as a **full-screen app** (alternate
-screen buffer): the transcript lives in an in-app scrolling viewport above a
-fixed prompt box — nothing prints to the terminal's own scrollback, so window
-resizes re-wrap cleanly instead of smearing history:
+Claude Code and Gemini CLI use). Completed messages print once into the
+terminal's **native scrollback** — smooth wheel scrolling, text selection,
+search, and history that survives exit are all just your terminal, unchanged.
+Only a compact dynamic footer ever repaints: the live-turn tail (capped at
+half the screen), queued-prompt panel, completion menu, and the prompt box.
 
 ```bash
 zcode-acp            # chat in this directory
 ```
 
 A startup welcome panel (version, session directory, seeded config, key
-hints) sits at the tail of the transcript viewport. Streaming output has
-code-fence coloring, dim thinking lines, live tool rows, and arrow-key
-permission prompts. The prompt line is a caret editor — `←`/`→` (or
-Ctrl-B/Ctrl-F) move inside the typed text, Backspace/Delete edit at the
-caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears the line, and a
-block cursor marks the position; completion keeps precedence while its menu is
-open. The status row also carries a compact plan-quota readout (`5h 16% ·
-wk 4%`) refreshed every 10 minutes — `/quota` prints the full card. The **mouse wheel** pages through history too — the REPL
-arms xterm mouse reporting so the terminal itself no longer scrolls over the
-UI (shift-drag still selects text). `PageUp`/`PageDown` (or `Home`/`End`) page
-back through history; `End` unpins and follows the live tail again.
-`Ctrl-C` cancels a
-running turn; while idle, press it twice to quit. `Ctrl-L` forces a full
-repaint — the recovery if a terminal (Warp notably) garbles the screen while
-scrolling its own buffer. `/exit` leaves; the session
-itself persists in the ZCode backend and is available to your editor.
+hints) lands in scrollback first. Streaming output has code-fence coloring,
+dim thinking lines, and live tool rows. The prompt line wraps across rows
+with a CJK-aware block cursor — `←`/`→` (or Ctrl-B/Ctrl-F) move inside the
+typed text, Backspace/Delete edit at the caret, Ctrl-A/Ctrl-E jump to the
+line's ends, Ctrl-U clears the line; completion keeps precedence while its
+menu is open. The status row carries a compact plan-quota readout
+(`5h 16% · wk 4%`) refreshed every 10 minutes — `/quota` prints the full
+card. Pasted or dragged-in content (error logs, file drops) is sanitized and
+size-capped before it reaches the editor, so long pastes batch cleanly.
+`Ctrl-C` cancels a running turn; `esc` interrupts one too; while idle, press
+Ctrl-C twice to quit. `/exit` leaves; the session itself persists in the
+ZCode backend and is available to your editor.
 
 Messages typed while a turn is running (or the session is still starting) are
 queued, not lost: each shows up in the transcript immediately and a `⏸ queued`
 panel above the prompt box lists everything waiting to run. When the current
-turn ends the queue drains one prompt at a time. `esc` with prompts waiting
-interrupts the running turn and sends the next queued message right away.
+turn ends the queue drains one prompt at a time — through the same command
+parsing as direct submits, so queued `/help` and `/exit` still work.
 
-Warp note: Warp's alt-screen handling corrupts ink full-screen frames on
-resize/scroll for apps outside its CLI-agent whitelist (warp#9838 — fixed
-upstream only for whitelisted agents). Mouse-wheel capture removes the common
-trigger (the wheel no longer scrolls Warp's buffer at all); non-wheel paths
-(Cmd+Up, dragging the scrollbar) can still trip it, so `Ctrl-L` remains the
-recovery. You can also turn off **Settings → Appearance → Full-screen Apps →
-Use custom padding in alt-screen**, or start the REPL with
-`ZCODE_ACP_REPL_INLINE=1` to render inline over the native scrollback like
-Claude Code does, skipping the alternate screen entirely.
-
-`/sessions` lists this project's previous conversations (title, age, short
-id); pick one with the arrow keys and it is resumed via `session/load` —
-the full history replays into the viewport and you keep chatting where you
-left off.
+`/sessions` lists this project's previous conversations in an 8-row sliding
+window (position counter, plus "N newer above / N older below" hints); arrow
+keys move over the full list even though only part of it renders. Resuming
+loads the most recent tail of the conversation (last 50 messages, turn-aligned)
+instead of dumping thousands of lines at once — when older history exists the
+note says exactly what was loaded:
+`resumed "<title>" — showing last 50 of 1234 messages`.
 
 The full-width prompt box mirrors the editor's dropdowns: its bottom row shows
 the current `model · mode · thought level`, and typing `/` opens an interactive
@@ -257,6 +247,11 @@ confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`,
 The arg-less forms still print a static listing over the same slash-command
 path the editor uses. `/help` lists every command the bridge advertises,
 including plugin commands.
+
+Unexpected internal errors never take the REPL down silently: they print to
+stderr and surface as an `-- error absorbed: …` note in the transcript while
+everything keeps running. Only repeated failures within ten seconds trip a
+breaker that shuts the UI down cleanly.
 
 While remote access is enabled, turns started from other clients (the mobile
 app, a second editor) render live in the REPL too, and questions or permission

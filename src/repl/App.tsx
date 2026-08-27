@@ -362,7 +362,12 @@ function InputLine({
         return;
       }
       if (nav?.down) {
-        setSelIdx((i) => Math.min(menu!.length - 1, i + 1));
+        // Without an open menu there is nothing to move through — swallow
+        // the press. `menu!` here used to throw inside a setState UPDATER,
+        // which fires during the next render: React unmounted the whole
+        // tree and ink restored the terminal, leaving a silent zombie.
+        if (!menu) return;
+        setSelIdx((i) => Math.min(menu.length - 1, i + 1));
         return;
       }
       // tab (or →) completes the highlighted candidate when a menu is open.

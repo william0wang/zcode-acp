@@ -144,6 +144,14 @@ export async function runRepl(): Promise<void> {
   // while the load request is still in flight, so consuming early would let a
   // >10ms gap between two replayed messages falsely end replay mode.
   let replayMode = false;
+  // The live ACP session. Starts as the fresh session/new placeholder; a
+  // `/sessions` resume swaps it for an attached load of the picked backend
+  // session (same pump, same update routing). Declared with the other
+  // state, NOT at its bootstrap assignment below: /sessions can run while
+  // that await is still in flight, and assigning a `let` before its
+  // declaration executes is a TDZ ReferenceError.
+  let activeSession: ActiveSession | null = null;
+  let resumedDuringStartup = false;
   let loadSettled = true;
   let replayTurn: TurnState | null = null;
   const REPLAY_QUIET_MS = 10;
@@ -387,15 +395,20 @@ export async function runRepl(): Promise<void> {
     clientInfo: { name: "zcode-acp", title: "zcode-acp REPL", version: AGENT_INFO.version },
   });
 
-  // The live ACP session. Starts as the fresh session/new placeholder; a
-  // `/sessions` resume swaps it for an attached load of the picked backend
-  // session (same pump, same update routing).
-  let activeSession: ActiveSession | null = null;
   try {
-    activeSession = await cx.buildSession(process.cwd()).start();
-    // The initial config options ride the session/new response body, not a
-    // notification — seed the status from it; later switches push updates.
-    status = seedStatusFromNewSession(status, activeSession.newSessionResponse);
+    const fresh = await cx.buildSession(process.cwd()).start();
+    if (resumedDuringStartup) {
+      // The user picked a session from /sessions while this cold-start
+      // round-trip was still in flight — the fresh placeholder is already
+      // obsolete and its default status must not overwrite the resumed
+      // session's own seeded selects. Discard it, keep what they expect.
+      fresh.dispose();
+    } else {
+      activeSession = fresh;
+      // The initial config options ride the session/new response body, not a
+      // notification — seed the status from it; later switches push updates.
+      status = seedStatusFromNewSession(status, activeSession.newSessionResponse);
+    }
   } catch (err) {
     entries = [
       ...entries,
@@ -540,7 +553,10 @@ export async function runRepl(): Promise<void> {
       rerender();
       return;
     }
-    void startTurn(next);
+    // Route through onSubmit, not startTurn directly: queued entries still
+    // go through command parsing (a queued "/help" must render locally,
+    // "/exit" must exit — never reach the bridge as a literal prompt).
+    void onSubmit(next);
   }
 
   function onCancelTurn(): void {
@@ -607,7 +623,10 @@ export async function runRepl(): Promise<void> {
     sessionPickResolver = null;
     rerender();
     const picked = items.find((s) => s.sessionId === sid);
-    if (sid && picked) await resumeInto(picked);
+    if (sid && picked) {
+      resumedDuringStartup = true;
+      await resumeInto(picked);
+    }
   }
 
   /**
