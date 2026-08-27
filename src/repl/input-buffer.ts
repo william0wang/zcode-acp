@@ -21,6 +21,76 @@ export function createLineEditor(): LineEditor {
 
 const toArray = (text: string): string[] => Array.from(text);
 
+/**
+ * Hard cap on prompt size (code points). Image-drag/paste dumps from some
+ * terminals deliver megabytes of junk in one chunk; without a cap the editor
+ * renders a colossal wrapped box and ink goes down with it.
+ */
+export const MAX_PROMPT_CHARS = 20_000;
+
+/**
+ * Strip control characters (C0 + DEL) from a raw input chunk. Terminal
+ * bracketed-paste wrappers (\x1b[200~ … \x1b[201~) and image-drop binary
+ * fragments must never reach editor state: every later render re-wraps the
+ * whole text, so smuggled escape bytes corrupt frames on all subsequent
+ * keystrokes. Printable text, emoji, and CJK pass through untouched.
+ */
+export function sanitizeInputChunk(chunk: string): string {
+  let out = "";
+  for (const ch of chunk) {
+    const cp = ch.codePointAt(0)!;
+    if (cp < 0x20 || cp === 0x7f) continue;
+    out += ch;
+  }
+  return out;
+}
+
+/**
+ * One planned step for replaying a coalesced input chunk into the editor:
+ * contiguous printable runs batch as a single insert, while semantic bytes
+ * (\r submit, \t complete, backspace, ctrl chords) stay per-character so
+ * their usual key semantics apply.
+ */
+export type ChunkOp = { kind: "insert"; text: string } | { kind: "char"; ch: string };
+
+/**
+ * Split a raw coalesced chunk into ops such that the caller issues ONE
+ * editor application per insert (not one per character). Applying per char
+ * used to mean one full ink rerender per char inside a single tick — a long
+ * paste blew through React's nested-update limit ("Maximum update depth
+ * exceeded") and killed the REPL.
+ *
+ * Escape sequences never reach here (the caller routes those chunks by their
+ * ink-parsed flags); control characters are dropped from runs by
+ * sanitizeInputChunk at plan time.
+ */
+export function planChunkOps(chunk: string): ChunkOp[] {
+  const isSemantic = (ch: string): boolean => {
+    if (ch === "\r" || ch === "\n" || ch === "\t") return true;
+    if (ch === "\x7f" || ch === "\b") return true;
+    const cp = ch.codePointAt(0)!;
+    return cp >= 1 && cp <= 26;
+  };
+  const ops: ChunkOp[] = [];
+  let run = "";
+  const flush = (): void => {
+    if (!run) return;
+    const clean = sanitizeInputChunk(run);
+    if (clean) ops.push({ kind: "insert", text: clean });
+    run = "";
+  };
+  for (const ch of chunk) {
+    if (isSemantic(ch)) {
+      flush();
+      ops.push({ kind: "char", ch });
+    } else {
+      run += ch;
+    }
+  }
+  flush();
+  return ops;
+}
+
 /** Whole-line replacement (completion results), caret parked at the end. */
 export function replaceText(text: string): LineEditor {
   return { text, caret: toArray(text).length };
@@ -28,9 +98,13 @@ export function replaceText(text: string): LineEditor {
 
 export function insertAtCaret(editor: LineEditor, str: string): LineEditor {
   if (!str) return editor;
+  // Silent tail-drop past the cap — the alternative is an unusable frame.
+  const allowed = Math.max(0, MAX_PROMPT_CHARS - toArray(editor.text).length);
+  const incoming = toArray(str).slice(0, allowed);
+  if (incoming.length === 0) return editor;
   const parts = toArray(editor.text);
-  parts.splice(editor.caret, 0, ...toArray(str));
-  return { text: parts.join(""), caret: editor.caret + toArray(str).length };
+  parts.splice(editor.caret, 0, ...incoming);
+  return { text: parts.join(""), caret: editor.caret + incoming.length };
 }
 
 /** Remove the character BEFORE the caret (Backspace). */

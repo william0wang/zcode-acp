@@ -21,7 +21,7 @@ import { createElement } from "react";
 import { z } from "zod";
 
 import { queryQuota } from "../quota/index.js";
-import { AGENT_INFO } from "../utils.js";
+import { AGENT_INFO, warn } from "../utils.js";
 import {
   App,
   type AppProps,
@@ -50,6 +50,23 @@ import {
 import { createLineEditor, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
+  // Crash containment: an unexpected throw must never kill the REPL
+  // silently (or take the terminal down with an unprinted stack). A fatal
+  // exception prints plainly and exits; rejected promises are logged but
+  // non-fatal — the SDK resolves raced/aborted request promises late by
+  // design, and those settle as rejections we deliberately ignore.
+  process.on("uncaughtException", (err) => {
+    warn(`repl crashed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(1);
+  });
+  process.on("unhandledRejection", (reason) => {
+    warn(
+      `repl ignored an async failure: ${
+        reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)
+      }`,
+    );
+  });
+
   const serverJs = fileURLToPath(new URL("../index.js", import.meta.url));
   const child = spawn(process.execPath, [serverJs], {
     stdio: ["pipe", "pipe", "pipe"],

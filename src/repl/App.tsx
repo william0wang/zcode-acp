@@ -43,7 +43,9 @@ import {
   ctrlChord,
   deleteAtCaret,
   insertAtCaret,
+  planChunkOps,
   replaceText,
+  sanitizeInputChunk,
   type LineEditor,
 } from "./input-buffer.js";
 
@@ -452,17 +454,26 @@ function InputLine({
       if (chord === "u") return void applyEdit(() => createLineEditor());
     }
     if (ch && !k.ctrl && !k.meta) {
-      applyEdit((cur) => insertAtCaret(cur, ch));
+      // Paste/drop chunks can carry escape bytes (bracketed-paste wrappers,
+      // image-drop binary) — sanitize before they reach editor state, or
+      // every later render re-wraps corrupted text.
+      const clean = sanitizeInputChunk(ch);
+      if (clean) applyEdit((cur) => insertAtCaret(cur, clean));
     }
   };
 
   useInput((inputChar, key) => {
-    // Coalesced printable chunk (paste, rapid keys) — decompose per char so
-    // embedded \r/\n/\t keep submit/tab semantics. Escape-sequence chunks
-    // (arrow keys flushed together) keep ink's parsed flags instead.
+    // Coalesced printable chunk (paste, rapid keys) — batched via
+    // planChunkOps: printable runs apply as ONE editor op, semantic bytes
+    // stay per-character. Escape-sequence chunks (arrow keys flushed
+    // together) keep ink's parsed flags instead.
     if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
-      for (const ch of inputChar) {
-        handleChar(ch, derivedKey(ch), null);
+      for (const op of planChunkOps(inputChar)) {
+        if (op.kind === "insert") {
+          applyEdit((cur) => insertAtCaret(cur, op.text));
+        } else {
+          handleChar(op.ch, derivedKey(op.ch), null);
+        }
       }
       return;
     }
