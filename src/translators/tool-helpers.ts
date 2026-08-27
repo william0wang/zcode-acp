@@ -382,6 +382,7 @@ export function formatTurnError(error: unknown): string {
 const TRANSIENT_CAUSE_CODES = new Set([
   "model_request_failed",
   "invalid_model_request", // provider rejected the request — often plan/quota or brief provider-side rejection
+  "model_rate_limited",
   "provider_not_configured",
   "rate_limit",
   "timeout",
@@ -429,6 +430,15 @@ export function isTransientTurnError(error: unknown): boolean {
 function matchesTransient(node: unknown): boolean {
   if (!node || typeof node !== "object" || Array.isArray(node)) return false;
   const n = node as Record<string, unknown>;
+  const context = n["context"];
+  if (
+    context &&
+    typeof context === "object" &&
+    !Array.isArray(context) &&
+    (context as Record<string, unknown>)["retryable"] === false
+  ) {
+    return false;
+  }
   const code = String(n["code"] ?? n["type"] ?? "").trim();
   if (code && TRANSIENT_CAUSE_CODES.has(code)) return true;
   const message = String(n["message"] ?? n["detail"] ?? "").toLowerCase();

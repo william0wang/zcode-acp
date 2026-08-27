@@ -32,6 +32,7 @@ describe("isTransientTurnError", () => {
       "invalid_model_request",
       "provider_not_configured",
       "rate_limit",
+      "model_rate_limited",
       "timeout",
       "ECONNRESET",
       "ETIMEDOUT",
@@ -57,6 +58,14 @@ describe("isTransientTurnError", () => {
     expect(
       isTransientTurnError({ cause: { message: "provider rejected the model request" } }),
     ).toBe(true);
+  });
+
+  it("does not retry when the backend explicitly marks a rate limit non-retryable", () => {
+    expect(
+      isTransientTurnError({
+        cause: { code: "rate_limit", context: { retryable: false } },
+      }),
+    ).toBe(false);
   });
 
   it("matches via message keyword when code is absent/unrecognised", () => {
