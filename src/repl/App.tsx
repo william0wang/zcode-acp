@@ -73,6 +73,8 @@ export interface AppProps {
   question: QuestionPrompt | null;
   /** Pending /sessions picker, null when closed. */
   sessionPick: SessionPick | null;
+  /** Prompts accepted but waiting for the running turn to finish. */
+  queued: string[];
   /** Bumped on every terminal resize — remounts <Static> for a full repaint. */
   resizeTick: number;
   /** Session status: command menu + model/mode/thought selects. */
@@ -85,6 +87,8 @@ export interface AppProps {
   onAnswerQuestion: (answer: QuestionAnswer | null) => void;
   /** null = dismiss the picker without resuming. */
   onPickSession: (sessionId: string | null) => void;
+  /** Force a full-frame repaint (Ctrl-L) after terminal buffer corruption. */
+  onRedraw: () => void;
   onExit: () => void;
 }
 
@@ -144,6 +148,7 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
         <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
         <Text dimColor>{"  /sessions list and resume past conversations of this project"}</Text>
         <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
+        <Text dimColor>{"  ctrl-l   repaint the screen (after terminal scroll glitches)"}</Text>
       </Box>
     </Box>
   );
@@ -368,7 +373,10 @@ function InputLine({
     .join(" · ");
 
   return (
-    <Box flexDirection="column">
+    // width="100%": the chrome parent is a row Box, so without an explicit
+    // width the whole subtree shrink-wraps to its longest line and the
+    // bordered input box stops spanning the terminal.
+    <Box flexDirection="column" width="100%">
       {menu ? (
         <Box flexDirection="column" paddingLeft={2}>
           {menu.map((m, i) => (
@@ -410,35 +418,46 @@ function entryHeight(entry: ReplEntry, width: number): number {
     case "user":
       return 1 + estimateLines(entry.text, width);
     case "welcome":
-      return 1 + 10; // marginTop + branding/session/config/tips block
+      return 1 + 11; // marginTop + branding/session/config/tips block
     case "tool":
-      return 1;
+      // Tool rows wrap when the title is long — count them like text.
+      return estimateLines(`• ${entry.title} (${entry.status})`, width);
     default:
       return estimateLines(entry.text, width);
   }
 }
 
-/** Height of the live-turn block (entries + streaming buffers + spinner). */
+/**
+ * Height of the live-turn block (entries + streaming buffers + spinner).
+ * Deliberately biased HIGH: an underestimate makes the whole layout exceed
+ * the terminal and ink clips from the bottom — the input box disappears. A
+ * few blank rows at the bottom of the viewport are harmless by contrast.
+ */
 function turnHeight(turn: TurnState | null, width: number): number {
   if (!turn) return 0;
   let h = turn.entries.reduce((n, e) => n + entryHeight(e, width), 0);
-  if (turn.thinkBuf.trim()) h += 1;
+  if (turn.thinkBuf.trim()) {
+    // The render collapses whitespace and keeps only the tail, but even that
+    // can wrap (CJK especially) — measure it instead of assuming one line.
+    h += estimateLines(`⎿ thinking · ${turn.thinkBuf.replace(/\s+/g, " ").slice(-120)}`, width);
+  }
   if (turn.textBuf) h += estimateLines(turn.textBuf, width);
-  return h + 1; // spinner line
+  return h + 1 + 2; // spinner line + safety margin
 }
 
 export function App(props: AppProps): ReactElement {
-  const { entries, turn, permission, question, sessionPick, status, busy } = props;
+  const { entries, turn, permission, question, sessionPick, queued, status, busy } = props;
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
+  // Throttle for page-key-triggered forced repaints (key repeat guard).
+  const lastRedrawAt = useRef(0);
 
   // Full-screen app layout (alternate screen): the transcript is an in-app
   // viewport above the input chrome — nothing ever prints to the terminal's
   // own scrollback, so resizes just re-wrap the whole app cleanly.
+  // Full terminal width — no centered reading column; every region spans cols.
   const cols = process.stdout.columns || 100;
   const rows = process.stdout.rows || 24;
-  const contentWidth = Math.min(cols, 100);
-  const margin = Math.max(0, Math.floor((cols - contentWidth) / 2));
 
   // --- scroll state ---
   // 0 = follow the tail (autoscroll); >0 = lines pinned while the user reads
@@ -447,6 +466,8 @@ export function App(props: AppProps): ReactElement {
 
   const submit = useCallback(
     (text: string) => {
+      // Own messages must be visible immediately — leave pinned scrollback.
+      setScrollOffset(0);
       props.onSubmit(text);
     },
     [props],
@@ -487,7 +508,18 @@ export function App(props: AppProps): ReactElement {
   }, [sessionPick]);
 
   useInput((inputChar, key) => {
-    // Scrollback paging — inert while a picker owns the keyboard.
+    // Ctrl-L — vim-convention full repaint. Terminals that scroll into their
+    // own buffer while an alternate-screen app runs (Warp notably) can garble
+    // the screen without the app ever hearing about it; ink only writes
+    // diffs, so a manual forced repaint is the recovery path.
+    if ((key.ctrl && inputChar === "l") || (inputChar ?? "").includes("\x0c")) {
+      props.onRedraw();
+      return;
+    }
+    // Scrollback paging — inert while a picker owns the keyboard. Each page
+    // key also forces a throttled full repaint: the typical moment for it is
+    // right after scrolling the terminal's own buffer (Warp garbles the
+    // alternate screen there and ink's diffs can't heal it).
     if (key.pageUp || key.pageDown || key.home || key.end) {
       if (sessionPick || question || permission) return;
       const viewport = Math.max(3, rows - CHROME_ROWS);
@@ -495,6 +527,11 @@ export function App(props: AppProps): ReactElement {
       else if (key.end) setScrollOffset(0);
       else if (key.pageUp) setScrollOffset((o) => o + Math.floor(viewport * 0.8));
       else setScrollOffset((o) => Math.max(0, o - Math.floor(viewport * 0.8)));
+      const now = Date.now();
+      if (now - lastRedrawAt.current > 400) {
+        lastRedrawAt.current = now;
+        props.onRedraw();
+      }
       return;
     }
     if (sessionPick && sessionPick.items.length > 0) {
@@ -507,6 +544,12 @@ export function App(props: AppProps): ReactElement {
     }
     if (permission) {
       handlePermissionKey(inputChar, key);
+      return;
+    }
+    // Esc with prompts waiting: interrupt the running turn — the stop
+    // handler drains the queue, so the next queued message starts at once.
+    if (key.escape && turn && queued.length > 0) {
+      props.onCancelTurn();
       return;
     }
     // Count ctrl-c presses across both delivery shapes: a lone \x03 arrives
@@ -643,11 +686,14 @@ export function App(props: AppProps): ReactElement {
   // Fixed rows reserved for the input chrome (input box + status line +
   // scroll indicator + safety margin). Everything above is transcript.
   const CHROME_ROWS = 6;
-  const viewportRows = Math.max(3, rows - CHROME_ROWS - turnHeight(turn, contentWidth));
+  // The queued-prompts panel sits between the turn block and the input box.
+  const queuedShown = Math.min(queued.length, 3);
+  const queueRows = queued.length > 0 ? queuedShown + (queued.length > 3 ? 1 : 0) + 1 : 0;
+  const viewportRows = Math.max(3, rows - CHROME_ROWS - queueRows - turnHeight(turn, cols));
   // Render only the visible tail of the transcript: cost per frame stays
   // constant no matter how long the session grows. `scrollOffset` pins older
   // lines while the user reads back; overflow:hidden crops the top edge.
-  const heights = entries.map((e) => entryHeight(e, contentWidth));
+  const heights = entries.map((e) => entryHeight(e, cols));
   const total = heights.reduce((a, b) => a + b, 0);
   const maxOffset = Math.max(0, total - viewportRows);
   const offset = Math.min(scrollOffset, maxOffset);
@@ -664,8 +710,7 @@ export function App(props: AppProps): ReactElement {
     <Box flexDirection="column" height={rows} width={cols}>
       <Box
         flexDirection="column"
-        marginLeft={margin}
-        width={contentWidth}
+        width={cols}
         height={viewportRows}
         overflow="hidden"
         justifyContent="flex-end"
@@ -675,13 +720,13 @@ export function App(props: AppProps): ReactElement {
         ))}
       </Box>
       {offset > 0 ? (
-        <Box marginLeft={margin} width={contentWidth}>
+        <Box width={cols}>
           <Text dimColor> ↑ {offset} lines hidden — pageDown or end returns to the live tail</Text>
         </Box>
       ) : null}
 
       {turn ? (
-        <Box flexDirection="column" marginLeft={margin} width={contentWidth}>
+        <Box flexDirection="column" width={cols}>
           {turn.entries.map((e, i) => (
             <EntryView key={i} entry={e} />
           ))}
@@ -695,7 +740,21 @@ export function App(props: AppProps): ReactElement {
         </Box>
       ) : null}
 
-      <Box marginLeft={margin} width={contentWidth}>
+      {queued.length > 0 ? (
+        <Box flexDirection="column" width={cols}>
+          {queued.slice(0, 3).map((text, i) => (
+            <Text key={`${i}:${text}`} dimColor>
+              ⏸ queued · {text.length > cols - 16 ? `${text.slice(0, cols - 17)}…` : text}
+            </Text>
+          ))}
+          {queued.length > 3 ? <Text dimColor>⏸ … +{queued.length - 3} more</Text> : null}
+          {turn ? (
+            <Text dimColor> esc stops the current turn and sends the next queued message</Text>
+          ) : null}
+        </Box>
+      ) : null}
+
+      <Box width={cols}>
         {sessionPick ? (
           <SessionPicker pick={sessionPick} index={sessIndex} cwd={process.cwd()} />
         ) : permission ? (

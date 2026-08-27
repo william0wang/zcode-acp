@@ -39,6 +39,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invalid_model_request` / "provider rejected the model request" cause codes
   and message shapes, so provider-side model rejections auto-retry with
   backoff instead of surfacing "(Turn execution failed)".
+- REPL input box spans the terminal width again: the chrome container is a
+  row flex box, so the unwidthed subtree shrink-wrapped to its longest line
+  and the bordered prompt rendered ~40 columns wide at any terminal size.
+- REPL `Ctrl-L` forces a full-frame repaint (unmount + fresh render) — the
+  recovery for terminals that garble the alternate screen when scrolling
+  their own buffer, notably Warp; ink's diff renderer never rewrites
+  unchanged lines on its own. The repaint also fires (throttled) on the
+  paging keys, and a short gap separates the alternate-screen exit/enter so
+  GPU terminals can't coalesce the pair away and skip the repaint.
+- `ZCODE_ACP_REPL_INLINE=1` renders the REPL inline over native scrollback
+  instead of the alternate screen — escape hatch for Warp, which turns every
+  ink full-frame clear (`\x1b[2J`) into scroll-into-block-history for apps
+  outside its CLI-agent whitelist, filling the screen with duplicated content
+  on resize/scroll (warp#9838; fixed upstream only for whitelisted agents).
+- Prompts typed while a turn is running are now visible queue members: a
+  `⏸ queued` panel above the prompt box lists every pending message (the
+  message also lands in the transcript the moment it is submitted), and `esc`
+  with prompts waiting interrupts the running turn so the next one starts
+  immediately.
+- Live-turn height estimation no longer undershoots wrapped thinking lines
+  and long tool rows; the underestimate let the frame exceed the terminal and
+  ink clipped from the bottom, taking the input box off-screen mid-stream.
 
 ## [0.13.0] - 2026-08-26
 

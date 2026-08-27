@@ -211,8 +211,24 @@ hints) sits at the tail of the transcript viewport. Streaming output has
 code-fence coloring, dim thinking lines, live tool rows, and arrow-key
 permission prompts. `PageUp`/`PageDown` (or `Home`/`End`) page back through
 history; `End` unpins and follows the live tail again. `Ctrl-C` cancels a
-running turn; while idle, press it twice to quit. `/exit` leaves; the session
+running turn; while idle, press it twice to quit. `Ctrl-L` forces a full
+repaint — the recovery if a terminal (Warp notably) garbles the screen while
+scrolling its own buffer. `/exit` leaves; the session
 itself persists in the ZCode backend and is available to your editor.
+
+Messages typed while a turn is running (or the session is still starting) are
+queued, not lost: each shows up in the transcript immediately and a `⏸ queued`
+panel above the prompt box lists everything waiting to run. When the current
+turn ends the queue drains one prompt at a time. `esc` with prompts waiting
+interrupts the running turn and sends the next queued message right away.
+
+Warp note: Warp's alt-screen handling corrupts ink full-screen frames on
+resize/scroll for apps outside its CLI-agent whitelist (warp#9838 — fixed
+upstream only for whitelisted agents). If the screen fills with duplicated or
+lost content there, either turn off **Settings → Appearance → Full-screen
+Apps → Use custom padding in alt-screen**, or start the REPL with
+`ZCODE_ACP_REPL_INLINE=1` to render inline over the native scrollback like
+Claude Code does, skipping the alternate screen entirely.
 
 `/sessions` lists this project's previous conversations (title, age, short
 id); pick one with the arrow keys and it is resumed via `session/load` —

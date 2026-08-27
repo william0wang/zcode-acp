@@ -100,10 +100,16 @@ export async function runRepl(): Promise<void> {
   // Full-screen app: ink takes over the whole terminal (alternate screen
   // buffer). The transcript lives in an in-app viewport — nothing prints to
   // the terminal's own scrollback, which is what makes resizes clean.
-  const ink = render(createElement(App, snapshot()), {
-    exitOnCtrlC: false,
-    alternateScreen: true,
-  });
+  //
+  // ZCODE_ACP_REPL_INLINE=1 opts out: renders inline over the block history
+  // instead. Escape hatch for terminals whose alt-screen handling corrupts
+  // ink frames — Warp turns every full-frame clear (\x1b[2J) into
+  // scroll-into-scrollback for apps outside its CLI-agent whitelist, so the
+  // screen fills with duplicated content on resize/scroll (warp#9838, fixed
+  // upstream only for whitelisted agents via warp#9877).
+  const inline = process.env.ZCODE_ACP_REPL_INLINE === "1";
+  const renderOpts = { exitOnCtrlC: false, alternateScreen: !inline };
+  let ink = render(createElement(App, snapshot()), renderOpts);
   function snapshot(): AppProps {
     return {
       entries,
@@ -111,6 +117,7 @@ export async function runRepl(): Promise<void> {
       permission,
       question,
       sessionPick,
+      queued: [...promptQueue],
       resizeTick,
       status,
       busy,
@@ -125,11 +132,28 @@ export async function runRepl(): Promise<void> {
         resolve?.(answer);
       },
       onPickSession: (sid) => sessionPickResolver?.(sid),
+      onRedraw: () => void forceRedraw(),
       onExit: () => cleanup(0),
     };
   }
   function rerender(): void {
     if (!exited) ink.rerender(createElement(App, snapshot()));
+  }
+  /**
+   * Forced full-frame repaint for terminal buffer corruption (Warp scrollback
+   * notably). Public-API only: unmount tears down the alternate screen and a
+   * fresh render paints its first frame whole — ink's diff renderer can't do
+   * this, its frame cache still matches what it believes is on screen. The
+   * sleep between the two matters: back-to-back ?1049l/?1049h written in one
+   * tick get coalesced by GPU terminals (Warp), which then never rebuilds
+   * its alternate-screen layer and the repaint is lost.
+   */
+  async function forceRedraw(): Promise<void> {
+    if (exited) return;
+    ink.unmount();
+    await sleep(80);
+    if (exited) return;
+    ink = render(createElement(App, snapshot()), renderOpts);
   }
 
   // --- Permission bridging: agent request → picker → response ---
