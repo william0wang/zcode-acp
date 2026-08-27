@@ -3,11 +3,15 @@
 Backend RPC methods and event types exposed by the ZCode CLI (`zcode app-server`)
 that are **not yet wired into the bridge**, tracked for potential future support.
 
-Last audited against **app-server 0.16.5** (bundled in ZCode desktop 3.9.1,
-2026-08-24). The App bundle was replaced on disk 2026-08-23 and the editor
-points `ZCODE_BIN` straight at it, so every bridge spawn since then already
-runs 0.16.5 (live-verified). Method names were extracted from the bundled
-`zcode.cjs` dispatch switch and verified with live RPC calls.
+Last audited against **app-server 0.16.5** (bundled in ZCode desktop 3.9.2,
+2026-08-27; the previous audit ran against desktop 3.9.1 / same app-server
+0.16.5, so this refresh is a re-verification rather than a version bump).
+Method names were extracted from the bundled `zcode.cjs` dispatch switch and
+verified with live RPC calls. Live checks after the 3.9.2 update: `session/
+list`, `session/create`, `session/steer` (still `-32601`), and a full REPL
+smoke (`session/new` + `/sessions`) all behave unchanged. New in the
+enumeration: the reference-catalog family below (either shipped quietly in
+0.16.x or added by 3.9.2 — the previous audit never listed them).
 
 ## Removed upstream in 0.16 (verified live: `-32601`)
 
@@ -27,22 +31,23 @@ elsewhere.
 Available in the backend but with no ACP-side counterpart yet. Pick them up
 when a concrete ACP/editor need appears.
 
-| Method                                                                          | Purpose                                                     | Current bridge behavior                                                                                                |
-| ------------------------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `session/subagents`                                                             | Query the list of sub-agents for a session                  | Sub-agent info is parsed from the `Agent` tool result (`_meta.subagent`); sufficient for now                           |
-| `session/events`                                                                | Pull-mode event history (complement to `session/subscribe`) | Not used; could support event replay/gap-fill                                                                          |
-| `session/usage`                                                                 | Per-session token usage                                     | Context bar uses `session.updated` usage payload instead                                                               |
-| `workspace/hooks/trustGrant`                                                    | Server→client request: approve hook trust                   | Auto-errored by the unknown-request fallback (`server-requests.ts` `handleOne`) during turns; `session/send` carries a 15s timeout so nothing hangs. If hook trust ever needs real UX, map it onto ACP `session/request_permission` |
-| `interaction/browserList` / `interaction/browserExecute`                        | Server→client requests: browser automation via the client   | Auto-errored by the fallback above; only meaningful once an ACP client has a browser surface                                                 |
-| `interaction/requestProviderRuntimeHeaders`                                     | Server→client request: provider runtime headers             | Auto-errored by the fallback above                                                                                     |
-| `interaction/requestOfficialMcpAuthHeaders` (0.16.5)                            | Server→client request: official MCP auth headers            | Auto-errored by the fallback above                                                                                     |
-| `session/requestRuntimePreferences` (0.16.5)                                    | Runtime preference negotiation                              | Auto-errored by the fallback above (same class as trustGrant)                                                          |
-| `session/close` (0.16.5)                                                        | Actually close a backend session/runtime                    | Not used — remote close intentionally retires discovery only (ADR-0006, self-healing); backend runtimes idle-evict anyway |
-| `workspace/generateText` / `workspace/cancelGenerateText` (0.16.5)              | Workspace-scoped one-shot text generation                   | Not used; no ACP counterpart                                                                                           |
-| `workspace/readState` (0.16.5)                                                  | Read workspace state                                        | Not used                                                                                                               |
-| `workspace/setDefaultMode` / `setDefaultModel` / `setDefaultThoughtLevel` (0.16.5) | Workspace-level defaults (bridge uses per-session setters)  | Not used                                                                                                               |
-| `workspace/upsertModelProvider` / `removeModelProvider` (0.16.5)                | Provider registry management                                | Not used; bridge forwards the client's registry via `updateProviderRegistry`                                           |
-| `workspace/updateInteractionPreferences` / `workspace/updateModelIoPreferences` | Client preference updates                                   | Not used                                                                                                               |
+| Method                                                                                                                                                      | Purpose                                                                | Current bridge behavior                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session/subagents`                                                                                                                                         | Query the list of sub-agents for a session                             | Sub-agent info is parsed from the `Agent` tool result (`_meta.subagent`); sufficient for now                                                                                                                                        |
+| `session/events`                                                                                                                                            | Pull-mode event history (complement to `session/subscribe`)            | Not used; could support event replay/gap-fill                                                                                                                                                                                       |
+| `session/usage`                                                                                                                                             | Per-session token usage                                                | Context bar uses `session.updated` usage payload instead                                                                                                                                                                            |
+| `workspace/hooks/trustGrant`                                                                                                                                | Server→client request: approve hook trust                              | Auto-errored by the unknown-request fallback (`server-requests.ts` `handleOne`) during turns; `session/send` carries a 15s timeout so nothing hangs. If hook trust ever needs real UX, map it onto ACP `session/request_permission` |
+| `interaction/browserList` / `interaction/browserExecute`                                                                                                    | Server→client requests: browser automation via the client              | Auto-errored by the fallback above; only meaningful once an ACP client has a browser surface                                                                                                                                        |
+| `interaction/requestProviderRuntimeHeaders`                                                                                                                 | Server→client request: provider runtime headers                        | Auto-errored by the fallback above                                                                                                                                                                                                  |
+| `interaction/requestOfficialMcpAuthHeaders` (0.16.5)                                                                                                        | Server→client request: official MCP auth headers                       | Auto-errored by the fallback above                                                                                                                                                                                                  |
+| `session/requestRuntimePreferences` (0.16.5)                                                                                                                | Runtime preference negotiation                                         | Auto-errored by the fallback above (same class as trustGrant)                                                                                                                                                                       |
+| `session/close` (0.16.5)                                                                                                                                    | Actually close a backend session/runtime                               | Not used — remote close intentionally retires discovery only (ADR-0006, self-healing); backend runtimes idle-evict anyway                                                                                                           |
+| `workspace/generateText` / `workspace/cancelGenerateText` (0.16.5)                                                                                          | Workspace-scoped one-shot text generation                              | Not used; no ACP counterpart                                                                                                                                                                                                        |
+| `workspace/readState` (0.16.5)                                                                                                                              | Read workspace state                                                   | Not used                                                                                                                                                                                                                            |
+| `workspace/setDefaultMode` / `setDefaultModel` / `setDefaultThoughtLevel` (0.16.5)                                                                          | Workspace-level defaults (bridge uses per-session setters)             | Not used                                                                                                                                                                                                                            |
+| `workspace/upsertModelProvider` / `removeModelProvider` (0.16.5)                                                                                            | Provider registry management                                           | Not used; bridge forwards the client's registry via `updateProviderRegistry`                                                                                                                                                        |
+| `workspace/updateInteractionPreferences` / `workspace/updateModelIoPreferences`                                                                             | Client preference updates                                              | Not used                                                                                                                                                                                                                            |
+| `skills/referenceCatalog`, `plugins/referenceCatalog`, `plugins/resolveSuggestedReference` (verified live 2026-08-27, params need `workspace.workspaceKey`) | Skill/plugin reference catalog lookup + suggested-reference resolution | Not used — the bridge reads skills and plugin commands from disk (`config/skill-discovery.ts`, `config/plugin-commands.ts`); revisit only if a client needs the backend's catalog view                                              |
 
 ### New `session/send` params (0.16+)
 
@@ -61,16 +66,16 @@ forwarded:
 
 ### New event types (undocumented in PROTOCOL.md)
 
-| Event                                    | Notes                                                                      |
-| ---------------------------------------- | -------------------------------------------------------------------------- |
-| `checkpoint.created`                     | Checkpoint lifecycle; pairs with `rewind.triggered`                        |
-| `rewind.triggered`                       | A rewind happened (e.g. initiated elsewhere)                               |
-| `rewind.started` / `rewind.failed` / `rewind.completed` (0.16.5) | Full rewind lifecycle; richer than the bare `triggered` |
-| `streamRecovery.updated`                 | Stream recovery progress — potentially useful for the replay/gap-fill path |
-| `turn.attachments.resolved`              | Attachment resolution telemetry                                            |
-| `usage.delta`                            | Streaming usage updates                                                    |
-| `turn.steerQueued` / `turn.steerDrained` | Steer lifecycle (queue/drain of steered inputs)                            |
-| `turn.terminal`                          | Terminal turn lifecycle; bridge relies on `turn.completed`/`turn.failed`   |
+| Event                                                            | Notes                                                                      |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `checkpoint.created`                                             | Checkpoint lifecycle; pairs with `rewind.triggered`                        |
+| `rewind.triggered`                                               | A rewind happened (e.g. initiated elsewhere)                               |
+| `rewind.started` / `rewind.failed` / `rewind.completed` (0.16.5) | Full rewind lifecycle; richer than the bare `triggered`                    |
+| `streamRecovery.updated`                                         | Stream recovery progress — potentially useful for the replay/gap-fill path |
+| `turn.attachments.resolved`                                      | Attachment resolution telemetry                                            |
+| `usage.delta`                                                    | Streaming usage updates                                                    |
+| `turn.steerQueued` / `turn.steerDrained`                         | Steer lifecycle (queue/drain of steered inputs)                            |
+| `turn.terminal`                                                  | Terminal turn lifecycle; bridge relies on `turn.completed`/`turn.failed`   |
 
 Unknown event types fall through the translator's else-chain untranslated and
 silently — new backend events never produce noise or errors, so additions
