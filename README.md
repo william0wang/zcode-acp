@@ -213,7 +213,8 @@ permission prompts. The prompt line is a caret editor — `←`/`→` (or
 Ctrl-B/Ctrl-F) move inside the typed text, Backspace/Delete edit at the
 caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears the line, and a
 block cursor marks the position; completion keeps precedence while its menu is
-open. The **mouse wheel** pages through history too — the REPL
+open. The status row also carries a compact plan-quota readout (`5h 16% ·
+wk 4%`) refreshed every 10 minutes — `/quota` prints the full card. The **mouse wheel** pages through history too — the REPL
 arms xterm mouse reporting so the terminal itself no longer scrolls over the
 UI (shift-drag still selects text). `PageUp`/`PageDown` (or `Home`/`End`) page
 back through history; `End` unpins and follows the live tail again.

@@ -20,6 +20,7 @@ import { render } from "ink";
 import { createElement } from "react";
 import { z } from "zod";
 
+import { queryQuota } from "../quota/index.js";
 import { AGENT_INFO } from "../utils.js";
 import {
   App,
@@ -35,6 +36,7 @@ import {
   createReplStatus,
   createTurnState,
   finishTurn,
+  formatQuotaLine,
   handleLocalCommand,
   parseCommand,
   parseQuestionForm,
@@ -126,6 +128,34 @@ export async function runRepl(): Promise<void> {
   // a Ctrl-L remount must never eat a half-typed message.
   let editor: LineEditor = createLineEditor();
 
+  // --- plan-quota indicator (prompt-line status suffix) ---
+  // Fetched once at startup and refreshed every QUOTA_TTL_MS; null (hidden)
+  // while the fetch runs or fails, so offline / auth-expired sessions just
+  // lose the suffix instead of nagging. The full card stays available via
+  // /quota. Failures are silent by design — warn() on every TTL tick would
+  // spam long-lived sessions.
+  let quotaLine: string | null = null;
+  let quotaFetchId = 0;
+  let quotaTimer: NodeJS.Timeout | null = null;
+  const QUOTA_TTL_MS = 10 * 60 * 1000;
+  async function refreshQuota(): Promise<void> {
+    const id = ++quotaFetchId;
+    try {
+      const result = await queryQuota();
+      if (exited || id !== quotaFetchId) return; // stale reply — a newer fetch owns the line
+      const line = formatQuotaLine(result);
+      if (line !== quotaLine) {
+        quotaLine = line;
+        rerender();
+      }
+    } catch {
+      // best-effort indicator: leave whatever was last shown in place
+    }
+  }
+  void refreshQuota();
+  quotaTimer = setInterval(() => void refreshQuota(), QUOTA_TTL_MS);
+  quotaTimer.unref();
+
   // --- mouse wheel capture (full-screen mode only) ---
   // Arming xterm mouse reporting (?1000/?1002/?1006) makes the TERMINAL stop
   // scrolling its own buffer on wheel — the exact gesture that loses the
@@ -194,6 +224,7 @@ export async function runRepl(): Promise<void> {
         editor = op(editor);
         rerender();
       },
+      quotaLine,
       onSubmit: (text) => void onSubmit(text),
       onCancelTurn,
       onAnswerPermission: (id) => permissionResolver?.(id),
@@ -673,6 +704,12 @@ export async function runRepl(): Promise<void> {
       } catch {
         // ignore
       }
+    }
+    try {
+      if (quotaTimer !== null) clearInterval(quotaTimer);
+      quotaTimer = null;
+    } catch {
+      // ignore
     }
     try {
       process.stdout.off("resize", onResize);

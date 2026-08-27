@@ -20,6 +20,7 @@ import {
   createTurnState,
   finishTurn,
   formatConfigList,
+  formatQuotaLine,
   handleLocalCommand,
   parseCommand,
   relativeTime,
@@ -444,5 +445,36 @@ describe("parseQuestionForm", () => {
     expect(parseQuestionForm(null)).toBeNull();
     expect(parseQuestionForm({ mode: "url" })).toBeNull();
     expect(parseQuestionForm(form({ q_0: { type: "string", title: "No options" } }))).toBeNull();
+  });
+});
+
+describe("formatQuotaLine", () => {
+  const ok = (items: Array<{ key: string; label: string; usedPercent: number }>) => ({
+    kind: "success" as const,
+    level: "pro",
+    items,
+  });
+
+  it("summarizes token windows compactly and rounds percents", () => {
+    expect(
+      formatQuotaLine(
+        ok([
+          { key: "token_5h", label: "5h", usedPercent: 33.7 },
+          { key: "mcp", label: "MCP", usedPercent: 12 },
+          { key: "token_week", label: "Week", usedPercent: 8.2 },
+        ]),
+      ),
+    ).toBe("5h 34% · wk 8%");
+  });
+
+  it("skips unknown future windows and empty item lists", () => {
+    expect(formatQuotaLine(ok([{ key: "token_30", label: "30", usedPercent: 1 }]))).toBeNull();
+    expect(formatQuotaLine(ok([]))).toBeNull();
+  });
+
+  it("returns null for non-success results and null input", () => {
+    expect(formatQuotaLine({ kind: "auth_error" })).toBeNull();
+    expect(formatQuotaLine({ kind: "unavailable" })).toBeNull();
+    expect(formatQuotaLine(null)).toBeNull();
   });
 });

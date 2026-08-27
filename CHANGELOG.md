@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead (+3/-3 lines per notch). Mouse bytes are stripped from stdin before
   ink sees them, and reporting is disarmed on every exit path. Shift-drag
   still selects text; `ZCODE_ACP_REPL_INLINE=1` keeps native scrollback.
+- The prompt line shows the plan-quota usage inline: a compact
+  `5h NN% · wk NN%` suffix (token windows only) appended to the status row,
+  fetched at startup and refreshed every 10 minutes; it hides itself when the
+  fetch fails or auth expires, and the full `/quota` card is unchanged.
 - The prompt line is a caret editor: `←`/`→` (or Ctrl-B/Ctrl-F) move within
   the typed text instead of only delete-and-retype, Backspace/Delete edit at
   the caret, Ctrl-A/Ctrl-E jump to the line's ends, Ctrl-U clears it, and a

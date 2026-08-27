@@ -13,8 +13,30 @@ import stringWidth from "string-width";
 
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
+import type { QuotaResult } from "../quota/types.js";
+
 /** Alias so tests can build fixtures without importing SDK types directly. */
 export type SessionUpdateLike = SessionUpdate;
+
+/**
+ * Compact plan-quota summary for the prompt line's status row, e.g.
+ * `"5h 34% · wk 8%"`. Token windows only (5h / weekly — all GLM exposes);
+ * MCP detail lives in the full `/quota` card, not a one-line indicator, and
+ * unknown future windows are skipped rather than mislabeled. Returns null
+ * when there is nothing worth showing (fetch failed / auth expired /
+ * transient busy) so the row degrades to its previous form instead of
+ * nagging.
+ */
+export function formatQuotaLine(result: QuotaResult | null): string | null {
+  if (result === null || result.kind !== "success") return null;
+  const parts: string[] = [];
+  for (const item of result.items) {
+    const label = item.key === "token_5h" ? "5h" : item.key === "token_week" ? "wk" : null;
+    if (label === null) continue;
+    parts.push(`${label} ${Math.round(item.usedPercent)}%`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
 
 /**
  * Estimated rendered line count of `text` when wrapped at `width` display

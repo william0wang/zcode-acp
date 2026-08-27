@@ -112,6 +112,8 @@ export interface AppProps {
   editor: LineEditor;
   /** Apply one pure editor op to the prompt line and repaint. */
   applyEdit: (op: (e: LineEditor) => LineEditor) => void;
+  /** Compact plan-quota suffix for the status row (null = not fetched yet). */
+  quotaLine: string | null;
   onSubmit: (text: string) => void;
   onCancelTurn: () => void;
   onAnswerPermission: (optionId: string | null) => void;
@@ -274,12 +276,14 @@ function InputLine({
   status,
   editor,
   applyEdit,
+  quotaLine,
   onSubmitText,
 }: {
   busy: boolean;
   status: ReplStatus;
   editor: LineEditor;
   applyEdit: (op: (e: LineEditor) => LineEditor) => void;
+  quotaLine: string | null;
   onSubmitText: (text: string) => void;
 }): ReactElement {
   // `ed` mirrors props.editor for the render below; edits go through
@@ -441,7 +445,10 @@ function InputLine({
   });
 
   // e.g. "GLM-5.3 · build · max" — lives INSIDE the input box (bottom row),
-  // mirroring the editor dropdown state.
+  // mirroring the editor dropdown state. The plan-quota suffix rides after it
+  // ("5h 34% · wk 8%"), clamped so one wrap never changes the box height —
+  // the transcript viewport slices heights from CHROME_ROWS.
+  const cols = process.stdout.columns || 100;
   const statusLine = [
     selectLabel(status.model),
     selectLabel(status.mode),
@@ -449,6 +456,8 @@ function InputLine({
   ]
     .filter(Boolean)
     .join(" · ");
+  const LEFT_BUDGET = Math.max(12, cols - 40); // right hint ≈ 34 cols + margin
+  const leftLine = [statusLine, quotaLine].filter(Boolean).join(" · ").slice(0, LEFT_BUDGET);
 
   return (
     // width="100%": the chrome parent is a row Box, so without an explicit
@@ -496,7 +505,7 @@ function InputLine({
           })()}
         </Box>
         <Box justifyContent="space-between" width="100%">
-          <Text dimColor>{statusLine || "type / for commands · tab completes"}</Text>
+          <Text dimColor>{leftLine || "type / for commands · tab completes"}</Text>
           <Text dimColor> </Text>
           <Text dimColor>{busy ? "" : "enter send · ctrl-c cancels/quits"}</Text>
         </Box>
@@ -860,6 +869,7 @@ export function App(props: AppProps): ReactElement {
             status={status}
             editor={props.editor}
             applyEdit={props.applyEdit}
+            quotaLine={props.quotaLine}
             onSubmitText={submit}
           />
         )}
