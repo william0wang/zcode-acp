@@ -18,7 +18,12 @@ import { RequestError } from "@agentclientprotocol/sdk";
 
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
 import type { ZcodeCreateResult, ZcodeListResult, ZcodeSnapshot } from "../backend/types.js";
-import { buildModes, buildConfigOptions } from "../config/options.js";
+import {
+  buildModes,
+  buildConfigOptions,
+  formatModelValue,
+  loadAllModels,
+} from "../config/options.js";
 import { emitInitialUsage } from "../config/model-cache.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
@@ -412,15 +417,15 @@ export async function resumeSession(
     if (params.mcpServers && params.mcpServers.length > 0) {
       zcParams.mcpServers = params.mcpServers;
     }
-    const runtimeModel = buildResumeRuntimeModel();
-    if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
     // Push the provider registry BEFORE resume: a resumed session may carry a
     // third-party model in its history, and the backend needs the provider
     // registered to even process the resume turn.
     await syncProviderRegistry(server, cwd);
-    const resumeResult = await resumeBackendSession(server, zcParams);
+    const resumeResult = await resumePreservingModel(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
+    // The session kept its own model — repair it only if it's no longer enabled.
+    await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
     const backendWs = workspaceFromResumeResult(resumeResult);
@@ -471,15 +476,15 @@ export async function loadSession(
       sessionId: zcodeSid,
       workspace: workspaceFor(cwd),
     };
-    const runtimeModel = buildResumeRuntimeModel();
-    if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
     // Push the provider registry BEFORE resume: a loaded session may carry a
     // third-party model in its history, and the backend needs the provider
     // registered to process it.
     await syncProviderRegistry(server, cwd);
-    const resumeResult = await resumeBackendSession(server, zcParams);
+    const resumeResult = await resumePreservingModel(server, zcParams);
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
+    // The session kept its own model — repair it only if it's no longer enabled.
+    await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
     const backendWs = workspaceFromResumeResult(resumeResult);
@@ -1256,8 +1261,8 @@ async function resumeBackendSession(
  * Reload a session into the backend subprocess via `session/resume` — the
  * recovery path after the backend evicted the resident runtime (idle timeout
  * / LRU). Same param shape as session/load·resume (workspace from the
- * recorded session cwd, runtimeModel overlay for stale history models).
- * Marks the session backend-loaded on success.
+ * recorded session cwd, default-model overlay only if a faithful resume
+ * fails). Marks the session backend-loaded on success.
  */
 async function reloadBackendSession(
   server: ZcodeAcpServer,
@@ -1268,10 +1273,74 @@ async function reloadBackendSession(
     sessionId: zcodeSid,
     workspace: workspaceFor(server.sessionCwds.get(acpSid) ?? process.cwd()),
   };
-  const runtimeModel = buildResumeRuntimeModel();
-  if (runtimeModel !== null) zcParams.runtimeModel = runtimeModel;
-  await resumeBackendSession(server, zcParams);
+  await resumePreservingModel(server, zcParams);
   server.markBackendLoaded(acpSid);
+}
+
+/**
+ * Resume WITHOUT pinning a model, so the session keeps its own selection (the
+ * backend persists it per session — sessions the user ran on GLM-5.3-Flash
+ * used to be silently re-pinned to the first config model by an unconditional
+ * runtimeModel overlay). The overlay is now a FALLBACK repair only: when the
+ * faithful resume fails outright (history carrying a stale/revoked model),
+ * retry once pinned to the first enabled provider's first model.
+ */
+async function resumePreservingModel(
+  server: ZcodeAcpServer,
+  zcParams: Record<string, unknown>,
+): Promise<unknown> {
+  try {
+    return await resumeBackendSession(server, zcParams);
+  } catch (err) {
+    const overlay = buildResumeRuntimeModel();
+    if (overlay === null) throw err;
+    warn(
+      `resume failed (${err instanceof Error ? err.message : String(err)}); retrying with default-model overlay`,
+    );
+    return resumeBackendSession(server, { ...zcParams, runtimeModel: overlay });
+  }
+}
+
+/**
+ * After a faithful resume the session keeps its own last model; when that
+ * model no longer belongs to an enabled provider in config.json (deleted or
+ * revoked elsewhere), the first send would fail with 历史模型不可用. Repair
+ * proactively: switch to the default (first enabled) model. Best-effort — a
+ * failed check leaves the model untouched.
+ */
+async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
+  try {
+    const backend = server.ensureBackend();
+    const resp = await backend.request(
+      server.nextId(),
+      "session/read",
+      { sessionId: zcodeSid },
+      5000,
+    );
+    if (resp.error) return;
+    const settings = (
+      (resp.result ?? {}) as {
+        settings?: { model?: { current?: { providerId?: string; modelId?: string } } };
+      }
+    ).settings;
+    const cur = settings?.model?.current;
+    if (!cur?.providerId || !cur.modelId) return;
+    const available = loadAllModels();
+    if (available.some((m) => m.providerId === cur.providerId && m.modelId === cur.modelId)) return;
+    const fallback = available[0];
+    if (!fallback) return;
+    warn(
+      `session ${zcodeSid} model ${cur.providerId}/${cur.modelId} is no longer enabled; switching to ${fallback.providerId}/${fallback.modelId}`,
+    );
+    const { applyModelSwitch } = await import("../config/runtime-model.js");
+    await applyModelSwitch(
+      server,
+      zcodeSid,
+      formatModelValue(fallback.providerId, fallback.modelId),
+    );
+  } catch (e) {
+    log(`model repair check failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /** Get or create the session-level ProjectionDiffer (persists across turns). */

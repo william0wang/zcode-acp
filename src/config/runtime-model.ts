@@ -9,12 +9,12 @@
  *
  * Two uses:
  *
- *   1. Resume/load overlay (`buildResumeRuntimeModel`): a resumed session may
- *      carry a stale/revoked model in its history → send fails with "历史模型
- *      不可用". The overlay pins the session onto the default model — the FIRST
- *      enabled provider's FIRST model, the same one a fresh `session/new` lands
- *      on — so resume never inherits the session's last-used (possibly
- *      third-party / unavailable) model.
+ *   1. Resume/load FALLBACK overlay (`buildResumeRuntimeModel`, via
+ *      `resumePreservingModel` in handlers/session.ts): sessions are resumed
+ *      faithfully (keeping their own model) and this overlay is only applied
+ *      when that resume fails outright — history carrying a stale/revoked
+ *      third-party model. It pins onto the FIRST enabled provider's FIRST
+ *      model as a known-working repair, not as a default choice.
  *
  *   2. Model switch (`applyModelSwitch`): UI/slash model switching goes through
  *      `session/setModel` with both a `model` ref and a `runtimeModel` provider
@@ -94,10 +94,10 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
 }
 
 /**
- * Build the resume-time overlay pinned to the default model: the FIRST enabled
- * provider's FIRST model (the same one a fresh `session/new` lands on). This
- * ensures resume never inherits the session's last-used model, which may be a
- * now-unavailable third-party model (e.g. Nvidia) and cause "历史模型不可用".
+ * Build the resume-time FALLBACK overlay pinned to the first enabled
+ * provider's first model — a known-working repair for sessions whose history
+ * references an unavailable model. Only applied when a faithful (no-overlay)
+ * resume fails; see resumePreservingModel in handlers/session.ts.
  */
 export function buildResumeRuntimeModel(): unknown | null {
   const first = loadAllModels()[0];

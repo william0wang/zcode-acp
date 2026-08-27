@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resuming a session no longer force-pins it to the first config.json model:
+  the bridge used to attach a `runtimeModel` overlay (first enabled provider's
+  first model) on every resume/load, silently overriding whatever model the
+  session actually ran on (e.g. GLM-5.3-Flash → GLM-5.3). Resume is now
+  faithful — the session keeps its own selection — with the overlay demoted to
+  a one-retry fallback when the faithful resume fails outright, and a repair
+  step that switches to the default model only when the session's model is no
+  longer enabled.
 - Transient turn failures classified as retryable now include
   `invalid_model_request` / "provider rejected the model request" cause codes
   and message shapes, so provider-side model rejections auto-retry with
