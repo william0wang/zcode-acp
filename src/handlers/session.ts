@@ -1380,7 +1380,8 @@ async function runEventTurn(
   const translator = new EventTranslator();
   differ.resetTurn();
   const NO_PROGRESS_MS = 120_000;
-  let lastProgress = Date.now();
+  let lastProtocolProgressAt = Date.now();
+  let nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
   let lastStallCheck = Date.now();
   let emittedText = false;
   let emittedOutput = false;
@@ -1395,7 +1396,45 @@ async function runEventTurn(
   let thinkingHintSent = false;
   const THINKING_HINT_DELAY_MS = 1200;
 
-  while (Date.now() - lastProgress < NO_PROGRESS_MS) {
+  const recordProtocolProgress = (): void => {
+    lastProtocolProgressAt = Date.now();
+    nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
+  };
+
+  while (true) {
+    if (Date.now() >= nextNoProgressDecisionAt) {
+      if (listener.hasQueuedEvents()) {
+        // An event that arrived exactly at the deadline is real protocol
+        // progress. Consume it below before making any terminal decision.
+        recordProtocolProgress();
+      } else if (turn.cancelled) {
+        // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
+        // lock after stop must not keep a user-cancelled turn alive forever.
+        stopBackendTurn(server, turn.zcodeSid);
+        return { stopReason: "max_turn_requests" };
+      } else {
+        const lockState = await probePromptLock(server, turn.zcodeSid);
+        if (lockState === "held") {
+          // A prompt-lock failure is direct evidence that the backend still owns
+          // an active turn. It is liveness, not protocol progress: leave
+          // lastProtocolProgressAt untouched and schedule a later decision.
+          // This protects legitimately long model/tool operations without
+          // allowing a stale `projection.status=running` to refresh the clock.
+          const activeTools = [...translator.seenToolIds].filter(
+            (toolId) => !translator.finalToolIds.has(toolId),
+          ).length;
+          log(
+            `  [stall] prompt lock still held after ${Math.round((Date.now() - lastProtocolProgressAt) / 1000)}s silence (activeTools=${activeTools}); deferring terminal decision`,
+          );
+          nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
+        } else {
+          log(`  [stall] no-progress deadline reached; prompt lock=${lockState}`);
+          stopBackendTurn(server, turn.zcodeSid);
+          return { stopReason: "max_turn_requests" };
+        }
+      }
+    }
+
     // Drain + handle server→client requests (interaction/*). Refreshes the
     // no-progress timer when any are handled. Pass `turn` so interaction
     // requests become turn-cancel aware (user stop aborts pending popups).
@@ -1408,7 +1447,7 @@ async function runEventTurn(
       warn(`handleServerRequests threw: ${e instanceof Error ? e.message : String(e)}`);
     }
     if (handled) {
-      lastProgress = Date.now();
+      recordProtocolProgress();
     }
 
     if (turn.cancelled) {
@@ -1456,7 +1495,7 @@ async function runEventTurn(
       if (
         !turn.cancelled &&
         translator.turnStarted &&
-        Date.now() - lastProgress > 15_000 &&
+        Date.now() - lastProtocolProgressAt > 15_000 &&
         Date.now() - lastStallCheck > 15_000
       ) {
         lastStallCheck = Date.now();
@@ -1470,7 +1509,7 @@ async function runEventTurn(
           // turn is alive (it stays queued for the next poll).
           await sleep(1500);
           if (listener.hasQueuedEvents()) {
-            lastProgress = Date.now();
+            recordProtocolProgress();
             continue; // alive — events will be consumed by the next poll
           }
           const proj2 = await monitor.pollOnce();
@@ -1496,7 +1535,6 @@ async function runEventTurn(
           // Second probe says the backend is still working (or events arrived
           // mid-probe) — keep waiting; queued events are consumed by the next
           // poll iteration.
-          lastProgress = Date.now();
           if (proj2?.status === "running") {
             await listener.resubscribe(() => server.nextId());
           }
@@ -1507,14 +1545,13 @@ async function runEventTurn(
           // The send-retry loop in prompt() already covers the recovery window
           // for the NEXT turn; for this in-flight turn we just resubscribe and
           // let the backend emit its terminal event when ready.
-          lastProgress = Date.now();
           await listener.resubscribe(() => server.nextId());
         }
       }
       continue;
     }
 
-    lastProgress = Date.now();
+    recordProtocolProgress();
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still
     // finalising) that landed in the queue while send was retrying on a busy
@@ -1660,10 +1697,36 @@ async function runEventTurn(
       return { stopReason: "end_turn" };
     }
   }
+}
 
-  // 120s no progress: abandon.
-  stopBackendTurn(server, turn.zcodeSid);
-  return { stopReason: "max_turn_requests" };
+type PromptLockState = "held" | "released" | "unknown";
+
+/**
+ * Probe the backend's authoritative prompt lock without waiting for it to
+ * change. `session/read` projection status is intentionally not considered:
+ * that projection can remain stale at `running`, which is the condition this
+ * probe is used to disambiguate.
+ */
+async function probePromptLock(server: ZcodeAcpServer, zcodeSid: string): Promise<PromptLockState> {
+  const backend = server.ensureBackend();
+  if (backend.isDead) return "unknown";
+  try {
+    const resp = await backend.request(
+      server.nextId(),
+      "session/goal",
+      { sessionId: zcodeSid, action: "show" },
+      10_000,
+    );
+    if (!resp.error) return "released";
+    const message = (resp.error.message ?? "").toLowerCase();
+    if (message.includes("prompt is running") || message.includes("already running")) {
+      return "held";
+    }
+    return "unknown";
+  } catch (e) {
+    log(`  [stall] prompt-lock probe failed: ${e instanceof Error ? e.message : String(e)}`);
+    return "unknown";
+  }
 }
 
 /**

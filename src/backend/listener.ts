@@ -7,8 +7,8 @@
  * resubscribe from it to recover missed events after a stall.
  *
  * `TurnMonitor` is the legacy snapshot path: a one-shot `session/read` that
- * returns the authoritative projection. Used for stall reconciliation and
- * lock-release probing.
+ * returns the latest projection. Used for stall reconciliation, but never as
+ * proof of protocol progress because a `running` projection may be stale.
  */
 
 import type { ZcodeBackend } from "./client.js";
@@ -196,8 +196,9 @@ export class EventStreamListener {
 }
 
 /**
- * Legacy snapshot path: a single `session/read` returning the authoritative
- * projection. Used in stall reconciliation and lock-release probing.
+ * Legacy snapshot path: a single `session/read` returning the latest
+ * projection. Used in stall reconciliation; prompt-lock state is probed
+ * separately because a `running` projection may be stale.
  */
 export class TurnMonitor {
   private readonly backend: ZcodeBackend;
