@@ -1,10 +1,11 @@
 /**
  * Ink UI for the interactive REPL (bare `zcode-acp`).
  *
- * Rendering model: completed transcript entries go to <Static> (appended once,
- * becomes native terminal scrollback); the live turn (streaming text, thinking
- * buffer, tool rows) plus the input line re-render below it. A pending
- * permission request takes over the input area with an arrow-key picker.
+ * Rendering model: the whole app draws in a fixed-height frame managed by
+ * run.ts (full-screen mode) — the transcript is an in-app viewport, and the
+ * live turn (streaming text, thinking buffer, tool rows), prompt line, and
+ * pickers render inside it. A pending permission request takes over the
+ * input area with an arrow-key picker.
  */
 
 import { Box, Text, useInput, type Key } from "ink";
@@ -88,7 +89,7 @@ export interface AppProps {
   sessionPick: SessionPick | null;
   /** Prompts accepted but waiting for the running turn to finish. */
   queued: string[];
-  /** Bumped on every terminal resize — remounts <Static> for a full repaint. */
+  /** Bumped on every terminal resize — forces a full-frame repaint. */
   resizeTick: number;
   /**
    * Pinned-older-lines viewport offset. Lives in run.ts's external store,
@@ -114,6 +115,14 @@ export interface AppProps {
   applyEdit: (op: (e: LineEditor) => LineEditor) => void;
   /** Compact plan-quota suffix for the status row (null = not fetched yet). */
   quotaLine: string | null;
+  /**
+   * Live completion-menu visibility. InputLine mirrors it out of its React
+   * state on every render (same external-store rationale as the editor), so
+   * the app-level key handler can give the menu first claim on esc.
+   */
+  isMenuOpen: () => boolean;
+  /** InputLine → external store: publish the current menu visibility. */
+  onMenuOpenChange: (open: boolean) => void;
   onSubmit: (text: string) => void;
   onCancelTurn: () => void;
   onAnswerPermission: (optionId: string | null) => void;
@@ -145,6 +154,15 @@ export function colorizeCodeFences(text: string): string {
       return inFence ? color.cyan(line) : line;
     })
     .join("\n");
+}
+
+/**
+ * Esc / Ctrl-C means "dismiss" for every picker (question form, /sessions,
+ * permission). Both ctrl-c delivery shapes count: a lone \x03 arrives as
+ * ("c", ctrl) but rapid presses coalesce into one raw chunk with ctrl=false.
+ */
+function isCancelKey(inputChar: string | undefined, key: Key): boolean {
+  return key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03");
 }
 
 const TOOL_STATUS_ICON: Record<string, string> = {
@@ -276,6 +294,7 @@ function InputLine({
   status,
   editor,
   applyEdit,
+  onMenuOpenChange,
   quotaLine,
   onSubmitText,
 }: {
@@ -283,6 +302,8 @@ function InputLine({
   status: ReplStatus;
   editor: LineEditor;
   applyEdit: (op: (e: LineEditor) => LineEditor) => void;
+  /** Publish current menu visibility to the external store (see AppProps). */
+  onMenuOpenChange: (open: boolean) => void;
   quotaLine: string | null;
   onSubmitText: (text: string) => void;
 }): ReactElement {
@@ -307,6 +328,12 @@ function InputLine({
   };
   const candidates = completionCandidates(ed.text, status);
   const menu = !dismissed && candidates !== null && candidates.length > 0 ? candidates : null;
+  // Mirror visibility out of React on every render: the app-level key handler
+  // may run for the same keystroke and must see the PRE-keystroke value
+  // (stale-by-one-keystroke is exactly right — it decides esc precedence
+  // before this component's own listener dismisses anything). Plain store
+  // assignment, no React state, so this can't loop.
+  onMenuOpenChange(menu !== null);
   // New keystroke → new filter: restart the selection and re-open a
   // previously dismissed menu.
   useEffect(() => {
@@ -520,7 +547,10 @@ function entryHeight(entry: ReplEntry, width: number): number {
     case "user":
       return 1 + estimateLines(entry.text, width);
     case "welcome":
-      return 1 + 11; // marginTop + branding/session/config/tips block
+      // Must track <WelcomeView> below (marginTop + branding/session/config/
+      // tips block): CHROME_ROWS-style viewport math silently drifts if the
+      // component grows a row without this number following.
+      return 1 + 11;
     case "tool":
       // Tool rows wrap when the title is long — count them like text.
       return estimateLines(`• ${entry.title} (${entry.status})`, width);
@@ -650,7 +680,9 @@ export function App(props: AppProps): ReactElement {
     }
     // Esc with prompts waiting: interrupt the running turn — the stop
     // handler drains the queue, so the next queued message starts at once.
-    if (key.escape && turn && queued.length > 0) {
+    // With the completion menu open, the menu takes this esc instead
+    // (dismiss); a second esc reaches here and interrupts.
+    if (key.escape && turn && queued.length > 0 && !props.isMenuOpen()) {
       props.onCancelTurn();
       return;
     }
@@ -675,8 +707,7 @@ export function App(props: AppProps): ReactElement {
   /** Keys for the active AskUserQuestion picker (state mirrors in qRef). */
   function handleQuestionKey(inputChar: string | undefined, key: Key): void {
     if (!question) return;
-    const isSkip =
-      key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03");
+    const isSkip = isCancelKey(inputChar, key);
     if (qRef.current.custom !== null) {
       if (key.return) {
         props.onAnswerQuestion({ picked: [...qRef.current.toggled], custom: qRef.current.custom });
@@ -758,7 +789,7 @@ export function App(props: AppProps): ReactElement {
       props.onPickSession(sessionPick.items[sessIndexRef.current]!.sessionId);
       return;
     }
-    if (key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03")) {
+    if (isCancelKey(inputChar, key)) {
       props.onPickSession(null);
     }
   }
@@ -780,7 +811,7 @@ export function App(props: AppProps): ReactElement {
       props.onAnswerPermission(permission.options[permIndexRef.current]!.id);
       return;
     }
-    if (key.escape || (key.ctrl && inputChar === "c") || (inputChar ?? "").includes("\x03")) {
+    if (isCancelKey(inputChar, key)) {
       props.onAnswerPermission(null);
     }
   }
@@ -870,6 +901,7 @@ export function App(props: AppProps): ReactElement {
             editor={props.editor}
             applyEdit={props.applyEdit}
             quotaLine={props.quotaLine}
+            onMenuOpenChange={props.onMenuOpenChange}
             onSubmitText={submit}
           />
         )}

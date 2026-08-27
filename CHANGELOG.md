@@ -48,12 +48,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second editor), which previously never appeared. Permission and question
   requests answered elsewhere dismiss the local picker via the SDK request
   abort signal instead of hanging forever.
+- Interactive AskUserQuestion support in the REPL: the bridge's form
+  elicitation renders as an arrow-key picker (single/multi-select plus a
+  custom-answer row per question; `esc` skips). This needs a client-side
+  `elicitation.form` capability, declared in the REPL's `initialize`
+  handshake (the ACP SDK never sends one on a client's behalf, so the REPL
+  sends it itself).
 
 ### Changed
 
 - ExitPlanMode (plan approval) in the REPL now heads as "plan approval" and
   shows the plan text inline before the Approve/Reject options (the bridge
   adds a `toolCall.title`); previously it was an unlabeled permission popup.
+- An open completion menu takes precedence over the queued-prompt interrupt:
+  with a turn running and prompts queued, `esc` now dismisses the menu first
+  (a second press interrupts the turn); previously both fired at once, so one
+  keypress silently cancelled the running turn.
 
 ### Fixed
 

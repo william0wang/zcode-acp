@@ -128,6 +128,12 @@ export async function runRepl(): Promise<void> {
   // a Ctrl-L remount must never eat a half-typed message.
   let editor: LineEditor = createLineEditor();
 
+  // --- completion-menu visibility mirror ---
+  // InputLine publishes whether its menu is showing (plain var, no React
+  // state); the app-level key handler reads it so an open menu takes the
+  // first esc — dismissing it must not also interrupt a queued-up turn.
+  let completionMenuOpen = false;
+
   // --- plan-quota indicator (prompt-line status suffix) ---
   // Fetched once at startup and refreshed every QUOTA_TTL_MS; null (hidden)
   // while the fetch runs or fails, so offline / auth-expired sessions just
@@ -225,6 +231,10 @@ export async function runRepl(): Promise<void> {
         rerender();
       },
       quotaLine,
+      isMenuOpen: (): boolean => completionMenuOpen,
+      onMenuOpenChange: (open: boolean) => {
+        completionMenuOpen = open;
+      },
       onSubmit: (text) => void onSubmit(text),
       onCancelTurn,
       onAnswerPermission: (id) => permissionResolver?.(id),
@@ -390,10 +400,11 @@ export async function runRepl(): Promise<void> {
 
   // Advertise form-elicitation so AskUserQuestion routes here as a
   // structured form instead of permission-popups labeled "permission
-  // requested". The connection's auto-initialize carries no capabilities, so
-  // a follow-up initialize re-merges them (the bridge's handler is
-  // idempotent). Sent via the generic request() — the typed helper lives on
-  // the Agent interface, not the ClientContext we hold.
+  // requested". The SDK never sends a protocol-level initialize on the
+  // client's behalf, so this request() IS the handshake (the bridge rejects
+  // any earlier non-initialize message). Sent via the generic request() —
+  // the typed helper lives on the Agent interface, not the ClientContext we
+  // hold.
   await cx.request("initialize", {
     protocolVersion: 1,
     clientCapabilities: {
@@ -670,29 +681,32 @@ export async function runRepl(): Promise<void> {
     rerender();
   }
 
-  // Terminal resize: scrollback printed at the old width soft-wraps under the
-  // new width and shifts every line, which is what makes resizes look
-  // scrambled (ink only clears its own dynamic region). Clear the screen and
-  // bump resizeTick so <Static> remounts and repaints EVERYTHING at the new
-  // width — the full-screen-TUI answer.
+  // Terminal resize: lines painted at the old width soft-wrap differently
+  // under the new one, so ink's diff repaint alone leaves the frame
+  // misplaced. Full-screen mode clears and repaints EVERYTHING at the new
+  // size — the full-screen-TUI answer. Inline mode skips the clear: \x1b[2J
+  // is exactly the Warp duplicated-content trigger the mode exists to avoid,
+  // and ink diffs heal the width change well enough for an escape hatch.
   const onResize = (): void => {
     if (exited) return;
-    try {
-      process.stdout.write("\x1b[2J\x1b[1;1H");
-    } catch {
-      // best-effort; the repaint below still re-renders the dynamic area
+    if (!inline) {
+      try {
+        process.stdout.write("\x1b[2J\x1b[1;1H");
+      } catch {
+        // best-effort; the repaint below still re-renders the dynamic area
+      }
     }
     resizeTick++;
     rerender();
   };
   if (process.stdout.isTTY) process.stdout.on("resize", onResize);
 
-  function cleanup(code: number): void {
-    if (exited) return;
-    exited = true;
-    // Release real stdin and disarm mouse reporting before the unmount's
-    // terminal-restore writes — a wheel notch racing ?1049l would land on an
-    // already-torn-down UI.
+  /**
+   * Release the filtered stdin and disarm ?1000/?1002/?1006 reporting. One
+   * teardown for both exit paths; every caller wraps it — disposal failures
+   * must never skip the rest of shutdown.
+   */
+  function teardownMouse(): void {
     try {
       wheelCapture?.dispose();
     } catch {
@@ -705,6 +719,15 @@ export async function runRepl(): Promise<void> {
         // ignore
       }
     }
+  }
+
+  function cleanup(code: number): void {
+    if (exited) return;
+    exited = true;
+    // Release real stdin and disarm mouse reporting before the unmount's
+    // terminal-restore writes — a wheel notch racing ?1049l would land on an
+    // already-torn-down UI.
+    teardownMouse();
     try {
       if (quotaTimer !== null) clearInterval(quotaTimer);
       quotaTimer = null;
@@ -751,18 +774,7 @@ export async function runRepl(): Promise<void> {
   child.once("exit", (code) => {
     if (exited) return;
     exited = true;
-    try {
-      wheelCapture?.dispose();
-    } catch {
-      // ignore
-    }
-    if (wheelCapture !== null) {
-      try {
-        process.stdout.write(MOUSE_DISABLE);
-      } catch {
-        // ignore
-      }
-    }
+    teardownMouse();
     ink.unmount();
     process.stderr.write(
       `bridge exited unexpectedly (code ${code})\n${stderrTail.trim() ? `stderr tail:\n${stderrTail}` : ""}\n`,

@@ -33,6 +33,8 @@ export function formatQuotaLine(result: QuotaResult | null): string | null {
   for (const item of result.items) {
     const label = item.key === "token_5h" ? "5h" : item.key === "token_week" ? "wk" : null;
     if (label === null) continue;
+    // Compact status-line readout: integer percents on purpose — the 0.1-step
+    // precision rule (quota/rounding.ts) belongs to the /quota card only.
     parts.push(`${label} ${Math.round(item.usedPercent)}%`);
   }
   return parts.length > 0 ? parts.join(" · ") : null;
@@ -236,23 +238,27 @@ export function createReplStatus(): ReplStatus {
   return { commands: [], model: null, mode: null, thought: null };
 }
 
+/** Shared by both lists below so /help and /exit keep one description each. */
+const HELP_COMMAND: CommandInfo = { name: "help", description: "list commands (REPL-local)" };
+const EXIT_COMMAND: CommandInfo = { name: "exit", description: "quit the REPL" };
+
 /** Commands shown before the bridge's first `available_commands_update`. */
 export const FALLBACK_COMMANDS: CommandInfo[] = [
-  { name: "help", description: "list commands (REPL-local)" },
+  HELP_COMMAND,
   { name: "model", description: "show or switch model" },
   { name: "mode", description: "show or switch mode" },
   { name: "thought", description: "show or switch thought level" },
   { name: "compact", description: "compact conversation context" },
   { name: "mcp", description: "list configured MCP servers" },
   { name: "quota", description: "show plan usage card" },
-  { name: "exit", description: "quit the REPL" },
+  EXIT_COMMAND,
 ];
 
 /** REPL-local commands, always offered regardless of what the bridge advertises. */
 const LOCAL_COMMANDS: CommandInfo[] = [
-  { name: "help", description: "list commands (REPL-local)" },
+  HELP_COMMAND,
   { name: "sessions", description: "list and resume project sessions" },
-  { name: "exit", description: "quit the REPL" },
+  EXIT_COMMAND,
 ];
 
 /**

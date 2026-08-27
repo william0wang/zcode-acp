@@ -13,6 +13,8 @@
  * raw escape codes.
  */
 
+import { roundTenth } from "./rounding.js";
+
 /** ANSI reset (cancel all attributes). */
 export const RESET = "\x1b[0m";
 
@@ -78,7 +80,7 @@ export function pickOverlay(item: {
   ) {
     return `${item.usedCount}/${item.totalCount}`;
   }
-  const pct = Math.round(Math.max(0, Math.min(100, item.usedPercent)) * 10) / 10;
+  const pct = roundTenth(Math.max(0, Math.min(100, item.usedPercent)));
   return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
 }
 

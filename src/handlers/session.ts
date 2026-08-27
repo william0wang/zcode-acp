@@ -402,11 +402,11 @@ export async function resumeSession(
   const { zcodeSid, alreadyLive } = await resolveResumeTarget(server, acpSid);
 
   if (!alreadyLive) {
-    // runtimeModel overlay: a resumed session may carry a stale/revoked model in
-    // its history → send fails with "历史模型不可用". Overlaying the current
-    // enabled provider redirects the session onto a working model. The overlay
-    // deliberately carries NO apiKey (the backend's schema rejects it; it resolves
-    // auth from its own config/OAuth store).
+    // No runtimeModel pinning here: the session keeps its own persisted
+    // model (see resumePreservingModel — an overlay is a FALLBACK only, when
+    // the faithful resume fails outright). The params deliberately carry NO
+    // apiKey either (the backend's schema rejects it; it resolves auth from
+    // its own config/OAuth store).
     const zcParams: Record<string, unknown> = {
       sessionId: zcodeSid,
       workspace: workspaceFor(cwd),
@@ -1304,9 +1304,10 @@ async function resumePreservingModel(
 /**
  * After a faithful resume the session keeps its own last model; when that
  * model no longer belongs to an enabled provider in config.json (deleted or
- * revoked elsewhere), the first send would fail with 历史模型不可用. Repair
- * proactively: switch to the default (first enabled) model. Best-effort — a
- * failed check leaves the model untouched.
+ * revoked elsewhere), the first send would fail with the backend's
+ * stale-history-model error. Repair proactively: switch to the default
+ * (first enabled) model. Best-effort — a failed check leaves the model
+ * untouched.
  */
 async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
   try {
@@ -1339,7 +1340,7 @@ async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string):
       formatModelValue(fallback.providerId, fallback.modelId),
     );
   } catch (e) {
-    log(`model repair check failed: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`model repair check failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 

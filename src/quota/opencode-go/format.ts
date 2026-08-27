@@ -9,6 +9,7 @@
 
 import { pickOverlay, renderColorBar } from "../color.js";
 import { formatResetTime, renderBar } from "../format.js";
+import { roundTenth } from "../rounding.js";
 import type { GoQueryResult, GoWindowKey } from "./types.js";
 
 /** Label + window-key metadata, in display order. */
@@ -95,9 +96,9 @@ export function formatGoSection(
       return `${m.label.padEnd(5)} ${bar} · ${reset}`;
     }
     const bar = renderBar(w.usagePercent);
-    // Cap at one fractional digit — the dashboard reports 0.1 steps (84.3),
-    // and raw floats would print their full representation.
-    const pct = Math.round(w.usagePercent * 10) / 10;
+    // The dashboard reports 0.1 steps (84.3); roundTenth caps the printed
+    // value there so raw floats never spill their full representation.
+    const pct = roundTenth(w.usagePercent);
     // No leading indent — the bar lines align with GLM's so the two sections
     // read as one card. The section header carries the ` Opencode Go` indent.
     return `${m.label.padEnd(5)} ${bar}  ${padPercent(pct)}% · ${reset}`;

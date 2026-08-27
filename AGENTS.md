@@ -68,7 +68,9 @@ src/
 │   │                     local /help & listings)
 │   ├── App.tsx           Ink components (stream, tools, permission picker,
 │   │                     full-width input box with in-box status row,
-│   │                     ↑↓/tab completion menu)
+│   │                     ↑↓/tab completion menu, question form picker)
+│   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
+│   │                     Ctrl-B/F/A/E/U chords) — no React, testable
 │   ├── mouse.ts          Mouse-wheel capture: xterm SGR mouse filter between
 │   │                     process.stdin and ink's stdin (full-screen mode)
 │   └── run.ts            Orchestration: spawn bridge, pump updates
