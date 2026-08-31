@@ -193,47 +193,24 @@ export class EventTranslator {
     const results: InternalEvent[] = [];
     const tkind = (payload["kind"] as string) ?? "";
     const callId = (payload["toolCallId"] as string) ?? "";
-    let toolName = (payload["toolName"] as string) ?? "";
+    const toolName = (payload["toolName"] as string) ?? "";
 
     if (tkind === "scheduled") {
-      if (callId && !this.seenToolIds.has(callId)) {
-        this.seenToolIds.add(callId);
-        if (toolName) {
-          this.toolNames.set(callId, toolName);
-        } else {
-          toolName = this.toolNames.get(callId) ?? "unknown";
-        }
-        const acpKind = TOOL_KIND_MAP[toolName] ?? "execute";
-        // Input: scheduled payload first, fall back to cached tool_call input.
-        let inp = payload["input"];
-        if (inp === undefined) inp = this.toolInputs.get(callId);
-        const summary = summarizeToolInput(toolName, inp);
-        const title = summary ? `${toolName}: ${summary}` : toolName;
-        // Track background launches so the later `result` event (input omitted)
-        // can still tag its ToolCallUpdate. The BackgroundTaskListener also
-        // keys off this to know which callId owns the card.
-        const isBackground = isBackgroundInput(inp);
-        if (isBackground) this.backgroundCallIds.add(callId);
-        const newEv: InternalEvent = {
-          kind: "ToolCallNew",
-          callId,
-          tool: toolName,
-          acpKind,
-          status: "pending",
-          title,
-          ...(isBackground ? { background: true } : {}),
-        };
-        if (inp !== undefined) (newEv as { input?: unknown }).input = inp;
-        const locs = extractLocations(toolName, inp);
-        if (locs.length > 0) (newEv as { locations?: typeof locs }).locations = locs;
-        results.push(newEv);
-      }
+      const newEv = this.createToolCall(callId, toolName, payload["input"], "pending");
+      if (newEv) results.push(newEv);
     } else if (tkind === "started") {
       if (callId) {
-        results.push({ kind: "ToolCallUpdate", callId, status: "in_progress" });
+        const newEv = this.createToolCall(callId, toolName, payload["input"], "in_progress");
+        if (newEv) {
+          results.push(newEv);
+        } else {
+          results.push({ kind: "ToolCallUpdate", callId, status: "in_progress" });
+        }
       }
     } else if (tkind === "progress") {
       if (callId) {
+        const newEv = this.createToolCall(callId, toolName, payload["input"], "in_progress");
+        if (newEv) results.push(newEv);
         const output = payload["stdoutTail"] ?? payload["stderrTail"] ?? "";
         const tn = (toolName || this.toolNames.get(callId)) ?? "";
         results.push({
@@ -247,6 +224,8 @@ export class EventTranslator {
       }
     } else if (tkind === "result") {
       if (callId) {
+        const newEv = this.createToolCall(callId, toolName, payload["input"], "in_progress");
+        if (newEv) results.push(newEv);
         const resultPayload = payload["result"];
         const tn = (toolName || this.toolNames.get(callId)) ?? "";
         const ev: InternalEvent = {
@@ -268,6 +247,8 @@ export class EventTranslator {
       }
     } else if (tkind === "error") {
       if (callId) {
+        const newEv = this.createToolCall(callId, toolName, payload["input"], "in_progress");
+        if (newEv) results.push(newEv);
         const tn = (toolName || this.toolNames.get(callId)) ?? "";
         const errPayload = payload["error"];
         const ev: InternalEvent = {
@@ -297,6 +278,37 @@ export class EventTranslator {
       }
     }
     return results;
+  }
+
+  /** Create the first ACP tool event, even if the backend omitted `scheduled`. */
+  private createToolCall(
+    callId: string,
+    eventToolName: string,
+    eventInput: unknown,
+    status: "pending" | "in_progress",
+  ): Extract<InternalEvent, { kind: "ToolCallNew" }> | null {
+    if (!callId || this.seenToolIds.has(callId)) return null;
+    this.seenToolIds.add(callId);
+
+    const toolName = eventToolName || this.toolNames.get(callId) || "unknown";
+    this.toolNames.set(callId, toolName);
+    const input = eventInput === undefined ? this.toolInputs.get(callId) : eventInput;
+    const summary = summarizeToolInput(toolName, input);
+    const isBackground = isBackgroundInput(input);
+    if (isBackground) this.backgroundCallIds.add(callId);
+    const newEv: Extract<InternalEvent, { kind: "ToolCallNew" }> = {
+      kind: "ToolCallNew",
+      callId,
+      tool: toolName,
+      acpKind: TOOL_KIND_MAP[toolName] ?? "execute",
+      status,
+      title: summary ? `${toolName}: ${summary}` : toolName,
+      ...(isBackground ? { background: true } : {}),
+    };
+    if (input !== undefined) newEv.input = input;
+    const locations = extractLocations(toolName, input);
+    if (locations.length > 0) newEv.locations = locations;
+    return newEv;
   }
 
   private translateTurnDone(payload: Record<string, unknown>): InternalEvent[] {

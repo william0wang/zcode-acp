@@ -65,6 +65,43 @@ describe("EventTranslator", () => {
     expect(out2).toHaveLength(0);
   });
 
+  it("creates an in-progress tool call when started arrives without scheduled", () => {
+    const t = new EventTranslator();
+    t.translate(
+      ev("model.streaming", {
+        kind: "tool_call",
+        toolCallId: "c2_missing_scheduled",
+        toolName: "Bash",
+        input: { command: "sleep 140" },
+      }),
+    );
+
+    const out = t.translate(
+      ev("tool.updated", { kind: "started", toolCallId: "c2_missing_scheduled" }),
+    );
+
+    expect(out).toEqual([
+      expect.objectContaining({
+        kind: "ToolCallNew",
+        callId: "c2_missing_scheduled",
+        tool: "Bash",
+        status: "in_progress",
+        title: "Bash: sleep 140",
+        input: { command: "sleep 140" },
+      }),
+    ]);
+    expect(t.seenToolIds.has("c2_missing_scheduled")).toBe(true);
+    expect(
+      t.translate(
+        ev("tool.updated", {
+          kind: "scheduled",
+          toolCallId: "c2_missing_scheduled",
+          toolName: "Bash",
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   it("translates tool.updated result → completed ToolCallUpdate with content for Read", () => {
     const t = new EventTranslator();
     t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c3", toolName: "Read" }));
@@ -81,6 +118,36 @@ describe("EventTranslator", () => {
     expect(u.content?.[0]).toMatchObject({
       type: "content",
       content: { type: "text", text: "file body" },
+    });
+  });
+
+  it("creates a tool call before completing a result received without prior lifecycle events", () => {
+    const t = new EventTranslator();
+    t.translate(
+      ev("model.streaming", {
+        kind: "tool_call",
+        toolCallId: "c3_missing_lifecycle",
+        toolName: "Read",
+        input: { file_path: "README.md" },
+      }),
+    );
+
+    const out = t.translate(
+      ev("tool.updated", {
+        kind: "result",
+        toolCallId: "c3_missing_lifecycle",
+        result: { success: true, content: "file body" },
+      }),
+    );
+
+    expect(out.map((event) => [event.kind, event.status])).toEqual([
+      ["ToolCallNew", "in_progress"],
+      ["ToolCallUpdate", "completed"],
+    ]);
+    expect(out[0]).toMatchObject({
+      callId: "c3_missing_lifecycle",
+      tool: "Read",
+      input: { file_path: "README.md" },
     });
   });
 
