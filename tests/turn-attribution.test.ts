@@ -223,14 +223,10 @@ describe("preemptInFlightTurn cancels ALL matching turns", () => {
     expect(pendingTurns.get(101)?.cancelled).toBe(true);
     expect(pendingTurns.get(102)?.cancelled).toBe(true);
     expect(pendingTurns.get(102)?.stopSent).toBe(true);
-    // stopBackendTurn fires once (stopSent guard dedupes across both turns),
-    // then the close escalation kills the runtime so the generation actually
-    // ends (the backend ignores session/stop — verified 0.16.5). The stale
-    // entry's stopSent guard skips its stop, so close lands first.
-    expect(sends).toEqual([
-      { method: "session/close", sid: "zs_1" },
-      { method: "session/stop", sid: "zs_1" },
-    ]);
+    // stopBackendTurn fires once (stopSent guard dedupes across both turns):
+    // the session/stop formality plus the v4/command stop that actually kills
+    // the generation (the backend ignores session/stop — verified 0.16.5).
+    expect(sends.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
   });
 
   it("returns false when no other turn exists for the session", () => {

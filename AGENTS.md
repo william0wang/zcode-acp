@@ -142,17 +142,18 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
   raw-backend probe; the backend's own log records `hadActivePrompt: false` —
-  the in-flight generation's abort controller is never registered). Cancel is
-  therefore honoured bridge-side, in three parts: the turn loop returns
-  `stopReason: "cancelled"` on the flag instead of waiting for a terminal
-  event; cancel/preempt escalate to `session/close`, which tears down the
-  resident runtime and kills the generation (the conversation persists —
-  `session/resume` restores it); and a send after a recent cancel settles the
-  backend first (drain gate: reload-after-close, or poll-until-idle — a
-  mid-generation send is accepted as steer input and silently dropped when
-  the old turn ends). If a future build fixes the stop, the early return
-  stays correct (client cancel semantics); close just costs a reload, and
-  the drain gate becomes a no-op.
+  the in-flight generation's abort controller is never registered). The
+  official desktop app never hits that path: its stop button sends a
+  `v4/command` RPC of type `stop` (`payload.expectedForegroundExecutionId`
+  optional), which asks the runtime to stop the active foreground execution
+  — found by grepping the app bundle. stopBackendTurn sends both: the
+  session/stop formality plus the v4 stop, which kills the generation
+  instantly (verified: `turn.completed` in 0.0s). Cancel is otherwise
+  bridge-side: the turn loop returns `stopReason: "cancelled"` on the flag,
+  and a send after a recent cancel settles the backend first (drain gate:
+  poll-until-idle, with a `session/close` escalation after a 5s grace if a
+  generation somehow survives both stops — a mid-generation send is accepted
+  as steer input and silently dropped when the old turn ends).
 - **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing

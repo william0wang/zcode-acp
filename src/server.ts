@@ -36,6 +36,12 @@ export interface PendingTurn {
   /** Set once session/stop has been fired for this turn, to avoid re-sending. */
   stopSent?: boolean;
   /**
+   * Foreground execution id from the backend's `turn.started` payload. The
+   * v4/command stop targets it — session/stop alone is ignored by the Aug-28
+   * app-server (its abort controller is never registered; see AGENTS.md).
+   */
+  foregroundExecutionId?: string;
+  /**
    * Set when the turn was ended by the stall-recovery heuristic (backend
    * reported idle after a silence) rather than a real turn.completed event.
    * prompt() skips auto-compact for such turns — the completion was inferred,

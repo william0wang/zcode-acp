@@ -38,7 +38,7 @@ function makeServer(turns: FakeTurn[], resolve: (sid: string) => string | undefi
 }
 
 describe("session/cancel handler", () => {
-  it("marks the matching turn cancelled and fires session/stop + session/close", async () => {
+  it("marks the matching turn cancelled and fires session/stop + v4 stop", async () => {
     const turn: FakeTurn = { zcodeSid: "sess_z", cancelled: false, stopSent: false };
     const { server, sent } = makeServer([turn], (sid) => (sid === "acp_a" ? "sess_z" : undefined));
 
@@ -46,12 +46,11 @@ describe("session/cancel handler", () => {
 
     expect(turn.cancelled).toBe(true);
     expect(turn.stopSent).toBe(true);
-    // stop is the protocol formality; close is what actually kills the
-    // generation (the backend ignores session/stop — verified 0.16.5).
-    expect(sent).toEqual([
-      { method: "session/stop", params: { sessionId: "sess_z" } },
-      { method: "session/close", params: { sessionId: "sess_z" } },
-    ]);
+    // session/stop is the protocol formality; the v4/command stop (the
+    // official app's own path) is what actually kills the generation on the
+    // Aug-28 app-server, which ignores session/stop entirely.
+    expect(sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
+    expect(sent[1]?.params).toMatchObject({ sessionId: "sess_z", type: "stop" });
     expect(server.lastCancelledAt.get("sess_z")).toBeGreaterThan(0);
   });
 
@@ -68,12 +67,9 @@ describe("session/cancel handler", () => {
     expect(old.cancelled).toBe(true);
     expect(live.cancelled).toBe(true);
     expect(other.cancelled).toBe(false);
-    // The stale turn's stopSent guard skips the stop; close fires first (per
-    // cancel), then the live turn's stop. Both target the same session.
-    expect(sent).toEqual([
-      { method: "session/close", params: { sessionId: "sess_z" } },
-      { method: "session/stop", params: { sessionId: "sess_z" } },
-    ]);
+    // The stale turn's stopSent guard skips its stop pair entirely; the live
+    // turn's fires the session/stop + v4/command pair once.
+    expect(sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
   });
 
   it("no-ops for an unknown session id", async () => {
@@ -143,8 +139,8 @@ describe("runEventTurn: cancel exits immediately (backend ignores session/stop)"
     );
 
     expect(resp).toEqual({ stopReason: "cancelled" });
-    // Guard-fired stop (stopSent was false), and NOT a single event consumed.
-    expect(f.sent).toEqual([{ method: "session/stop", params: { sessionId: "sess_z" } }]);
+    // Guard-fired stop pair (stopSent was false), and NOT a single event consumed.
+    expect(f.sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
     expect(f.pollEvent).not.toHaveBeenCalled();
   });
 
@@ -177,7 +173,7 @@ describe("runEventTurn: cancel exits immediately (backend ignores session/stop)"
     );
 
     expect(resp).toEqual({ stopReason: "cancelled" });
-    expect(f.sent).toEqual([{ method: "session/stop", params: { sessionId: "sess_z" } }]);
+    expect(f.sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
   });
 
   it("does not re-fire session/stop when the guard already sent one", async () => {

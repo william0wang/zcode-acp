@@ -75,24 +75,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `esc`/stop now takes effect immediately. The Aug-28 app-server build
-  (still reporting 0.16.5) accepts `session/stop` but no longer aborts the
-  in-flight model stream: the backend's own log records every stop with
-  `hadActivePrompt: false` — the generation's abort controller is never
-  registered — so the stream ran ~10s past the stop to its natural end while
-  the turn loop waited for a terminal event that only came after the full
-  generation. Two changes: the turn loop now returns `stopReason: "cancelled"`
-  the moment the cancel flag is observed, and cancel/preempt escalate to
-  `session/close`, which tears down the resident runtime and kills the
-  generation outright (verified: stream halts within 0.5s, and the
-  conversation persists — `session/resume` restores it with the partial
-  reply in the history).
+  (still reporting 0.16.5) accepts `session/stop` but never aborts the
+  in-flight model stream — its own log records every stop with
+  `hadActivePrompt: false`, i.e. the generation's abort controller is never
+  registered, so the stream ran ~10s past the stop to its natural end while
+  the turn loop waited for a terminal event. Digging through the desktop
+  app's bundle revealed the stop path the official client actually uses: a
+  `v4/command` RPC of type `stop` that asks the runtime to stop the active
+  foreground execution (not the broken `session/stop`). The bridge now sends
+  that v4 stop alongside `session/stop` — verified live: the generation dies
+  the instant the command lands (`turn.completed` in 0.0s, vs +39.7s natural
+  drift before). The turn loop also returns `stopReason: "cancelled"` at
+  once instead of waiting for a terminal event.
 - A follow-up prompt sent right after a cancel/preempt is no longer silently
   dropped. The same backend build accepts a mid-generation `session/send`
   as a steer and discards its input when the old turn finishes (verified:
   only one `turn.completed` ever arrives, for the old prompt). The bridge
-  now settles the backend before sending: with the close escalation the
-  probe fails fast into a session reload; on a backend that honours stop it
-  polls the projection until idle — a visible
+  now settles the backend before sending: with the v4 stop the probe sees
+  idle immediately; on a backend that honours `session/stop` it polls the
+  projection until idle; if a generation somehow survives both stops, a
+  `session/close` escalation after a 5s grace tears down the runtime (the
+  probe then fails into a session reload). A visible
   `[上一个回复仍在生成，等待结束后发送…]` note explains the wait — bounded at
   90s, still interruptible with `esc`, falling back to a direct send on
   timeout or probe failure.
