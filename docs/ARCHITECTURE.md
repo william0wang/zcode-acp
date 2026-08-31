@@ -263,10 +263,21 @@ editor still has it open).
     | turn.completed      | -> end_turn
     | turn.failed         | -> error
     | turn.cancelled      | -> cancelled
-    | timeout (120s)      | -> max_turn_requests
+    | no protocol        |
+    | progress (120s)    | -> probe prompt lock
+    |   lock released    | -> max_turn_requests
+    |   lock held        | -> defer decision
     | manual cancel       | -> cancelled
     +---------------------+
 ```
+
+Projection polling is a recovery signal, not protocol progress. In
+particular, `projection.status=running` may be stale and therefore never
+refreshes the 120-second deadline. At that deadline the bridge probes the
+backend prompt lock (`session/goal show`): an explicitly held lock proves a
+model or tool turn is still active and defers the terminal decision, while a
+released or indeterminate lock preserves the bounded `max_turn_requests`
+outcome. Already-queued events win the deadline race and are consumed first.
 
 ### Tool lifecycle
 
