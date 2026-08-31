@@ -1660,7 +1660,7 @@ export async function runEventTurn(
       } else if (turn.cancelled) {
         // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
         // lock after stop must not keep a user-cancelled turn alive forever.
-        stopBackendTurn(server, turn.zcodeSid);
+        stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
         return { stopReason: "max_turn_requests" };
       } else {
         const lockState = await probePromptLock(server, turn.zcodeSid);
@@ -1679,7 +1679,7 @@ export async function runEventTurn(
           nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
         } else {
           log(`  [stall] no-progress deadline reached; prompt lock=${lockState}`);
-          stopBackendTurn(server, turn.zcodeSid);
+          stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
           return { stopReason: "max_turn_requests" };
         }
       }
@@ -1979,11 +1979,6 @@ export async function runEventTurn(
   }
 }
 
-  // 120s no progress: abandon.
-  stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
-  return { stopReason: "max_turn_requests" };
-}
-
 type PromptLockState = "held" | "released" | "unknown";
 
 /**
@@ -2003,6 +1998,11 @@ async function probePromptLock(server: ZcodeAcpServer, zcodeSid: string): Promis
       10_000,
     );
     if (!resp.error) return "released";
+    // Lock-busy must match by error CODE, not message text: backend message
+    // wording drifts between releases (repo Gotcha), and a missed match kills
+    // a live turn. 1308 is the prompt-lock-busy code (same one the send-retry
+    // loop keys on); message matching kept as a legacy fallback.
+    if (resp.error.code === 1308) return "held";
     const message = (resp.error.message ?? "").toLowerCase();
     if (message.includes("prompt is running") || message.includes("already running")) {
       return "held";

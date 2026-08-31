@@ -124,7 +124,7 @@ describe("stale running projection recovery", () => {
     // Let prompt() finish its immediate setup/subscribe/send chain before the
     // large time jump; otherwise fake time can advance before runEventTurn has
     // captured its initial deadline.
-    for (let i = 0; i < 20 && sendRequests.mock.calls.length === 0; i++) {
+    for (let i = 0; i < 80 && sendRequests.mock.calls.length === 0; i++) {
       await Promise.resolve();
     }
     expect(sendRequests).toHaveBeenCalledOnce();
@@ -143,7 +143,7 @@ describe("stale running projection recovery", () => {
       settled = true;
     });
 
-    for (let i = 0; i < 20 && control.sendRequests.mock.calls.length === 0; i++) {
+    for (let i = 0; i < 80 && control.sendRequests.mock.calls.length === 0; i++) {
       await Promise.resolve();
     }
     expect(control.sendRequests).toHaveBeenCalledOnce();
