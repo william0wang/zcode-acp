@@ -153,7 +153,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   and a send after a recent cancel settles the backend first (drain gate:
   poll-until-idle, with a `session/close` escalation after a 5s grace if a
   generation somehow survives both stops — a mid-generation send is accepted
-  as steer input and silently dropped when the old turn ends).
+  as steer input and silently dropped when the old turn ends; the
+  `turn.steerQueued` event proves the swallow and the bridge reports it at
+  once instead of hanging). After a close-escalation reload the drain gate
+  must resubscribe the event stream (the reload revives the session but not
+  its push — the next turn would run deaf) and re-baseline the projection
+  differ (the abandoned turn committed messages while waiting — a stale
+  baseline replays that residue as the next reply).
 - **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing

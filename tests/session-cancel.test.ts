@@ -195,4 +195,77 @@ describe("runEventTurn: cancel exits immediately (backend ignores session/stop)"
     expect(resp).toEqual({ stopReason: "cancelled" });
     expect(f.sent).toEqual([]);
   });
+
+  it("reports a steered-and-dropped send at once instead of hanging (turn.steerQueued)", async () => {
+    const f = makeTurnFixtures();
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+    // The send landed mid-generation: the backend queued it as steer input
+    // (silently dropped when the old turn ends) and emitted steerQueued. No
+    // turn.started will ever arrive — report the swallow immediately rather
+    // than hanging until the 120s watchdog.
+    f.pollEvent.mockResolvedValue({
+      sessionId: "sess_z",
+      seq: 1,
+      type: "turn.steerQueued",
+      payload: {},
+    });
+
+    const resp = await runEventTurn(
+      f.server,
+      f.listener,
+      f.monitor,
+      f.differ,
+      f.cx,
+      "acp_a",
+      "m1",
+      turn,
+      true, // gate armed: cancel/preempt window
+    );
+
+    expect(resp).toEqual({ stopReason: "max_turn_requests" });
+    // Nothing of ours is generating — no stop pair; the visible note tells
+    // the user to resend.
+    expect(f.sent).toEqual([]);
+    const note = f.cx.notify.mock.calls.find((c) => JSON.stringify(c).includes("重新发送"));
+    expect(note).toBeDefined();
+  });
+
+  it("does not report a steerQueued event once the turn has started", async () => {
+    const f = makeTurnFixtures();
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+    f.pollEvent.mockResolvedValueOnce({
+      sessionId: "sess_z",
+      seq: 1,
+      type: "turn.started",
+      payload: {},
+    });
+    f.pollEvent.mockImplementation(async () => {
+      turn.cancelled = true; // end the loop via the cancel path
+      return {
+        sessionId: "sess_z",
+        seq: 2,
+        type: "turn.steerQueued",
+        payload: {},
+      };
+    });
+
+    const resp = await runEventTurn(
+      f.server,
+      f.listener,
+      f.monitor,
+      f.differ,
+      f.cx,
+      "acp_a",
+      "m1",
+      turn,
+      true,
+    );
+
+    // turn.started already passed: a late steerQueued belongs to someone
+    // else's send — the translator ignores it and the loop does NOT fire the
+    // steer report; the cancel flag ends the turn instead.
+    expect(resp).toEqual({ stopReason: "cancelled" });
+    expect(f.sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);
+    expect(f.cx.notify.mock.calls.some((c) => JSON.stringify(c).includes("重新发送"))).toBe(false);
+  });
 });

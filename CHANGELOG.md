@@ -98,7 +98,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe then fails into a session reload). A visible
   `[上一个回复仍在生成，等待结束后发送…]` note explains the wait — bounded at
   90s, still interruptible with `esc`, falling back to a direct send on
-  timeout or probe failure.
+  timeout or probe failure. Two edge paths found in review are also closed:
+  after a close-escalation reload the bridge re-subscribes the event stream
+  (the reload revives the session but not its push — without this the next
+  turn runs deaf until the watchdog) and re-baselines the projection differ
+  so the cancelled turn's residue is never replayed as the next reply; and a
+  send that does land mid-generation is reported at once via the backend's
+  `turn.steerQueued` event (`[消息被并入仍在生成的回合，将被丢弃，请重新发送]`)
+  instead of hanging silently until the 120s watchdog.
 - Pressing ↓ with no completion menu open no longer zombifies the whole UI:
   the setState updater dereferenced a null menu during render, unmounting
   React's tree under ink without any crash signal (found by review,
