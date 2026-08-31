@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-08-31
+
+### Fixed
+
+- The turn loop's 120-second no-progress watchdog can no longer be kept
+  alive indefinitely by a stale backend projection stuck at
+  `status: "running"`: projection probes no longer refresh the deadline.
+  At the deadline the bridge now probes the authoritative prompt lock via
+  `session/goal show` (lock-busy matched by error code 1308, message text
+  as fallback). A held lock defers the terminal decision by another 120
+  seconds — protecting legitimately long model/tool operations — while a
+  released or indeterminate lock ends the turn with the existing bounded
+  `max_turn_requests` outcome. Queued events are consumed before a
+  deadline decision. (Originally by GuanBear in #83; rebased and adapted
+  to the post-#84 cancel machinery in #85.)
+
 ## [0.14.1] - 2026-08-31
 
 ### Fixed
