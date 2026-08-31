@@ -684,6 +684,21 @@ export function App(props: AppProps): ReactElement {
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
 
+  // --- live-turn liveness ticker ---
+  // A turn with no streamed output (model thinking, silent tool calls) would
+  // otherwise leave the footer frozen — indistinguishable from a stall. The
+  // status row below re-renders once a second so time visibly progresses.
+  const [, tick] = useState(0);
+  const turnStartRef = useRef<number | null>(null);
+  if (turn && turnStartRef.current === null) turnStartRef.current = Date.now();
+  if (!turn) turnStartRef.current = null;
+  const turnActive = turn !== null;
+  useEffect(() => {
+    if (!turnActive) return;
+    const timer = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [turnActive]);
+
   // Native-scrollback layout: full terminal width — no centered reading
   // column. `rows` still matters for capping the live-turn tail so the input
   // box can't be pushed off-screen mid-stream; there is no viewport math.
@@ -906,6 +921,18 @@ export function App(props: AppProps): ReactElement {
   // estimate drift INSIDE this box: an undercounted row crops invisibly off
   // the top instead of stretching the footer past the fold.
   const turnBudget = Math.min(turnHeight(turn, cols), MAX_TURN_ROWS);
+  // Status row for the live-turn block: phase label + elapsed seconds. Bright
+  // (not dim) and self-updating — this line is the "still alive" signal.
+  const turnElapsed = turnStartRef.current
+    ? Math.max(0, Math.floor((Date.now() - turnStartRef.current) / 1000))
+    : 0;
+  const turnLabel = turn
+    ? turn.textBuf
+      ? "writing"
+      : turn.thinkBuf.trim()
+        ? "thinking"
+        : "working"
+    : "";
 
   return (
     <Box flexDirection="column" width={cols}>
@@ -940,8 +967,8 @@ export function App(props: AppProps): ReactElement {
             <Text dimColor>⎿ thinking · {turn.thinkBuf.replace(/\s+/g, " ").slice(-120)}</Text>
           ) : null}
           {turn.textBuf ? <Text>{colorizeCodeFences(turn.textBuf)}</Text> : null}
-          <Text dimColor>
-            <Spinner type="dots" /> ctrl-c to cancel
+          <Text>
+            <Spinner type="dots" /> {turnLabel}… ({turnElapsed}s · esc to interrupt)
           </Text>
         </Box>
       ) : null}

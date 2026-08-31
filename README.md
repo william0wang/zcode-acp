@@ -253,7 +253,9 @@ Submitted prompts are history: `↑`/`↓` (with the completion menu closed)
 recall them per project across restarts — the first `↑` stashes the draft
 and `↓` past the newest entry restores it. Pasted text folds to a single
 line (newlines and tabs become spaces), so a multi-paragraph paste lands in
-the box as one prompt instead of firing line-by-line.
+the box as one prompt instead of firing line-by-line. While a reply streams,
+the footer shows a live status row — `⠋ working… (12s · esc to interrupt)` —
+so stretches with no streamed output (long tool calls) still visibly tick.
 
 Unexpected internal errors never take the REPL down silently: they print to
 stderr and surface as an `-- error absorbed: …` note in the transcript while

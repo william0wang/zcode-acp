@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundary, and the prompt draft is cleared. A running turn refuses it
   (`esc` interrupts first); it is registered as a one-shot command, so
   picking it in the completion menu executes immediately.
+- A live status row while a turn runs — `⠋ working… (12s · esc to interrupt)`,
+  phase-labeled thinking/writing/working — re-rendering every second so
+  stretches with no streamed output (long tool calls) are visibly alive; the
+  old dim "ctrl-c to cancel" line carried no liveness signal.
 - Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
   bridge the editor uses, including slash-command completion with an
   interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
