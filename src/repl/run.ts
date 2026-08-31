@@ -71,6 +71,14 @@ export async function runRepl(): Promise<void> {
     warn(`repl absorbed an error (${crashTimes.length}/${CRASH_LIMIT} recent): ${detail}`);
     if (crashTimes.length >= CRASH_LIMIT) {
       warn("repl: too many errors in a row — UI is likely broken, shutting down");
+      // Unmount so ink's stdin cleanup effects run (raw mode, bracketed
+      // paste): process.exit alone would leave the tty wedged. The tree may
+      // be exactly what's broken — guard the unmount.
+      try {
+        ink.unmount();
+      } catch {
+        // ignore
+      }
       try {
         child.stdin?.end();
       } catch {
@@ -254,6 +262,8 @@ export async function runRepl(): Promise<void> {
   quotaTimer = setInterval(() => void refreshQuota(), QUOTA_TTL_MS);
   quotaTimer.unref();
 
+  // Bracketed paste (?2004) is armed by ink's usePaste hook inside InputLine
+  // and disarmed with its unmount — no manual terminal-mode management here.
   const renderOpts = { exitOnCtrlC: false };
   let ink = render(createElement(App, snapshot()), renderOpts);
   function snapshot(): AppProps {

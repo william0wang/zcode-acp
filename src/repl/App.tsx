@@ -8,7 +8,7 @@
  * input area with an arrow-key picker.
  */
 
-import { Box, Static, Text, useInput, type Key } from "ink";
+import { Box, Static, Text, useInput, usePaste, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
@@ -42,6 +42,7 @@ import {
   createLineEditor,
   ctrlChord,
   deleteAtCaret,
+  foldPasteChunk,
   insertAtCaret,
   planChunkOps,
   replaceText,
@@ -470,19 +471,39 @@ function InputLine({
     }
   };
 
+  // Dedicated paste channel (ADR-0009): ink tokenizes ?2004 bracketed pastes
+  // and delivers them here — markers stripped, newlines intact — and NEVER
+  // forwards them to useInput while this hook is mounted. ink also arms and
+  // disarms bracketed-paste mode with this hook's lifecycle.
+  usePaste((text) => {
+    applyEdit((cur) => insertAtCaret(cur, foldPasteChunk(text)));
+  });
+
   useInput((inputChar, key) => {
-    // Coalesced printable chunk (paste, rapid keys) — batched via
-    // planChunkOps: printable runs apply as ONE editor op, semantic bytes
-    // stay per-character. Escape-sequence chunks (arrow keys flushed
-    // together) keep ink's parsed flags instead.
-    if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
-      for (const op of planChunkOps(inputChar)) {
+    const applyOps = (chunk: string): void => {
+      for (const op of planChunkOps(chunk)) {
         if (op.kind === "insert") {
           applyEdit((cur) => insertAtCaret(cur, op.text));
         } else {
           handleChar(op.ch, derivedKey(op.ch), null);
         }
       }
+    };
+    // Legacy-terminal fallback (no ?2004): unwrapped pastes arrive as raw
+    // coalesced chunks. Require a real newline to fold — lone \r bytes stay
+    // semantic, so coalesced keystroke bursts that happen to carry an Enter
+    // ("x\r" from fast typing, a held-down return) keep their submit
+    // semantics exactly as they had before ADR-0009.
+    if (inputChar && inputChar.length > 1 && inputChar.includes("\n") && !key.ctrl) {
+      applyEdit((cur) => insertAtCaret(cur, foldPasteChunk(inputChar)));
+      return;
+    }
+    // Coalesced printable chunk (paste, rapid keys) — batched via
+    // planChunkOps: printable runs apply as ONE editor op, semantic bytes
+    // stay per-character. Escape-sequence chunks (arrow keys flushed
+    // together) keep ink's parsed flags instead.
+    if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
+      applyOps(inputChar);
       return;
     }
     handleChar(
