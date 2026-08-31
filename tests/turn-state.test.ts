@@ -129,6 +129,62 @@ describe("$/zcode/turnState emission", () => {
     expect(server.pendingTurns.size).toBe(0);
   });
 
+  it("preserves a non-retryable model quota failure in the ACP error", async () => {
+    const server = setup(
+      scriptedBackend(() => [
+        { type: "turn.started" },
+        {
+          type: "turn.failed",
+          payload: {
+            error: {
+              code: "UNKNOWN_ERROR",
+              message: "Turn execution failed",
+              cause: {
+                code: "model_rate_limited",
+                message: "Usage limit reached; resets later",
+                context: {
+                  providerCode: "1308",
+                  responseStatus: 429,
+                  reason: "rate_limited",
+                  retryable: false,
+                  responseBodySummary: {
+                    responseHeaders: { "retry-after": "1118", "set-cookie": "secret" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ]),
+    );
+    const { cx, turnStates } = collectCx();
+
+    const error = await prompt(server, promptParams(), cx, 3).then(
+      () => null,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toMatchObject({
+      name: "RequestError",
+      code: -32603,
+      message: "ZCode turn failed: model_rate_limited Usage limit reached; resets later",
+      data: {
+        type: "zcode_turn_failed",
+        code: "model_rate_limited",
+        reason: "rate_limited",
+        statusCode: 429,
+        providerCode: "1308",
+        retryable: false,
+        retryAfterMs: 1_118_000,
+      },
+    });
+    expect(JSON.stringify((error as { data?: unknown }).data)).not.toContain("secret");
+    expect(turnStates).toEqual([
+      { sessionId: "sess_ts", running: true },
+      { sessionId: "sess_ts", running: false },
+    ]);
+  });
+
   it("preempted turn's exit reports running:true while the preemptor is in flight", async () => {
     let sendCount = 0;
     const server = setup(

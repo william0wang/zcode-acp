@@ -879,14 +879,13 @@ export async function prompt(
         // Only a transient TurnFailedError is retryable; everything else (send
         // failures, non-transient turn errors, exhausted retries, cancellation)
         // propagates to the caller.
-        if (
-          e instanceof TurnFailedError &&
-          attempt < MAX_TURN_ATTEMPTS &&
-          !turn.cancelled &&
-          isTransientTurnError(e.turnError)
-        ) {
-          lastTurnError = e.turnError;
-          continue;
+        if (e instanceof TurnFailedError) {
+          const transient = isTransientTurnError(e.turnError);
+          if (attempt < MAX_TURN_ATTEMPTS && !turn.cancelled && transient) {
+            lastTurnError = e.turnError;
+            continue;
+          }
+          if (!transient) throw turnFailureRequestError(e);
         }
         throw e;
       }
@@ -1014,6 +1013,67 @@ class TurnFailedError extends Error {
     this.name = "TurnFailedError";
     this.turnError = turnError;
   }
+}
+
+interface AcpTurnFailureData {
+  type: "zcode_turn_failed";
+  code?: string;
+  reason?: string;
+  statusCode?: number;
+  providerCode?: string;
+  retryable?: boolean;
+  retryAfterMs?: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Build a small, safe ACP error payload from a backend turn failure. */
+function acpTurnFailureData(turnError: Record<string, unknown>): AcpTurnFailureData {
+  const cause = asRecord(turnError["cause"]) ?? turnError;
+  const context = asRecord(cause["context"]);
+  const summary = asRecord(context?.["responseBodySummary"]);
+  const headers = asRecord(summary?.["responseHeaders"]);
+  const retryAfterMs =
+    finiteNumber(context?.["retryAfterMs"]) ??
+    (() => {
+      const seconds = finiteNumber(headers?.["retry-after"]);
+      return seconds === undefined ? undefined : seconds * 1000;
+    })();
+
+  const data: AcpTurnFailureData = { type: "zcode_turn_failed" };
+  const code = cause["code"] ?? cause["type"];
+  if (typeof code === "string" && code.trim()) data.code = code;
+  const reason = context?.["reason"];
+  if (typeof reason === "string" && reason.trim()) data.reason = reason;
+  const statusCode = finiteNumber(context?.["statusCode"] ?? context?.["responseStatus"]);
+  if (statusCode !== undefined) data.statusCode = statusCode;
+  const providerCode = context?.["providerCode"];
+  if (typeof providerCode === "string" && providerCode.trim()) data.providerCode = providerCode;
+  const retryable = context?.["retryable"];
+  if (typeof retryable === "boolean") data.retryable = retryable;
+  if (retryAfterMs !== undefined) data.retryAfterMs = retryAfterMs;
+  return data;
+}
+
+function turnFailureRequestError(error: TurnFailedError): RequestError {
+  const cause = asRecord(error.turnError["cause"]);
+  const detail = formatTurnError(cause ?? error.turnError) || error.message;
+  return new RequestError(
+    -32603,
+    `ZCode turn failed: ${detail}`,
+    acpTurnFailureData(error.turnError),
+  );
 }
 
 /**
