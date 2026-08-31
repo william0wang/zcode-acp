@@ -47,7 +47,7 @@ import {
   type SessionSummary,
   type TurnState,
 } from "./model.js";
-import { historyPath, loadHistory, pushHistory, saveHistory } from "./history.js";
+import { HISTORY_MAX, historyPath, loadHistory, pushHistory, saveHistory } from "./history.js";
 import { createLineEditor, replaceText, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
@@ -556,7 +556,10 @@ export async function runRepl(): Promise<void> {
     // submission: the queue drain re-enters through here (viaQueue) and its
     // entries were already recorded when they were queued.
     if (!viaQueue) {
-      history = pushHistory(history, text);
+      // Keep memory in step with the file: saveHistory trims to the newest
+      // HISTORY_MAX entries on disk; slice here so a long-lived session's
+      // in-memory array cannot outgrow the same bound.
+      history = pushHistory(history, text).slice(-HISTORY_MAX);
       saveHistory(historyFile, history);
       historyIdx = -1;
       historyDraft = null;
