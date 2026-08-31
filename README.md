@@ -217,9 +217,16 @@ menu is open. The status row carries a compact plan-quota readout
 (`5h 16% · wk 4%`) refreshed every 10 minutes — `/quota` prints the full
 card. Pasted or dragged-in content (error logs, file drops) is sanitized and
 size-capped before it reaches the editor, so long pastes batch cleanly.
-`Ctrl-C` cancels a running turn; `esc` interrupts one too; while idle, press
-Ctrl-C twice to quit. `/exit` leaves; the session itself persists in the
-ZCode backend and is available to your editor.
+`esc` interrupts a running turn (immediately — the bridge resolves the prompt
+as cancelled without waiting for the backend); `Ctrl-C` also interrupts, and
+while idle press it twice to quit. `/exit` leaves; the session itself persists
+in the ZCode backend and is available to your editor.
+
+Sending a follow-up right after an interrupt waits for the backend to finish
+the cancelled generation first — a `[上一个回复仍在生成，等待结束后发送…]`
+note explains the pause (the Aug-28 app-server accepts mid-generation sends
+as steer input but drops them when the old turn ends; the bridge polls until
+the session is idle, up to 90s, so the message actually runs).
 
 Messages typed while a turn is running (or the session is still starting) are
 queued, not lost: each shows up in the transcript immediately and a `⏸ queued`

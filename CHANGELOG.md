@@ -29,7 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A live status row while a turn runs — `⠋ working… (12s · esc to interrupt)`,
   phase-labeled thinking/writing/working — re-rendering every second so
   stretches with no streamed output (long tool calls) are visibly alive; the
-  old dim "ctrl-c to cancel" line carried no liveness signal.
+  old dim "ctrl-c to cancel" line carried no liveness signal. Help lines and
+  the input-box hint now advertise `esc` as the interrupt (ctrl-c is quit).
 - Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
   bridge the editor uses, including slash-command completion with an
   interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
@@ -73,6 +74,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `esc`/stop now takes effect immediately. The Aug-28 app-server build
+  (still reporting 0.16.5) accepts `session/stop` but no longer aborts the
+  in-flight model stream (verified with a raw-backend probe: the stream ran
+  ~10s past the stop to its natural end), so the bridge's turn loop waited
+  for a terminal event that only came after the full generation — every
+  client (REPL, mobile, editor) saw the stop "not work" while output kept
+  streaming. The turn loop now returns `stopReason: "cancelled"` the moment
+  the cancel flag is observed.
+- A follow-up prompt sent right after a cancel/preempt is no longer silently
+  dropped. The same backend build accepts a mid-generation `session/send`
+  as a steer and discards its input when the old turn finishes (verified:
+  only one `turn.completed` ever arrives, for the old prompt). The bridge
+  now polls the session until the backend reports idle before sending —
+  with a visible `[上一个回复仍在生成，等待结束后发送…]` note — bounded at
+  90s, still interruptible with `esc`, falling back to a direct send on
+  timeout or probe failure.
 - Pressing ↓ with no completion menu open no longer zombifies the whole UI:
   the setState updater dereferenced a null menu during render, unmounting
   React's tree under ink without any crash signal (found by review,
@@ -93,6 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   completion, while the other client saw everything). Session-scoped
   notifications (updates, turnState, prompt echo) are now emitted once per
   attached session alias.
+- ESC (and ctrl-c) now interrupts a running turn immediately. The backend
+  ignores `session/stop` (verified against app-server 0.16.5 — the model
+  stream runs to its natural end regardless), and the turn loop used to wait
+  for that terminal event before reporting cancelled, so the reply kept
+  streaming for the whole remaining generation (10s+ observed) while the
+  status row kept spinning. The loop now returns `cancelled` at once; a
+  follow-up prompt sent during the abandoned turn's finalisation arms the
+  turn-attribution gate so the residue is dropped instead of bleeding into
+  the new reply. REPL hint copy now advertises esc as the interrupt
+  ("esc interrupt") instead of ctrl-c.
 
 ## [0.13.0] - 2026-08-26
 

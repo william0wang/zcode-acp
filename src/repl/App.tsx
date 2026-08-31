@@ -203,7 +203,8 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
         <Text dimColor>{"  /        command menu — ↑/↓ move · enter picks · esc closes"}</Text>
         <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
         <Text dimColor>{"  /sessions list and resume past conversations of this project"}</Text>
-        <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
+        <Text dimColor>{"  esc      interrupt the running turn"}</Text>
+        <Text dimColor>{"  ctrl-c   quit — press twice when idle"}</Text>
       </Box>
     </Box>
   );
@@ -637,7 +638,7 @@ function InputLine({
         <Box justifyContent="space-between" width="100%">
           <Text dimColor>{leftLine || "type / for commands · tab completes"}</Text>
           <Text dimColor> </Text>
-          <Text dimColor>{busy ? "" : "enter send · ctrl-c cancels/quits"}</Text>
+          <Text dimColor>{busy ? "" : "enter send · esc interrupt · ctrl-c quit"}</Text>
         </Box>
       </Box>
     </Box>
@@ -653,7 +654,7 @@ function entryHeight(entry: ReplEntry, width: number): number {
     case "user":
       return 1 + estimateLines(`> ${entry.text}`, width);
     case "welcome":
-      return 1 + 11;
+      return 1 + 12;
     case "tool":
       return estimateLines(`• ${entry.title} (${entry.status})`, width);
     default:

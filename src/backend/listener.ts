@@ -57,11 +57,12 @@ export class EventStreamListener {
    */
   async subscribe(nextId: NextId): Promise<ZcodeSnapshot> {
     // Retry transient timeouts as a lightweight safety net for cold-start /
-    // network blips. The cancel-preempt path no longer needs subscribe retries
-    // to absorb a backend stop-finalization window: the turn loop now blocks
-    // until the backend emits turn.completed/turn.failed before its prompt()
-    // exits, so by the time the next prompt reaches subscribe the backend is
-    // already idle. These retries are just a last-resort cushion.
+    // network blips. The cancel path returns from prompt() at once (the
+    // backend ignores session/stop), so a prompt sent right after a cancel
+    // CAN reach subscribe while the abandoned turn is still generating —
+    // prompt()'s drain gate polls the backend to idle before sending, so
+    // residue is gone by the time this subscribes. These retries are just a
+    // last-resort cushion.
     //
     // Only `timeout` is retried — non-transient errors (reader dead, pipe
     // broken, method-not-found, session-level business error) fail fast.

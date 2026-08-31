@@ -105,6 +105,12 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **ZCode backend version drift**: the backend may change event payloads between
   releases. When diff display or event handling breaks, check the raw backend
   event with `ZCODE_ACP_DEBUG=1` before changing translator code.
+- **The backend ignores `session/stop`** (verified against app-server 0.16.5 —
+  the model stream runs to its natural end no matter what). Cancel is therefore
+  bridge-side only: the turn loop returns `cancelled` at once, and the next
+  prompt's turn-attribution gate (armed on a recent cancel) drops the abandoned
+  turn's leftover stream. Never "wait for the backend terminal event" after a
+  cancel — that made ESC feel dead for the whole remaining generation.
 - **`session/prompt` ordering**: subscribe to events BEFORE calling `session/send`
   — short turns can complete before a late subscribe catches them.
 - **Preempt lock**: concurrent prompts for the same session are serialized via
@@ -133,6 +139,19 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **REPL render state lives in run.ts, not React**: App re-renders from fresh
   snapshots; anything that must persist across them (prompt-line editor,
   queue, entries) belongs to run.ts's external store passed via snapshot props.
+- **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
+  RPC returns `{}` but the model stream runs to its natural end (verified by
+  raw-backend probe). Cancel must therefore be honoured bridge-side — the
+  turn loop returns `stopReason: "cancelled"` on the flag instead of waiting
+  for a terminal event, and a send after a recent cancel waits for the
+  backend to report idle (a mid-generation send is accepted as steer input
+  and silently dropped when the old turn ends). If a future build fixes the
+  stop, the early return stays correct (client cancel semantics); only the
+  drain gate becomes a no-op.
+- **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
+  zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
+  client never sends one — keep it that way when hand-probing
+  `zcode app-server --stdio` (frames are bare `{id, method, params}`).
 
 ## Docs to read before sensitive changes
 
