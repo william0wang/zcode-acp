@@ -47,7 +47,8 @@ import {
   type SessionSummary,
   type TurnState,
 } from "./model.js";
-import { createLineEditor, type LineEditor } from "./input-buffer.js";
+import { historyPath, loadHistory, pushHistory, saveHistory } from "./history.js";
+import { createLineEditor, replaceText, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
   // Crash containment: an unexpected throw is SURFACED, never fatal — it
@@ -175,6 +176,50 @@ export async function runRepl(): Promise<void> {
   // snapshots, so draft text must live out here to survive rerenders.
   let editor: LineEditor = createLineEditor();
 
+  // --- prompt history (ADR-0008) ---
+  // Entries load once at startup; `historyIdx` points at the recalled entry
+  // (-1 = live draft). ↑ stashes the draft before walking back; ↓ past the
+  // newest entry restores it. State out here so recall survives repaints.
+  const historyFile = historyPath(process.cwd());
+  let history: string[] = [];
+  let historyIdx = -1;
+  let historyDraft: string | null = null;
+  try {
+    history = loadHistory(historyFile);
+  } catch {
+    // loadHistory is already best-effort; this guard keeps even a throw from
+    // its own write-back path from killing startup.
+  }
+
+  /** Recall one entry older; stashes the live draft on the first step. */
+  function historyUp(): void {
+    if (history.length === 0 || exited) return;
+    if (historyIdx === -1) {
+      historyDraft = editor.text;
+      historyIdx = history.length - 1;
+    } else if (historyIdx > 0) {
+      historyIdx--;
+    } else {
+      return;
+    }
+    editor = replaceText(history[historyIdx]!);
+    rerender();
+  }
+
+  /** Walk one entry newer; past the newest, restore the stashed draft. */
+  function historyDown(): void {
+    if (historyIdx === -1 || exited) return;
+    if (historyIdx < history.length - 1) {
+      historyIdx++;
+      editor = replaceText(history[historyIdx]!);
+    } else {
+      historyIdx = -1;
+      editor = replaceText(historyDraft ?? "");
+      historyDraft = null;
+    }
+    rerender();
+  }
+
   // --- completion-menu visibility mirror ---
   // InputLine publishes whether its menu is showing (plain var, no React
   // state); the app-level key handler reads it so an open menu takes the
@@ -244,6 +289,8 @@ export async function runRepl(): Promise<void> {
         resolve?.(answer);
       },
       onPickSession: (sid) => sessionPickResolver?.(sid),
+      onHistoryUp: historyUp,
+      onHistoryDown: historyDown,
       onExit: () => cleanup(0),
     };
   }
@@ -488,7 +535,17 @@ export async function runRepl(): Promise<void> {
     }
   })();
 
-  async function onSubmit(text: string): Promise<void> {
+  async function onSubmit(text: string, viaQueue = false): Promise<void> {
+    // Every submit is history (slash commands included, verbatim) — recall
+    // exists precisely for command incantations. Recorded ONCE, at first
+    // submission: the queue drain re-enters through here (viaQueue) and its
+    // entries were already recorded when they were queued.
+    if (!viaQueue) {
+      history = pushHistory(history, text);
+      saveHistory(historyFile, history);
+      historyIdx = -1;
+      historyDraft = null;
+    }
     const cmd = parseCommand(text);
     if (cmd === "exit") {
       cleanup(0);
@@ -556,7 +613,7 @@ export async function runRepl(): Promise<void> {
     // Route through onSubmit, not startTurn directly: queued entries still
     // go through command parsing (a queued "/help" must render locally,
     // "/exit" must exit — never reach the bridge as a literal prompt).
-    void onSubmit(next);
+    void onSubmit(next, true);
   }
 
   function onCancelTurn(): void {

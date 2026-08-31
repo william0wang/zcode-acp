@@ -132,6 +132,9 @@ export interface AppProps {
   onAnswerQuestion: (answer: QuestionAnswer | null) => void;
   /** null = dismiss the picker without resuming. */
   onPickSession: (sessionId: string | null) => void;
+  /** Prompt-history recall (ADR-0008); run.ts no-ops when nothing to walk. */
+  onHistoryUp: () => void;
+  onHistoryDown: () => void;
   onExit: () => void;
 }
 
@@ -713,6 +716,21 @@ export function App(props: AppProps): ReactElement {
     }
     if (permission) {
       handlePermissionKey(inputChar, key);
+      return;
+    }
+    // Prompt-history recall: the completion menu keeps its claim on ↑/↓ while
+    // open (its own handler consumes them); with it closed — and no picker
+    // mounted — the arrows walk submitted prompts (ADR-0008). InputLine's
+    // handler also sees these keys but only nudges its (reset) selection.
+    if (
+      (key.upArrow || key.downArrow) &&
+      !props.isMenuOpen() &&
+      !sessionPick &&
+      !question &&
+      !permission
+    ) {
+      if (key.upArrow) props.onHistoryUp();
+      else props.onHistoryDown();
       return;
     }
     // Esc interrupts the running turn — with or without queued follow-ups;
