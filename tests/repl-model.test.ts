@@ -122,6 +122,11 @@ describe("parseCommand", () => {
     expect(parseCommand("/session")).toBe(null);
     expect(parseCommand("/sessions now")).toBe(null);
   });
+
+  it("recognizes the fresh-session command (no arguments)", () => {
+    expect(parseCommand("/new")).toBe("new");
+    expect(parseCommand("/new x")).toBe(null);
+  });
 });
 
 describe("relativeTime", () => {
@@ -312,6 +317,7 @@ describe("isOneShotCommandValue", () => {
     expect(isOneShotCommandValue("/exit")).toBe(true);
     expect(isOneShotCommandValue("/HELP")).toBe(true); // case-insensitive command
     expect(isOneShotCommandValue("/sessions")).toBe(true);
+    expect(isOneShotCommandValue("/new")).toBe(true);
     expect(isOneShotCommandValue("/compact")).toBe(true);
   });
 
@@ -386,8 +392,15 @@ describe("completionCandidates / applyCompletion", () => {
       { name: "model", description: "Switch the session model" },
     ];
     const out = completionCandidates("/", withBridge)!;
-    // Local help/sessions/exit lead even though the bridge doesn't advertise them.
-    expect(out.map((c) => c.value)).toEqual(["/help", "/sessions", "/exit", "/compact", "/model"]);
+    // Local help/sessions/new/exit lead even though the bridge doesn't advertise them.
+    expect(out.map((c) => c.value)).toEqual([
+      "/help",
+      "/sessions",
+      "/new",
+      "/exit",
+      "/compact",
+      "/model",
+    ]);
     // /help output uses the same merged menu.
     const help = handleLocalCommand("/help", withBridge)!;
     expect(help.some((e) => e.kind === "note" && e.text.includes("/help —"))).toBe(true);

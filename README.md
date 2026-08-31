@@ -246,7 +246,14 @@ confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`,
 (skills, plugins) only fills the line, since those usually expect arguments.
 The arg-less forms still print a static listing over the same slash-command
 path the editor uses. `/help` lists every command the bridge advertises,
-including plugin commands.
+including plugin commands. `/new` swaps in a fresh session without leaving
+the terminal (the old conversation stays in `/sessions` and in scrollback).
+
+Submitted prompts are history: `↑`/`↓` (with the completion menu closed)
+recall them per project across restarts — the first `↑` stashes the draft
+and `↓` past the newest entry restores it. Pasted text folds to a single
+line (newlines and tabs become spaces), so a multi-paragraph paste lands in
+the box as one prompt instead of firing line-by-line.
 
 Unexpected internal errors never take the REPL down silently: they print to
 stderr and surface as an `-- error absorbed: …` note in the transcript while

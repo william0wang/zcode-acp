@@ -339,6 +339,11 @@ export async function runRepl(): Promise<void> {
   // --- /sessions bridging: list → picker → resume ---
   let sessionPickResolver: ((sessionId: string | null) => void) | null = null;
 
+  // Bumped by every session swap; async continuations compare their captured
+  // generation after each await and bail when another swap went first —
+  // otherwise a slow session/load could reseed status into a FRESH session.
+  let swapGen = 0;
+
   // --- ACP client connection ---
   const stream = acp.ndJsonStream(
     Writable.toWeb(child.stdin! as Writable),
@@ -566,6 +571,10 @@ export async function runRepl(): Promise<void> {
       void openSessionPicker();
       return;
     }
+    if (cmd === "new") {
+      void startFreshSession();
+      return;
+    }
     entries = [...entries, { kind: "user", text }];
     // REPL-local commands (help / arg-less listing forms) render here and
     // never reach the bridge; everything else is a prompt (slash interception
@@ -706,6 +715,7 @@ export async function runRepl(): Promise<void> {
    * routing (`buildSession().start()` only covers session/new).
    */
   async function resumeInto(picked: SessionSummary): Promise<void> {
+    const gen = ++swapGen;
     const loaded = (
       cx as unknown as {
         attachSession(response: { sessionId: string }): ActiveSession;
@@ -735,9 +745,11 @@ export async function runRepl(): Promise<void> {
         configOptions?: acp.SessionConfigOption[] | null;
         replayMeta?: { replayedMessages?: number; totalMessages?: number; hasMore?: boolean };
       };
+      if (gen !== swapGen) return; // another swap went first — this load is stale
       status = seedStatusFromNewSession(status, resp);
       resumeMeta = resp.replayMeta ?? null;
     } catch (err) {
+      if (gen !== swapGen) return; // stale — another swap owns the state now
       replayMode = false;
       replayTurn = null;
       entries = [
@@ -763,6 +775,102 @@ export async function runRepl(): Promise<void> {
       { kind: "note", text: `resumed "${title}"${truncated || " — history restored above"}` },
     ];
     rerender();
+  }
+
+  /** Fresh welcome panel entry; reused by startup and `/new`. */
+  function welcomeEntry(): ReplEntry {
+    return {
+      kind: "welcome",
+      info: {
+        version: AGENT_INFO.version,
+        cwd: process.cwd(),
+        model: selectLabel(status.model),
+        mode: selectLabel(status.mode),
+        thought: selectLabel(status.thought),
+      },
+    };
+  }
+
+  /**
+   * `/new` (ADR-0010): swap the live session for a fresh backend-created one,
+   * strictly client-side — routing the command to the backend's slash
+   * interception would rotate the session id out from under the update pump.
+   * Reuses the session/new bootstrap; the swap refuses while a turn runs or
+   * startup is still in flight (same preempt discipline as /sessions).
+   */
+  async function startFreshSession(): Promise<void> {
+    if (busy || turnActive) {
+      entries = [
+        ...entries,
+        { kind: "user", text: "/new" },
+        {
+          kind: "note",
+          text: turnActive
+            ? "a turn is running — esc interrupts it first"
+            : "still starting up — try /new again in a moment",
+        },
+      ];
+      rerender();
+      return;
+    }
+    const gen = ++swapGen;
+    try {
+      const fresh = await cx.buildSession(process.cwd()).start();
+      if (gen !== swapGen) {
+        fresh.dispose(); // another swap went first — this placeholder is junk
+        return;
+      }
+      if (turnActive) {
+        // A turn raced into the old session during the session/new roundtrip
+        // (a local submit or a remote client). Swapping now would orphan it:
+        // disposing the session takes its update pump down and the
+        // completion event is filtered by session id, so turnActive would
+        // stick forever and wedge the REPL. Keep the current session.
+        fresh.dispose();
+        entries = [
+          ...entries,
+          { kind: "user", text: "/new" },
+          {
+            kind: "note",
+            text: "a turn started while /new was swapping — staying in the current session",
+          },
+        ];
+        rerender();
+        return;
+      }
+      activeSession?.dispose();
+      activeSession = fresh;
+      status = seedStatusFromNewSession(status, fresh.newSessionResponse);
+      // Any in-flight /sessions replay is dead: its pump read fails into the
+      // catch/re-arm path, and its stale continuations bail on swapGen.
+      replayMode = false;
+      replayTurn = null;
+      loadSettled = true;
+      // Native-scrollback model: entries are APPEND-ONLY — ink <Static> has
+      // already printed everything before its print cursor, so shrinking the
+      // array would silently drop the divider. The old conversation stays in
+      // the terminal's own history (that's the model's whole point).
+      entries = [
+        ...entries,
+        { kind: "user", text: "/new" },
+        {
+          kind: "note",
+          text: "── new session started — the previous conversation stays in /sessions ──",
+        },
+      ];
+      editor = createLineEditor();
+      rerender();
+    } catch (err) {
+      entries = [
+        ...entries,
+        { kind: "user", text: "/new" },
+        {
+          kind: "note",
+          text: `failed to start a new session: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      ];
+      rerender();
+    }
   }
 
   // Terminal resize: the dynamic footer re-wraps at the new width via a
@@ -832,17 +940,6 @@ export async function runRepl(): Promise<void> {
 
   // Welcome panel as the first transcript entry — branding, session info,
   // seeded config, and key hints; pushed into scrollback by the first prompt.
-  entries = [
-    {
-      kind: "welcome",
-      info: {
-        version: AGENT_INFO.version,
-        cwd: process.cwd(),
-        model: selectLabel(status.model),
-        mode: selectLabel(status.mode),
-        thought: selectLabel(status.thought),
-      },
-    },
-  ];
+  entries = [welcomeEntry()];
   rerender();
 }

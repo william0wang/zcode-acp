@@ -299,12 +299,13 @@ export function finishTurn(state: TurnState, stopReason?: string): ReplEntry[] {
 }
 
 /** REPL meta-commands. Everything else is a prompt. */
-export type ReplCommand = "exit" | "sessions" | null;
+export type ReplCommand = "exit" | "sessions" | "new" | null;
 
 export function parseCommand(text: string): ReplCommand {
   const t = text.trim();
   if (t === "/exit" || t === "/quit" || t === "/q") return "exit";
   if (t === "/sessions") return "sessions";
+  if (t === "/new") return "new";
   return null;
 }
 
@@ -369,6 +370,7 @@ export function createReplStatus(): ReplStatus {
 
 /** Shared by both lists below so /help and /exit keep one description each. */
 const HELP_COMMAND: CommandInfo = { name: "help", description: "list commands (REPL-local)" };
+const NEW_COMMAND: CommandInfo = { name: "new", description: "start a fresh session" };
 const EXIT_COMMAND: CommandInfo = { name: "exit", description: "quit the REPL" };
 
 /** Commands shown before the bridge's first `available_commands_update`. */
@@ -380,6 +382,7 @@ export const FALLBACK_COMMANDS: CommandInfo[] = [
   { name: "compact", description: "compact conversation context" },
   { name: "mcp", description: "list configured MCP servers" },
   { name: "quota", description: "show plan usage card" },
+  NEW_COMMAND,
   EXIT_COMMAND,
 ];
 
@@ -387,6 +390,7 @@ export const FALLBACK_COMMANDS: CommandInfo[] = [
 const LOCAL_COMMANDS: CommandInfo[] = [
   HELP_COMMAND,
   { name: "sessions", description: "list and resume project sessions" },
+  NEW_COMMAND,
   EXIT_COMMAND,
 ];
 
@@ -565,7 +569,7 @@ export function isConfigArgumentMenu(value: string): boolean {
  * fill semantics because its bare form usually expects an argument, and
  * sending must stay the user's explicit act.
  */
-const ONE_SHOT_COMMANDS = new Set(["help", "sessions", "exit", "compact", "mcp", "quota"]);
+const ONE_SHOT_COMMANDS = new Set(["help", "sessions", "new", "exit", "compact", "mcp", "quota"]);
 
 /** Whether the "/"-prefixed single-token line executes immediately when picked. */
 export function isOneShotCommandValue(value: string): boolean {

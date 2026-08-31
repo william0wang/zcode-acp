@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- REPL prompt history: every submit is recorded per project
+  (`~/.zcode/acp/repl-history/<sha1(cwd)>.jsonl`, newest 500 kept, runs of
+  duplicates collapsed) and recalled across restarts with `↑`/`↓` while the
+  completion menu is closed — the first `↑` stashes the live draft and `↓`
+  past the newest entry restores it.
+- Pasted text is folded to a single line before it reaches the prompt:
+  bracketed-paste mode (`?2004`) is armed so ink delivers pastes as one
+  chunk, and newlines/tabs inside them (or any multi-character chunk
+  carrying a newline, for terminals without `?2004`) become single spaces.
+  Previously every newline in a paste submitted mid-paste, firing a
+  multi-paragraph paste line-by-line as separate prompts.
+- REPL `/new` starts a fresh session without leaving the terminal: the live
+  session is swapped client-side for a new `session/new` placeholder
+  (config selects reseeded from the response), a divider note marks the
+  boundary, and the prompt draft is cleared. A running turn refuses it
+  (`esc` interrupts first); it is registered as a one-shot command, so
+  picking it in the completion menu executes immediately.
 - Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
   bridge the editor uses, including slash-command completion with an
   interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
