@@ -73,6 +73,8 @@ src/
 │   │                     input box). No alternate screen, no wheel capture.
 │   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
 │   │                     Ctrl-B/F/A/E/U chords) — no React, testable
+│   ├── history.ts        Per-project prompt history (JSONL under
+│   │                     ~/.zcode/acp/repl-history), pure + testable
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)

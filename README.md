@@ -241,7 +241,7 @@ completion menu — `↑`/`↓` move, `enter` picks the highlighted entry (or `t
 `→`; typing the exact form already sends), `esc` dismisses. After picking
 `/model`, `/mode`, or `/thought` the same menu lists the config options (the
 current one marked `●`) and **enter on a row switches immediately** — no second
-confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`,
+confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`, `/new`,
 `/compact`, `/mcp`, `/quota`) run on pick as well; every other completion
 (skills, plugins) only fills the line, since those usually expect arguments.
 The arg-less forms still print a static listing over the same slash-command
