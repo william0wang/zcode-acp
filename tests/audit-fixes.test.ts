@@ -171,6 +171,7 @@ describe("dispatchPlanIfChanged delayed re-check", () => {
     const server = {
       ensureBackend: () => backend,
       nextId: () => 1,
+      sessionAliases: (sid: string) => [sid],
     } as unknown as ZcodeAcpServer;
     const cx = { notify: vi.fn().mockResolvedValue(undefined) } as unknown as acp.AgentContext;
 

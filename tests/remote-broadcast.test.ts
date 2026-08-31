@@ -184,7 +184,10 @@ describe("echoUserPromptToOthers", () => {
 
   it("echoes the prompt text to other clients, never the prompter", async () => {
     const { registry, zed, phone, prompter } = registryWithZedAndPhone();
-    const server = { clients: registry } as unknown as ZcodeAcpServer;
+    const server = {
+      clients: registry,
+      sessionAliases: (sid: string) => [sid],
+    } as unknown as ZcodeAcpServer;
 
     echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt: "hello from zed" });
     await sleep(0);
@@ -203,7 +206,10 @@ describe("echoUserPromptToOthers", () => {
 
   it("joins text blocks of a structured prompt and skips non-text ones", async () => {
     const { registry, phone, prompter } = registryWithZedAndPhone();
-    const server = { clients: registry } as unknown as ZcodeAcpServer;
+    const server = {
+      clients: registry,
+      sessionAliases: (sid: string) => [sid],
+    } as unknown as ZcodeAcpServer;
     const prompt = [
       { type: "text", text: "look at this" },
       { type: "image", data: "…" },
@@ -221,7 +227,10 @@ describe("echoUserPromptToOthers", () => {
 
   it("sends nothing for an empty prompt", async () => {
     const { registry, phone, prompter } = registryWithZedAndPhone();
-    const server = { clients: registry } as unknown as ZcodeAcpServer;
+    const server = {
+      clients: registry,
+      sessionAliases: (sid: string) => [sid],
+    } as unknown as ZcodeAcpServer;
 
     echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt: "  " });
     await sleep(0);

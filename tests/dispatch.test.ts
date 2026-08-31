@@ -371,3 +371,72 @@ describe("dispatchEvent", () => {
     expect(options[2]).toMatchObject({ id: "thought", currentValue: "high" });
   });
 });
+
+/**
+ * Cross-alias fan-out (server.sessionAliases): one conversation attached
+ * under several ACP ids (a local session/new placeholder AND a remote
+ * session/list id) must emit one update PER alias — clients route
+ * session/update by payload sessionId, so a single emission under the
+ * prompting client's id silently starves every other attached client.
+ */
+describe("cross-alias fan-out", () => {
+  /** Mock AgentContext recording the sessionId of every notify call. */
+  function recordingContext(): {
+    cx: acp.AgentContext;
+    calls: Array<{ sessionId: string; update: acp.SessionUpdate }>;
+  } {
+    const calls: Array<{ sessionId: string; update: acp.SessionUpdate }> = [];
+    const cx = {
+      notify(_method: string, params: { sessionId: string; update: acp.SessionUpdate }) {
+        calls.push(params);
+        return Promise.resolve();
+      },
+    } as unknown as acp.AgentContext;
+    return { cx, calls };
+  }
+
+  it("sessionAliases lists every acp id attached to the same backend session", () => {
+    const server = makeServer(false);
+    expect(server.sessionAliases("unknown")).toEqual(["unknown"]);
+    server.registerSession("acp_a", "zc_1");
+    expect(server.sessionAliases("acp_a")).toEqual(["acp_a"]);
+    server.registerSession("acp_b", "zc_1");
+    server.registerSession("acp_z", "zc_1");
+    expect(new Set(server.sessionAliases("acp_a"))).toEqual(new Set(["acp_a", "acp_b", "acp_z"]));
+    // Re-registering overwrites only that pair, never drops siblings.
+    server.registerSession("acp_b", "zc_1");
+    expect(new Set(server.sessionAliases("acp_a"))).toEqual(new Set(["acp_a", "acp_b", "acp_z"]));
+  });
+
+  it("dispatchEvent emits once per attached alias", async () => {
+    const { cx, calls } = recordingContext();
+    const server = makeServer(false);
+    server.registerSession("acp_a", "zc_1");
+    server.registerSession("acp_b", "zc_1");
+    await dispatchEvent(
+      server,
+      cx,
+      "acp_a",
+      { kind: "TextDelta", text: "hi" } as InternalEvent,
+      CHUNK,
+    );
+    expect(calls.map((c) => c.sessionId).sort()).toEqual(["acp_a", "acp_b"]);
+    for (const c of calls) {
+      expect(c.update).toMatchObject({ sessionUpdate: "agent_message_chunk", messageId: CHUNK });
+    }
+  });
+
+  it("unregistered sessions keep the single-emission fast path", async () => {
+    const { cx, calls } = recordingContext();
+    const server = makeServer(false);
+    await dispatchEvent(
+      server,
+      cx,
+      "solo",
+      { kind: "TextDelta", text: "hi" } as InternalEvent,
+      CHUNK,
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sessionId).toBe("solo");
+  });
+});

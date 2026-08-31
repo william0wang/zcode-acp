@@ -126,23 +126,31 @@ export function echoUserPromptToOthers(
     .trim();
   if (!text) return;
   const messageId = `uprompt_${randomUUID()}`;
-  void enqueueSessionSend(params.sessionId, () =>
-    server.clients
-      .notifyOthers(prompter, "session/update", {
-        sessionId: params.sessionId,
-        update: {
-          sessionUpdate: "user_message_chunk",
-          content: { type: "text", text },
-          messageId,
-        },
-      })
-      .catch((e: unknown) => {
+  void enqueueSessionSend(params.sessionId, async () => {
+    // Emit once per attached alias (server.sessionAliases): clients route
+    // session/update by payload sessionId, so the prompter's id alone never
+    // reaches a client holding this conversation under a different id.
+    const results = await Promise.allSettled(
+      server.sessionAliases(params.sessionId).map((sid) =>
+        server.clients.notifyOthers(prompter, "session/update", {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text },
+            messageId,
+          },
+        }),
+      ),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
         warn(
           `user-prompt echo failed (sid=${params.sessionId}): ` +
-            `${e instanceof Error ? e.message : String(e)}`,
+            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
         );
-      }),
-  );
+      }
+    }
+  });
 }
 
 /** Shape of a slash command entry (matches ACP's AvailableCommand). */

@@ -86,6 +86,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwrite the resumed one; the placeholder is now discarded.
 - Resume no longer force-pins a session to the first config.json model
   (faithful model preservation, overlay demoted to one-retry fallback).
+- Turns driven from another client (mobile app, second editor) now render
+  live in the REPL even when the two hold different ACP session ids for the
+  same conversation — the common "fresh REPL session, mobile follow-up"
+  path previously stayed completely silent (no live turn, no streaming, no
+  completion, while the other client saw everything). Session-scoped
+  notifications (updates, turnState, prompt echo) are now emitted once per
+  attached session alias.
 
 ## [0.13.0] - 2026-08-26
 

@@ -646,12 +646,24 @@ export async function prompt(
   }
   // Out-of-band running indicator: clients that did not send this prompt
   // (re-attached mobile, second editor) learn the turn started here — the
-  // session/load replayMeta only snapshots attach time. Best-effort: a dead
+  // session/load replayMeta only snapshots attach time. Emitted per attached
+  // alias (see server.sessionAliases) so a client holding this conversation
+  // under a different ACP id opens its live turn too. Best-effort: a dead
   // client must not fail the turn.
-  const emitTurnState = (running: boolean): Promise<void> =>
-    cx
-      .notify("$/zcode/turnState", { sessionId: params.sessionId, running })
-      .catch((e) => log(`turnState notify failed: ${e instanceof Error ? e.message : String(e)}`));
+  const emitTurnState = async (running: boolean): Promise<void> => {
+    const results = await Promise.allSettled(
+      server
+        .sessionAliases(params.sessionId)
+        .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        log(
+          `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
+  };
   await emitTurnState(true);
 
   const listener = new EventStreamListener(backend, zcodeSid);

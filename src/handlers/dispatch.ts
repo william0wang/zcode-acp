@@ -36,42 +36,48 @@ export async function dispatchEvent(
   ev: InternalEvent,
   chunkMsgId: string,
 ): Promise<void> {
-  switch (ev.kind) {
-    case "ToolCallNew":
-      await dispatchToolCallNew(server, cx, acpSid, ev);
-      break;
-    case "ToolCallUpdate":
-      await dispatchToolCallUpdate(server, cx, acpSid, ev);
-      break;
-    case "UsageDelta":
-      await dispatchUsageDelta(server, cx, acpSid, ev);
-      break;
-    case "TextDelta":
-      await sendSessionUpdate(cx, acpSid, {
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: ev.text },
-        messageId: chunkMsgId,
-      });
-      break;
-    case "ReasoningDelta":
-      await sendSessionUpdate(cx, acpSid, {
-        sessionUpdate: "agent_thought_chunk",
-        content: { type: "text", text: ev.text },
-        messageId: `thought_${chunkMsgId}`,
-      });
-      break;
-    case "PlanUpdate":
-      await sendSessionUpdate(cx, acpSid, {
-        sessionUpdate: "plan",
-        entries: ev.entries,
-      });
-      break;
-    case "FilesChanged":
-      await dispatchFilesChanged(cx, acpSid, ev);
-      break;
-    case "ConfigChanged":
-      await dispatchConfigChanged(server, cx, acpSid, ev);
-      break;
+  // One conversation can be attached under several ACP ids (see
+  // server.sessionAliases): emit once per alias with that alias as the
+  // payload sessionId, or every client but the prompter starves silently.
+  const targets = server.sessionAliases(acpSid);
+  for (const sid of targets) {
+    switch (ev.kind) {
+      case "ToolCallNew":
+        await dispatchToolCallNew(server, cx, sid, ev);
+        break;
+      case "ToolCallUpdate":
+        await dispatchToolCallUpdate(server, cx, sid, ev);
+        break;
+      case "UsageDelta":
+        await dispatchUsageDelta(server, cx, sid, ev);
+        break;
+      case "TextDelta":
+        await sendSessionUpdate(cx, sid, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: ev.text },
+          messageId: chunkMsgId,
+        });
+        break;
+      case "ReasoningDelta":
+        await sendSessionUpdate(cx, sid, {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: ev.text },
+          messageId: `thought_${chunkMsgId}`,
+        });
+        break;
+      case "PlanUpdate":
+        await sendSessionUpdate(cx, sid, {
+          sessionUpdate: "plan",
+          entries: ev.entries,
+        });
+        break;
+      case "FilesChanged":
+        await dispatchFilesChanged(cx, sid, ev);
+        break;
+      case "ConfigChanged":
+        await dispatchConfigChanged(server, cx, sid, ev);
+        break;
+    }
   }
 }
 
