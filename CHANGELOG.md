@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-31
+
+### Fixed
+
+- REPL live turn: streamed prose now interleaves with thinking and tool
+  entries in stream order. Prose segments are flushed as entries whenever
+  thinking resumes, a fresh tool row starts, or a plan note arrives —
+  previously the whole reply accumulated in a single buffer pinned to the
+  bottom of the live-turn tail until the turn ended, rendering later
+  thinking/tool entries above earlier prose and letting long replies crowd
+  the tail. Whitespace-only thought chunks are ignored as segment
+  transitions so they cannot shred prose.
+
 ## [0.14.0] - 2026-08-31
 
 ### Added
