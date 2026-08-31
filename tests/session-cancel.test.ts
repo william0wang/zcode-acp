@@ -38,7 +38,7 @@ function makeServer(turns: FakeTurn[], resolve: (sid: string) => string | undefi
 }
 
 describe("session/cancel handler", () => {
-  it("marks the matching turn cancelled and fires session/stop once", async () => {
+  it("marks the matching turn cancelled and fires session/stop + session/close", async () => {
     const turn: FakeTurn = { zcodeSid: "sess_z", cancelled: false, stopSent: false };
     const { server, sent } = makeServer([turn], (sid) => (sid === "acp_a" ? "sess_z" : undefined));
 
@@ -46,7 +46,12 @@ describe("session/cancel handler", () => {
 
     expect(turn.cancelled).toBe(true);
     expect(turn.stopSent).toBe(true);
-    expect(sent).toEqual([{ method: "session/stop", params: { sessionId: "sess_z" } }]);
+    // stop is the protocol formality; close is what actually kills the
+    // generation (the backend ignores session/stop — verified 0.16.5).
+    expect(sent).toEqual([
+      { method: "session/stop", params: { sessionId: "sess_z" } },
+      { method: "session/close", params: { sessionId: "sess_z" } },
+    ]);
     expect(server.lastCancelledAt.get("sess_z")).toBeGreaterThan(0);
   });
 
@@ -63,8 +68,12 @@ describe("session/cancel handler", () => {
     expect(old.cancelled).toBe(true);
     expect(live.cancelled).toBe(true);
     expect(other.cancelled).toBe(false);
-    // The already-stopped turn does not fire a second stop.
-    expect(sent).toEqual([{ method: "session/stop", params: { sessionId: "sess_z" } }]);
+    // The stale turn's stopSent guard skips the stop; close fires first (per
+    // cancel), then the live turn's stop. Both target the same session.
+    expect(sent).toEqual([
+      { method: "session/close", params: { sessionId: "sess_z" } },
+      { method: "session/stop", params: { sessionId: "sess_z" } },
+    ]);
   });
 
   it("no-ops for an unknown session id", async () => {

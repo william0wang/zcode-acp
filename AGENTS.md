@@ -141,13 +141,18 @@ ZCode protocol types into ACP notifications directly — always translate.
   queue, entries) belongs to run.ts's external store passed via snapshot props.
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
-  raw-backend probe). Cancel must therefore be honoured bridge-side — the
-  turn loop returns `stopReason: "cancelled"` on the flag instead of waiting
-  for a terminal event, and a send after a recent cancel waits for the
-  backend to report idle (a mid-generation send is accepted as steer input
-  and silently dropped when the old turn ends). If a future build fixes the
-  stop, the early return stays correct (client cancel semantics); only the
-  drain gate becomes a no-op.
+  raw-backend probe; the backend's own log records `hadActivePrompt: false` —
+  the in-flight generation's abort controller is never registered). Cancel is
+  therefore honoured bridge-side, in three parts: the turn loop returns
+  `stopReason: "cancelled"` on the flag instead of waiting for a terminal
+  event; cancel/preempt escalate to `session/close`, which tears down the
+  resident runtime and kills the generation (the conversation persists —
+  `session/resume` restores it); and a send after a recent cancel settles the
+  backend first (drain gate: reload-after-close, or poll-until-idle — a
+  mid-generation send is accepted as steer input and silently dropped when
+  the old turn ends). If a future build fixes the stop, the early return
+  stays correct (client cancel semantics); close just costs a reload, and
+  the drain gate becomes a no-op.
 - **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing

@@ -76,18 +76,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `esc`/stop now takes effect immediately. The Aug-28 app-server build
   (still reporting 0.16.5) accepts `session/stop` but no longer aborts the
-  in-flight model stream (verified with a raw-backend probe: the stream ran
-  ~10s past the stop to its natural end), so the bridge's turn loop waited
-  for a terminal event that only came after the full generation — every
-  client (REPL, mobile, editor) saw the stop "not work" while output kept
-  streaming. The turn loop now returns `stopReason: "cancelled"` the moment
-  the cancel flag is observed.
+  in-flight model stream: the backend's own log records every stop with
+  `hadActivePrompt: false` — the generation's abort controller is never
+  registered — so the stream ran ~10s past the stop to its natural end while
+  the turn loop waited for a terminal event that only came after the full
+  generation. Two changes: the turn loop now returns `stopReason: "cancelled"`
+  the moment the cancel flag is observed, and cancel/preempt escalate to
+  `session/close`, which tears down the resident runtime and kills the
+  generation outright (verified: stream halts within 0.5s, and the
+  conversation persists — `session/resume` restores it with the partial
+  reply in the history).
 - A follow-up prompt sent right after a cancel/preempt is no longer silently
   dropped. The same backend build accepts a mid-generation `session/send`
   as a steer and discards its input when the old turn finishes (verified:
   only one `turn.completed` ever arrives, for the old prompt). The bridge
-  now polls the session until the backend reports idle before sending —
-  with a visible `[上一个回复仍在生成，等待结束后发送…]` note — bounded at
+  now settles the backend before sending: with the close escalation the
+  probe fails fast into a session reload; on a backend that honours stop it
+  polls the projection until idle — a visible
+  `[上一个回复仍在生成，等待结束后发送…]` note explains the wait — bounded at
   90s, still interruptible with `esc`, falling back to a direct send on
   timeout or probe failure.
 - Pressing ↓ with no completion menu open no longer zombifies the whole UI:

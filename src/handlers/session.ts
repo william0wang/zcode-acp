@@ -756,15 +756,18 @@ export async function prompt(
 
       const chunkMsgId = randomUUID();
 
-      // Drain gate: a recent cancel/preempt means the backend is STILL
-      // generating — session/stop does not abort the model stream (verified
-      // against app-server 0.16.5) — and a send that lands mid-generation is
-      // accepted as a steer whose input the backend silently DROPS when the
-      // old turn finishes (verified: only one turn.completed ever arrives).
-      // Poll the projection until the backend reports idle so the user's
-      // follow-up actually runs; a visible chunk tells them why it waits.
-      // Bounded: on timeout (or a failed probe) send anyway — the steer-drop
-      // risk returns, but blocking the prompt forever is worse.
+      // Drain gate: a recent cancel/preempt means the backend side needs
+      // settling before the send. Two regimes: (a) a backend that honours
+      // session/stop — the abandoned turn is still generating, and a send
+      // that lands mid-generation is accepted as a steer whose input the
+      // backend silently DROPS when the old turn finishes (verified: only
+      // one turn.completed ever arrives) — so poll the projection until it
+      // reports idle; (b) the 0.16.5 reality — cancel() escalated to
+      // session/close, so the session is briefly NOT ACTIVE and must be
+      // reloaded before the send (pollOnce fails fast into that branch).
+      // A visible chunk tells the user why the send waits. Bounded: on
+      // timeout send anyway — the steer-drop risk returns, but blocking the
+      // prompt forever is worse.
       const DRAIN_TIMEOUT_MS = 90_000;
       const DRAIN_POLL_MS = 1000;
       const cancelledRecently =
@@ -780,7 +783,19 @@ export async function prompt(
             return { stopReason: "cancelled" };
           }
           const proj = await drainMonitor.pollOnce();
-          if (!proj) break; // probe failed — don't block the send on it
+          if (!proj) {
+            // Probe failed — most likely the session was just closed by the
+            // cancel escalation (close tears down the runtime). Reload it so
+            // the send below doesn't die on "session is not active".
+            try {
+              await reloadBackendSession(server, params.sessionId, zcodeSid);
+            } catch (e) {
+              warn(
+                `drain gate: reload after close failed: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            break;
+          }
           if (proj.status === "idle") break;
           if (!noticed) {
             noticed = true;
@@ -1002,12 +1017,19 @@ export async function cancel(
   // could leave the live one running. Each turn guards its own stopSent, so
   // multiple matching turns may each fire session/stop once — the backend
   // treats stop as idempotent, so the duplicate is harmless.
+  let closed = false;
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
       turn.cancelled = true;
       if (!turn.stopSent) {
         stopBackendTurn(server, zcodeSid);
         turn.stopSent = true;
+      }
+      // session/stop is a protocol-level formality on 0.16.5 — the generation
+      // only dies when the resident runtime is closed. Once per cancel.
+      if (!closed) {
+        closeBackendSession(server, zcodeSid);
+        closed = true;
       }
       // Record cancel time so a prompt arriving in the backend's ~20s
       // model-connection recovery window can fast-fail instead of hanging.
@@ -1048,6 +1070,31 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
   } catch (e) {
     log(
       `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
+ * Hard-stop a backend turn by tearing down its resident runtime.
+ *
+ * `session/stop` returns `{}` but does NOT abort the model stream on
+ * app-server 0.16.5 (verified live: the stream ran 10s+ past the stop to its
+ * natural end, and the backend's own log shows `hadActivePrompt: false` — the
+ * in-flight generation's abort controller is never registered, so stop finds
+ * nothing to abort). `session/close` closes the runtime itself, which kills
+ * the generation immediately; the conversation is persisted in the backend's
+ * session store, so `session/resume` restores it (verified live: resume
+ * succeeds and the partial reply is in the history). Callers reload the
+ * session on next use — prompt()'s subscribe recovery and the drain gate's
+ * reload both handle the closed window.
+ */
+function closeBackendSession(server: ZcodeAcpServer, zcodeSid: string): void {
+  try {
+    server.ensureBackend().send("session/close", { sessionId: zcodeSid });
+    log(`  [stop] session/close fired for ${zcodeSid} (backend ignores session/stop)`);
+  } catch (e) {
+    log(
+      `  [stop] session/close send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
     );
   }
 }
@@ -1124,12 +1171,21 @@ export function preemptInFlightTurn(
   // would retry against a busy backend for 30s and fail. Each turn guards its
   // own stopSent; duplicate stops are idempotent on the backend.
   let found = false;
+  let closed = false;
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid !== zcodeSid || reqId === selfRequestId) continue;
     turn.cancelled = true; // signal the old turn to stop its retry loops
     if (!turn.stopSent) {
       stopBackendTurn(server, zcodeSid);
       turn.stopSent = true;
+    }
+    // The old generation only dies when the resident runtime is closed (the
+    // backend ignores session/stop) — otherwise this new prompt would wait
+    // out the ENTIRE remaining generation in the drain gate, and a send that
+    // lands mid-generation is silently dropped as a steer. Once per preempt.
+    if (!closed) {
+      closeBackendSession(server, zcodeSid);
+      closed = true;
     }
     // Record cancel time so the prompt()'s send-retry can use the recovery
     // window as a hint (see session/send retry loop).
