@@ -96,6 +96,27 @@ export function replaceText(text: string): LineEditor {
   return { text, caret: toArray(text).length };
 }
 
+/**
+ * Fold a pasted chunk into single-line text (ADR-0009). Bracketed-paste
+ * wrappers are stripped, CRLF/CR/LF runs and tabs collapse to single
+ * spaces, and remaining control bytes are sanitized away — a newline inside
+ * a paste must never keep its Enter semantics (pre-fix pastes fired
+ * line-by-line as separate prompts). Printable text, emoji, CJK pass
+ * through; the prompt-size cap still bounds the result.
+ */
+export function foldPasteChunk(chunk: string): string {
+  // replaceAll with string needles: the wrappers contain ESC, which ESLint's
+  // no-control-regex (rightly) refuses inside a regex literal.
+  const stripped = chunk.replaceAll("\x1b[200~", "").replaceAll("\x1b[201~", "");
+  const folded = stripped.replace(/\r\n?/g, "\n").replace(/\n+/g, " ").replace(/\t/g, " ");
+  // Cap by CODE POINTS (Array.from), matching insertAtCaret's quota —
+  // String.slice counts UTF-16 units and would cleave a surrogate pair at
+  // the boundary on emoji-dense pastes.
+  const clean = Array.from(sanitizeInputChunk(folded)).slice(0, MAX_PROMPT_CHARS).join("");
+  // A whitespace-only paste (blank lines, stray wrappers) inserts nothing.
+  return clean.trim() ? clean : "";
+}
+
 export function insertAtCaret(editor: LineEditor, str: string): LineEditor {
   if (!str) return editor;
   // Silent tail-drop past the cap — the alternative is an unusable frame.

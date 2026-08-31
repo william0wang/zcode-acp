@@ -36,6 +36,12 @@ export interface PendingTurn {
   /** Set once session/stop has been fired for this turn, to avoid re-sending. */
   stopSent?: boolean;
   /**
+   * Foreground execution id from the backend's `turn.started` payload. The
+   * v4/command stop targets it — session/stop alone is ignored by the Aug-28
+   * app-server (its abort controller is never registered; see AGENTS.md).
+   */
+  foregroundExecutionId?: string;
+  /**
    * Set when the turn was ended by the stall-recovery heuristic (backend
    * reported idle after a silence) rather than a real turn.completed event.
    * prompt() skips auto-compact for such turns — the completion was inferred,
@@ -316,6 +322,27 @@ export class ZcodeAcpServer {
   }
 
   /**
+   * Every ACP alias attached to the same backend conversation — at least
+   * [acpSid] itself. Two clients can hold DIFFERENT acpSids for one
+   * conversation (a fresh session/new placeholder in one, a session/list id
+   * resumed in another), and clients route session-scoped notifications by
+   * the payload sessionId. Anything emitted under the prompting client's id
+   * alone is silently dropped by every client holding another alias, so
+   * session-scoped emits (updates, turnState, prompt echo) must loop this
+   * list. A client holding two aliases of one conversation gets both copies —
+   * pathological, accepted.
+   */
+  sessionAliases(acpSid: string): string[] {
+    const zcodeSid = this.sessionMap.get(acpSid);
+    if (!zcodeSid) return [acpSid];
+    const aliases: string[] = [];
+    for (const [sid, zsid] of this.sessionMap) {
+      if (zsid === zcodeSid) aliases.push(sid);
+    }
+    return aliases.length > 0 ? aliases : [acpSid];
+  }
+
+  /**
    * Push a `session/update` notification to the client from OUTSIDE a request
    * handler (used by the background-task listener). Resolves the acp_sid from
    * the zcode_sid and no-ops (returning false) if the client or session is
@@ -329,11 +356,17 @@ export class ZcodeAcpServer {
     try {
       // Broadcast notify swallows per-client failures internally (warn only).
       // Serialized through the replay guard so a background emission queues
-      // behind an in-flight replay batch for the same session.
-      await enqueueSessionSend(acpSid, () =>
-        this.clients.broadcast().notify("session/update", { sessionId: acpSid, update }),
-      );
-      return true;
+      // behind an in-flight replay batch for the same session. Emitted per
+      // attached alias (sessionAliases) so a client holding this conversation
+      // under a different ACP id receives it too.
+      let sent = false;
+      for (const alias of this.sessionAliases(acpSid)) {
+        await enqueueSessionSend(alias, () =>
+          this.clients.broadcast().notify("session/update", { sessionId: alias, update }),
+        );
+        sent = true;
+      }
+      return sent;
     } catch (e) {
       log(`notifyByZcodeSid: session/update failed: ${e instanceof Error ? e.message : String(e)}`);
       return false;

@@ -58,6 +58,74 @@ describe("applyUpdate", () => {
     expect(s.thinkBuf).toBe("");
   });
 
+  it("flushes prose as an entry when thinking resumes after it", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_message_chunk", "para one"));
+    s = applyUpdate(s, chunk("agent_thought_chunk", "hmm"));
+    expect(s.entries).toEqual([{ kind: "assistant", text: "para one" }]);
+    expect(s.textBuf).toBe("");
+    expect(s.thinkBuf).toBe("hmm");
+  });
+
+  it("keeps stream order across a prose → thinking → tool interleave", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_message_chunk", "let me check"));
+    s = applyUpdate(s, chunk("agent_thought_chunk", "which file?"));
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "Read x.ts",
+      status: "in_progress",
+    } as SessionUpdateLike);
+    expect(s.entries).toEqual([
+      { kind: "assistant", text: "let me check" },
+      { kind: "thinking", text: "which file?" },
+      { kind: "tool", id: "t1", title: "Read x.ts", status: "in_progress" },
+    ]);
+    expect(s.textBuf).toBe("");
+    expect(s.thinkBuf).toBe("");
+  });
+
+  it("keeps buffers alone on in-place tool status updates", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      title: "Read x.ts",
+      status: "in_progress",
+    } as SessionUpdateLike);
+    s = applyUpdate(s, chunk("agent_thought_chunk", "still thinking"));
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "t1",
+      status: "completed",
+    } as SessionUpdateLike);
+    // A status change mid-thinking must not shred the live thought stream.
+    expect(s.thinkBuf).toBe("still thinking");
+    expect(s.entries).toEqual([
+      { kind: "tool", id: "t1", title: "Read x.ts", status: "completed" },
+    ]);
+  });
+
+  it("flushes prose before a plan note", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_message_chunk", "here comes the plan"));
+    s = applyUpdate(s, { sessionUpdate: "plan", entries: [{}, {}] } as SessionUpdateLike);
+    expect(s.entries).toEqual([
+      { kind: "assistant", text: "here comes the plan" },
+      { kind: "note", text: "plan · 2 steps" },
+    ]);
+  });
+
+  it("does not shred prose on whitespace-only thought chunks", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_message_chunk", "para "));
+    s = applyUpdate(s, chunk("agent_thought_chunk", "\n\n"));
+    s = applyUpdate(s, chunk("agent_message_chunk", "two"));
+    expect(s.entries).toEqual([]);
+    expect(s.textBuf).toBe("para two");
+  });
+
   it("upserts tool rows by toolCallId and keeps last status", () => {
     let s = createTurnState();
     s = applyUpdate(s, {
@@ -121,6 +189,11 @@ describe("parseCommand", () => {
     expect(parseCommand(" /sessions ")).toBe("sessions");
     expect(parseCommand("/session")).toBe(null);
     expect(parseCommand("/sessions now")).toBe(null);
+  });
+
+  it("recognizes the fresh-session command (no arguments)", () => {
+    expect(parseCommand("/new")).toBe("new");
+    expect(parseCommand("/new x")).toBe(null);
   });
 });
 
@@ -312,6 +385,7 @@ describe("isOneShotCommandValue", () => {
     expect(isOneShotCommandValue("/exit")).toBe(true);
     expect(isOneShotCommandValue("/HELP")).toBe(true); // case-insensitive command
     expect(isOneShotCommandValue("/sessions")).toBe(true);
+    expect(isOneShotCommandValue("/new")).toBe(true);
     expect(isOneShotCommandValue("/compact")).toBe(true);
   });
 
@@ -386,8 +460,15 @@ describe("completionCandidates / applyCompletion", () => {
       { name: "model", description: "Switch the session model" },
     ];
     const out = completionCandidates("/", withBridge)!;
-    // Local help/sessions/exit lead even though the bridge doesn't advertise them.
-    expect(out.map((c) => c.value)).toEqual(["/help", "/sessions", "/exit", "/compact", "/model"]);
+    // Local help/sessions/new/exit lead even though the bridge doesn't advertise them.
+    expect(out.map((c) => c.value)).toEqual([
+      "/help",
+      "/sessions",
+      "/new",
+      "/exit",
+      "/compact",
+      "/model",
+    ]);
     // /help output uses the same merged menu.
     const help = handleLocalCommand("/help", withBridge)!;
     expect(help.some((e) => e.kind === "note" && e.text.includes("/help —"))).toBe(true);

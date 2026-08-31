@@ -646,12 +646,24 @@ export async function prompt(
   }
   // Out-of-band running indicator: clients that did not send this prompt
   // (re-attached mobile, second editor) learn the turn started here — the
-  // session/load replayMeta only snapshots attach time. Best-effort: a dead
+  // session/load replayMeta only snapshots attach time. Emitted per attached
+  // alias (see server.sessionAliases) so a client holding this conversation
+  // under a different ACP id opens its live turn too. Best-effort: a dead
   // client must not fail the turn.
-  const emitTurnState = (running: boolean): Promise<void> =>
-    cx
-      .notify("$/zcode/turnState", { sessionId: params.sessionId, running })
-      .catch((e) => log(`turnState notify failed: ${e instanceof Error ? e.message : String(e)}`));
+  const emitTurnState = async (running: boolean): Promise<void> => {
+    const results = await Promise.allSettled(
+      server
+        .sessionAliases(params.sessionId)
+        .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        log(
+          `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
+  };
   await emitTurnState(true);
 
   const listener = new EventStreamListener(backend, zcodeSid);
@@ -726,7 +738,7 @@ export async function prompt(
         // reconcile the differ baseline so the retried turn's new messages
         // aren't treated as already-seen, surface a retry hint, then back off.
         if (turn.cancelled) {
-          stopBackendTurn(server, zcodeSid);
+          stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
           return { stopReason: "cancelled" };
         }
         differ.markSeen(await fetchMessages(server, zcodeSid));
@@ -743,6 +755,24 @@ export async function prompt(
       }
 
       const chunkMsgId = randomUUID();
+
+      // Drain gate: a recent cancel/preempt means the backend side needs
+      // settling before the send — see drainBackendAfterCancel.
+      const cancelledRecently =
+        server.lastCancelledAt.get(zcodeSid) !== undefined &&
+        Date.now() - server.lastCancelledAt.get(zcodeSid)! < DRAIN_WINDOW_MS;
+      if (cancelledRecently) {
+        const drained = await drainBackendAfterCancel(server, {
+          acpSid: params.sessionId,
+          zcodeSid,
+          turn,
+          listener,
+          monitor: new TurnMonitor(backend, zcodeSid, () => server.nextId()),
+          differ,
+          cx,
+        });
+        if (drained === "cancelled") return { stopReason: "cancelled" };
+      }
 
       // Send the prompt, retrying while the backend reports it's still busy.
       // The backend's prompt lock is the single authoritative readiness signal:
@@ -762,7 +792,7 @@ export async function prompt(
       let sendAttempt = 0;
       while (true) {
         if (turn.cancelled) {
-          stopBackendTurn(server, zcodeSid);
+          stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
           return { stopReason: "cancelled" };
         }
         sendAttempt++;
@@ -777,7 +807,7 @@ export async function prompt(
         if (expectBusy) {
           await sleep(SEND_RETRY_INTERVAL_MS);
           if (turn.cancelled) {
-            stopBackendTurn(server, zcodeSid);
+            stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
             return { stopReason: "cancelled" };
           }
         }
@@ -809,6 +839,13 @@ export async function prompt(
 
       try {
         // Event-driven turn loop: translate events via EventTranslator + dispatch.
+        // Arm the attribution gate also on a recent cancel: the abandoned turn
+        // is still finalising in the backend (session/stop is not honored —
+        // verified 0.16.5), and its leftover deltas stream past the subscribe
+        // of this new prompt (see the gate comment in runEventTurn).
+        const gateArmed =
+          preempted ||
+          Date.now() - (server.lastCancelledAt.get(zcodeSid) ?? 0) < CANCEL_RESIDUE_WINDOW_MS;
         const result = await runEventTurn(
           server,
           listener,
@@ -818,7 +855,7 @@ export async function prompt(
           params.sessionId,
           chunkMsgId,
           turn,
-          preempted,
+          gateArmed,
         );
 
         // (Session title: already set once at the FIRST prompt, before the
@@ -883,6 +920,15 @@ export async function prompt(
   }
 }
 
+/** How long after a cancel a new prompt's attribution gate stays armed (the
+ *  abandoned turn may still be streaming its finalisation into the backend). */
+const CANCEL_RESIDUE_WINDOW_MS = 120_000;
+
+/** How long after a cancel/preempt a new prompt still runs the drain gate
+ *  (drainBackendAfterCancel) before sending — same bound as the drain wait
+ *  itself, so the gate never waits twice its window. */
+const DRAIN_WINDOW_MS = 90_000;
+
 /**
  * `session/set_config_option` → dispatch model/mode/thought and emit the
  * resulting config_option_update (+ current_mode_update for mode).
@@ -922,9 +968,11 @@ export async function setConfigOptionHandler(
  * on a session with no active turn, and on a turn already aborted), so firing
  * it eagerly is safe; the loop's `stopSent` guard prevents a second send.
  *
- * `turn.cancelled` is still set so the turn loop switches to its silent-drain
- * path (translate to detect turnDone, but discard every internal event — no
- * text/tool/usage is pushed after the user stopped).
+ * `turn.cancelled` is still set so the turn loop returns at once (the backend
+ * ignores session/stop — verified 0.16.5, the model stream runs to its natural
+ * end — so waiting for a terminal event would hang the stop for the whole
+ * remaining generation). The loop's return resolves session/prompt with
+ * stopReason "cancelled" immediately.
  */
 export async function cancel(
   server: ZcodeAcpServer,
@@ -936,13 +984,13 @@ export async function cancel(
   // prior turn is still finalising, pendingTurns holds both it and any newer
   // prompt waiting on the backend's prompt lock; breaking on the first match
   // could leave the live one running. Each turn guards its own stopSent, so
-  // multiple matching turns may each fire session/stop once — the backend
-  // treats stop as idempotent, so the duplicate is harmless.
+  // multiple matching turns may each fire the stop pair once — the backend
+  // treats both as idempotent, so the duplicate is harmless.
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
       turn.cancelled = true;
       if (!turn.stopSent) {
-        stopBackendTurn(server, zcodeSid);
+        stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
         turn.stopSent = true;
       }
       // Record cancel time so a prompt arriving in the backend's ~20s
@@ -978,7 +1026,11 @@ class TurnFailedError extends Error {
  * backend's prompt lock releases when ITS finalisation completes — that,
  * not any bridge-side signal, is what the next prompt's send-retry waits on.
  */
-function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
+function stopBackendTurn(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  foregroundExecutionId?: string,
+): void {
   try {
     server.ensureBackend().send("session/stop", { sessionId: zcodeSid });
   } catch (e) {
@@ -986,6 +1038,144 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string): void {
       `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
     );
   }
+  // The official stop path (this is what the desktop app's stop button uses —
+  // found in the app bundle): a v4 command that asks the runtime to stop the
+  // active foreground execution. session/stop alone is a no-op on the Aug-28
+  // app-server (its abort controller is never registered; backend log shows
+  // `hadActivePrompt: false`), while this kills the generation instantly —
+  // verified: turn.completed arrives the same instant the command lands.
+  // expectedForegroundExecutionId is passed when known — it is captured from
+  // the turn's own turn.started, so it names the execution that is foreground
+  // at cancel time, letting the backend guard against stopping a newer one.
+  // Omitted when unknown, targeting whatever is currently foreground.
+  try {
+    server.ensureBackend().send("v4/command", {
+      commandId: randomUUID(),
+      clientId: "zcode-acp-server",
+      sessionId: zcodeSid,
+      type: "stop",
+      payload: foregroundExecutionId
+        ? { expectedForegroundExecutionId: foregroundExecutionId }
+        : {},
+      issuedAt: Date.now(),
+    });
+    log(`  [stop] v4/command stop sent for ${zcodeSid}`);
+  } catch (e) {
+    log(
+      `  [stop] v4/command stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
+ * Last-resort stop: tear down the session's resident runtime, killing any
+ * generation that survived the stop pair (session/stop + v4/command stop).
+ *
+ * The primary path is stopBackendTurn's v4/command stop — the official one —
+ * which kills the generation instantly. This close is the escalation when
+ * both stops are ignored (drain gate, 5s grace): `session/close` closes the
+ * runtime itself, which kills the generation immediately; the conversation
+ * is persisted in the backend's session store, so `session/resume` restores
+ * it (verified live: resume succeeds and the partial reply is in the
+ * history). Callers reload the session on next use — prompt()'s subscribe
+ * recovery and the drain gate's reload both handle the closed window.
+ */
+function closeBackendSession(server: ZcodeAcpServer, zcodeSid: string): void {
+  try {
+    server.ensureBackend().send("session/close", { sessionId: zcodeSid });
+    log(`  [stop] session/close fired for ${zcodeSid} (backend ignores session/stop)`);
+  } catch (e) {
+    log(
+      `  [stop] session/close send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/** Dependencies of drainBackendAfterCancel, injectable for tests. */
+interface DrainDeps {
+  acpSid: string;
+  zcodeSid: string;
+  turn: PendingTurn;
+  listener: EventStreamListener;
+  monitor: TurnMonitor;
+  differ: ProjectionDiffer;
+  cx: acp.AgentContext;
+  /** Test hook: override the close-escalation grace (default 5s). */
+  escalateAfterMs?: number;
+}
+
+/**
+ * Drain gate: a recent cancel/preempt means the backend side needs settling
+ * before the next send. Primary path: stopBackendTurn's v4/command stop kills
+ * the generation at once, so the first probe here already sees idle.
+ * Fallbacks: on a backend that honours session/stop we poll the projection
+ * until idle (a send that lands mid-generation is accepted as a steer whose
+ * input the backend silently DROPS when the old turn finishes); if the
+ * generation is STILL running after a grace period — both stops ignored —
+ * escalate to session/close, which tears down the runtime and kills it
+ * outright (the probe then fails into the reload branch). A visible chunk
+ * tells the user why the send waits. Bounded: on timeout send anyway — the
+ * steer-drop risk returns (the turn.steerQueued guard in runEventTurn reports
+ * it), but blocking the prompt forever is worse.
+ *
+ * Two post-drain repairs, both mirroring established patterns (prompt's
+ * eviction recovery / transient-retry re-baseline):
+ * - resubscribe: session/close killed the runtime this prompt subscribed to;
+ *   the reload revives the session but not the event push, so re-arm it —
+ *   without resubscribe the next turn runs deaf (no events at all, and stall
+ *   recovery can't engage because it needs turn.started).
+ * - re-baseline: the abandoned turn committed messages to the session history
+ *   while we waited (and close persisted its partial output); without markSeen
+ *   the completion diff replays that residue as this turn's output.
+ *
+ * Returns "cancelled" when the turn was flagged cancelled during the drain
+ * (stop pair fired; caller resolves session/prompt at once).
+ */
+export async function drainBackendAfterCancel(
+  server: ZcodeAcpServer,
+  deps: DrainDeps,
+): Promise<"cancelled" | "drained"> {
+  const { acpSid, zcodeSid, turn, listener, monitor, differ, cx } = deps;
+  const DRAIN_TIMEOUT_MS = 90_000;
+  const DRAIN_POLL_MS = 1000;
+  const escalateAfterMs = deps.escalateAfterMs ?? 5_000;
+  const drainT0 = Date.now();
+  let noticed = false;
+  let escalated = false;
+  while (Date.now() - drainT0 < DRAIN_TIMEOUT_MS) {
+    if (turn.cancelled) {
+      stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
+      return "cancelled";
+    }
+    const proj = await monitor.pollOnce();
+    if (!proj) {
+      // Probe failed — most likely the session was just closed by the
+      // escalation (close tears down the runtime). Reload it so the send
+      // below doesn't die on "session is not active", then re-arm the event
+      // push (see docstring).
+      try {
+        await reloadBackendSession(server, acpSid, zcodeSid);
+        await listener.resubscribe(() => server.nextId());
+      } catch (e) {
+        warn(
+          `drain gate: reload after close failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      break;
+    }
+    if (proj.status === "idle") break;
+    if (proj.status === "running" && !escalated && Date.now() - drainT0 > escalateAfterMs) {
+      escalated = true;
+      closeBackendSession(server, zcodeSid);
+    }
+    if (!noticed) {
+      noticed = true;
+      await sendTextChunk(cx, acpSid, "[上一个回复仍在生成，等待结束后发送…]", randomUUID());
+    }
+    await sleep(DRAIN_POLL_MS);
+  }
+  differ.markSeen(await fetchMessages(server, zcodeSid));
+  return "drained";
 }
 
 /**
@@ -1064,7 +1254,7 @@ export function preemptInFlightTurn(
     if (turn.zcodeSid !== zcodeSid || reqId === selfRequestId) continue;
     turn.cancelled = true; // signal the old turn to stop its retry loops
     if (!turn.stopSent) {
-      stopBackendTurn(server, zcodeSid);
+      stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
       turn.stopSent = true;
     }
     // Record cancel time so the prompt()'s send-retry can use the recovery
@@ -1365,7 +1555,7 @@ function getOrCreateDiffer(server: ZcodeAcpServer, zcodeSid: string): Projection
  * handling (requestPermission / ExitPlanMode / AskUserQuestion) lands in
  * Commit 6 — for now they're polled to keep the inbox clear.
  */
-async function runEventTurn(
+export async function runEventTurn(
   server: ZcodeAcpServer,
   listener: EventStreamListener,
   monitor: TurnMonitor,
@@ -1374,7 +1564,7 @@ async function runEventTurn(
   acpSid: string,
   chunkMsgId: string,
   turn: PendingTurn,
-  preempted: boolean,
+  gateArmed: boolean,
 ): Promise<acp.PromptResponse> {
   const backend = server.ensureBackend();
   const translator = new EventTranslator();
@@ -1412,18 +1602,22 @@ async function runEventTurn(
     }
 
     if (turn.cancelled) {
-      // Cancel requested: ensure stop was fired (cancel()/preempt normally do
-      // this, but guard anyway). We do NOT silence subsequent events here — if
-      // the backend ignored the stop and kept producing, that content is still
-      // valuable to the user and should be displayed (the backend is the single
-      // source of truth within a session). Cross-turn contamination is handled
-      // separately by the turn-attribution gate below, which discards this
-      // turn's leftover events from the *next* turn's queue. The loop exits
-      // normally on the terminal event (translator.turnDone below).
+      // Cancel requested: fire the stop (cancel()/preempt normally already
+      // did — this is a guard) and END THE TURN AT ONCE. The backend's
+      // session/stop is fire-and-forget and, as verified against app-server
+      // 0.16.5, does NOT abort the in-flight model stream — waiting for the
+      // backend's terminal event used to keep the turn streaming for the
+      // full remaining generation (10s+ past the stop) while the user stared
+      // at a live spinner. Returning here resolves session/prompt with
+      // stopReason "cancelled" immediately; the finally below unregisters
+      // the turn listener, so events the backend still pushes are delivered
+      // to no turn listener, and the next turn's turn-attribution gate
+      // discards any residue that slipped into the queue meanwhile.
       if (!turn.stopSent) {
-        stopBackendTurn(server, turn.zcodeSid);
+        stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
         turn.stopSent = true;
       }
+      return { stopReason: "cancelled" };
     }
 
     const ev = await listener.pollEvent(500);
@@ -1483,7 +1677,7 @@ async function runEventTurn(
                 await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
               } else if (!emittedOutput) {
                 // No text and no output → suspected failure.
-                stopBackendTurn(server, turn.zcodeSid);
+                stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
                 throw new RequestError(-32603, "turn produced no output");
               }
             }
@@ -1515,6 +1709,22 @@ async function runEventTurn(
     }
 
     lastProgress = Date.now();
+    // Steer-swallow guard: a send accepted while the previous turn is still
+    // generating is queued as steer input, which the backend silently DROPS
+    // when that turn ends — no new turn ever starts (no turn.started), and
+    // the attribution gate below would discard the steerQueued event like
+    // any other residue, leaving this prompt to hang until the 120s watchdog
+    // with the message lost. turn.steerQueued is definitive proof of the
+    // swallow: report it at once so the user can resend immediately.
+    if (ev.type === "turn.steerQueued" && !translator.turnStarted && gateArmed) {
+      await sendTextChunk(
+        cx,
+        acpSid,
+        "[消息被并入仍在生成的回合，将被丢弃，请重新发送]",
+        chunkMsgId,
+      );
+      return { stopReason: "max_turn_requests" };
+    }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still
     // finalising) that landed in the queue while send was retrying on a busy
@@ -1526,14 +1736,24 @@ async function runEventTurn(
     // terminal event here would flip them and make THIS turn exit prematurely
     // at the first check after its own turn.started passes the gate.
     //
-    // The gate is armed ONLY when this send preempted another prompt. Without
-    // preemption no prior-turn residue can exist: the queue can only contain
-    // events of a backend-owned turn that was already active at send time
-    // (e.g. the main-branch turn auto-resumed after a compaction) — this send
-    // was steered into it and produces NO new turn.started, so dropping those
-    // events would silently swallow the entire turn's output in the UI.
-    if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, preempted)) {
+    // Armed when this send preempted another prompt, OR when a cancel is
+    // recent: the backend ignores session/stop, so an abandoned turn keeps
+    // streaming until its natural end while the turn loop has already
+    // returned — a prompt sent in that window reaches subscribe while the
+    // residue is still arriving. Backend serialisation bounds the exposure:
+    // a send is accepted only after the prior turn released the lock, so the
+    // residue can only arrive BEFORE this turn's turn.started. (A send that
+    // lands mid-generation instead is a steer whose input is dropped — the
+    // turn.steerQueued guard above reports that at once.)
+    if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, gateArmed)) {
       continue;
+    }
+    if (ev.type === "turn.started") {
+      // Remember the runtime's foreground execution id: the v4/command stop
+      // (see stopBackendTurn) targets it if the user cancels mid-turn.
+      const fge = (ev.payload as { foregroundExecutionId?: string } | undefined)
+        ?.foregroundExecutionId;
+      if (fge) turn.foregroundExecutionId = fge;
     }
     const internalEvents = translator.translate(ev);
     // Capture the turn-start timestamp for the thinking-phase hint above.
@@ -1608,7 +1828,7 @@ async function runEventTurn(
       }
       if (translator.turnFailed) {
         // Best-effort stop in case the failed turn left a residual lock.
-        stopBackendTurn(server, turn.zcodeSid);
+        stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
         // Throw a TurnFailedError carrying the structured error so the caller
         // (prompt's retry loop) can classify transient vs fatal. The error
         // message is formatted for display when it ultimately reaches the user.
@@ -1662,7 +1882,7 @@ async function runEventTurn(
   }
 
   // 120s no progress: abandon.
-  stopBackendTurn(server, turn.zcodeSid);
+  stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
   return { stopReason: "max_turn_requests" };
 }
 

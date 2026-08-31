@@ -73,6 +73,8 @@ src/
 │   │                     input box). No alternate screen, no wheel capture.
 │   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
 │   │                     Ctrl-B/F/A/E/U chords) — no React, testable
+│   ├── history.ts        Per-project prompt history (JSONL under
+│   │                     ~/.zcode/acp/repl-history), pure + testable
 │   └── run.ts            Orchestration: spawn bridge, pump updates
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
@@ -103,6 +105,12 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **ZCode backend version drift**: the backend may change event payloads between
   releases. When diff display or event handling breaks, check the raw backend
   event with `ZCODE_ACP_DEBUG=1` before changing translator code.
+- **The backend ignores `session/stop`** (verified against app-server 0.16.5 —
+  the model stream runs to its natural end no matter what). Cancel is therefore
+  bridge-side only: the turn loop returns `cancelled` at once, and the next
+  prompt's turn-attribution gate (armed on a recent cancel) drops the abandoned
+  turn's leftover stream. Never "wait for the backend terminal event" after a
+  cancel — that made ESC feel dead for the whole remaining generation.
 - **`session/prompt` ordering**: subscribe to events BEFORE calling `session/send`
   — short turns can complete before a late subscribe catches them.
 - **Preempt lock**: concurrent prompts for the same session are serialized via
@@ -131,6 +139,31 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **REPL render state lives in run.ts, not React**: App re-renders from fresh
   snapshots; anything that must persist across them (prompt-line editor,
   queue, entries) belongs to run.ts's external store passed via snapshot props.
+- **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
+  RPC returns `{}` but the model stream runs to its natural end (verified by
+  raw-backend probe; the backend's own log records `hadActivePrompt: false` —
+  the in-flight generation's abort controller is never registered). The
+  official desktop app never hits that path: its stop button sends a
+  `v4/command` RPC of type `stop` (`payload.expectedForegroundExecutionId`
+  optional), which asks the runtime to stop the active foreground execution
+  — found by grepping the app bundle. stopBackendTurn sends both: the
+  session/stop formality plus the v4 stop, which kills the generation
+  instantly (verified: `turn.completed` in 0.0s). Cancel is otherwise
+  bridge-side: the turn loop returns `stopReason: "cancelled"` on the flag,
+  and a send after a recent cancel settles the backend first (drain gate:
+  poll-until-idle, with a `session/close` escalation after a 5s grace if a
+  generation somehow survives both stops — a mid-generation send is accepted
+  as steer input and silently dropped when the old turn ends; the
+  `turn.steerQueued` event proves the swallow and the bridge reports it at
+  once instead of hanging). After a close-escalation reload the drain gate
+  must resubscribe the event stream (the reload revives the session but not
+  its push — the next turn would run deaf) and re-baseline the projection
+  differ (the abandoned turn committed messages while waiting — a stale
+  baseline replays that residue as the next reply).
+- **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
+  zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
+  client never sends one — keep it that way when hand-probing
+  `zcode app-server --stdio` (frames are bare `{id, method, params}`).
 
 ## Docs to read before sensitive changes
 

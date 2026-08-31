@@ -7,8 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-31
+
+### Fixed
+
+- REPL live turn: streamed prose now interleaves with thinking and tool
+  entries in stream order. Prose segments are flushed as entries whenever
+  thinking resumes, a fresh tool row starts, or a plan note arrives —
+  previously the whole reply accumulated in a single buffer pinned to the
+  bottom of the live-turn tail until the turn ended, rendering later
+  thinking/tool entries above earlier prose and letting long replies crowd
+  the tail. Whitespace-only thought chunks are ignored as segment
+  transitions so they cannot shred prose.
+
+## [0.14.0] - 2026-08-31
+
 ### Added
 
+- REPL prompt history: every submit is recorded per project
+  (`~/.zcode/acp/repl-history/<sha1(cwd)>.jsonl`, newest 500 kept, runs of
+  duplicates collapsed) and recalled across restarts with `↑`/`↓` while the
+  completion menu is closed — the first `↑` stashes the live draft and `↓`
+  past the newest entry restores it.
+- Pasted text is folded to a single line before it reaches the prompt:
+  bracketed-paste mode (`?2004`) is armed so ink delivers pastes as one
+  chunk, and newlines/tabs inside them (or any multi-character chunk
+  carrying a newline, for terminals without `?2004`) become single spaces.
+  Previously every newline in a paste submitted mid-paste, firing a
+  multi-paragraph paste line-by-line as separate prompts.
+- REPL `/new` starts a fresh session without leaving the terminal: the live
+  session is swapped client-side for a new `session/new` placeholder
+  (config selects reseeded from the response), a divider note marks the
+  boundary, and the prompt draft is cleared. A running turn refuses it
+  (`esc` interrupts first); it is registered as a one-shot command, so
+  picking it in the completion menu executes immediately.
+- A live status row while a turn runs — `⠋ working… (12s · esc to interrupt)`,
+  phase-labeled thinking/writing/working — re-rendering every second so
+  stretches with no streamed output (long tool calls) are visibly alive; the
+  old dim "ctrl-c to cancel" line carried no liveness signal. Help lines and
+  the input-box hint now advertise `esc` as the interrupt (ctrl-c is quit).
 - Interactive REPL (bare `zcode-acp`): an Ink terminal chat over the same
   bridge the editor uses, including slash-command completion with an
   interactive menu, a caret-aware prompt line (arrows/Ctrl-B/F/A/E/U),
@@ -52,6 +89,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `esc`/stop now takes effect immediately. The Aug-28 app-server build
+  (still reporting 0.16.5) accepts `session/stop` but never aborts the
+  in-flight model stream — its own log records every stop with
+  `hadActivePrompt: false`, i.e. the generation's abort controller is never
+  registered, so the stream ran ~10s past the stop to its natural end while
+  the turn loop waited for a terminal event. Digging through the desktop
+  app's bundle revealed the stop path the official client actually uses: a
+  `v4/command` RPC of type `stop` that asks the runtime to stop the active
+  foreground execution (not the broken `session/stop`). The bridge now sends
+  that v4 stop alongside `session/stop` — verified live: the generation dies
+  the instant the command lands (`turn.completed` in 0.0s, vs +39.7s natural
+  drift before). The turn loop also returns `stopReason: "cancelled"` at
+  once instead of waiting for a terminal event.
+- A follow-up prompt sent right after a cancel/preempt is no longer silently
+  dropped. The same backend build accepts a mid-generation `session/send`
+  as a steer and discards its input when the old turn finishes (verified:
+  only one `turn.completed` ever arrives, for the old prompt). The bridge
+  now settles the backend before sending: with the v4 stop the probe sees
+  idle immediately; on a backend that honours `session/stop` it polls the
+  projection until idle; if a generation somehow survives both stops, a
+  `session/close` escalation after a 5s grace tears down the runtime (the
+  probe then fails into a session reload). A visible
+  `[上一个回复仍在生成，等待结束后发送…]` note explains the wait — bounded at
+  90s, still interruptible with `esc`, falling back to a direct send on
+  timeout or probe failure. Two edge paths found in review are also closed:
+  after a close-escalation reload the bridge re-subscribes the event stream
+  (the reload revives the session but not its push — without this the next
+  turn runs deaf until the watchdog) and re-baselines the projection differ
+  so the cancelled turn's residue is never replayed as the next reply; and a
+  send that does land mid-generation is reported at once via the backend's
+  `turn.steerQueued` event (`[消息被并入仍在生成的回合，将被丢弃，请重新发送]`)
+  instead of hanging silently until the 120s watchdog.
 - Pressing ↓ with no completion menu open no longer zombifies the whole UI:
   the setState updater dereferenced a null menu during render, unmounting
   React's tree under ink without any crash signal (found by review,
@@ -65,6 +134,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overwrite the resumed one; the placeholder is now discarded.
 - Resume no longer force-pins a session to the first config.json model
   (faithful model preservation, overlay demoted to one-retry fallback).
+- Turns driven from another client (mobile app, second editor) now render
+  live in the REPL even when the two hold different ACP session ids for the
+  same conversation — the common "fresh REPL session, mobile follow-up"
+  path previously stayed completely silent (no live turn, no streaming, no
+  completion, while the other client saw everything). Session-scoped
+  notifications (updates, turnState, prompt echo) are now emitted once per
+  attached session alias.
+- ESC (and ctrl-c) now interrupts a running turn immediately. The backend
+  ignores `session/stop` (verified against app-server 0.16.5 — the model
+  stream runs to its natural end regardless), and the turn loop used to wait
+  for that terminal event before reporting cancelled, so the reply kept
+  streaming for the whole remaining generation (10s+ observed) while the
+  status row kept spinning. The loop now returns `cancelled` at once; a
+  follow-up prompt sent during the abandoned turn's finalisation arms the
+  turn-attribution gate so the residue is dropped instead of bleeding into
+  the new reply. REPL hint copy now advertises esc as the interrupt
+  ("esc interrupt") instead of ctrl-c.
 
 ## [0.13.0] - 2026-08-26
 

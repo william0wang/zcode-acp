@@ -122,13 +122,17 @@ export async function main(): Promise<void> {
     .onRequest("initialize", (ctx) => server.initialize(ctx.params))
     .onRequest("session/new", async (ctx) => {
       const result = await newSession(server, ctx.params);
-      sendAvailableCommandsDeferred(server.clients.broadcast(), result.sessionId, allCommands);
+      for (const sid of server.sessionAliases(result.sessionId)) {
+        sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+      }
       return result;
     })
     .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
     .onRequest("session/resume", async (ctx) => {
       const result = await resumeSession(server, ctx.params, server.clients.broadcast());
-      sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
+      for (const sid of server.sessionAliases(ctx.params.sessionId)) {
+        sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+      }
       // A client that (re)connects catches up via resume/load; any interaction
       // request still waiting for an answer is re-sent to it so a question
       // fired while it was offline becomes answerable there.
@@ -137,7 +141,9 @@ export async function main(): Promise<void> {
     })
     .onRequest("session/load", async (ctx) => {
       const result = await loadSession(server, ctx.params, server.clients.broadcast());
-      sendAvailableCommandsDeferred(server.clients.broadcast(), ctx.params.sessionId, allCommands);
+      for (const sid of server.sessionAliases(ctx.params.sessionId)) {
+        sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+      }
       resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
       return result;
     })

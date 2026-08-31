@@ -8,7 +8,7 @@
  * input area with an arrow-key picker.
  */
 
-import { Box, Static, Text, useInput, type Key } from "ink";
+import { Box, Static, Text, useInput, usePaste, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
@@ -42,6 +42,7 @@ import {
   createLineEditor,
   ctrlChord,
   deleteAtCaret,
+  foldPasteChunk,
   insertAtCaret,
   planChunkOps,
   replaceText,
@@ -132,6 +133,9 @@ export interface AppProps {
   onAnswerQuestion: (answer: QuestionAnswer | null) => void;
   /** null = dismiss the picker without resuming. */
   onPickSession: (sessionId: string | null) => void;
+  /** Prompt-history recall (ADR-0008); run.ts no-ops when nothing to walk. */
+  onHistoryUp: () => void;
+  onHistoryDown: () => void;
   onExit: () => void;
 }
 
@@ -199,7 +203,8 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
         <Text dimColor>{"  /        command menu — ↑/↓ move · enter picks · esc closes"}</Text>
         <Text dimColor>{"  /model   switch model — /mode and /thought likewise"}</Text>
         <Text dimColor>{"  /sessions list and resume past conversations of this project"}</Text>
-        <Text dimColor>{"  ctrl-c   cancel a running turn · idle, press twice to quit"}</Text>
+        <Text dimColor>{"  esc      interrupt the running turn"}</Text>
+        <Text dimColor>{"  ctrl-c   quit — press twice when idle"}</Text>
       </Box>
     </Box>
   );
@@ -467,19 +472,39 @@ function InputLine({
     }
   };
 
+  // Dedicated paste channel (ADR-0009): ink tokenizes ?2004 bracketed pastes
+  // and delivers them here — markers stripped, newlines intact — and NEVER
+  // forwards them to useInput while this hook is mounted. ink also arms and
+  // disarms bracketed-paste mode with this hook's lifecycle.
+  usePaste((text) => {
+    applyEdit((cur) => insertAtCaret(cur, foldPasteChunk(text)));
+  });
+
   useInput((inputChar, key) => {
-    // Coalesced printable chunk (paste, rapid keys) — batched via
-    // planChunkOps: printable runs apply as ONE editor op, semantic bytes
-    // stay per-character. Escape-sequence chunks (arrow keys flushed
-    // together) keep ink's parsed flags instead.
-    if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
-      for (const op of planChunkOps(inputChar)) {
+    const applyOps = (chunk: string): void => {
+      for (const op of planChunkOps(chunk)) {
         if (op.kind === "insert") {
           applyEdit((cur) => insertAtCaret(cur, op.text));
         } else {
           handleChar(op.ch, derivedKey(op.ch), null);
         }
       }
+    };
+    // Legacy-terminal fallback (no ?2004): unwrapped pastes arrive as raw
+    // coalesced chunks. Require a real newline to fold — lone \r bytes stay
+    // semantic, so coalesced keystroke bursts that happen to carry an Enter
+    // ("x\r" from fast typing, a held-down return) keep their submit
+    // semantics exactly as they had before ADR-0009.
+    if (inputChar && inputChar.length > 1 && inputChar.includes("\n") && !key.ctrl) {
+      applyEdit((cur) => insertAtCaret(cur, foldPasteChunk(inputChar)));
+      return;
+    }
+    // Coalesced printable chunk (paste, rapid keys) — batched via
+    // planChunkOps: printable runs apply as ONE editor op, semantic bytes
+    // stay per-character. Escape-sequence chunks (arrow keys flushed
+    // together) keep ink's parsed flags instead.
+    if (inputChar && inputChar.length > 1 && !inputChar.includes("\x1b") && !key.ctrl) {
+      applyOps(inputChar);
       return;
     }
     handleChar(
@@ -613,7 +638,7 @@ function InputLine({
         <Box justifyContent="space-between" width="100%">
           <Text dimColor>{leftLine || "type / for commands · tab completes"}</Text>
           <Text dimColor> </Text>
-          <Text dimColor>{busy ? "" : "enter send · ctrl-c cancels/quits"}</Text>
+          <Text dimColor>{busy ? "" : "enter send · esc interrupt · ctrl-c quit"}</Text>
         </Box>
       </Box>
     </Box>
@@ -629,7 +654,7 @@ function entryHeight(entry: ReplEntry, width: number): number {
     case "user":
       return 1 + estimateLines(`> ${entry.text}`, width);
     case "welcome":
-      return 1 + 11;
+      return 1 + 12;
     case "tool":
       return estimateLines(`• ${entry.title} (${entry.status})`, width);
     default:
@@ -659,6 +684,21 @@ export function App(props: AppProps): ReactElement {
   const { entries, turn, permission, question, sessionPick, queued, status, busy } = props;
   // Second consecutive idle Ctrl-C exits; a turn-running Ctrl-C only cancels.
   const idleIntCount = useRef(0);
+
+  // --- live-turn liveness ticker ---
+  // A turn with no streamed output (model thinking, silent tool calls) would
+  // otherwise leave the footer frozen — indistinguishable from a stall. The
+  // status row below re-renders once a second so time visibly progresses.
+  const [, tick] = useState(0);
+  const turnStartRef = useRef<number | null>(null);
+  if (turn && turnStartRef.current === null) turnStartRef.current = Date.now();
+  if (!turn) turnStartRef.current = null;
+  const turnActive = turn !== null;
+  useEffect(() => {
+    if (!turnActive) return;
+    const timer = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, [turnActive]);
 
   // Native-scrollback layout: full terminal width — no centered reading
   // column. `rows` still matters for capping the live-turn tail so the input
@@ -713,6 +753,21 @@ export function App(props: AppProps): ReactElement {
     }
     if (permission) {
       handlePermissionKey(inputChar, key);
+      return;
+    }
+    // Prompt-history recall: the completion menu keeps its claim on ↑/↓ while
+    // open (its own handler consumes them); with it closed — and no picker
+    // mounted — the arrows walk submitted prompts (ADR-0008). InputLine's
+    // handler also sees these keys but only nudges its (reset) selection.
+    if (
+      (key.upArrow || key.downArrow) &&
+      !props.isMenuOpen() &&
+      !sessionPick &&
+      !question &&
+      !permission
+    ) {
+      if (key.upArrow) props.onHistoryUp();
+      else props.onHistoryDown();
       return;
     }
     // Esc interrupts the running turn — with or without queued follow-ups;
@@ -867,6 +922,18 @@ export function App(props: AppProps): ReactElement {
   // estimate drift INSIDE this box: an undercounted row crops invisibly off
   // the top instead of stretching the footer past the fold.
   const turnBudget = Math.min(turnHeight(turn, cols), MAX_TURN_ROWS);
+  // Status row for the live-turn block: phase label + elapsed seconds. Bright
+  // (not dim) and self-updating — this line is the "still alive" signal.
+  const turnElapsed = turnStartRef.current
+    ? Math.max(0, Math.floor((Date.now() - turnStartRef.current) / 1000))
+    : 0;
+  const turnLabel = turn
+    ? turn.textBuf
+      ? "writing"
+      : turn.thinkBuf.trim()
+        ? "thinking"
+        : "working"
+    : "";
 
   return (
     <Box flexDirection="column" width={cols}>
@@ -901,8 +968,8 @@ export function App(props: AppProps): ReactElement {
             <Text dimColor>⎿ thinking · {turn.thinkBuf.replace(/\s+/g, " ").slice(-120)}</Text>
           ) : null}
           {turn.textBuf ? <Text>{colorizeCodeFences(turn.textBuf)}</Text> : null}
-          <Text dimColor>
-            <Spinner type="dots" /> ctrl-c to cancel
+          <Text>
+            <Spinner type="dots" /> {turnLabel}… ({turnElapsed}s · esc to interrupt)
           </Text>
         </Box>
       ) : null}

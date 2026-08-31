@@ -217,9 +217,16 @@ menu is open. The status row carries a compact plan-quota readout
 (`5h 16% · wk 4%`) refreshed every 10 minutes — `/quota` prints the full
 card. Pasted or dragged-in content (error logs, file drops) is sanitized and
 size-capped before it reaches the editor, so long pastes batch cleanly.
-`Ctrl-C` cancels a running turn; `esc` interrupts one too; while idle, press
-Ctrl-C twice to quit. `/exit` leaves; the session itself persists in the
-ZCode backend and is available to your editor.
+`esc` interrupts a running turn (immediately — the bridge resolves the prompt
+as cancelled without waiting for the backend); `Ctrl-C` also interrupts, and
+while idle press it twice to quit. `/exit` leaves; the session itself persists
+in the ZCode backend and is available to your editor.
+
+Sending a follow-up right after an interrupt waits for the backend to finish
+the cancelled generation first — a `[上一个回复仍在生成，等待结束后发送…]`
+note explains the pause (the Aug-28 app-server accepts mid-generation sends
+as steer input but drops them when the old turn ends; the bridge polls until
+the session is idle, up to 90s, so the message actually runs).
 
 Messages typed while a turn is running (or the session is still starting) are
 queued, not lost: each shows up in the transcript immediately and a `⏸ queued`
@@ -241,12 +248,21 @@ completion menu — `↑`/`↓` move, `enter` picks the highlighted entry (or `t
 `→`; typing the exact form already sends), `esc` dismisses. After picking
 `/model`, `/mode`, or `/thought` the same menu lists the config options (the
 current one marked `●`) and **enter on a row switches immediately** — no second
-confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`,
+confirmation. Argument-free commands (`/exit`, `/help`, `/sessions`, `/new`,
 `/compact`, `/mcp`, `/quota`) run on pick as well; every other completion
 (skills, plugins) only fills the line, since those usually expect arguments.
 The arg-less forms still print a static listing over the same slash-command
 path the editor uses. `/help` lists every command the bridge advertises,
-including plugin commands.
+including plugin commands. `/new` swaps in a fresh session without leaving
+the terminal (the old conversation stays in `/sessions` and in scrollback).
+
+Submitted prompts are history: `↑`/`↓` (with the completion menu closed)
+recall them per project across restarts — the first `↑` stashes the draft
+and `↓` past the newest entry restores it. Pasted text folds to a single
+line (newlines and tabs become spaces), so a multi-paragraph paste lands in
+the box as one prompt instead of firing line-by-line. While a reply streams,
+the footer shows a live status row — `⠋ working… (12s · esc to interrupt)` —
+so stretches with no streamed output (long tool calls) still visibly tick.
 
 Unexpected internal errors never take the REPL down silently: they print to
 stderr and surface as an `-- error absorbed: …` note in the transcript while

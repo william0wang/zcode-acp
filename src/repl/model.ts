@@ -223,6 +223,24 @@ function blockText(content: unknown): string {
 }
 
 /**
+ * Fold pending stream buffers into entries. The live tail renders entries
+ * first and the streaming buffers last, so a segment that starts later must
+ * not stay buffered below entries that streamed earlier — flush on every
+ * transition to keep the tail in stream order. At most one buffer is
+ * non-empty between transitions; both are handled for safety.
+ */
+function flushBuffers(next: TurnState): void {
+  if (next.thinkBuf.trim()) {
+    next.entries = [...next.entries, { kind: "thinking", text: next.thinkBuf.trim() }];
+    next.thinkBuf = "";
+  }
+  if (next.textBuf.trim()) {
+    next.entries = [...next.entries, { kind: "assistant", text: next.textBuf.trim() }];
+    next.textBuf = "";
+  }
+}
+
+/**
  * Apply one update to the live turn state. Returns a NEW state object (safe
  * for React-style always-replace updates). Unknown update kinds are ignored.
  */
@@ -235,17 +253,22 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
   switch (update.sessionUpdate) {
     case "agent_message_chunk": {
       const chunk = blockText(update.content);
-      // A message chunk after thinking means the thought stream ended — flush
-      // it as its own dim entry before the prose starts.
-      if (chunk && next.thinkBuf) {
-        next.entries = [...next.entries, { kind: "thinking", text: next.thinkBuf.trim() }];
-        next.thinkBuf = "";
-      }
+      // Entering prose flushes the thought stream as its own dim entry.
+      // Continuation chunks must not re-flush, and the buffer side is
+      // trim-tested: a whitespace-only thought chunk must not count as a
+      // segment (it would otherwise shred every following prose chunk into
+      // its own entry).
+      if (chunk && next.thinkBuf.trim()) flushBuffers(next);
       next.textBuf = next.textBuf + chunk;
       return next;
     }
     case "agent_thought_chunk": {
-      next.thinkBuf = next.thinkBuf + blockText(update.content);
+      const chunk = blockText(update.content);
+      // Symmetric: entering thinking flushes the prose segment as its own
+      // entry — otherwise it stays pinned below every later entry until the
+      // turn ends and the tail renders out of stream order.
+      if (chunk.trim() && !next.thinkBuf.trim()) flushBuffers(next);
+      next.thinkBuf = next.thinkBuf + chunk;
       return next;
     }
     case "tool_call":
@@ -264,6 +287,11 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
           next.entries = entries;
         }
       } else {
+        // A fresh row starts a non-prose segment: flush pending buffers so
+        // the row lands after everything streamed before it. In-place status
+        // updates keep buffers alone — a live thinking stream would shred
+        // into fragments on every status change.
+        flushBuffers(next);
         next.entries = [...next.entries, { kind: "tool", id, title, status }];
       }
       return next;
@@ -271,6 +299,7 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
     case "plan": {
       // First version renders plans as a one-line note; full plan UI is a
       // follow-up. Counts entries when the shape provides them.
+      flushBuffers(next);
       const items = Array.isArray(update.entries) ? update.entries.length : 0;
       next.entries = [
         ...next.entries,
@@ -299,12 +328,13 @@ export function finishTurn(state: TurnState, stopReason?: string): ReplEntry[] {
 }
 
 /** REPL meta-commands. Everything else is a prompt. */
-export type ReplCommand = "exit" | "sessions" | null;
+export type ReplCommand = "exit" | "sessions" | "new" | null;
 
 export function parseCommand(text: string): ReplCommand {
   const t = text.trim();
   if (t === "/exit" || t === "/quit" || t === "/q") return "exit";
   if (t === "/sessions") return "sessions";
+  if (t === "/new") return "new";
   return null;
 }
 
@@ -369,6 +399,7 @@ export function createReplStatus(): ReplStatus {
 
 /** Shared by both lists below so /help and /exit keep one description each. */
 const HELP_COMMAND: CommandInfo = { name: "help", description: "list commands (REPL-local)" };
+const NEW_COMMAND: CommandInfo = { name: "new", description: "start a fresh session" };
 const EXIT_COMMAND: CommandInfo = { name: "exit", description: "quit the REPL" };
 
 /** Commands shown before the bridge's first `available_commands_update`. */
@@ -380,6 +411,7 @@ export const FALLBACK_COMMANDS: CommandInfo[] = [
   { name: "compact", description: "compact conversation context" },
   { name: "mcp", description: "list configured MCP servers" },
   { name: "quota", description: "show plan usage card" },
+  NEW_COMMAND,
   EXIT_COMMAND,
 ];
 
@@ -387,6 +419,7 @@ export const FALLBACK_COMMANDS: CommandInfo[] = [
 const LOCAL_COMMANDS: CommandInfo[] = [
   HELP_COMMAND,
   { name: "sessions", description: "list and resume project sessions" },
+  NEW_COMMAND,
   EXIT_COMMAND,
 ];
 
@@ -565,7 +598,7 @@ export function isConfigArgumentMenu(value: string): boolean {
  * fill semantics because its bare form usually expects an argument, and
  * sending must stay the user's explicit act.
  */
-const ONE_SHOT_COMMANDS = new Set(["help", "sessions", "exit", "compact", "mcp", "quota"]);
+const ONE_SHOT_COMMANDS = new Set(["help", "sessions", "new", "exit", "compact", "mcp", "quota"]);
 
 /** Whether the "/"-prefixed single-token line executes immediately when picked. */
 export function isOneShotCommandValue(value: string): boolean {
