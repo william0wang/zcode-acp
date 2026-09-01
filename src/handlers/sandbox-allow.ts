@@ -219,32 +219,37 @@ export async function handleSandboxDenial(
   }
 
   const options = [
-    {
-      optionId: "sandbox_allow_always",
-      kind: "allow_always" as const,
-      name: `始终允许 ${targetReal}(写入项目配置)`,
-    },
-    { optionId: "sandbox_allow_once", kind: "allow_once" as const, name: `仅此一次 ${targetReal}` },
+    { optionId: "sandbox_allow_always", kind: "allow_always" as const, name: "始终允许" },
+    { optionId: "sandbox_allow_once", kind: "allow_once" as const, name: "仅此一次" },
     { optionId: "sandbox_reject_once", kind: "reject_once" as const, name: "拒绝一次" },
-    {
-      optionId: "sandbox_reject_always",
-      kind: "reject_always" as const,
-      name: `始终拒绝 ${targetReal}(记入项目配置)`,
-    },
+    { optionId: "sandbox_reject_always", kind: "reject_always" as const, name: "始终拒绝" },
   ];
   let decision: "always" | "once" | "reject_once" | "reject_always" | "deny" = "deny";
   try {
     // Wire name is session/request_permission (snake_case — the camelCase
-    // form is silently method-not-found on real clients) and the params must
-    // carry the toolCall the denial came from: Zed renders the popup against
-    // a tool call the session has already reported.
+    // form is silently method-not-found on real clients). The schema has no
+    // top-level title: the popup's DETAILS live on the toolCall update — its
+    // title names the denied path and the text content explains the stakes.
+    // No `as never`: tsc validates the wire shape against the SDK schema.
     const resp = (await withTimeout(
       cx.request("session/request_permission", {
         sessionId: acpSid,
-        title: "沙箱写入放行",
+        toolCall: {
+          toolCallId,
+          title: `沙箱写入放行:${targetReal}`,
+          content: [
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: `沙箱拒绝了工作区外的写入:${targetReal}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(.zcode/acp/sandbox.json,可编辑撤销)。`,
+              },
+            },
+          ],
+          rawInput: { path: targetReal },
+        },
         options,
-        toolCall: { toolCallId, rawInput: null },
-      } as never),
+      }),
       ASK_TIMEOUT_MS,
     )) as { outcome?: { optionId?: string } } | undefined;
     const oid = resp?.outcome?.optionId ?? "";

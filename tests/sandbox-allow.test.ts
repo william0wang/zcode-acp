@@ -198,11 +198,15 @@ describe("handleSandboxDenial", () => {
     );
 
     const expectedDir = path.dirname(path.join(wsRoot, "..", "outside", "f.txt"));
-    // The popup offers the RESOLVED absolute dir, and the once-allow stores
-    // it too (a raw relative entry would be dropped when the config/profile
-    // is read back).
-    const sentParams = request.mock.calls[0]?.[1] as { options?: { name: string }[] };
-    expect(sentParams.options?.[0]?.name).toContain(expectedDir);
+    // The popup's DETAILS carry the resolved absolute dir (option labels stay
+    // short), and the params are schema-clean: no non-standard top-level
+    // title — a strict client would reject the whole request over it.
+    const sentParams = request.mock.calls[0]?.[1] as {
+      title?: string;
+      toolCall?: { title?: string };
+    };
+    expect(sentParams.toolCall?.title).toContain(expectedDir);
+    expect(sentParams.title).toBeUndefined();
     expect(server.sandboxOnceAllows.has(expectedDir)).toBe(true);
   });
 
