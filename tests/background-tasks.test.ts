@@ -7,11 +7,20 @@
  * backend or ACP client — `notifyByZcodeSid` is stubbed to record calls.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BackgroundTaskListener } from "../src/handlers/background-tasks.js";
 import type { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
+
+// Pin the language: asserted card titles are English and fs is not mocked.
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "en");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 /** A minimal fake server: records every session/update it would send. */
 interface FakeServer {

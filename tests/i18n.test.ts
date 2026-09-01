@@ -52,9 +52,23 @@ describe("resolveLanguage", () => {
     expect(resolveLanguage({})).toBe("zh");
   });
 
-  it("never crashes on non-string app locale values (number/bool/null/array/object)", async () => {
+  it("treats an empty-string localePreference as unset", async () => {
     const { resolveLanguage } = await freshModule();
+    settingJson = JSON.stringify({ localePreference: "", locale: "zh-CN" });
+    expect(resolveLanguage({})).toBe("zh");
+  });
+
+  it("parses a BOM-prefixed settings file", async () => {
+    const { resolveLanguage } = await freshModule();
+    settingJson = "\uFEFF" + JSON.stringify({ locale: "zh-CN" });
+    expect(resolveLanguage({})).toBe("zh");
+  });
+
+  it("never crashes on non-string app locale values (number/bool/null/array/object)", async () => {
+    // A fresh module per value — memoization would otherwise short-circuit
+    // every file parse after the first.
     for (const bad of [5, true, null, [], { x: 1 }]) {
+      const { resolveLanguage } = await freshModule();
       settingJson = JSON.stringify({ locale: bad });
       expect(resolveLanguage({ LANG: "zh_CN" })).toBe("zh"); // falls through
       expect(resolveLanguage({})).toBe("en"); // default
