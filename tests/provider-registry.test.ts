@@ -27,6 +27,20 @@ const FAKE_CONFIG = {
       options: { baseURL: "https://example.test/primary" },
       models: { "model-a": { limit: { context: 128000 } } },
     },
+    "builtin:empty-plan": {
+      name: "Empty Plan",
+      kind: "anthropic",
+      enabled: true,
+      source: "builtin",
+      options: { baseURL: "https://example.test/empty-plan" },
+      models: {},
+    },
+    "builtin:no-models-key": {
+      name: "No Models Key",
+      kind: "anthropic",
+      enabled: true,
+      source: "builtin",
+    },
     "custom-openai-kind": {
       name: "Custom One",
       kind: "openai-compatible",
@@ -78,6 +92,15 @@ describe("buildProviderRegistry", () => {
     expect(ids).toContain("builtin:primary");
     expect(ids).toContain("custom-openai-kind");
     expect(ids).toContain("custom-anthropic-kind");
+  });
+
+  it("skips providers with zero models — an empty models array is rejected by the backend's schema and would fail the whole registry sync", () => {
+    const reg = buildProviderRegistry();
+    const ids = reg.providers.map((p) => p.providerId);
+    expect(ids).not.toContain("builtin:empty-plan");
+    expect(ids).not.toContain("builtin:no-models-key");
+    // Non-empty providers still make it through.
+    expect(ids).toContain("builtin:primary");
   });
 
   it("wraps apiKey as the inline union {source:'inline', value}, never a bare string", () => {
