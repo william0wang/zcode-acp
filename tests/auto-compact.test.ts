@@ -8,7 +8,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeResponse } from "../src/backend/types.js";
@@ -68,7 +68,14 @@ function makeServerWithProjection(
   return { server, backend, compactCalls: compactMock };
 }
 
+// Pin the language: asserted status lines are English and fs is not mocked
+// (a real zh ~/.zcode/v2/setting.json would flip them on a zh-locale machine).
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "en");
+});
+
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 

@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2] - 2026-09-01
+
+### Fixed
+
+Second dual Review + Adversary pass over the 0.16.1 commit (pre-publish gate):
+
+- `setting.json` with an empty-string `localePreference` (`""`) read as a
+  real preference and masked a valid `locale`; the empty string now reads
+  as unset and the effective locale wins.
+- A UTF-8 BOM prefix in `setting.json` made `JSON.parse` throw and the
+  bridge silently fell back to English; the BOM is stripped before parsing.
+- Two more suites asserted English output without pinning
+  `ZCODE_ACP_LANG` (`tests/auto-compact.test.ts`,
+  `tests/background-tasks.test.ts`) — the same zh-machine redness 0.16.1
+  fixed for `mcp-list.test.ts` (6 cases went red per run). Both are now
+  pinned to `en`.
+- `tests/i18n.test.ts`'s crash-guard loop reused one module instance for
+  all five malformed locale values, so memoization short-circuited four of
+  them; each value now parses through a fresh module.
+- Removed a dead `?? ""` on `resp.error.message` (non-optional) in
+  `src/handlers/slash.ts`, and corrected 0.16.1's overstated "import order
+  normalized" claim below.
+
 ## [0.16.1] - 2026-09-01
 
 ### Fixed
@@ -28,8 +51,7 @@ Cross-review follow-ups to 0.16.0 (found by a dual Review + Adversary pass):
   "interaction"), the replay "tool call" fallback, background-task card
   titles, and the slash-command error messages (which previously stayed
   English next to localized success feedback).
-- Import order normalized (alphabetical) for the new i18n imports;
-  `tests/i18n.test.ts` now asserts the nested `slashCommandDescriptions`
+- `tests/i18n.test.ts` now asserts the nested `slashCommandDescriptions`
   key sets match across languages and cover every static command.
 - CHANGELOG wording: 0.16.0's "covers every string" overstated — token-form
   feedback (`✓ /mode = yolo`) and argument hints intentionally stay

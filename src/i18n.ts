@@ -55,11 +55,14 @@ function appLocale(): string | undefined {
     let locale: string | undefined;
     try {
       const raw = readFileSync(path.join(os.homedir(), ".zcode", "v2", "setting.json"), "utf8");
-      const parsed = JSON.parse(raw) as { localePreference?: unknown; locale?: unknown };
+      // Editors saving UTF-8 with a BOM leave \uFEFF in the string; JSON.parse
+      // rejects it, which would silently fall the bridge back to English.
+      const bomless = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+      const parsed = JSON.parse(bomless) as { localePreference?: unknown; locale?: unknown };
       const pref =
         typeof parsed.localePreference === "string" ? parsed.localePreference : undefined;
       const eff = typeof parsed.locale === "string" ? parsed.locale : undefined;
-      locale = pref ?? eff;
+      locale = pref || eff; // an empty preference string reads as unset
     } catch {
       locale = undefined; // app never installed / unreadable / malformed
     }

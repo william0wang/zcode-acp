@@ -209,7 +209,7 @@ export async function handleSlashCommand(
             15000,
           );
         if (resp.error) {
-          throw new RequestError(-32603, messages().slashErrFailed(cmd, resp.error.message ?? ""));
+          throw new RequestError(-32603, messages().slashErrFailed(cmd, resp.error.message));
         }
         // Notify the editor UI: emit config_option_update (+ current_mode_update
         // for mode). Without this the dropdown / mode indicator never reflects
