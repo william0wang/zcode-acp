@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-09-01
+
+### Fixed
+
+- Turns running silently behind a sub-agent (or any long quiet operation) are
+  no longer killed after 120 seconds of stream silence. 0.14.2's deadline
+  check probed the prompt lock via `session/goal show` and killed the turn on
+  a released or indeterminate lock — but raw-backend probes against the
+  Aug-28 app-server proved the prompt lock is not a liveness signal:
+  `session/goal show` succeeds mid-turn, and a probe `session/send` is
+  accepted (queued as steer input) while the turn runs, because the lock is
+  only held during turn finalisation. The deadline now keys on the
+  `session/read` projection watermark (contextUsed / totalTokenCount /
+  turnCount / currentTurnId), refreshed by the 15-second stall reconcile: an
+  advancing watermark proves the backend is still making progress and defers
+  the terminal decision indefinitely, and only a watermark frozen for ten
+  minutes (STALE_FREEZE_MS) ends the turn — reply fetch first, bounded stop
+  as the last resort.
+
 ## [0.14.2] - 2026-08-31
 
 ### Fixed
