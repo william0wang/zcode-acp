@@ -225,6 +225,19 @@ export class ZcodeAcpServer {
   /** Monotonic id counter; base 10_000_000 to avoid collisions with zcode-originated ids. */
   private msgCounter = 10_000_000;
 
+  /**
+   * Headless serve mode (ADR-0012): this bridge was hub-spawned for ONE known
+   * project (the process cwd). session/new then ignores client-supplied cwds
+   * and always uses the process cwd — the remote create-whitelist stays
+   * closed end to end (a client cannot steer a serve bridge into another
+   * directory).
+   */
+  readonly serveMode: boolean;
+
+  constructor(opts: { serveMode?: boolean } = {}) {
+    this.serveMode = opts.serveMode === true;
+  }
+
   /** Next JSON-RPC id for messages we send to zcode. */
   nextId(): number {
     return ++this.msgCounter;

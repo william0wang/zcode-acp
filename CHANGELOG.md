@@ -5,6 +5,34 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-01
+
+### Added
+
+Remote session-create (ADR-0014): a remote client can start a NEW agent
+session in any of the machine's known projects, no editor required.
+
+- `GET /api/projects` (hub, token auth): the known-project list aggregated
+  from the App's `tasks-index.sqlite` — every workspace that ever ran a
+  session, filtered (system temp trees, `~/.zcode` itself, vanished
+  directories) and sorted by last activity.
+- `POST /api/instances {workspacePath}` (hub, token auth): spawns
+  `zcode-acp serve` — a headless bridge — detached in the project cwd,
+  waits for its heartbeat registration, and returns `{id, reused}`. The
+  project list doubles as the whitelist: paths outside it get 403, so a
+  remote client can never spawn an agent in an arbitrary directory. A live
+  serve instance for the same workspace is reused instead of re-spawned.
+- `zcode-acp serve` CLI subcommand: the same ACP surface as the stdio
+  server minus the editor — spawned by the hub with remote ENV, it
+  registers back, serves remote WS clients, and exits after 10 idle
+  minutes with no clients and no running turns (ADR-0001's headless
+  counterpart). In serve mode `session/new` ignores client cwds and always
+  uses the process cwd, keeping the whitelist closed end to end.
+- Registration heartbeats and `/api/instances` now carry an `origin`
+  field (`"editor"` or `"serve"`, older bridges default to `"editor"`)
+  so remote UIs can label CLI-started instances and the hub can dedupe
+  them per workspace.
+
 ## [0.16.2] - 2026-09-01
 
 ### Fixed

@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 
 import { resolveInvocation } from "../src/cli.js";
+import { serveIdleDecision } from "../src/index.js";
 
 describe("resolveInvocation", () => {
   it("routes the legacy zcode-acp-server bin alias straight to server", () => {
@@ -22,6 +23,7 @@ describe("resolveInvocation", () => {
 
   it("maps each subcommand, passing through trailing args", () => {
     expect(resolveInvocation("cli.js", ["server"])).toEqual({ kind: "server" });
+    expect(resolveInvocation("cli.js", ["serve"])).toEqual({ kind: "serve" });
     expect(resolveInvocation("cli.js", ["hub"])).toEqual({ kind: "hub" });
     expect(resolveInvocation("cli.js", ["quota"])).toEqual({ kind: "quota", args: [] });
     expect(resolveInvocation("cli.js", ["quota", "-w", "glm"])).toEqual({
@@ -42,11 +44,27 @@ describe("resolveInvocation", () => {
   });
 
   it("reports unknown subcommands with the offending token", () => {
-    expect(resolveInvocation("cli.js", ["serve"])).toEqual({ kind: "unknown", sub: "serve" });
     // A bare prompt string is not a subcommand — it does not start a turn.
     expect(resolveInvocation("cli.js", ["hello world"])).toEqual({
       kind: "unknown",
       sub: "hello world",
     });
+  });
+});
+
+describe("serveIdleDecision", () => {
+  const IDLE = 10 * 60_000;
+
+  it("never exits while a client is attached or a turn is running", () => {
+    const now = 1_000_000;
+    expect(serveIdleDecision(1, 0, 0, now, IDLE)).toBe(false);
+    expect(serveIdleDecision(0, 1, 0, now, IDLE)).toBe(false);
+    expect(serveIdleDecision(2, 3, now - 2 * IDLE, now, IDLE)).toBe(false);
+  });
+
+  it("exits only after the full idle window with nothing attached", () => {
+    const lastBusy = 1_000_000;
+    expect(serveIdleDecision(0, 0, lastBusy, lastBusy + IDLE - 1, IDLE)).toBe(false);
+    expect(serveIdleDecision(0, 0, lastBusy, lastBusy + IDLE, IDLE)).toBe(true);
   });
 });

@@ -258,6 +258,9 @@ export async function startRemoteEndpoint(
     pid: process.pid,
     workspace: server.workspaceLabel(),
     sessions,
+    // "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0012):
+    // lets the hub dedupe headless instances per workspace and label them.
+    origin: config.origin,
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,

@@ -24,6 +24,13 @@ export interface RemoteConfig {
   hubPort: number;
   hubHost: string;
   bridgePort: number;
+  /**
+   * Who this bridge serves: "editor" (spawned by an editor over stdio) or
+   * "serve" (headless, hub-spawned for remote session-create, ADR-0012).
+   * Rides the registration heartbeat; the hub uses it to dedupe headless
+   * instances per workspace and label them for remote clients.
+   */
+  origin: "editor" | "serve";
 }
 
 export const DEFAULT_HUB_PORT = 8377;
@@ -57,6 +64,7 @@ export function parseRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteC
     hubPort: parsePort(env.ZCODE_ACP_HUB_PORT, DEFAULT_HUB_PORT, "ZCODE_ACP_HUB_PORT"),
     hubHost: (env.ZCODE_ACP_HUB_HOST ?? "").trim() || DEFAULT_HUB_HOST,
     bridgePort: parsePort(env.ZCODE_ACP_REMOTE_PORT, DEFAULT_BRIDGE_PORT, "ZCODE_ACP_REMOTE_PORT"),
+    origin: "editor",
   };
 }
 
@@ -72,5 +80,6 @@ export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConf
     hubPort: parsePort(env.ZCODE_ACP_HUB_PORT, DEFAULT_HUB_PORT, "ZCODE_ACP_HUB_PORT"),
     hubHost: (env.ZCODE_ACP_HUB_HOST ?? "").trim() || DEFAULT_HUB_HOST,
     bridgePort: parsePort(env.ZCODE_ACP_REMOTE_PORT, DEFAULT_BRIDGE_PORT, "ZCODE_ACP_REMOTE_PORT"),
+    origin: "editor",
   };
 }

@@ -147,7 +147,10 @@ export async function newSession(
 ): Promise<acp.NewSessionResponse> {
   // Creation is the one moment a client's cwd is trusted (the editor
   // declaring its worktree); "/" is still rejected as a degenerate root.
-  const cwd = sanitizeClientCwd(params.cwd) ?? process.cwd();
+  // Serve mode (ADR-0012) is the exception: a headless bridge exists for ONE
+  // hub-chosen project — the process cwd wins and client-supplied values are
+  // ignored, so the remote create-whitelist cannot be bypassed via session/new.
+  const cwd = server.serveMode ? process.cwd() : (sanitizeClientCwd(params.cwd) ?? process.cwd());
   // Placeholder id — the client addresses this session with it until the
   // backend session materializes; never shown in session/list.
   const acpSid = randomUUID();

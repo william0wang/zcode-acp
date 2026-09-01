@@ -23,6 +23,7 @@
  * next bridge re-spawns it on demand.
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -36,12 +37,14 @@ import {
 } from "node:http";
 import net from "node:net";
 import path from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
+import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
   port: number;
@@ -66,6 +69,17 @@ export interface HubOptions {
    * directory this module runs from.
    */
   codePaths?: { packageJson: string; distDir: string };
+  /**
+   * Override where the remote session-create endpoints read the known-project
+   * whitelist from (tests point this at a fixture sqlite). Default: the App's
+   * tasks-index.sqlite (see listKnownWorkspaces).
+   */
+  projectsDbPath?: string;
+  /**
+   * Override how POST /api/instances spawns the headless serve bridge (tests
+   * inject a fake). Default: this node + this package's dist/cli.js.
+   */
+  spawnServe?: (opts: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcess;
 }
 
 export interface HubHandle {
@@ -89,6 +103,8 @@ interface InstanceEntry {
   workspace: string;
   sessions: SessionSummary[];
   lastSeen: number;
+  /** "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0012). */
+  origin: "editor" | "serve";
 }
 
 const HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -162,6 +178,43 @@ function validSessions(raw: unknown): SessionSummary[] | null {
     });
   }
   return out;
+}
+
+/** How long POST /api/instances waits for the spawned bridge to register. */
+const SERVE_REGISTER_TIMEOUT_MS = 10_000;
+const SERVE_REGISTER_POLL_MS = 300;
+
+/** Register-origin parser: only "serve" is special; anything else is "editor". */
+function parseOrigin(raw: unknown): "editor" | "serve" {
+  return raw === "serve" ? "serve" : "editor";
+}
+
+/**
+ * Default serve-bridge spawner (remote session-create, ADR-0012): this node
+ * running this package's cli.js `serve` subcommand, detached in the project's
+ * cwd with the ENV the bridge needs to find its way back to this hub. Mirrors
+ * endpoint.ts's spawnHub: detached + unref'd (the hub must not own its life),
+ * stderr piped and tail-logged so startup failures surface instead of
+ * silently vanishing with an "ignore" pipe.
+ */
+function defaultSpawnServe(opts: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcess {
+  // dist/remote/hub-server.js → dist/cli.js (one level up).
+  const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
+  const child = spawn(process.execPath, [cliJs, "serve"], {
+    cwd: opts.cwd,
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+    env: opts.env,
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (d: string) => {
+    for (const line of d.split("\n")) {
+      if (line.trim()) warn(`serve-bridge[${opts.cwd}]: ${line}`);
+    }
+  });
+  child.once("error", (e) => warn(`serve-bridge[${opts.cwd}] spawn failed: ${e.message}`));
+  child.unref();
+  return child;
 }
 
 /**
@@ -307,6 +360,8 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     onIdleExit,
     onRestart,
     codePaths = defaultCodePaths(),
+    projectsDbPath,
+    spawnServe = defaultSpawnServe,
   } = options;
 
   /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
@@ -449,6 +504,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           pid: e.pid,
           startedAt: e.startedAt,
           workspace: e.workspace,
+          origin: e.origin,
           sessions: e.sessions.filter((s) => winners.get(s.sessionId)?.instance === e),
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -474,6 +530,104 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.end("quota query failed");
       }
       return;
+    }
+    // GET /api/projects — the machine's known-project list (remote
+    // session-create, ADR-0012). Sourced from the App's tasks index: every
+    // workspace that ever ran a session. This list IS the create whitelist —
+    // POST /api/instances refuses paths outside it, so a remote client can
+    // never spawn an agent in an arbitrary directory.
+    if (url.pathname === "/api/projects" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const projects = await listKnownWorkspaces(projectsDbPath);
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(projects));
+      return;
+    }
+    // POST /api/instances — create (or reuse) a headless serve bridge for one
+    // known project. The hub spawns `zcode-acp serve` detached in the project
+    // cwd and waits for its heartbeat registration; the bridge lives its own
+    // idle-timed life afterwards (ADR-0012). Dedupe: one serve instance per
+    // workspace — an existing live one is returned instead of a second spawn.
+    if (url.pathname === "/api/instances" && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const body = await readJson(req);
+      const rawPath = (body as { workspacePath?: unknown } | undefined)?.workspacePath;
+      const workspacePath = typeof rawPath === "string" ? rawPath.trim() : "";
+      if (!workspacePath) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("workspacePath required");
+        return;
+      }
+      const known = await listKnownWorkspaces(projectsDbPath);
+      if (!known.some((p) => p.workspacePath === workspacePath)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("unknown project");
+        return;
+      }
+      const findServe = (): InstanceEntry | undefined =>
+        Array.from(instances.values()).find(
+          (e) => e.origin === "serve" && e.workspace === workspacePath,
+        );
+      const existing = findServe();
+      if (existing) {
+        log(`hub: serve instance for ${workspacePath} already live (${existing.id}) — reusing`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: existing.id, reused: true }));
+        return;
+      }
+      let child: ChildProcess;
+      try {
+        child = spawnServe({
+          cwd: workspacePath,
+          env: {
+            ...process.env,
+            ZCODE_ACP_REMOTE: "1",
+            ZCODE_ACP_REMOTE_TOKEN: token,
+            ZCODE_ACP_HUB_PORT: String(port),
+          },
+        });
+      } catch (e) {
+        warn(`hub: serve spawn failed: ${e instanceof Error ? e.message : String(e)}`);
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("serve bridge spawn failed");
+        return;
+      }
+      log(`hub: spawned serve bridge for ${workspacePath} (pid ${child.pid})`);
+      const deadline = Date.now() + SERVE_REGISTER_TIMEOUT_MS;
+      for (;;) {
+        await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
+        const entry = findServe();
+        if (entry) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ id: entry.id, reused: false }));
+          return;
+        }
+        // The child dying is the honest fast-fail (missing cwd perms, port
+        // exhaustion, crash) — without this check the loop burns the full 10s.
+        if (child.exitCode !== null || child.signalCode !== null) {
+          warn(`hub: serve bridge for ${workspacePath} exited during startup`);
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("serve bridge exited during startup");
+          return;
+        }
+        if (Date.now() > deadline) {
+          warn(`hub: serve bridge for ${workspacePath} never registered`);
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("serve bridge did not register in time");
+          return;
+        }
+      }
     }
     // POST /api/upgrade — a remote client may TRIGGER a staleness check but
     // never decide the restart: the hub compares its frozen running version
@@ -629,6 +783,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           workspace: typeof body.workspace === "string" ? body.workspace : "",
           sessions,
           lastSeen: Date.now(),
+          origin: parseOrigin(body.origin),
         });
       } else {
         instances.delete(id);

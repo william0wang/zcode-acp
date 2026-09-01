@@ -168,10 +168,28 @@ token 鉴权、实例发现、字节级 WebSocket 代理——不保存会话状
 心跳，心跳停止约 30 秒后从发现列表移除；客户端刷新时也可调用
 `GET /api/instances?probe=1` 主动探测，立即清理不可达的实例。
 
+**远程创建会话**（ADR-0014）。远程客户端可以在本机的已知项目里直接开一个
+新会话——不需要任何编辑器在场：
+
+```text
+GET  /api/projects                  → [{"workspacePath","sessions","lastActive"}]
+POST /api/instances {workspacePath} → {"id","reused"}
+```
+
+`/api/projects` 聚合 App 的任务索引：所有跑过会话的项目（过滤系统临时
+目录、`~/.zcode` 自身和已不存在的目录），按最近活跃排序。这份列表同时
+就是白名单——POST 对列表之外的路径一律 403，远程永远无法在任意目录里
+启动 agent。创建时 hub 会在项目目录下拉起 `zcode-acp serve`（无头 bridge），
+数秒内注册回 hub，之后像普通实例一样可连接；同项目已有存活的 serve 实例
+则直接复用（`reused:true`）。serve bridge 只为远程连接而活：最后一个客户端
+断开且最后一个 turn 结束约 10 分钟后自动退出；其 `session/new` 无论客户端
+传什么都使用项目目录（白名单端到端闭合）。
+
 **语义。** 所有 agent 通知广播给每个已连接客户端；权限 / elicitation 请求
 发给所有客户端，**先应答者生效**，其余客户端收到 `$/cancel_request` 关闭
 对话框。同一会话的并发 prompt 与单编辑器一样串行化。任一客户端声明的能力
-按 OR 合并。
+按 OR 合并。`/api/instances` 的每个实例带 `origin` 字段（`"editor"`＝编辑器
+stdio 桥，`"serve"`＝远程创建的无头桥），客户端可据此标注。
 
 **隧道。** 面向单端口隧道（Cloudflare Tunnel、frp）设计：只映射 hub 端口。
 frp 的 `tcp` 模式原样透传 WebSocket；Cloudflare Tunnel 会断开空闲连接，

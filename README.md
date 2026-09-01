@@ -195,11 +195,36 @@ discovery ~30s after it stops.
 
 ```text
 GET /api/instances              → [{"id","port","pid","startedAt","workspace",
-                                    "sessions":[{"sessionId","title?","updatedAt"}]}]
+                                    "origin","sessions":[{"sessionId","title?","updatedAt"}]}]
 GET /api/instances?probe=1      → same list, but unreachable bridges are pruned first
 WS   /acp?instance=<id>         → proxied to that bridge's endpoint
 GET /api/instances/{id}/fs/…    → read-only session files (list + raw bytes, ADR-0004)
 ```
+
+`origin` labels how an instance was started: `"editor"` (a bridge an editor
+spawned over stdio) or `"serve"` (a headless bridge created remotely, see
+below).
+
+**Remote session-create** (ADR-0014). A remote client can start a NEW agent
+session in any of the machine's known projects — no editor required:
+
+```text
+GET  /api/projects              → [{"workspacePath","sessions","lastActive"}]
+POST /api/instances {workspacePath} → {"id","reused"}
+```
+
+`/api/projects` aggregates the App's tasks index: every workspace that ever
+ran a session (system temp trees, `~/.zcode` itself, and vanished
+directories filtered out), newest activity first. The list doubles as the
+whitelist — the POST refuses (403) any path outside it, so a remote client
+can never spawn an agent in an arbitrary directory. On create the hub
+spawns `zcode-acp serve` — a headless bridge — in the project's cwd; it
+registers back within seconds and is reachable like any other instance. A
+live serve instance for the same workspace is reused instead of re-spawned
+(`reused:true`). The serve bridge lives for remote interest only: it exits
+~10 minutes after the last client detaches and the last turn finishes, and
+its `session/new` always uses the project cwd regardless of what a client
+sends.
 
 `sessions` lists the project's **currently running** conversations (live
 editor tabs and remote attachments) under the same ACP session ids the
