@@ -15,8 +15,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { compareVersions, log } from "../utils.js";
 import { messages } from "../i18n.js";
+import { compareVersions, log } from "../utils.js";
 
 /** Information about a discovered MCP server. */
 export interface McpServerInfo {

@@ -178,7 +178,7 @@ export async function handleSlashCommand(
         return ok(messages().slashCompacted);
       }
       case "goal": {
-        if (!arg) throw new RequestError(-32602, "/goal requires a goal description");
+        if (!arg) throw new RequestError(-32602, messages().slashErrGoalArg);
         await goal(server, { sessionId: acpSid, action: "set", objective: arg });
         return ok(messages().slashGoalSet(arg));
       }
@@ -189,17 +189,17 @@ export async function handleSlashCommand(
         return ok(messages().slashForked(result.forkedSessionId ?? "?"));
       }
       case "model": {
-        if (!arg) throw new RequestError(-32602, "/model requires a model id");
+        if (!arg) throw new RequestError(-32602, messages().slashErrModelArg);
         const switchOk = await applyModelSwitch(server, zcodeSid, arg);
-        if (!switchOk) throw new RequestError(-32603, `model switch failed for ${arg}`);
+        if (!switchOk) throw new RequestError(-32603, messages().slashErrSwitchFailed(arg));
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "model");
         return ok(messages().slashModelSet(arg));
       }
       case "mode":
       case "thought": {
-        if (!arg) throw new RequestError(-32602, `/${cmd} requires an argument`);
+        if (!arg) throw new RequestError(-32602, messages().slashErrArg(cmd));
         const dispatch = CONFIG_DISPATCH[cmd];
-        if (!dispatch) throw new RequestError(-32602, `unknown /${cmd}`);
+        if (!dispatch) throw new RequestError(-32602, messages().slashErrUnknown(cmd));
         const resp = await server
           .ensureBackend()
           .request(
@@ -208,7 +208,9 @@ export async function handleSlashCommand(
             { sessionId: zcodeSid, [dispatch.paramKey]: arg },
             15000,
           );
-        if (resp.error) throw new RequestError(-32603, `${cmd} failed: ${resp.error.message}`);
+        if (resp.error) {
+          throw new RequestError(-32603, messages().slashErrFailed(cmd, resp.error.message ?? ""));
+        }
         // Notify the editor UI: emit config_option_update (+ current_mode_update
         // for mode). Without this the dropdown / mode indicator never reflects
         // the change — slash commands return end_turn and bypass the turn-

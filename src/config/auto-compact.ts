@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { compact } from "../handlers/extensions.js";
+import { messages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { sendTextChunk } from "../handlers/io.js";
@@ -63,10 +64,11 @@ export async function maybeAutoCompact(
     if (used < threshold) return;
 
     log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
+    const m = messages();
     await sendTextChunk(
       cx,
       acpSid,
-      `🔄 auto-compact: context usage ${used.toLocaleString()} ≥ threshold ${threshold.toLocaleString()}, compressing…`,
+      m.autoCompactStart(used.toLocaleString(), threshold.toLocaleString()),
       msgId,
     );
 
@@ -75,14 +77,9 @@ export async function maybeAutoCompact(
       __lockTimeout?: boolean;
     };
     if (result.__lockTimeout) {
-      await sendTextChunk(
-        cx,
-        acpSid,
-        "⚠ auto-compact timed out (300s) — backend may still be processing",
-        msgId,
-      );
+      await sendTextChunk(cx, acpSid, m.autoCompactTimeout, msgId);
     } else {
-      await sendTextChunk(cx, acpSid, "✓ auto-compact: context compressed", msgId);
+      await sendTextChunk(cx, acpSid, m.autoCompactDone, msgId);
     }
     log("auto-compact: done");
   } catch (e) {
@@ -90,7 +87,7 @@ export async function maybeAutoCompact(
     await sendTextChunk(
       cx,
       acpSid,
-      `⚠ auto-compact failed: ${e instanceof Error ? e.message : String(e)}`,
+      messages().autoCompactFailed(e instanceof Error ? e.message : String(e)),
       msgId,
     );
     // Best-effort: never break the prompt response.

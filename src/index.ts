@@ -45,8 +45,8 @@ import { loadSkillCommands } from "./config/skill-discovery.js";
 import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
-import { ZcodeAcpServer } from "./server.js";
 import { messages } from "./i18n.js";
+import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 /**

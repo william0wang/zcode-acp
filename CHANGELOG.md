@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-09-01
+
+### Fixed
+
+Cross-review follow-ups to 0.16.0 (found by a dual Review + Adversary pass):
+
+- Startup crash: a `setting.json` carrying a non-string `locale` (number,
+  bool, array, object) threw `TypeError` inside `pick()` — the bridge died
+  at `buildAllCommands()` before serving anything. `pick()` now narrows to
+  strings, and the settings parse validates both keys.
+- The app-locale cache used a null sentinel that a literal `"locale": null`
+  punched through — every `messages()` call then re-read and re-parsed the
+  settings file synchronously (~6ms each on a large file). Replaced with an
+  explicit read-once flag.
+- `tests/mcp-list.test.ts` asserted the English `/mcp` card without pinning
+  `ZCODE_ACP_LANG`, and its fs mock falls through to the real fs — so the
+  suite read the developer's real `~/.zcode/v2/setting.json` and failed 6
+  cases on any zh-locale machine. Now pinned to `en`.
+- Localized the strings the first pass missed: auto-compact status lines,
+  the pre-popup tool_call titles ("Ready to code?", "tool permission (…)",
+  "interaction"), the replay "tool call" fallback, background-task card
+  titles, and the slash-command error messages (which previously stayed
+  English next to localized success feedback).
+- Import order normalized (alphabetical) for the new i18n imports;
+  `tests/i18n.test.ts` now asserts the nested `slashCommandDescriptions`
+  key sets match across languages and cover every static command.
+- CHANGELOG wording: 0.16.0's "covers every string" overstated — token-form
+  feedback (`✓ /mode = yolo`) and argument hints intentionally stay
+  as-is (language-neutral).
+
 ## [0.16.0] - 2026-09-01
 
 ### Added

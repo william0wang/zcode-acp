@@ -35,6 +35,7 @@ import { randomUUID } from "node:crypto";
 
 import type { EventListener } from "../backend/client.js";
 import type { ZcodeEvent } from "../backend/types.js";
+import { messages } from "../i18n.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 
@@ -104,8 +105,7 @@ function toAcpStatus(status: string | undefined): "in_progress" | "completed" | 
 
 /** Build the card title for a background task. */
 function cardTitle(description: string | undefined): string {
-  const d = (description ?? "").trim();
-  return d ? `[background] ${d}` : "[background] task";
+  return messages().backgroundTaskTitle((description ?? "").trim());
 }
 
 export class BackgroundTaskListener implements EventListener {
