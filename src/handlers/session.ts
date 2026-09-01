@@ -564,12 +564,52 @@ export async function loadSession(
   return result as acp.LoadSessionResponse;
 }
 
-/** `session/prompt` → subscribe-before-send, run the event-driven turn loop. */
+/**
+ * `session/prompt` → subscribe-before-send, run the event-driven turn loop.
+ *
+ * Sandbox allow-restart chaining (ADR-0011): when a turn unwinds as cancelled
+ * because the user approved a new writable root (the backend was killed to be
+ * respawned under the widened profile), the continuation prompt runs INSIDE
+ * this same request via runPrompt. The editor's spinner then spans the
+ * respawn+reload window and the resumed work renders as the same turn. A
+ * detached follow-up prompt (the previous design) has no pending editor
+ * request behind it, so the editor showed no running state for it at all —
+ * the window read as "it just stopped", any message typed there preempted
+ * the continuation for real, and only the session/load replay later surfaced
+ * the orphaned continuation bubble.
+ */
 export async function prompt(
   server: ZcodeAcpServer,
   params: acp.PromptRequest,
   cx: acp.AgentContext,
   requestId: number | string,
+): Promise<acp.PromptResponse> {
+  const result = await runPrompt(server, params, cx, requestId);
+  const continuation = server.sandboxContinuations.get(params.sessionId);
+  if (continuation && result.stopReason === "cancelled") {
+    server.sandboxContinuations.delete(params.sessionId);
+    // Same request, fresh round: runPrompt re-enters the whole machinery
+    // (ensureBackend respawns; ensureRealSession/subscribe-recovery reloads
+    // the session into it). The user's preempt/ESC during the continuation
+    // still cancels it — the round registers itself in pendingTurns.
+    return runPrompt(
+      server,
+      { sessionId: params.sessionId, prompt: [{ type: "text", text: continuation }] },
+      cx,
+      `sandbox-cont-${randomUUID()}`,
+      true,
+    );
+  }
+  return result;
+}
+
+/** One prompt round: subscribe-before-send, run the event-driven turn loop. */
+async function runPrompt(
+  server: ZcodeAcpServer,
+  params: acp.PromptRequest,
+  cx: acp.AgentContext,
+  requestId: number | string,
+  continuationRound = false,
 ): Promise<acp.PromptResponse> {
   // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
   // after the backend spawned unsandboxed must arm on THIS prompt, not on the
@@ -841,7 +881,9 @@ export async function prompt(
           sendErrMsg.includes("prompt is running") ||
           sendErrMsg.includes("already running");
         if (!isBusy) {
-          // Non-busy error (auth, malformed, etc.) — don't retry, surface it.
+          // Non-busy error (auth, malformed, stale model, etc.) — don't
+          // retry, surface it. The stale-history-model case is repaired
+          // before the send (repairUnavailableModel on every resume path).
           throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
         }
         if (Date.now() - sendT0 > SEND_RETRY_TIMEOUT_MS) {
@@ -851,6 +893,20 @@ export async function prompt(
         }
         log(
           `  [send] backend busy (${sendResp.error.message ?? ""}), retrying in ${SEND_RETRY_INTERVAL_MS}ms`,
+        );
+      }
+
+      // Continuation round status line: the respawn+reload window (~seconds)
+      // shows only the editor spinner before the model's first output — a
+      // bare thinking block with no context. Announce the resumed turn at
+      // send-accept so every phase of the allow→restart→continue flow is
+      // visibly accounted for (the allow-time hint covers the restart start).
+      if (continuationRound) {
+        await sendTextChunk(
+          cx,
+          params.sessionId,
+          "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
+          randomUUID(),
         );
       }
 
@@ -891,31 +947,9 @@ export async function prompt(
           await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
         }
 
-        // Sandbox allow-restart continuation (ADR-0011): the turn unwound as
-        // cancelled because the user approved a new writable root and the
-        // backend was killed. Fire a continuation prompt so the model resumes
-        // the task under the widened profile — fire-and-forget: the preempt
-        // lock serializes it behind this prompt's cleanup, and the nested
-        // prompt() re-enters through the existing machinery (fresh backend,
-        // "session is not active" subscribe recovery reloads + re-baselines
-        // + resubscribes, rebuilds its listener against the new backend).
-        const continuation = server.sandboxContinuations.get(params.sessionId);
-        if (continuation && result.stopReason === "cancelled") {
-          server.sandboxContinuations.delete(params.sessionId);
-          void prompt(
-            server,
-            {
-              sessionId: params.sessionId,
-              prompt: [{ type: "text", text: continuation }],
-            } as acp.PromptRequest,
-            cx,
-            `sandbox-cont-${randomUUID()}`,
-          ).catch((e) =>
-            warn(
-              `sandbox: continuation prompt failed: ${e instanceof Error ? e.message : String(e)}`,
-            ),
-          );
-        }
+        // (Sandbox allow-restart continuation: handled by the prompt() wrapper
+        // — the chained round keeps the editor's original request pending so
+        // the restart window stays visibly "running".)
 
         return result;
       } catch (e) {
@@ -1562,12 +1596,22 @@ async function reloadBackendSession(
   acpSid: string,
   zcodeSid: string,
 ): Promise<void> {
+  const cwd = server.sessionCwds.get(acpSid) ?? process.cwd();
   const zcParams: Record<string, unknown> = {
     sessionId: zcodeSid,
-    workspace: workspaceFor(server.sessionCwds.get(acpSid) ?? process.cwd()),
+    workspace: workspaceFor(cwd),
   };
+  // Same pre-resume steps as the ACP resume/load handlers: register the
+  // provider registry (a resumed session's history references a model the
+  // fresh backend can't process until its provider is registered — sends
+  // then fail with the backend's stale-history-model error, persistent, not
+  // transient), then repair a model that is no longer enabled. Skipping
+  // these made every backend respawn (sandbox allow-restart, eviction
+  // recovery) deaf-fail its first sends.
+  await syncProviderRegistry(server, cwd);
   await resumePreservingModel(server, zcParams);
   server.markBackendLoaded(acpSid);
+  await repairUnavailableModel(server, zcodeSid);
 }
 
 /**

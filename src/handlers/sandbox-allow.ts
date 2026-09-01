@@ -5,9 +5,9 @@
  * with "Operation not permitted" in the tool output. The bridge extracts the
  * denied path, asks the user via ACP `session/request_permission`
  * (仅此一次 / 始终允许 / 拒绝一次 / 始终拒绝), and on approval kills the backend so the next
- * ensureBackend() respawns under a widened profile. prompt() follows up with
- * a continuation prompt (see session.ts) so the model resumes the
- * interrupted task — per-command seamless escalation is impossible (the
+ * ensureBackend() respawns under a widened profile. prompt() then chains the
+ * continuation inside the original session/prompt request (see session.ts) so
+ * the model resumes the interrupted task — per-command seamless escalation is impossible (the
  * executor lives inside the sandbox; profiles are immutable per process),
  * directory-granularity with a restart is the closest achievable form.
  */

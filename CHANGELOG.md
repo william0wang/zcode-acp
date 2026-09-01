@@ -83,6 +83,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case-insensitive; read-only tools (Read/Grep/Glob/... — their output
   merely echoes text) are excluded from the scan to avoid phantom asks, and
   asks resolving to $HOME or an ancestor are refused outright.
+- Backend respawn (sandbox allow-restart, idle-eviction recovery) restored
+  the session via a bare `session/resume`, skipping the provider-registry
+  sync and the stale-model repair that the ACP resume/load handlers
+  perform — the session history references a model whose provider the
+  fresh backend never registered, so every send failed persistently with
+  the backend's "历史任务使用的模型已不可用" error (auto-continuation
+  after an allow died silently; user messages hung on the send retry).
+  `reloadBackendSession` now performs the same sync → resume → repair
+  sequence as the ACP paths.
+- The post-allow continuation ran as a detached bridge-internal prompt: the
+  editor had no pending request behind it, so it showed no running state —
+  the respawn+reload window (~7s) read as "it just stopped", any message
+  typed there preempted the continuation for real, and only the session/load
+  replay later surfaced the orphaned continuation bubble. The continuation
+  now chains INSIDE the original `session/prompt` request (wrapper in
+  `prompt()`), so the editor's spinner spans the restart and the resumed
+  work renders as the same turn; preempt/ESC during the continuation still
+  cancels it. The continuation round also emits a status line
+  ("[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]") at send-accept, so the
+  respawn+reload window no longer ends in an unexplained thinking block.
 - Rejection is explicit config, not hidden memory: the popup now offers all
   four ACP kinds — 始终允许 / 仅此一次 / 拒绝一次 / 始终拒绝. "始终拒绝"
   persists the path into the project config's `deny` list (the same ask
