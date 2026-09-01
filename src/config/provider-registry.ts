@@ -126,12 +126,25 @@ function buildProviderElement(providerId: string, p: ProviderEntry): Record<stri
  * Unlike `loadAllModels` (dropdown, enabled-only), the registry pushes every
  * configured provider so the backend recognises any of them when a session
  * switches to it. The backend applies its own enable/availability rules.
+ *
+ * Providers with zero models are skipped: the backend's schema requires
+ * `models` to have >= 1 item and rejects the WHOLE payload otherwise, so a
+ * single empty provider (e.g. a plan tier with no models listed yet) would
+ * break the registry sync and every session would fail with
+ * `provider_not_configured` before auth is even tried.
  */
 export function buildProviderRegistry(): ProviderRegistryPayload {
   const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as ConfigShape;
-  const providers = Object.entries(cfg.provider ?? {}).map(([pid, p]) =>
-    buildProviderElement(pid, p ?? {}),
-  );
+  const allEntries = Object.entries(cfg.provider ?? {});
+  const skipped: string[] = [];
+  const providers = [] as ReturnType<typeof buildProviderElement>[];
+  for (const [pid, p] of allEntries) {
+    if (Object.keys((p ?? {}).models ?? {}).length === 0) {
+      skipped.push(pid);
+      continue;
+    }
+    providers.push(buildProviderElement(pid, p ?? {}));
+  }
   const generatedAt = Date.now();
   // revision is a content hash; the backend skips unchanged revisions. A stable
   // JSON hash over provider ids+kinds+baseURLs is enough — apiKey changes are
@@ -139,7 +152,8 @@ export function buildProviderRegistry(): ProviderRegistryPayload {
   const revision = hashRevision(providers);
   log(
     `provider-registry: built ${providers.length} provider(s) ` +
-      `(ids: ${providers.map((p) => p.providerId).join(", ") || "none"})`,
+      `(ids: ${providers.map((p) => p.providerId).join(", ") || "none"})` +
+      (skipped.length > 0 ? `; skipped empty-model provider(s): ${skipped.join(", ")}` : ""),
   );
   return { providers, generatedAt, revision };
 }
