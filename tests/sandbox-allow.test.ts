@@ -67,6 +67,50 @@ describe("extractSandboxDenial", () => {
     });
   });
 
+  it("extracts the zsh redirect form (lowercase phrase, path after)", () => {
+    expect(
+      extractSandboxDenial("zsh:2: operation not permitted: /Users/william/sbx-test.txt"),
+    ).toEqual({ path: "/Users/william/sbx-test.txt", isMkdir: false });
+    expect(extractSandboxDenial("zsh:1: operation not permitted: ../xxx-app/f.txt")).toEqual({
+      path: "../xxx-app/f.txt",
+      isMkdir: false,
+    });
+  });
+
+  it("extracts explicit ./ and ../ paths from sh forms (resolved against session cwd later)", () => {
+    expect(extractSandboxDenial("mkdir: ../xxx-app: Operation not permitted")).toEqual({
+      path: "../xxx-app",
+      isMkdir: true,
+    });
+    expect(extractSandboxDenial("tee: ./out/log.txt: Operation not permitted")).toEqual({
+      path: "./out/log.txt",
+      isMkdir: false,
+    });
+  });
+
+  it("extracts the Node fs error form (quoted paths keep spaces)", () => {
+    expect(
+      extractSandboxDenial("Error: EPERM: operation not permitted, open '/Users/x/My Dir/a.txt'"),
+    ).toEqual({ path: "/Users/x/My Dir/a.txt", isMkdir: false });
+    expect(
+      extractSandboxDenial("Error: EPERM: operation not permitted, mkdir '/opt/new dir'"),
+    ).toEqual({ path: "/opt/new dir", isMkdir: true });
+    // Any libuv syscall name matches; rename takes the FIRST path.
+    expect(
+      extractSandboxDenial("Error: EPERM: operation not permitted, rename '/a/b' -> '/c/d'"),
+    ).toEqual({ path: "/a/b", isMkdir: false });
+    expect(
+      extractSandboxDenial(
+        "Error: EPERM: operation not permitted, mkdtemp '/Users/william/.zcode-acp-sbx-XXXXXX'",
+      ),
+    ).toEqual({ path: "/Users/william/.zcode-acp-sbx-XXXXXX", isMkdir: false });
+    // An apostrophe inside the path must NOT truncate into a broader dir —
+    // the match is refused entirely (generic-hint fallback).
+    expect(
+      extractSandboxDenial("Error: EPERM: operation not permitted, open '/Users/x/O'Brien/a.txt'"),
+    ).toBeNull();
+  });
+
   it("returns null without an EPERM or without a parsable absolute path", () => {
     expect(extractSandboxDenial("all good")).toBeNull();
     expect(extractSandboxDenial("some file: Operation not permitted")).toBeNull();
@@ -137,6 +181,144 @@ describe("handleSandboxDenial", () => {
     expect(turn.stopSent).toBe(true);
     expect(server.sandboxContinuations.get("acp_a")).toContain("请继续刚才的任务");
     expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("relative denial paths resolve against the session cwd before the ask", async () => {
+    const { server, cx, request } = makeStubs("sandbox_allow_once");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: "../outside/f.txt", isMkdir: false },
+      "tc_rel",
+    );
+
+    const expectedDir = path.dirname(path.join(wsRoot, "..", "outside", "f.txt"));
+    // The popup offers the RESOLVED absolute dir, and the once-allow stores
+    // it too (a raw relative entry would be dropped when the config/profile
+    // is read back).
+    const sentParams = request.mock.calls[0]?.[1] as { options?: { name: string }[] };
+    expect(sentParams.options?.[0]?.name).toContain(expectedDir);
+    expect(server.sandboxOnceAllows.has(expectedDir)).toBe(true);
+  });
+
+  it("reject_always persists the denial to the config deny list — visible, no restart", async () => {
+    const { server, cx, closed, request, notify } = makeStubs("sandbox_reject_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
+      "tc_reject",
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    // VISIBLE persistence: recorded in the project config, never in hidden
+    // bridge memory — the user can review/undo it by editing the file.
+    expect(readSandboxConfig(wsRoot).deny).toEqual([
+      path.dirname(path.join(wsRoot, "..", "outside", "f.txt")),
+    ]);
+    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalled(); // the confirmation hint reached the editor
+  });
+
+  it("reject_once stores nothing — the same ask resurfaces next time", async () => {
+    const { server, cx, closed, notify } = makeStubs("sandbox_reject_once");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
+      "tc_rejectonce",
+    );
+
+    expect(readSandboxConfig(wsRoot).deny).toEqual([]);
+    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalled(); // the rejection hint reached the editor
+  });
+
+  it("a persisted deny list suppresses the popup with a hint", async () => {
+    const { server, cx, closed, request, notify } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
+    writeFileSync(
+      sandboxConfigPath(wsRoot),
+      JSON.stringify({
+        enabled: true,
+        allow: [],
+        deny: [path.join(wsRoot, "..", "outside")],
+        strictGit: false,
+      }),
+    );
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
+      "tc_denyhit",
+    );
+
+    expect(request).not.toHaveBeenCalled();
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalled(); // the deny-list hint reached the editor
+  });
+
+  it("timeout / unknown outcome persists NOTHING (no hidden rejection memory)", async () => {
+    const { server, cx } = makeStubs("some_other_client_button");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
+      "tc_unknown",
+    );
+
+    expect(readSandboxConfig(wsRoot).deny).toEqual([]);
+    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
+  });
+
+  it("phantom-guard: $HOME-wide grants never get a popup", async () => {
+    const { server, cx, closed, request, notify } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      turn,
+      { path: path.join(os.homedir(), "sbx-echoed.txt"), isMkdir: false },
+      "tc_home",
+    );
+
+    expect(request).not.toHaveBeenCalled();
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalled(); // the too-broad hint reached the editor
   });
 
   it("island paths get a hint instead of a doomed popup (deny always wins)", async () => {

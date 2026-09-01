@@ -74,6 +74,12 @@ export interface SandboxConfig {
   enabled: boolean;
   /** Absolute realpaths OUTSIDE the workspace granted permanent write. */
   allow: string[];
+  /**
+   * Absolute realpaths the user chose NEVER to grant ("永不放行") — the
+   * popup is suppressed for these. Visible config, not hidden memory: the
+   * user can review or undo a denial by editing this file.
+   */
+  deny: string[];
   /** true = .git sits behind the allow popup instead of default-writable. */
   strictGit: boolean;
 }
@@ -97,7 +103,7 @@ const warnedConfigIssues = new Set<string>();
 const lastEnabledSeen = new Map<string, boolean>();
 
 function defaultConfig(enabled: boolean): SandboxConfig {
-  return { enabled, allow: [], strictGit: false };
+  return { enabled, allow: [], deny: [], strictGit: false };
 }
 
 /**
@@ -185,17 +191,30 @@ export function readSandboxConfig(workspaceRoot: string): SandboxConfig {
   }
   const cfg = parsed as Partial<SandboxConfig>;
   const allow = Array.isArray(cfg.allow) ? cfg.allow.filter((p) => typeof p === "string") : [];
+  const deny = Array.isArray(cfg.deny) ? cfg.deny.filter((p) => typeof p === "string") : [];
   // Relative (or `~user`) entries would silently anchor to the BRIDGE's cwd —
   // a committed config must speak in absolute paths or `~/` only.
-  const absolute = allow.filter((p) => p.startsWith("/") || p.startsWith("~/"));
-  if (absolute.length !== allow.length && !warnedConfigIssues.has(`${file}:relative`)) {
+  const absoluteAllow = allow.filter((p) => p.startsWith("/") || p.startsWith("~/"));
+  const absoluteDeny = deny.filter((p) => p.startsWith("/") || p.startsWith("~/"));
+  if (absoluteAllow.length !== allow.length && !warnedConfigIssues.has(`${file}:relative`)) {
     warnedConfigIssues.add(`${file}:relative`);
     warn(
-      `sandbox: dropped ${allow.length - absolute.length} non-absolute allow entries in ${file}`,
+      `sandbox: dropped ${allow.length - absoluteAllow.length} non-absolute allow entries in ${file}`,
+    );
+  }
+  if (absoluteDeny.length !== deny.length && !warnedConfigIssues.has(`${file}:relative-deny`)) {
+    warnedConfigIssues.add(`${file}:relative-deny`);
+    warn(
+      `sandbox: dropped ${deny.length - absoluteDeny.length} non-absolute deny entries in ${file}`,
     );
   }
   lastEnabledSeen.set(file, cfg.enabled === true);
-  return { enabled: cfg.enabled === true, allow: absolute, strictGit: cfg.strictGit === true };
+  return {
+    enabled: cfg.enabled === true,
+    allow: absoluteAllow,
+    deny: absoluteDeny,
+    strictGit: cfg.strictGit === true,
+  };
 }
 
 /**
@@ -219,7 +238,7 @@ export function appendSandboxAllow(workspaceRoot: string, allowedPath: string): 
     writeFileSync(
       file,
       JSON.stringify(
-        { enabled: cfg.enabled, allow: cfg.allow, strictGit: cfg.strictGit },
+        { enabled: cfg.enabled, allow: cfg.allow, deny: cfg.deny, strictGit: cfg.strictGit },
         null,
         2,
       ) + "\n",
@@ -228,6 +247,39 @@ export function appendSandboxAllow(workspaceRoot: string, allowedPath: string): 
     return true;
   } catch (e) {
     warn(`sandbox: could not persist allowlist: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/**
+ * Bridge-side persistence for the popup's "永不放行" choice — the visible
+ * counterpart of appendSandboxAllow: a denied path is RECORDED in the
+ * config (never hidden in bridge memory), so the ask never resurfaces for
+ * it and the user can review or undo the decision by editing the file.
+ */
+export function appendSandboxDeny(workspaceRoot: string, deniedPath: string): boolean {
+  const file = sandboxConfigPath(workspaceRoot);
+  if (!configIntegrityOk(workspaceRoot, file)) {
+    warn(`sandbox: refusing to persist through a symlinked/hardlinked ${file}`);
+    return false;
+  }
+  const cfg = readSandboxConfig(workspaceRoot);
+  if (cfg.deny.includes(deniedPath)) return true;
+  cfg.deny.push(deniedPath);
+  try {
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify(
+        { enabled: cfg.enabled, allow: cfg.allow, deny: cfg.deny, strictGit: cfg.strictGit },
+        null,
+        2,
+      ) + "\n",
+    );
+    log(`sandbox: denylisted ${deniedPath} in ${file}`);
+    return true;
+  } catch (e) {
+    warn(`sandbox: could not persist denylist: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
 }

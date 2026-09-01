@@ -4,7 +4,7 @@
  * A write outside the Seatbelt whitelist fails inside the sandboxed backend
  * with "Operation not permitted" in the tool output. The bridge extracts the
  * denied path, asks the user via ACP `session/request_permission`
- * (仅此一次 / 始终允许 / 拒绝), and on approval kills the backend so the next
+ * (仅此一次 / 始终允许 / 拒绝一次 / 始终拒绝), and on approval kills the backend so the next
  * ensureBackend() respawns under a widened profile. prompt() follows up with
  * a continuation prompt (see session.ts) so the model resumes the
  * interrupted task — per-command seamless escalation is impossible (the
@@ -12,11 +12,18 @@
  * directory-granularity with a restart is the closest achievable form.
  */
 
+import os from "node:os";
 import path from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 
-import { appendSandboxAllow, collectSandboxWorkspaces, resolveReal } from "../backend/sandbox.js";
+import {
+  appendSandboxAllow,
+  appendSandboxDeny,
+  collectSandboxWorkspaces,
+  readSandboxConfig,
+  resolveReal,
+} from "../backend/sandbox.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
@@ -36,21 +43,55 @@ const EPERM = "Operation not permitted";
 export const GENERIC_HINT_KEY = "(generic)";
 
 /**
+ * Tools whose output merely ECHOES text — an EPERM string in their output
+ * (docs, source, failing-test literals) is not their own syscall failing,
+ * and acting on it would raise a phantom ask. Lowercase: the backend
+ * reports both "Read" and "read" forms. Unknown names (MCP tools) stay
+ * scanned — a custom tool can legitimately hit the sandbox.
+ */
+export const READ_ONLY_TOOLS = new Set([
+  "read",
+  "grep",
+  "glob",
+  "webfetch",
+  "websearch",
+  "todoread",
+  "todowrite",
+  "enterplanmode",
+  "exitplanmode",
+  "askuserquestion",
+]);
+
+/**
  * Extract the denied path from tool output text (pure; exported for tests).
- * Handles raw shell output (`rm: /a/b: Operation not permitted`) and the
- * JSON-escaped form that rides tool.updated payloads (`\"/a/b: Operation not
- * permitted\"`). Paths containing spaces or quotes are not matched — the ask
- * falls back to a generic hint.
+ * Handles the POSIX tool form (`rm: /a/b: Operation not permitted`), the zsh
+ * redirect form (`zsh:2: operation not permitted: /a/b` — lowercase, path
+ * AFTER the phrase, the shape every shell redirect denial actually prints),
+ * and the Node fs form (`EPERM: operation not permitted, open '/a/b'`).
+ * Explicit `./` and `../` relative paths are extracted too and resolved
+ * against the session cwd by handleSandboxDenial; bare `foo/bar:` fragments
+ * are deliberately not matched. Paths containing spaces or quotes are not
+ * matched — the ask falls back to a generic hint.
  */
 export function extractSandboxDenial(text: string): SandboxDenial | null {
-  if (!text.includes(EPERM)) return null;
-  const mkdirMatch = /mkdir: (\/[^\s"\\:]+): /.exec(text);
+  if (!text.toLowerCase().includes(EPERM.toLowerCase())) return null;
+  const mkdirMatch = /mkdir: ((?:\/|\.{1,2}\/)[^\s"\\:]+): /i.exec(text);
   if (mkdirMatch) return { path: mkdirMatch[1]!, isMkdir: true };
   // Anchor the path to a boundary (start, whitespace, quote, bracket) so a
   // RELATIVE path fragment ("relative/x: …") is not mistaken for absolute.
-  const generic = /(?:^|[\s"([{])(\/[^\s"\\:]+): Operation not permitted/.exec(text);
-  if (!generic) return null;
-  return { path: generic[1]!, isMkdir: false };
+  const generic = /(?:^|[\s"([{])((?:\/|\.{1,2}\/)[^\s"\\:]+): operation not permitted/i.exec(text);
+  if (generic) return { path: generic[1]!, isMkdir: false };
+  // Node fs errors quote the path, so spaces survive this form. Any libuv
+  // syscall name matches (open/rename/unlink/mkdtemp/... — they all print
+  // alike); the closing quote must END the token (?![\w/]) so an apostrophe
+  // inside the path ("O'Brien") falls back to the generic hint instead of
+  // truncating the match into a much broader directory.
+  const nodeForm = /operation not permitted, ([a-z]+) '([^']+)'(?![\w/])/i.exec(text);
+  if (nodeForm) return { path: nodeForm[2]!, isMkdir: nodeForm[1]!.toLowerCase() === "mkdir" };
+  // zsh redirect form: path trails the phrase (`zsh:2: operation not permitted: /a/b`).
+  const zsh = /operation not permitted: ((?:\/|\.{1,2}\/)[^\s"\\:]+)/i.exec(text);
+  if (!zsh) return null;
+  return { path: zsh[1]!, isMkdir: false };
 }
 
 /** How long the allow popup may hang before it counts as a rejection. */
@@ -118,7 +159,14 @@ export async function handleSandboxDenial(
   // Process-level fact, not the config wish: the caller gates on the same
   // flag, so a sandbox armed only via project config (no env) still flows.
   if (!server.backendSandboxed) return;
-  const targetReal = resolveReal(denial.isMkdir ? denial.path : path.dirname(denial.path));
+  // The shell printed the path relative to the SESSION cwd — resolve against
+  // that, not the bridge's own cwd (they differ for remote/hub clients).
+  const raw = denial.isMkdir ? denial.path : path.dirname(denial.path);
+  const cwd = server.sessionCwds.get(acpSid);
+  const wsRoot = cwd;
+  const targetReal = resolveReal(
+    path.isAbsolute(raw) ? raw : path.resolve(cwd ?? process.cwd(), raw),
+  );
 
   // Debounce: one ask per path per session — the model retries the same
   // denied path and must not spam the popup; rejected/timeout asks count.
@@ -143,6 +191,33 @@ export async function handleSandboxDenial(
     return;
   }
 
+  // Phantom-ask guard: echoed EPERM text can also extract a path no syscall
+  // ever tried to write — and a grant for $HOME (or any of its ancestors)
+  // would effectively gut the sandbox. Such asks are refused; hand-editing
+  // the config is the only way to grant something this broad.
+  const home = resolveReal(os.homedir());
+  if (targetReal === "/" || targetReal === home || home.startsWith(targetReal + path.sep)) {
+    await sendTextChunk(
+      cx,
+      acpSid,
+      `[${targetReal} 范围过宽($HOME 或其上级),沙箱不会弹窗放行;确需放行请手动编辑 .zcode/acp/sandbox.json 的 allow 列表。]`,
+      randomUUID(),
+    );
+    return;
+  }
+
+  // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
+  // memory: no popup, and the asked-mark above keeps later repeats silent.
+  if (wsRoot && underAny(targetReal, readSandboxConfig(wsRoot).deny.map(resolveReal))) {
+    await sendTextChunk(
+      cx,
+      acpSid,
+      `[${targetReal} 已在 .zcode/acp/sandbox.json 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
+      randomUUID(),
+    );
+    return;
+  }
+
   const options = [
     {
       optionId: "sandbox_allow_always",
@@ -150,9 +225,14 @@ export async function handleSandboxDenial(
       name: `始终允许 ${targetReal}(写入项目配置)`,
     },
     { optionId: "sandbox_allow_once", kind: "allow_once" as const, name: `仅此一次 ${targetReal}` },
-    { optionId: "sandbox_reject", kind: "reject_once" as const, name: "拒绝" },
+    { optionId: "sandbox_reject_once", kind: "reject_once" as const, name: "拒绝一次" },
+    {
+      optionId: "sandbox_reject_always",
+      kind: "reject_always" as const,
+      name: `始终拒绝 ${targetReal}(记入项目配置)`,
+    },
   ];
-  let decision: "always" | "once" | "deny" = "deny";
+  let decision: "always" | "once" | "reject_once" | "reject_always" | "deny" = "deny";
   try {
     // Wire name is session/request_permission (snake_case — the camelCase
     // form is silently method-not-found on real clients) and the params must
@@ -170,6 +250,8 @@ export async function handleSandboxDenial(
     const oid = resp?.outcome?.optionId ?? "";
     if (oid === "sandbox_allow_always") decision = "always";
     else if (oid === "sandbox_allow_once") decision = "once";
+    else if (oid === "sandbox_reject_always") decision = "reject_always";
+    else if (oid === "sandbox_reject_once") decision = "reject_once";
   } catch (e) {
     // Popup failed/timed out or the client rejected the request itself —
     // keep the sandbox unchanged; the asked-mark prevents a retry loop.
@@ -179,11 +261,27 @@ export async function handleSandboxDenial(
     return;
   }
 
-  if (decision === "deny") {
+  if (decision === "reject_always") {
+    // The user's denial is persisted VISIBLY into the project config — never
+    // silently remembered in bridge memory. If the config can't be written,
+    // nothing is stored: the ask simply resurfaces next time.
+    const persisted = wsRoot ? appendSandboxDeny(wsRoot, targetReal) : false;
     await sendTextChunk(
       cx,
       acpSid,
-      `[已拒绝沙箱放行 ${targetReal}。如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
+      persisted
+        ? `[已记入始终拒绝 ${targetReal}(.zcode/acp/sandbox.json 的 deny 列表,可编辑撤销)。]`
+        : `[已拒绝 ${targetReal}(配置不可写,未持久化,同类写入下次仍会询问。)]`,
+      randomUUID(),
+    );
+    return;
+  }
+
+  if (decision === "reject_once" || decision === "deny") {
+    await sendTextChunk(
+      cx,
+      acpSid,
+      `[已拒绝沙箱放行 ${targetReal},未保存任何决定,同类写入会再次询问;如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
       randomUUID(),
     );
     return;
@@ -194,7 +292,6 @@ export async function handleSandboxDenial(
     // file from OUTSIDE the sandbox (the .zcode/acp deny island keeps the
     // agent from editing its own allowlist). A symlinked/hardlinked config
     // or an unwritable path downgrades to a bridge-lifetime once-allow.
-    const wsRoot = server.sessionCwds.get(acpSid);
     if (wsRoot) {
       if (!appendSandboxAllow(wsRoot, targetReal)) server.sandboxOnceAllows.add(targetReal);
     } else {

@@ -30,6 +30,7 @@ import type { ZcodeBackend } from "../src/backend/index.js";
 import {
   SANDBOX_ENV,
   appendSandboxAllow,
+  appendSandboxDeny,
   armSandboxArgv,
   buildSandboxProfile,
   collectSandboxWorkspaces,
@@ -87,7 +88,12 @@ describe("sandboxActive", () => {
       return sandboxActive([tmpRoot]);
     });
     expect(armed).toBe(false);
-    expect(readSandboxConfig(tmpRoot)).toEqual({ enabled: false, allow: [], strictGit: false });
+    expect(readSandboxConfig(tmpRoot)).toEqual({
+      enabled: false,
+      allow: [],
+      deny: [],
+      strictGit: false,
+    });
   });
 
   it("env arms globally regardless of configs", () => {
@@ -130,16 +136,16 @@ describe("sandboxActive", () => {
 describe("readSandboxConfig / appendSandboxAllow", () => {
   it("auto-creates the discovery template (enabled:false) on first read", () => {
     const cfg = readSandboxConfig(tmpRoot);
-    expect(cfg).toEqual({ enabled: false, allow: [], strictGit: false });
+    expect(cfg).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
     const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
-    expect(onDisk).toEqual({ enabled: false, allow: [], strictGit: false });
+    expect(onDisk).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
   });
 
   it("fails CLOSED on a malformed file and never rewrites the user's bytes", () => {
     writeConfig(tmpRoot, { enabled: true });
     writeFileSync(sandboxConfigPath(tmpRoot), "{not json");
     const cfg = readSandboxConfig(tmpRoot);
-    expect(cfg).toEqual({ enabled: true, allow: [], strictGit: false });
+    expect(cfg).toEqual({ enabled: true, allow: [], deny: [], strictGit: false });
     // A half-saved editor buffer must survive — no template clobbering.
     expect(readFileSync(sandboxConfigPath(tmpRoot), "utf8")).toBe("{not json");
   });
@@ -165,7 +171,12 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
     writeFileSync(target, JSON.stringify({ enabled: true, allow: ["~/.ssh"] }));
     mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
     symlinkSync(target, sandboxConfigPath(tmpRoot));
-    expect(readSandboxConfig(tmpRoot)).toEqual({ enabled: true, allow: [], strictGit: false });
+    expect(readSandboxConfig(tmpRoot)).toEqual({
+      enabled: true,
+      allow: [],
+      deny: [],
+      strictGit: false,
+    });
     expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(false);
     expect(JSON.parse(readFileSync(target, "utf8")).allow).toEqual(["~/.ssh"]);
   });
@@ -188,7 +199,12 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
   it("re-templates a config that vanished while never armed", () => {
     appendSandboxAllow(tmpRoot, "/x"); // materializes the enabled:false template
     rmSync(sandboxConfigPath(tmpRoot));
-    expect(readSandboxConfig(tmpRoot)).toEqual({ enabled: false, allow: [], strictGit: false });
+    expect(readSandboxConfig(tmpRoot)).toEqual({
+      enabled: false,
+      allow: [],
+      deny: [],
+      strictGit: false,
+    });
   });
 
   it("reads an EACCES config dir as armed (chmod-0000 must not disarm)", () => {
@@ -211,19 +227,54 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
   });
 
   it("persists always-allow entries without duplicates, preserving enabled", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: [], strictGit: false });
+    writeConfig(tmpRoot, { enabled: true, allow: [], deny: [], strictGit: false });
     expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(true);
     expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(true);
     expect(appendSandboxAllow(tmpRoot, "/opt/other")).toBe(true);
     const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
-    expect(onDisk).toEqual({ enabled: true, allow: ["/opt/data", "/opt/other"], strictGit: false });
+    expect(onDisk).toEqual({
+      enabled: true,
+      allow: ["/opt/data", "/opt/other"],
+      deny: [],
+      strictGit: false,
+    });
+  });
+
+  it("parses the deny list and drops relative entries from it too", () => {
+    writeConfig(tmpRoot, {
+      enabled: true,
+      allow: [],
+      deny: ["/opt/blocked", "relative/nope"],
+      strictGit: false,
+    });
+    expect(readSandboxConfig(tmpRoot)).toEqual({
+      enabled: true,
+      allow: [],
+      deny: ["/opt/blocked"],
+      strictGit: false,
+    });
+  });
+
+  it("appendSandboxDeny persists visibly and preserves every other field", () => {
+    writeConfig(tmpRoot, { enabled: true, allow: ["/opt/ok"], strictGit: true });
+    expect(appendSandboxDeny(tmpRoot, "/opt/blocked")).toBe(true);
+    expect(appendSandboxDeny(tmpRoot, "/opt/blocked")).toBe(true); // dedupe
+    const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
+    expect(onDisk).toEqual({
+      enabled: true,
+      allow: ["/opt/ok"],
+      deny: ["/opt/blocked"],
+      strictGit: true,
+    });
   });
 });
 
 describe("buildSandboxProfile", () => {
   it("denies writes by default, allows the workspace, carves the .zcode/acp deny island", () => {
     const profile = buildSandboxProfile({
-      workspaces: [{ root: tmpRoot, config: { enabled: true, allow: [], strictGit: false } }],
+      workspaces: [
+        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
+      ],
       extraAllow: [],
     });
     const lines = profile.split("\n");
@@ -242,7 +293,9 @@ describe("buildSandboxProfile", () => {
     // The profile's own dir self-denies LAST — the agent runs with $TMPDIR
     // writable and must not touch the next respawn's profile.
     const profile2 = buildSandboxProfile({
-      workspaces: [{ root: tmpRoot, config: { enabled: true, allow: [], strictGit: false } }],
+      workspaces: [
+        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
+      ],
       extraAllow: [],
       profileDir: "/fake/sbx-dir",
     });
@@ -257,7 +310,9 @@ describe("buildSandboxProfile", () => {
     });
     expect(strict).toContain(`(deny file-write* (subpath "${path.join(tmpRoot, ".git")}"))`);
     const lax = buildSandboxProfile({
-      workspaces: [{ root: tmpRoot, config: { enabled: true, allow: [], strictGit: false } }],
+      workspaces: [
+        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
+      ],
       extraAllow: [],
     });
     expect(lax).not.toContain('".git"');
@@ -269,7 +324,7 @@ describe("buildSandboxProfile", () => {
     rmSync(outside, { recursive: true, force: true }); // not created: resolveReal must survive
     const profile = buildSandboxProfile({
       workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [outside], strictGit: false } },
+        { root: tmpRoot, config: { enabled: true, allow: [outside], deny: [], strictGit: false } },
       ],
       extraAllow: [path.join(tmpRoot, "elsewhere")],
     });
@@ -338,7 +393,9 @@ describe("applySandboxFlip", () => {
 describe("armSandboxArgv", () => {
   const arm = () =>
     armSandboxArgv(["/usr/local/bin/node", "/glm/zcode.cjs", "app-server", "--stdio"], {
-      workspaces: [{ root: tmpRoot, config: { enabled: true, allow: [], strictGit: false } }],
+      workspaces: [
+        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
+      ],
       extraAllow: [],
     });
 

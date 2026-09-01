@@ -66,6 +66,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the auto-created template; protected-path matching folds case on macOS
   (`.ZCODE/ACP` variants no longer get a doomed popup).
 
+### Fixed
+
+- The dynamic-allow popup never fired for the most common denial shapes
+  (found by live testing right after arming): zsh prints redirect denials as
+  `zsh:2: operation not permitted: /path` — lowercase with the path AFTER the
+  phrase — which the extractor's `path: Operation not permitted` pattern and
+  the case-sensitive gate both missed, so `echo > /outside/f` (the standard
+  agent write) silently got no ask at all. The extractor now handles the zsh
+  redirect form, the Node fs form (`EPERM: operation not permitted, open
+'/path'` — quoted paths keep spaces, any libuv syscall name matches, and a
+  truncated apostrophe-in-path match is refused rather than allowed to
+  persist an over-broad directory), and explicit `./`/`../` relative
+  paths, which the handler resolves against the session cwd instead of the
+  bridge's own cwd (they differ for remote/hub clients); the gate is
+  case-insensitive; read-only tools (Read/Grep/Glob/... — their output
+  merely echoes text) are excluded from the scan to avoid phantom asks, and
+  asks resolving to $HOME or an ancestor are refused outright.
+- Rejection is explicit config, not hidden memory: the popup now offers all
+  four ACP kinds — 始终允许 / 仅此一次 / 拒绝一次 / 始终拒绝. "始终拒绝"
+  persists the path into the project config's `deny` list (the same ask
+  never resurfaces; review or undo by editing the file); "拒绝一次" and
+  timeouts/dismissals persist nothing and will ask again — no rejection is
+  remembered anywhere but the config.
+
 ## [0.14.3] - 2026-09-01
 
 ### Fixed

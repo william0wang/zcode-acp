@@ -128,9 +128,13 @@ redirections.
 
 When a write outside the whitelist is attempted, the tool fails with
 `Operation not permitted` and the bridge asks via the editor's permission
-popup whether to allow that directory **once** or **always**. "Always" is
-persisted by the bridge into `<workspace>/.zcode/acp/sandbox.json` (created
-on first run); the agent itself cannot edit that file — the sandbox denies
+popup with four choices: allow **once**, allow **always**, reject **once**,
+reject **always**. The "always" choices are persisted by the bridge into
+`<workspace>/.zcode/acp/sandbox.json` (created on first run — allows to the
+`allow` list, rejections to a `deny` list that suppresses future asks; edit
+the file to undo either). "Once" choices and dismissed popups persist
+nothing and will ask again. The agent itself cannot edit
+that file — the sandbox denies
 writes to `.zcode/acp/` inside the workspace while the bridge (outside the
 sandbox) writes it on your behalf. After an allow, the backend restarts with
 the widened profile (a few seconds; the bridge auto-continues the interrupted

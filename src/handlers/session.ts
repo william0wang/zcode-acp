@@ -51,7 +51,12 @@ import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
-import { extractSandboxDenial, GENERIC_HINT_KEY, handleSandboxDenial } from "./sandbox-allow.js";
+import {
+  extractSandboxDenial,
+  GENERIC_HINT_KEY,
+  handleSandboxDenial,
+  READ_ONLY_TOOLS,
+} from "./sandbox-allow.js";
 import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -1963,10 +1968,18 @@ export async function runEventTurn(
     // permissions. Only on tool.updated so mid-stream deltas aren't scanned.
     if (ev.type === "tool.updated" && server.backendSandboxed) {
       const outputText = JSON.stringify(ev.payload ?? {});
-      if (outputText.includes("Operation not permitted")) {
+      const toolCallId = String((ev.payload as { toolCallId?: unknown })?.toolCallId ?? "");
+      // Read-only tools merely ECHO text — an EPERM string in their output
+      // is not their own syscall failing, and acting on it would raise a
+      // phantom ask for a path nothing tried to write.
+      const toolName = (translator.toolNames.get(toolCallId) ?? "").toLowerCase();
+      // Case-insensitive: zsh prints redirects as "operation not permitted".
+      if (
+        !READ_ONLY_TOOLS.has(toolName) &&
+        outputText.toLowerCase().includes("operation not permitted")
+      ) {
         const denial = extractSandboxDenial(outputText);
         if (denial) {
-          const toolCallId = String((ev.payload as { toolCallId?: unknown })?.toolCallId ?? "");
           await handleSandboxDenial(server, cx, acpSid, turn, denial, toolCallId);
           if (turn.cancelled) return { stopReason: "cancelled" };
         } else {
