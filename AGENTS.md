@@ -160,6 +160,19 @@ ZCode protocol types into ACP notifications directly — always translate.
   its push — the next turn would run deaf) and re-baseline the projection
   differ (the abandoned turn committed messages while waiting — a stale
   baseline replays that residue as the next reply).
+- **Prompt lock ≠ turn liveness** (raw-backend verified, Aug-28 app-server):
+  `session/goal show` succeeds mid-turn (never reports the 1308 lock), and a
+  probe `session/send` is ACCEPTED while the turn runs — it is queued as
+  steer input. The 1308 lock only exists during turn finalisation, so "lock
+  released" proves nothing about whether a turn is alive. Killing a silently
+  running turn on a lock probe murdered live sub-agent turns behind quiet
+  event streams (PR #85 did exactly this for a day). The honest liveness
+  signal is the `session/read` projection watermark
+  (contextUsed/totalTokenCount/turnCount/currentTurnId): a sub-agent turn
+  advances it for minutes with zero stream events. `runEventTurn` therefore
+  defers the terminal decision while the watermark moves and only ends a
+  turn after the watermark has been frozen for STALE_FREEZE_MS (10 min) —
+  reply-fetch first, bounded stop as the last resort.
 - **The backend rejects JSON-RPC frames carrying a `jsonrpc` field** (strict
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing

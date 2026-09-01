@@ -263,21 +263,30 @@ editor still has it open).
     | turn.completed      | -> end_turn
     | turn.failed         | -> error
     | turn.cancelled      | -> cancelled
-    | no protocol        |
-    | progress (120s)    | -> probe prompt lock
-    |   lock released    | -> max_turn_requests
-    |   lock held        | -> defer decision
-    | manual cancel       | -> cancelled
+    | no protocol         |
+    | progress (120s)     | -> check read watermark
+    |   watermark moved   | -> defer decision (alive)
+    |   frozen < 10 min   | -> defer decision
+    |   frozen >= 10 min  | -> fetch reply -> end_turn
+    |                       |   no reply, no output -> max_turn_requests
+    | manual cancel        | -> cancelled
     +---------------------+
 ```
 
 Projection polling is a recovery signal, not protocol progress. In
 particular, `projection.status=running` may be stale and therefore never
-refreshes the 120-second deadline. At that deadline the bridge probes the
-backend prompt lock (`session/goal show`): an explicitly held lock proves a
-model or tool turn is still active and defers the terminal decision, while a
-released or indeterminate lock preserves the bounded `max_turn_requests`
-outcome. Already-queued events win the deadline race and are consumed first.
+refreshes the 120-second deadline. Neither is the prompt lock a liveness
+signal — verified against the Aug-28 app-server, `session/goal show` succeeds
+mid-turn, and a probe `session/send` is accepted (queued as steer input) while
+the turn runs; the lock is only held during finalisation. Instead the 15s
+stall-reconcile reads feed a liveness watermark
+(`contextUsed`/`totalTokenCount`/`turnCount`/`currentTurnId` from
+`session/read`): an advancing watermark proves a silently-working turn
+(typically a sub-agent) and defers the terminal decision indefinitely, while
+a watermark frozen for 10 minutes (STALE_FREEZE_MS) marks the projection as
+truly stale — the turn then ends gently (reply fetch first, bounded stop only
+when nothing was ever delivered). Already-queued events win the deadline race
+and are consumed first.
 
 ### Tool lifecycle
 

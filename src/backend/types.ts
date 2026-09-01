@@ -102,6 +102,10 @@ export interface ZcodeProjection {
   contextUsed?: number;
   contextWindow?: number;
   totalTokenCount?: number;
+  /** Turns completed in this session (observed in app-server projections). */
+  turnCount?: number;
+  /** Id of the turn the projection considers current, if any. */
+  currentTurnId?: string;
 }
 
 // ---------- messages / history ----------

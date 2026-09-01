@@ -1,7 +1,15 @@
 /**
- * Regression coverage for a stale `projection.status === "running"` keeping
- * the event turn alive forever.  The public `prompt()` boundary is used so the
- * test covers the real listener, monitor, and timeout wiring together.
+ * Regression coverage for stall termination in `runEventTurn`.
+ *
+ * History: PR #85 killed a turn after 120s of stream silence whenever a
+ * `session/goal show` probe answered without the 1308 lock error. Raw-backend
+ * probes (Aug-28 app-server) proved that probe worthless — goal show succeeds
+ * mid-turn, and even a probe `session/send` is accepted as steer input while
+ * the turn runs — so live sub-agent turns behind a silent stream were being
+ * murdered after 2 minutes. The replacement policy keys on the read-projection
+ * watermark (contextUsed/totalTokenCount/turnCount/currentTurnId): advancing
+ * watermark = alive (wait), watermark frozen past STALE_FREEZE_MS (10 min) =
+ * stale (end gently, stop as last resort).
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -22,18 +30,18 @@ interface StaleBackendControl {
   backend: ZcodeBackend;
   emit: (event: ZcodeEvent) => void;
   goalProbes: ReturnType<typeof vi.fn>;
-  setPromptLockHeld: (held: boolean) => void;
   sendRequests: ReturnType<typeof vi.fn>;
+  /** "advance": every session/read bumps contextUsed (live sub-agent). "frozen": never changes. */
+  setWatermarkMode: (mode: "advance" | "frozen") => void;
 }
 
 function staleRunningBackend(): StaleBackendControl {
   const listeners = new Set<{ handleEvent: (event: ZcodeEvent) => void }>();
-  let promptLockHeld = false;
-  const goalProbes = vi.fn(async () =>
-    promptLockHeld
-      ? { error: { message: "session goal: prompt is running" } }
-      : { result: { goal: null } },
-  );
+  let watermarkMode: "advance" | "frozen" = "frozen";
+  let contextUsed = 0;
+  // Kept only to assert the goal channel is NEVER consulted again — it cannot
+  // see turn liveness (verified against the real backend).
+  const goalProbes = vi.fn(async () => ({ result: { goal: null } }));
   const sendRequests = vi.fn();
   const backend = {
     isDead: false,
@@ -46,13 +54,15 @@ function staleRunningBackend(): StaleBackendControl {
           return { result: { eventSeq: 1 } };
         case "session/messages":
           return { result: { messages: [] } };
-        case "session/read":
+        case "session/read": {
+          if (watermarkMode === "advance") contextUsed += 1000;
           return {
             result: {
-              projection: { status: "running", contextUsed: 0 },
+              projection: { status: "running", contextUsed, contextWindow: 1000000 },
               settings: {},
             },
           };
+        }
         case "session/goal":
           return goalProbes();
         case "session/send":
@@ -78,10 +88,10 @@ function staleRunningBackend(): StaleBackendControl {
       for (const listener of listeners) listener.handleEvent(event);
     },
     goalProbes,
-    setPromptLockHeld: (held) => {
-      promptLockHeld = held;
-    },
     sendRequests,
+    setWatermarkMode: (mode) => {
+      watermarkMode = mode;
+    },
   };
 }
 
@@ -103,7 +113,15 @@ const cx = {
   request: vi.fn().mockResolvedValue({}),
 } as unknown as acp.AgentContext;
 
-describe("stale running projection recovery", () => {
+/** Pump the micro-task queue until prompt() has fired its session/send. */
+async function waitForSend(sendRequests: ReturnType<typeof vi.fn>) {
+  for (let i = 0; i < 80 && sendRequests.mock.calls.length === 0; i++) {
+    await Promise.resolve();
+  }
+  expect(sendRequests).toHaveBeenCalledOnce();
+}
+
+describe("stall termination policy (watermark-based)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -113,62 +131,83 @@ describe("stale running projection recovery", () => {
     vi.clearAllMocks();
   });
 
-  it("bounds a silent turn when running is stale and the prompt lock is released", async () => {
-    const { backend, goalProbes, sendRequests } = staleRunningBackend();
-    const turn = prompt(setup(backend), params, cx, 1);
-    let result: acp.PromptResponse | undefined;
-    void turn.then((value) => {
-      result = value;
-    });
-
-    // Let prompt() finish its immediate setup/subscribe/send chain before the
-    // large time jump; otherwise fake time can advance before runEventTurn has
-    // captured its initial deadline.
-    for (let i = 0; i < 80 && sendRequests.mock.calls.length === 0; i++) {
-      await Promise.resolve();
-    }
-    expect(sendRequests).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(121_000);
-
-    expect(result).toEqual({ stopReason: "max_turn_requests" });
-    expect(goalProbes).toHaveBeenCalled();
-  });
-
-  it("does not cancel an active tool while the prompt lock is still held", async () => {
+  it("keeps a silently-running sub-agent turn alive while the read watermark advances", async () => {
+    // The user-visible bug: a sub-agent works behind a silent event stream for
+    // minutes. The read watermark keeps moving (contextUsed grows on every
+    // 15s stall-reconcile probe), so the turn must NOT be killed at the 120s
+    // no-progress deadline — nor ever, while the watermark keeps advancing.
     const control = staleRunningBackend();
-    control.setPromptLockHeld(true);
-    const turn = prompt(setup(control.backend), params, cx, 2);
-    let settled = false;
-    void turn.then(() => {
-      settled = true;
+    control.setWatermarkMode("advance");
+    const turn = prompt(setup(control.backend), params, cx, 1);
+    let settled: acp.PromptResponse | undefined;
+    void turn.then((value) => {
+      settled = value;
     });
+    await waitForSend(control.sendRequests);
 
-    for (let i = 0; i < 80 && control.sendRequests.mock.calls.length === 0; i++) {
-      await Promise.resolve();
-    }
-    expect(control.sendRequests).toHaveBeenCalledOnce();
-    control.emit({
-      type: "tool.updated",
-      payload: {
-        kind: "scheduled",
-        toolCallId: "tool-1",
-        toolName: "Read",
-        input: { file_path: "/tmp/example" },
-      },
-    });
-    control.emit({
-      type: "tool.updated",
-      payload: { kind: "started", toolCallId: "tool-1", toolName: "Read" },
-    });
-    await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(121_000);
+    expect(settled).toBeUndefined(); // old goal-probe code killed the turn here
 
-    expect(control.goalProbes).toHaveBeenCalled();
-    expect(settled).toBe(false);
+    // Still alive long past any single deadline window.
+    await vi.advanceTimersByTimeAsync(700_000);
+    expect(settled).toBeUndefined();
 
     control.emit({ type: "turn.completed", payload: { resultType: "success" } });
     await vi.advanceTimersByTimeAsync(5_000);
 
     await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+    expect(control.goalProbes).not.toHaveBeenCalled();
+    expect(control.backend.send).not.toHaveBeenCalled();
+  });
+
+  it("ends a watermark-frozen turn after the stale-freeze budget (no output → stop)", async () => {
+    // PR #85's original goal stays: a projection stuck at `running` whose
+    // watermark never advances must eventually converge instead of hanging
+    // forever. Nothing was emitted, no reply can be fetched → bounded stop.
+    const control = staleRunningBackend();
+    control.setWatermarkMode("frozen");
+    const server = setup(control.backend);
+    const turn = prompt(server, params, cx, 2);
+    let result: acp.PromptResponse | undefined;
+    void turn.then((value) => {
+      result = value;
+    });
+    await waitForSend(control.sendRequests);
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(result).toBeUndefined(); // 120s freeze alone must not kill yet
+
+    // 10-minute stale-freeze budget from the first watermark read (~15s in).
+    await vi.advanceTimersByTimeAsync(700_000);
+
+    expect(result).toEqual({ stopReason: "max_turn_requests" });
+    expect(control.backend.send).toHaveBeenCalled(); // stopBackendTurn fired
+    expect(control.goalProbes).not.toHaveBeenCalled();
+  });
+
+  it("ends a watermark-frozen turn gently when output was already delivered", async () => {
+    // Same freeze, but a tool card was already streamed: the turn is treated
+    // as completed-but-terminal-event-lost — end_turn, no backend stop.
+    const control = staleRunningBackend();
+    control.setWatermarkMode("frozen");
+    const turn = prompt(setup(control.backend), params, cx, 3);
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    await waitForSend(control.sendRequests);
+
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "started", toolCallId: "tool-1", toolName: "Read" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await vi.advanceTimersByTimeAsync(121_000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(700_000);
+    await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+    expect(control.backend.send).not.toHaveBeenCalled();
   });
 });

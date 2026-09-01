@@ -17,7 +17,12 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
-import type { ZcodeCreateResult, ZcodeListResult, ZcodeSnapshot } from "../backend/types.js";
+import type {
+  ZcodeCreateResult,
+  ZcodeListResult,
+  ZcodeProjection,
+  ZcodeSnapshot,
+} from "../backend/types.js";
 import {
   buildModes,
   buildConfigOptions,
@@ -1630,8 +1635,33 @@ export async function runEventTurn(
   const translator = new EventTranslator();
   differ.resetTurn();
   const NO_PROGRESS_MS = 120_000;
+  // Stall termination policy. Two candidate liveness signals were verified
+  // against the Aug-28 app-server and both are unusable for kill decisions:
+  //   - `session/goal show` succeeds mid-turn (never reports the 1308 lock),
+  //   - a probe `session/send` is ACCEPTED while the turn runs (queued as
+  //     steer input) — the prompt lock is only held during finalisation.
+  // So "lock released" proves nothing about turn liveness, and killing on it
+  // murdered live sub-agent turns after 120s of stream silence. The honest
+  // signal is the read-projection watermark: contextUsed / totalTokenCount /
+  // turnCount / currentTurnId advance while the backend makes progress
+  // (verified: a sub-agent turn advanced the watermark for 5+ minutes with
+  // zero stream events). A live turn may still freeze the watermark for a
+  // while (long CoT, quiet tools — observed 60s+ pauses), so a freeze alone
+  // never kills: only a freeze sustained past STALE_FREEZE_MS ends the turn,
+  // reply-fetch first, stop as the last resort.
+  const STALE_FREEZE_MS = 600_000;
   let lastProtocolProgressAt = Date.now();
   let nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
+  let lastWatermarkAdvanceAt = Date.now();
+  let watermark = "";
+  const noteWatermark = (proj: ZcodeProjection | null): void => {
+    if (!proj) return;
+    const next = `${proj.contextUsed ?? 0}/${proj.totalTokenCount ?? 0}/${proj.turnCount ?? 0}/${proj.currentTurnId ?? ""}`;
+    if (next !== watermark) {
+      watermark = next;
+      lastWatermarkAdvanceAt = Date.now();
+    }
+  };
   let lastStallCheck = Date.now();
   let emittedText = false;
   let emittedOutput = false;
@@ -1663,22 +1693,42 @@ export async function runEventTurn(
         stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
         return { stopReason: "max_turn_requests" };
       } else {
-        const lockState = await probePromptLock(server, turn.zcodeSid);
-        if (lockState === "held") {
-          // A prompt-lock failure is direct evidence that the backend still owns
-          // an active turn. It is liveness, not protocol progress: leave
-          // lastProtocolProgressAt untouched and schedule a later decision.
-          // This protects legitimately long model/tool operations without
-          // allowing a stale `projection.status=running` to refresh the clock.
+        const frozenMs = Date.now() - lastWatermarkAdvanceAt;
+        if (frozenMs < STALE_FREEZE_MS) {
+          // The read watermark moved recently — direct evidence the backend is
+          // still making progress (typically a sub-agent or slow tool working
+          // behind a silent stream). Keep waiting; the 15s stall-reconcile
+          // below keeps refreshing the watermark via session/read.
           const activeTools = [...translator.seenToolIds].filter(
             (toolId) => !translator.finalToolIds.has(toolId),
           ).length;
           log(
-            `  [stall] prompt lock still held after ${Math.round((Date.now() - lastProtocolProgressAt) / 1000)}s silence (activeTools=${activeTools}); deferring terminal decision`,
+            `  [stall] watermark advanced within the last ${Math.round(frozenMs / 1000)}s (activeTools=${activeTools}); deferring terminal decision`,
           );
           nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
+        } else if (emittedText || emittedOutput) {
+          // Watermark frozen past the budget and something was already
+          // delivered — treat as a completed-but-terminal-event-lost turn
+          // (never compress its context; the completion is inferred).
+          turn.stallRecovered = true;
+          log(
+            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; ending turn after delivered output`,
+          );
+          return { stopReason: "end_turn" };
         } else {
-          log(`  [stall] no-progress deadline reached; prompt lock=${lockState}`);
+          const reply = await fetchLastReply(server, turn.zcodeSid, differ);
+          if (reply) {
+            registerFetchedReply(translator, reply);
+            await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
+            turn.stallRecovered = true;
+            log(
+              `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; recovered reply via session/messages`,
+            );
+            return { stopReason: "end_turn" };
+          }
+          log(
+            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with no output; stopping backend turn`,
+          );
           stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
           return { stopReason: "max_turn_requests" };
         }
@@ -1754,6 +1804,7 @@ export async function runEventTurn(
       ) {
         lastStallCheck = Date.now();
         const proj = await monitor.pollOnce();
+        noteWatermark(proj);
         if (proj?.status === "idle") {
           // A single idle probe can also fire mid-work: the backend is silent
           // during the model's thinking/connection phase and may report idle
@@ -1767,6 +1818,7 @@ export async function runEventTurn(
             continue; // alive — events will be consumed by the next poll
           }
           const proj2 = await monitor.pollOnce();
+          noteWatermark(proj2);
           if (proj2?.status === "idle" && !listener.hasQueuedEvents()) {
             // Turn completed but the event was lost (double-confirmed).
             if (!emittedText) {
@@ -1976,41 +2028,6 @@ export async function runEventTurn(
       await emitModeIfChanged(server, cx, acpSid, turn.zcodeSid);
       return { stopReason: "end_turn" };
     }
-  }
-}
-
-type PromptLockState = "held" | "released" | "unknown";
-
-/**
- * Probe the backend's authoritative prompt lock without waiting for it to
- * change. `session/read` projection status is intentionally not considered:
- * that projection can remain stale at `running`, which is the condition this
- * probe is used to disambiguate.
- */
-async function probePromptLock(server: ZcodeAcpServer, zcodeSid: string): Promise<PromptLockState> {
-  const backend = server.ensureBackend();
-  if (backend.isDead) return "unknown";
-  try {
-    const resp = await backend.request(
-      server.nextId(),
-      "session/goal",
-      { sessionId: zcodeSid, action: "show" },
-      10_000,
-    );
-    if (!resp.error) return "released";
-    // Lock-busy must match by error CODE, not message text: backend message
-    // wording drifts between releases (repo Gotcha), and a missed match kills
-    // a live turn. 1308 is the prompt-lock-busy code (same one the send-retry
-    // loop keys on); message matching kept as a legacy fallback.
-    if (resp.error.code === 1308) return "held";
-    const message = (resp.error.message ?? "").toLowerCase();
-    if (message.includes("prompt is running") || message.includes("already running")) {
-      return "held";
-    }
-    return "unknown";
-  } catch (e) {
-    log(`  [stall] prompt-lock probe failed: ${e instanceof Error ? e.message : String(e)}`);
-    return "unknown";
   }
 }
 
