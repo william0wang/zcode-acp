@@ -191,6 +191,8 @@ export interface WelcomeInfo {
   model: string;
   mode: string;
   thought: string;
+  /** "sandbox: on" status row content; empty when the sandbox is off. */
+  sandbox: string;
 }
 
 /** One rendered line (or block) in the transcript. */

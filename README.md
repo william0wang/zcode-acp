@@ -97,6 +97,51 @@ most setups need no `ZCODE_BIN` at all — set it only for custom installs:
 | `ZCODE_ACP_HUB_PORT`               | `8377`              | Port of the machine-level hub daemon. Map exactly this one port in your tunnel.                                                                                                                                                                                                                                                                                                              |
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`         | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`              | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
+| `ZCODE_ACP_SANDBOX`                | _(unset)_           | Set to `1` to confine the agent's file writes with a macOS Seatbelt sandbox globally; per-project, set `"enabled": true` in `<workspace>/.zcode/acp/sandbox.json` instead (see [Sandbox](#sandbox)).                                                                                                                                                                                         |
+
+## Sandbox
+
+Two switches arm the sandbox (macOS only), whichever comes first:
+
+- globally: `ZCODE_ACP_SANDBOX=1`, or
+- per project: `"enabled": true` in `<workspace>/.zcode/acp/sandbox.json`.
+  The bridge auto-creates that file with `"enabled": false` the first time
+  you open the workspace — flip the flag to opt this project in, no global
+  env needed. Flipping it mid-run takes effect on the next prompt (the
+  backend restarts sandboxed); flipping back takes effect the next time the
+  backend restarts on its own.
+
+Once armed, the zcode backend subprocess — and every Bash/Edit/Write it
+performs, including all child processes — runs wrapped in a
+Seatbelt (`sandbox-exec`) profile that denies file writes everywhere except:
+
+- the workspace root(s) of your live sessions,
+- `~/.zcode*` (the backend's own sessions/db/logs),
+- the system temp directory and regenerable tool caches (`~/Library/Caches`,
+  `~/.cache`, `~/.npm`, `~/Library/pnpm`, `~/.node-gyp`),
+- paths granted via the per-project config or the allow popup.
+
+Reads and process execution stay open: deletion (`rm`, `mv`, truncation) is a
+write-class syscall, so the write denial stops it regardless of which binary
+performs it — including `/bin/rm`, `python shutil.rmtree`, or shell
+redirections.
+
+When a write outside the whitelist is attempted, the tool fails with
+`Operation not permitted` and the bridge asks via the editor's permission
+popup whether to allow that directory **once** or **always**. "Always" is
+persisted by the bridge into `<workspace>/.zcode/acp/sandbox.json` (created
+on first run); the agent itself cannot edit that file — the sandbox denies
+writes to `.zcode/acp/` inside the workspace while the bridge (outside the
+sandbox) writes it on your behalf. After an allow, the backend restarts with
+the widened profile (a few seconds; the bridge auto-continues the interrupted
+task). Set `"strictGit": true` in the config to also put `.git` behind the
+popup.
+
+This targets accident prevention, not malice: indirect escapes (an
+agent-edited `.bashrc`, build scripts, or git hooks that you later run
+yourself outside the sandbox) are out of scope — treat its output like any
+other code review. Verify a profile manually with
+`bash scripts/verify-sandbox.sh` (macOS, after `pnpm build`).
 
 ## Remote Access
 

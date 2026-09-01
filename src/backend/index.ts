@@ -4,6 +4,19 @@ export { ZcodeBackend, type ServerRequest, type EventListener } from "./client.j
 export { EventStreamListener, TurnMonitor, type NextId } from "./listener.js";
 export { resolveZcodeCommand } from "./resolve.js";
 export { loadZcodeCredentials, mergeEnvWithCreds, type ZcodeCredentials } from "./credentials.js";
+export {
+  SANDBOX_ENV,
+  appendSandboxAllow,
+  armSandboxArgv,
+  buildSandboxProfile,
+  collectSandboxWorkspaces,
+  projectSandboxEnabled,
+  readSandboxConfig,
+  resetSandboxDecisionForTest,
+  sandboxActive,
+  sandboxConfigPath,
+  type SandboxConfig,
+} from "./sandbox.js";
 export type {
   ZcodeRequest,
   ZcodeNotification,

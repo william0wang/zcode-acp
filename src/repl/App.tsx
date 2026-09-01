@@ -193,6 +193,7 @@ function WelcomeView({ info }: { info: WelcomeInfo }): ReactElement {
         <Text dimColor> v{info.version}</Text>
       </Box>
       <Text dimColor>session · {info.cwd}</Text>
+      {info.sandbox ? <Text color="green">{info.sandbox}</Text> : null}
       {config ? (
         <Box marginTop={1}>
           <Text dimColor>● </Text>
@@ -654,7 +655,8 @@ function entryHeight(entry: ReplEntry, width: number): number {
     case "user":
       return 1 + estimateLines(`> ${entry.text}`, width);
     case "welcome":
-      return 1 + 12;
+      // Branding + session + sandbox row + config + 5 hint lines + margins.
+      return 1 + 13;
     case "tool":
       return estimateLines(`• ${entry.title} (${entry.status})`, width);
     default:

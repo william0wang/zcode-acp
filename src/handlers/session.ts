@@ -51,6 +51,7 @@ import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
+import { extractSandboxDenial, GENERIC_HINT_KEY, handleSandboxDenial } from "./sandbox-allow.js";
 import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -565,6 +566,12 @@ export async function prompt(
   cx: acp.AgentContext,
   requestId: number | string,
 ): Promise<acp.PromptResponse> {
+  // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
+  // after the backend spawned unsandboxed must arm on THIS prompt, not on the
+  // next bridge restart — kill the old process; the ensureBackend() below
+  // respawns under the profile and the subscribe-recovery path reloads the
+  // session. No-op unless the config appeared mid-run.
+  await server.applySandboxFlip();
   const backend = server.ensureBackend();
 
   // Extract prompt text + image attachments from ACP ContentBlock[].
@@ -877,6 +884,32 @@ export async function prompt(
         if (result.stopReason === "end_turn" && !turn.stallRecovered) {
           const { maybeAutoCompact } = await import("../config/auto-compact.js");
           await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
+        }
+
+        // Sandbox allow-restart continuation (ADR-0011): the turn unwound as
+        // cancelled because the user approved a new writable root and the
+        // backend was killed. Fire a continuation prompt so the model resumes
+        // the task under the widened profile — fire-and-forget: the preempt
+        // lock serializes it behind this prompt's cleanup, and the nested
+        // prompt() re-enters through the existing machinery (fresh backend,
+        // "session is not active" subscribe recovery reloads + re-baselines
+        // + resubscribes, rebuilds its listener against the new backend).
+        const continuation = server.sandboxContinuations.get(params.sessionId);
+        if (continuation && result.stopReason === "cancelled") {
+          server.sandboxContinuations.delete(params.sessionId);
+          void prompt(
+            server,
+            {
+              sessionId: params.sessionId,
+              prompt: [{ type: "text", text: continuation }],
+            } as acp.PromptRequest,
+            cx,
+            `sandbox-cont-${randomUUID()}`,
+          ).catch((e) =>
+            warn(
+              `sandbox: continuation prompt failed: ${e instanceof Error ? e.message : String(e)}`,
+            ),
+          );
         }
 
         return result;
@@ -1919,6 +1952,41 @@ export async function runEventTurn(
       // otherwise only set by its own diff / emitInitialUsage).
       if (iev.kind === "UsageDelta") differ.setLastUsage(iev.used);
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
+    }
+
+    // Sandbox write-denial (ADR-0011): the tool output reached the editor
+    // above; now check it for an EPERM outside the Seatbelt whitelist and
+    // run the dynamic-allow flow (ask → persist → kill backend → the turn
+    // unwinds as cancelled; prompt() fires the continuation). Gated on the
+    // PROCESS fact backendSandboxed (not the config wish) — EPERM can only
+    // come from a sandboxed process; unsandboxed EPERM is ordinary filesystem
+    // permissions. Only on tool.updated so mid-stream deltas aren't scanned.
+    if (ev.type === "tool.updated" && server.backendSandboxed) {
+      const outputText = JSON.stringify(ev.payload ?? {});
+      if (outputText.includes("Operation not permitted")) {
+        const denial = extractSandboxDenial(outputText);
+        if (denial) {
+          const toolCallId = String((ev.payload as { toolCallId?: unknown })?.toolCallId ?? "");
+          await handleSandboxDenial(server, cx, acpSid, turn, denial, toolCallId);
+          if (turn.cancelled) return { stopReason: "cancelled" };
+        } else {
+          // No path parsed — one generic hint per session, not one per retry.
+          let asked = server.sandboxAskedPaths.get(acpSid);
+          if (!asked) {
+            asked = new Set();
+            server.sandboxAskedPaths.set(acpSid, asked);
+          }
+          if (!asked.has(GENERIC_HINT_KEY)) {
+            asked.add(GENERIC_HINT_KEY);
+            await sendTextChunk(
+              cx,
+              acpSid,
+              "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
+              chunkMsgId,
+            );
+          }
+        }
+      }
     }
 
     // Edit/Write diff eager dispatch: on tool.updated result, grab the

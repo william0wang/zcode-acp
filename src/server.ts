@@ -15,10 +15,11 @@ import {
   resolveZcodeCommand,
   ZcodeBackend,
 } from "./backend/index.js";
+import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
 import { ClientRegistry } from "./remote/broadcast.js";
-import { AGENT_INFO, PROTOCOL_VERSION, log } from "./utils.js";
+import { AGENT_INFO, PROTOCOL_VERSION, log, warn } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
 export interface ClientCapabilities {
@@ -106,6 +107,32 @@ export class ZcodeAcpServer {
    * are deleted on first use.
    */
   readonly sessionCwds = new Map<string, string>();
+  /**
+   * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
+   * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
+   * on the next backend respawn in ensureBackend().
+   */
+  readonly sandboxOnceAllows = new Set<string>();
+  /**
+   * Deny paths already asked about, per ACP session — the debounce behind
+   * the allow popup (the model retries the same path and must not re-ask).
+   * Includes rejected/timed-out asks.
+   */
+  readonly sandboxAskedPaths = new Map<string, Set<string>>();
+  /**
+   * Continuation prompts waiting to run after a sandbox allow restart, per
+   * ACP session — set by the allow flow, consumed by prompt() after the
+   * interrupted turn unwinds (the new turn tells the model the write is now
+   * permitted and to resume the task).
+   */
+  readonly sandboxContinuations = new Map<string, string>();
+  /**
+   * Whether the current backend subprocess was spawned under sandbox-exec.
+   * Process-level fact (not config wish): EPERM in tool output can only come
+   * from a sandboxed process, and applySandboxFlip() needs to detect a
+   * config-armed sandbox facing an unsandboxed live backend.
+   */
+  backendSandboxed = false;
   /**
    * Currently running turns, keyed by the ACP request id (JSON-RPC ids may be
    * numbers or strings; set/delete always use the same value, so the wider
@@ -203,13 +230,76 @@ export class ZcodeAcpServer {
     return ++this.msgCounter;
   }
 
-  /** Lazily spawn the zcode backend on first use (initialize doesn't need it). */
+  /**
+   * Lazily spawn the zcode backend on first use (initialize doesn't need it).
+   * With the sandbox armed (ZCODE_ACP_SANDBOX=1 globally, or any live
+   * workspace's .zcode/acp/sandbox.json — ADR-0011), the spawn is wrapped in
+   * a Seatbelt profile built from the live workspace roots — session/new
+   * records cwds before any backend RPC (lazy placeholders), so the whitelist
+   * is complete by the time the backend materializes here.
+   */
   ensureBackend(): ZcodeBackend {
     if (this.backend && !this.backend.isDead) return this.backend;
     const env = mergeEnvWithCreds(loadZcodeCredentials());
-    const argv = resolveZcodeCommand();
+    let argv = resolveZcodeCommand();
+    this.backendSandboxed = sandboxActive(this.sandboxRoots());
+    if (this.backendSandboxed) {
+      const { workspaces, extraAllow } = collectSandboxWorkspaces(this.sandboxRoots());
+      argv = armSandboxArgv(argv, {
+        workspaces,
+        extraAllow: [...extraAllow, ...this.sandboxOnceAllows],
+      });
+    }
     this.backend = new ZcodeBackend(argv, env);
     return this.backend;
+  }
+
+  /**
+   * Mark every in-flight turn cancelled — used right before killing the
+   * backend WHOLESALE (sandbox arm-flip / allow restart). Those turn loops
+   * would otherwise wait on a dead reader with no stall signal (the backend
+   * is gone, so no events ever arrive) and hang until the freeze watchdog,
+   * ~10 minutes per turn. stopSent: no stop pair is needed — the entire
+   * process group dies with the backend.
+   */
+  cancelAllPendingTurns(): void {
+    for (const turn of this.pendingTurns.values()) {
+      turn.cancelled = true;
+      turn.stopSent = true;
+    }
+  }
+
+  /**
+   * Workspace roots that parametrize the sandbox decision/profile: every live
+   * session's cwd, falling back to the bridge's own cwd before any session.
+   */
+  sandboxRoots(): Set<string> {
+    const roots = new Set(this.sessionCwds.values());
+    if (roots.size === 0) roots.add(process.cwd());
+    return roots;
+  }
+
+  /**
+   * Project-level sandbox flip (ADR-0011): flipping `enabled: true` in a live
+   * workspace's .zcode/acp/sandbox.json arms the sandbox mid-run, without a
+   * global env. If the flip happened after the current backend spawned
+   * unsandboxed, kill it — the caller's next ensureBackend() respawns under
+   * the profile, and prompt()'s subscribe recovery reloads the session. The
+   * reverse (flipping back to false) never restarts a live sandboxed backend;
+   * the next natural respawn drops the wrap. Best-effort: a failed kill
+   * leaves things as they were (the sandbox arms on a later respawn).
+   */
+  async applySandboxFlip(): Promise<void> {
+    if (this.backendSandboxed) return;
+    if (!this.backend || this.backend.isDead) return;
+    if (!sandboxActive(this.sandboxRoots())) return;
+    warn("sandbox: project config armed mid-run — restarting backend under sandbox-exec");
+    this.cancelAllPendingTurns();
+    try {
+      await this.backend.close();
+    } catch (e) {
+      warn(`sandbox: backend kill failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   /** Resolve the zcode session id for an ACP session id. */
