@@ -46,6 +46,7 @@ import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
 import { ZcodeAcpServer } from "./server.js";
+import { messages } from "./i18n.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 
 /**
@@ -57,9 +58,15 @@ import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
 function buildAllCommands() {
   const pluginCommands = loadPluginCommands();
   const skillCommands = loadSkillCommands();
+  // Localize the static commands' descriptions (names/hints stay as-is —
+  // they are tokens); plugin/skill descriptions come from their own sources.
+  const m = messages();
   const seen = new Set<string>(SLASH_COMMANDS.map((c) => c.name));
   const merged: Array<{ name: string; description: string; input?: { hint: string } }> = [
-    ...SLASH_COMMANDS,
+    ...SLASH_COMMANDS.map((c) => ({
+      ...c,
+      description: m.slashCommandDescriptions[c.name] ?? c.description,
+    })),
   ];
   for (const c of [...pluginCommands, ...skillCommands]) {
     if (!seen.has(c.name)) {

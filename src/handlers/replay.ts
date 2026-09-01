@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeMessage, ZcodeMessagesResult } from "../backend/types.js";
+import { messages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { throwError, withReplayBatch } from "./io.js";
@@ -314,7 +315,7 @@ function transcriptTitle(tool: string, inputJson: string): string {
   } catch {
     /* non-JSON input — fall through */
   }
-  return `${tool} tool`;
+  return messages().replayToolFallback(tool);
 }
 
 /** <summary> line of a task-notification, entities decoded, capped at 60. */
@@ -347,10 +348,14 @@ function collapseUserText(
 ): { title: string; kind: CollapseKind } | null {
   if (semantics?.kind === "compact_summary") {
     const raw =
-      typeof summary?.title === "string" && summary.title ? summary.title : "Compact summary";
+      typeof summary?.title === "string" && summary.title
+        ? summary.title
+        : messages().replayCompactSummary;
     return { title: raw.length > 60 ? raw.slice(0, 57) + "…" : raw, kind: "compact" };
   }
-  if (CONTEXT_HANDOFF.test(text)) return { title: "Context handoff", kind: "context-handoff" };
+  if (CONTEXT_HANDOFF.test(text)) {
+    return { title: messages().replayContextHandoff, kind: "context-handoff" };
+  }
   const tool = TOOL_TRANSCRIPT.exec(text);
   if (tool) {
     return { title: transcriptTitle(tool[1]!, tool[2]!), kind: "tool-transcript" };

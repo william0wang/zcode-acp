@@ -24,6 +24,7 @@ import {
   TOOL_KIND_MAP,
 } from "../translators/tool-helpers.js";
 import type { InternalEvent } from "../translators/types.js";
+import { messages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
 import { sendSessionUpdate } from "./io.js";
@@ -349,14 +350,13 @@ function dispatchFilesChanged(
   const files = ev.files;
   const preview = files.slice(0, 3).join(", ");
   const ellipsis = files.length > 3 ? "..." : "";
+  const m = messages();
   return sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "tool_call",
     toolCallId: `files_${randomUUID().slice(0, 8)}`,
-    title: `changed files (${files.length}): ${preview}${ellipsis}`,
+    title: m.changedFilesTitle(files.length, preview) + ellipsis,
     kind: "edit",
     status: "completed",
-    content: [
-      { type: "content", content: { type: "text", text: "affected files:\n" + files.join("\n") } },
-    ],
+    content: [{ type: "content", content: { type: "text", text: m.affectedFilesList(files) } }],
   });
 }

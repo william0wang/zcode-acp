@@ -9,11 +9,20 @@
  *   that residue as the next reply's output.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TurnMonitor } from "../src/backend/listener.js";
 import { drainBackendAfterCancel } from "../src/handlers/session.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
+
+// These tests assert the Chinese message table.
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "zh");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 const fetchMessagesMock = vi.hoisted(() => vi.fn(async () => []));
 

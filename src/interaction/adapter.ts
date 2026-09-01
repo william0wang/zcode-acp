@@ -23,6 +23,7 @@ import type {
   ZcodeInteractionResponse,
   ZcodeInteractionUserInputParams,
 } from "../backend/types.js";
+import { messages } from "../i18n.js";
 
 // ---------- classification ----------
 
@@ -136,15 +137,16 @@ export function exitPlanModeToAcpPermission(
   sessionId: string;
   toolCall: { toolCallId: string; title?: string; rawInput: unknown };
 } {
+  const m = messages();
   return {
     options: [
-      { kind: "allow_once", name: "Approve — exit plan mode", optionId: "approve" },
-      { kind: "reject_once", name: "Reject — keep planning", optionId: "reject" },
+      { kind: "allow_once", name: m.planApproveOption, optionId: "approve" },
+      { kind: "reject_once", name: m.planRejectOption, optionId: "reject" },
     ],
     sessionId: acpSid,
     toolCall: {
       toolCallId: params.toolCallId ?? "",
-      title: "Exit plan mode",
+      title: m.planPopupTitle,
       rawInput: params.input,
     },
   };
@@ -204,11 +206,12 @@ export function splitAskUserQuestions(
     if (labels.length === 0) continue;
 
     const multi = q.multiSelect === true;
+    const m = messages();
     if (multi) {
       const options: PermissionOption[] = [];
       for (const lb of labels) {
-        options.push({ optionId: `${lb}:yes`, kind: "allow_once", name: `Include: ${lb}` });
-        options.push({ optionId: `${lb}:no`, kind: "reject_once", name: `Skip: ${lb}` });
+        options.push({ optionId: `${lb}:yes`, kind: "allow_once", name: m.askIncludeOption(lb) });
+        options.push({ optionId: `${lb}:no`, kind: "reject_once", name: m.askSkipLabelOption(lb) });
       }
       result.push({ question: q.question, multiSelect: true, options });
     } else {
@@ -217,7 +220,7 @@ export function splitAskUserQuestions(
         kind: "allow_once",
         name: lb,
       }));
-      options.push({ optionId: "__skip__", kind: "reject_once", name: "Skip" });
+      options.push({ optionId: "__skip__", kind: "reject_once", name: m.askSkipOption });
       result.push({ question: q.question, multiSelect: false, options });
     }
   }
@@ -312,7 +315,7 @@ export function buildAskUserElicitationForm(
     if (labels.length === 0) continue;
     // Titled enum option for "skip": const carries the sentinel value the
     // parser recognizes; title is what the client renders in the dropdown.
-    const skipOption = { const: ELICIT_SKIP, title: "Skip this question" };
+    const skipOption = { const: ELICIT_SKIP, title: messages().askSkipQuestionTitle };
     if (q.multiSelect) {
       properties[key] = {
         type: "array",

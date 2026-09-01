@@ -39,6 +39,7 @@ import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
 import { formatMcpServers, loadMcpServers } from "../config/mcp-discovery.js";
 import { loadPluginCommands } from "../config/plugin-commands.js";
+import { messages } from "../i18n.js";
 import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -172,29 +173,27 @@ export async function handleSlashCommand(
         if (result.__lockTimeout) {
           // 300s elapsed but the lock never released — the backend may still be
           // compacting; the next prompt will hit "a prompt is already running".
-          return ok(
-            "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
-          );
+          return ok(messages().slashCompactTimeout);
         }
-        return ok("✓ compacted conversation context");
+        return ok(messages().slashCompacted);
       }
       case "goal": {
         if (!arg) throw new RequestError(-32602, "/goal requires a goal description");
         await goal(server, { sessionId: acpSid, action: "set", objective: arg });
-        return ok(`✓ goal set: ${arg}`);
+        return ok(messages().slashGoalSet(arg));
       }
       case "fork": {
         const result = (await fork(server, { sessionId: acpSid })) as {
           forkedSessionId?: string;
         };
-        return ok(`✓ forked new session: ${result.forkedSessionId ?? "?"}`);
+        return ok(messages().slashForked(result.forkedSessionId ?? "?"));
       }
       case "model": {
         if (!arg) throw new RequestError(-32602, "/model requires a model id");
         const switchOk = await applyModelSwitch(server, zcodeSid, arg);
         if (!switchOk) throw new RequestError(-32603, `model switch failed for ${arg}`);
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "model");
-        return ok(`✓ model = ${arg}`);
+        return ok(messages().slashModelSet(arg));
       }
       case "mode":
       case "thought": {
@@ -226,7 +225,7 @@ export async function handleSlashCommand(
         // TUI-only commands → return a friendly error instead of passing
         // raw text to the model (which would confuse it).
         if (UNSUPPORTED_TUI_COMMANDS.has(cmd)) {
-          return ok(`⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`);
+          return ok(messages().slashTuiOnly(cmd));
         }
         // $-prefixed commands are discovered Skills (e.g. /$tdd). The $ is a
         // visual grouping marker for the editor's completion menu. Pass through
