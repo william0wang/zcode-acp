@@ -21,6 +21,7 @@ import { createElement } from "react";
 import { z } from "zod";
 
 import { queryQuota } from "../quota/index.js";
+import { sandboxActive } from "../backend/sandbox.js";
 import { AGENT_INFO, warn } from "../utils.js";
 import {
   App,
@@ -790,6 +791,10 @@ export async function runRepl(): Promise<void> {
         model: selectLabel(status.model),
         mode: selectLabel(status.mode),
         thought: selectLabel(status.thought),
+        // Live decision (env OR this project's sandbox.json — ADR-0011) so a
+        // project-armed sandbox shows here too; on non-macOS this may warn
+        // alongside the bridge, which is honest about the unsupported request.
+        sandbox: sandboxActive() ? "sandbox: on — writes confined to the workspace" : "",
       },
     };
   }

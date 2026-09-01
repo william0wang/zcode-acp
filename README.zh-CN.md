@@ -91,6 +91,45 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_ACP_HUB_PORT`               | `8377`           | 机器级 `zcode-acp-hub` 的端口。隧道只映射这一个端口。                                                                                                                                                                                                                               |
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`      | hub 绑定地址。`0.0.0.0` 会暴露仅 token 保护的明文面——只用于容器化隧道 agent 所在的私网接口（见[远程访问](#远程访问)）。                                                                                                                                                             |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`           | bridge ACP 端点的起始回环端口。每个 bridge（每个编辑器窗口）自动递增取下一个空闲端口。                                                                                                                                                                                              |
+| `ZCODE_ACP_SANDBOX`                | _（未设置）_     | 设为 `1` 全局启用 macOS Seatbelt 沙箱限制 Agent 的文件写入；项目级则在 `<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`（见[沙箱](#沙箱)）。                                                                                                                               |
+
+## 沙箱
+
+两个开关任一生效（仅 macOS）：
+
+- 全局：`ZCODE_ACP_SANDBOX=1`；
+- 项目级：`<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`。该文件
+  在首次打开工作区时由桥自动创建（默认 `"enabled": false`）——把开关翻成
+  `true` 即可单独启用本项目，无需全局环境变量。运行中途翻开关，下一次
+  prompt 生效（后端以沙箱重启）；翻回 `false` 则在后端下次自然重启时停用。
+
+启用后，zcode 后端子进程——连同它执行的每一次 Bash/Edit/Write 及所有子进
+程——被包进 Seatbelt（`sandbox-exec`）沙箱：除以下位置外**一律禁止文件写入**：
+
+- 各活跃会话的工作区根目录；
+- `~/.zcode*`（后端自身的会话/数据库/日志）；
+- 系统临时目录与可再生的工具缓存（`~/Library/Caches`、`~/.cache`、
+  `~/.npm`、`~/Library/pnpm`、`~/.node-gyp`）；
+- 项目配置或放行弹窗授权的路径。
+
+读取和进程执行不受限：删除（`rm`、`mv`、截断）属于写类系统调用，写禁令
+会拦下它——无论用哪个二进制执行（`/bin/rm`、Python `shutil.rmtree`、shell
+重定向都一样）。
+
+当 Agent 尝试写白名单之外的位置时，工具报 `Operation not permitted`，桥
+通过编辑器权限弹窗给出四个选项：**仅此一次**、**始终允许**、**拒绝一次**、
+**始终拒绝**。两个“始终”由桥代写进 `<工作区>/.zcode/acp/sandbox.json`
+（首次运行自动创建——放行记入 `allow` 列表，拒绝记入 `deny` 列表并不再
+询问；编辑该文件即可撤销）；两个“一次”及关闭弹窗不保存任何东西，下次
+仍会询问。Agent 自己改不了这个文件——沙箱禁止写工作区内的
+`.zcode/acp/`，而桥在沙箱外。放行
+后后端以加宽的 profile 重启（几秒），桥自动继续被中断的任务。配置里设
+`"strictGit": true` 可让 `.git` 也走弹窗。
+
+沙箱目标是防误删误写，不是防恶意：间接逃逸（Agent 改了你的 `.bashrc`、构
+建脚本或 git hook，随后由你自己在沙箱外执行）不在防护范围——请像代码评审
+一样对待它的产出。可用 `bash scripts/verify-sandbox.sh` 手工验证
+profile（macOS，先 `pnpm build`）。
 
 ## 远程访问
 

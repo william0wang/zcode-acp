@@ -5,7 +5,110 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-09-01
+
+### Added
+
+- Opt-in Seatbelt sandbox (`ZCODE_ACP_SANDBOX=1`, macOS) confining the
+  agent's file writes (ADR-0011): the zcode backend subprocess — and every
+  Bash/Edit/Write plus child process it runs — is wrapped in a generated
+  `sandbox-exec` profile that denies writes outside the workspace roots,
+  `~/.zcode*`, the system temp dir, regenerable tool caches, and the
+  per-project allowlist. Reads/execution stay open; deletion is a
+  write-class syscall, so `rm` (and every variant of it) is stopped by the
+  write denial regardless of the binary performing it. A write outside the
+  whitelist surfaces as an `Operation not permitted` in the tool output and
+  triggers the editor's permission popup: allow the directory **once**
+  (bridge-lifetime) or **always** — persisted by the bridge into
+  `<workspace>/.zcode/acp/sandbox.json` (auto-created; the `.zcode/acp/`
+  deny island keeps the agent from editing its own allowlist). After an
+  allow the backend restarts with the widened profile and the bridge
+  auto-continues the interrupted task. `"strictGit": true` in the config
+  puts `.git` behind the popup. Verified by `scripts/verify-sandbox.sh`
+  (four-state: workspace writable / outside denied / island protected /
+  config-allowed honored); two real bugs fell out of that verification —
+  SBPL resolves overlapping rules by LAST match (deny carve-outs must be
+  emitted after all allows), and every subpath must be realpath-resolved or
+  symlinked prefixes (/tmp → /private/tmp) silently fail to match.
+- Project-level sandbox switch: `"enabled": true` in
+  `<workspace>/.zcode/acp/sandbox.json` arms the sandbox for that project
+  without the global env. The template is auto-created with
+  `"enabled": false` on first open (discovery without arming); a malformed
+  config reads as enabled (fail closed — corruption must not silently
+  disarm). A mid-run flip to `true` is applied at the next prompt (the
+  unsandboxed backend is killed and respawned; the session reloads via the
+  subscribe-recovery path); flipping back drops the wrap on the next natural
+  backend respawn.
+- Sandbox hardening from adversarial cross-review (all findings reproduced,
+  then closed): the profile is generated into a fresh unpredictable dir per
+  respawn (O_EXCL) and self-denies its own directory — the previous stable
+  $TMPDIR path let a sandboxed agent race the write (full escape), symlink
+  it at a victim file, park a FIFO on it (bridge freeze), or occupy it with
+  a directory (respawn DoS); symlinked/hardlinked sandbox.json now reads as
+  armed with persistence disabled (writing the link target inside the
+  workspace pierced the deny island and let the agent edit its own
+  allowlist); `/dev/null` is allow-listed (git commit and every
+  `2>/dev/null` failed without it); island/strictGit paths get an
+  explanatory hint instead of a popup that could never override the
+  last-match deny; killing the backend now cancels all in-flight turns
+  (other sessions hung up to ~10min on the dead reader); the allow popup
+  uses the correct `session/request_permission` wire name with the source
+  `toolCall` (the camelCase form was method-not-found on every real
+  client, silently disabling the whole dynamic-allow flow); non-object JSON
+  configs fail closed; relative `allow` entries are dropped.
+- Second-round hardening (re-review found a regression and a fail-open gap,
+  both reproduced): the profile dir moved from $TMPDIR to a home-based
+  `~/.zcode-acp-sbx-*` mkdtemp — prior sandboxed generations (setsid
+  survivors) keep their old allows and could race the write→exec window of a
+  TMPDIR-placed profile regardless of name freshness (38–80% full escape);
+  a config previously read as armed that then turns unreadable (EACCES,
+  ENOTDIR) or vanishes now reads as armed instead of silently disarming via
+  the auto-created template; protected-path matching folds case on macOS
+  (`.ZCODE/ACP` variants no longer get a doomed popup).
+
+### Fixed
+
+- The dynamic-allow popup never fired for the most common denial shapes
+  (found by live testing right after arming): zsh prints redirect denials as
+  `zsh:2: operation not permitted: /path` — lowercase with the path AFTER the
+  phrase — which the extractor's `path: Operation not permitted` pattern and
+  the case-sensitive gate both missed, so `echo > /outside/f` (the standard
+  agent write) silently got no ask at all. The extractor now handles the zsh
+  redirect form, the Node fs form (`EPERM: operation not permitted, open
+'/path'` — quoted paths keep spaces, any libuv syscall name matches, and a
+  truncated apostrophe-in-path match is refused rather than allowed to
+  persist an over-broad directory), and explicit `./`/`../` relative
+  paths, which the handler resolves against the session cwd instead of the
+  bridge's own cwd (they differ for remote/hub clients); the gate is
+  case-insensitive; read-only tools (Read/Grep/Glob/... — their output
+  merely echoes text) are excluded from the scan to avoid phantom asks, and
+  asks resolving to $HOME or an ancestor are refused outright.
+- Backend respawn (sandbox allow-restart, idle-eviction recovery) restored
+  the session via a bare `session/resume`, skipping the provider-registry
+  sync and the stale-model repair that the ACP resume/load handlers
+  perform — the session history references a model whose provider the
+  fresh backend never registered, so every send failed persistently with
+  the backend's "历史任务使用的模型已不可用" error (auto-continuation
+  after an allow died silently; user messages hung on the send retry).
+  `reloadBackendSession` now performs the same sync → resume → repair
+  sequence as the ACP paths.
+- The post-allow continuation ran as a detached bridge-internal prompt: the
+  editor had no pending request behind it, so it showed no running state —
+  the respawn+reload window (~7s) read as "it just stopped", any message
+  typed there preempted the continuation for real, and only the session/load
+  replay later surfaced the orphaned continuation bubble. The continuation
+  now chains INSIDE the original `session/prompt` request (wrapper in
+  `prompt()`), so the editor's spinner spans the restart and the resumed
+  work renders as the same turn; preempt/ESC during the continuation still
+  cancels it. The continuation round also emits a status line
+  ("[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]") at send-accept, so the
+  respawn+reload window no longer ends in an unexplained thinking block.
+- Rejection is explicit config, not hidden memory: the popup now offers all
+  four ACP kinds — 始终允许 / 仅此一次 / 拒绝一次 / 始终拒绝. "始终拒绝"
+  persists the path into the project config's `deny` list (the same ask
+  never resurfaces; review or undo by editing the file); "拒绝一次" and
+  timeouts/dismissals persist nothing and will ask again — no rejection is
+  remembered anywhere but the config.
 
 ## [0.14.3] - 2026-09-01
 

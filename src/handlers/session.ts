@@ -51,6 +51,12 @@ import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
+import {
+  extractSandboxDenial,
+  GENERIC_HINT_KEY,
+  handleSandboxDenial,
+  READ_ONLY_TOOLS,
+} from "./sandbox-allow.js";
 import { handleServerRequests } from "./server-requests.js";
 
 /** Workspace descriptor used in session create/resume calls. */
@@ -558,13 +564,59 @@ export async function loadSession(
   return result as acp.LoadSessionResponse;
 }
 
-/** `session/prompt` → subscribe-before-send, run the event-driven turn loop. */
+/**
+ * `session/prompt` → subscribe-before-send, run the event-driven turn loop.
+ *
+ * Sandbox allow-restart chaining (ADR-0011): when a turn unwinds as cancelled
+ * because the user approved a new writable root (the backend was killed to be
+ * respawned under the widened profile), the continuation prompt runs INSIDE
+ * this same request via runPrompt. The editor's spinner then spans the
+ * respawn+reload window and the resumed work renders as the same turn. A
+ * detached follow-up prompt (the previous design) has no pending editor
+ * request behind it, so the editor showed no running state for it at all —
+ * the window read as "it just stopped", any message typed there preempted
+ * the continuation for real, and only the session/load replay later surfaced
+ * the orphaned continuation bubble.
+ */
 export async function prompt(
   server: ZcodeAcpServer,
   params: acp.PromptRequest,
   cx: acp.AgentContext,
   requestId: number | string,
 ): Promise<acp.PromptResponse> {
+  const result = await runPrompt(server, params, cx, requestId);
+  const continuation = server.sandboxContinuations.get(params.sessionId);
+  if (continuation && result.stopReason === "cancelled") {
+    server.sandboxContinuations.delete(params.sessionId);
+    // Same request, fresh round: runPrompt re-enters the whole machinery
+    // (ensureBackend respawns; ensureRealSession/subscribe-recovery reloads
+    // the session into it). The user's preempt/ESC during the continuation
+    // still cancels it — the round registers itself in pendingTurns.
+    return runPrompt(
+      server,
+      { sessionId: params.sessionId, prompt: [{ type: "text", text: continuation }] },
+      cx,
+      `sandbox-cont-${randomUUID()}`,
+      true,
+    );
+  }
+  return result;
+}
+
+/** One prompt round: subscribe-before-send, run the event-driven turn loop. */
+async function runPrompt(
+  server: ZcodeAcpServer,
+  params: acp.PromptRequest,
+  cx: acp.AgentContext,
+  requestId: number | string,
+  continuationRound = false,
+): Promise<acp.PromptResponse> {
+  // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
+  // after the backend spawned unsandboxed must arm on THIS prompt, not on the
+  // next bridge restart — kill the old process; the ensureBackend() below
+  // respawns under the profile and the subscribe-recovery path reloads the
+  // session. No-op unless the config appeared mid-run.
+  await server.applySandboxFlip();
   const backend = server.ensureBackend();
 
   // Extract prompt text + image attachments from ACP ContentBlock[].
@@ -829,7 +881,9 @@ export async function prompt(
           sendErrMsg.includes("prompt is running") ||
           sendErrMsg.includes("already running");
         if (!isBusy) {
-          // Non-busy error (auth, malformed, etc.) — don't retry, surface it.
+          // Non-busy error (auth, malformed, stale model, etc.) — don't
+          // retry, surface it. The stale-history-model case is repaired
+          // before the send (repairUnavailableModel on every resume path).
           throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
         }
         if (Date.now() - sendT0 > SEND_RETRY_TIMEOUT_MS) {
@@ -839,6 +893,20 @@ export async function prompt(
         }
         log(
           `  [send] backend busy (${sendResp.error.message ?? ""}), retrying in ${SEND_RETRY_INTERVAL_MS}ms`,
+        );
+      }
+
+      // Continuation round status line: the respawn+reload window (~seconds)
+      // shows only the editor spinner before the model's first output — a
+      // bare thinking block with no context. Announce the resumed turn at
+      // send-accept so every phase of the allow→restart→continue flow is
+      // visibly accounted for (the allow-time hint covers the restart start).
+      if (continuationRound) {
+        await sendTextChunk(
+          cx,
+          params.sessionId,
+          "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
+          randomUUID(),
         );
       }
 
@@ -878,6 +946,10 @@ export async function prompt(
           const { maybeAutoCompact } = await import("../config/auto-compact.js");
           await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
         }
+
+        // (Sandbox allow-restart continuation: handled by the prompt() wrapper
+        // — the chained round keeps the editor's original request pending so
+        // the restart window stays visibly "running".)
 
         return result;
       } catch (e) {
@@ -1524,12 +1596,22 @@ async function reloadBackendSession(
   acpSid: string,
   zcodeSid: string,
 ): Promise<void> {
+  const cwd = server.sessionCwds.get(acpSid) ?? process.cwd();
   const zcParams: Record<string, unknown> = {
     sessionId: zcodeSid,
-    workspace: workspaceFor(server.sessionCwds.get(acpSid) ?? process.cwd()),
+    workspace: workspaceFor(cwd),
   };
+  // Same pre-resume steps as the ACP resume/load handlers: register the
+  // provider registry (a resumed session's history references a model the
+  // fresh backend can't process until its provider is registered — sends
+  // then fail with the backend's stale-history-model error, persistent, not
+  // transient), then repair a model that is no longer enabled. Skipping
+  // these made every backend respawn (sandbox allow-restart, eviction
+  // recovery) deaf-fail its first sends.
+  await syncProviderRegistry(server, cwd);
   await resumePreservingModel(server, zcParams);
   server.markBackendLoaded(acpSid);
+  await repairUnavailableModel(server, zcodeSid);
 }
 
 /**
@@ -1919,6 +2001,49 @@ export async function runEventTurn(
       // otherwise only set by its own diff / emitInitialUsage).
       if (iev.kind === "UsageDelta") differ.setLastUsage(iev.used);
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
+    }
+
+    // Sandbox write-denial (ADR-0011): the tool output reached the editor
+    // above; now check it for an EPERM outside the Seatbelt whitelist and
+    // run the dynamic-allow flow (ask → persist → kill backend → the turn
+    // unwinds as cancelled; prompt() fires the continuation). Gated on the
+    // PROCESS fact backendSandboxed (not the config wish) — EPERM can only
+    // come from a sandboxed process; unsandboxed EPERM is ordinary filesystem
+    // permissions. Only on tool.updated so mid-stream deltas aren't scanned.
+    if (ev.type === "tool.updated" && server.backendSandboxed) {
+      const outputText = JSON.stringify(ev.payload ?? {});
+      const toolCallId = String((ev.payload as { toolCallId?: unknown })?.toolCallId ?? "");
+      // Read-only tools merely ECHO text — an EPERM string in their output
+      // is not their own syscall failing, and acting on it would raise a
+      // phantom ask for a path nothing tried to write.
+      const toolName = (translator.toolNames.get(toolCallId) ?? "").toLowerCase();
+      // Case-insensitive: zsh prints redirects as "operation not permitted".
+      if (
+        !READ_ONLY_TOOLS.has(toolName) &&
+        outputText.toLowerCase().includes("operation not permitted")
+      ) {
+        const denial = extractSandboxDenial(outputText);
+        if (denial) {
+          await handleSandboxDenial(server, cx, acpSid, turn, denial, toolCallId);
+          if (turn.cancelled) return { stopReason: "cancelled" };
+        } else {
+          // No path parsed — one generic hint per session, not one per retry.
+          let asked = server.sandboxAskedPaths.get(acpSid);
+          if (!asked) {
+            asked = new Set();
+            server.sandboxAskedPaths.set(acpSid, asked);
+          }
+          if (!asked.has(GENERIC_HINT_KEY)) {
+            asked.add(GENERIC_HINT_KEY);
+            await sendTextChunk(
+              cx,
+              acpSid,
+              "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
+              chunkMsgId,
+            );
+          }
+        }
+      }
     }
 
     // Edit/Write diff eager dispatch: on tool.updated result, grab the

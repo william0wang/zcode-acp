@@ -177,6 +177,41 @@ ZCode protocol types into ACP notifications directly — always translate.
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing
   `zcode app-server --stdio` (frames are bare `{id, method, params}`).
+- **SBPL (Seatbelt) resolves overlapping rules by LAST match, not by
+  deny-priority** — an `allow` emitted after a `deny` re-permits the write
+  (verified via scripts/verify-sandbox.sh; the deny-island test failed until
+  the denies were moved to the end). `buildSandboxProfile` therefore emits
+  base deny-all → all allows → island/strictGit denies LAST. Also:
+  subpath filters match REAL paths — every path (roots, allows, $TMPDIR)
+  must go through `resolveReal`, or a symlinked prefix (/tmp →
+  /private/tmp, $TMPDIR under /var/folders) silently fails to match. The
+  sandbox design lives in ADR-0011 (`.zcode/docs/adr/`): writes-only model,
+  per-project config in `.zcode/acp/sandbox.json` (deny island — only the
+  bridge may write it), dynamic allow = ask → persist → backend restart →
+  continuation prompt. Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
+  or `enabled: true` in that config per project (auto-created template ships
+  `false`; a malformed or non-object config reads as enabled — fail closed,
+  never rewrite the user's bytes). `server.backendSandboxed` is the process
+  fact the EPERM flow gates on — not `sandboxActive()`, which is the config
+  wish re-checked per call (a mid-run flip to `true` is applied by
+  `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on
+  the next respawn). Hardening invariants from adversarial review — do not
+  regress: profiles go through `armSandboxArgv()` (fresh mkdtemp dir under
+  HOME + O_EXCL + the profile denies its own dir last; the HOME base is the
+  point — every agent-writable path is writable by prior sandboxed
+  generations too, so a $TMPDIR profile is raceable across generations), and
+  the config must pass the integrity check before the bridge persists
+  through it (symlink/hardlink pierces the deny island; a config read as
+  armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
+  the template would silently disarm). `/dev/null` must stay write-allowed
+  or every `git commit` breaks.
+- **ACP wire method names are snake_case** (`session/request_permission`,
+  not `session/requestPermission`) — the camelCase spelling is silently
+  method-not-found (-32601) on real clients, and an `as never` param cast
+  hides it from tsc. Always mirror the SDK's method map or an already-working
+  call site (see `handlers/server-requests.ts`) when sending server→client
+  requests; the SDK types also require the `toolCall` field on permission
+  requests (Zed renders the popup against it).
 
 ## Docs to read before sensitive changes
 
