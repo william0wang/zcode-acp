@@ -44,6 +44,7 @@ import {
 } from "../interaction/adapter.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import type { ClientLike } from "../remote/broadcast.js";
+import { messages } from "../i18n.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -603,7 +604,7 @@ async function handleAskUserViaElicitation(
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "tool_call",
     toolCallId,
-    title: "questions",
+    title: messages().askQuestionsTitle,
     kind: "other",
     status: "pending",
     rawInput,
@@ -885,7 +886,7 @@ async function onInteractionInterrupted(
       content: [
         {
           type: "content",
-          content: { type: "text", text: "交互中断：连接关闭或超时，请重新发起对话。" },
+          content: { type: "text", text: messages().interactionInterrupted },
         },
       ],
     }).catch(() => {

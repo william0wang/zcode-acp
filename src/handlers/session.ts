@@ -32,6 +32,7 @@ import {
 import { emitInitialUsage } from "../config/model-cache.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
+import { messages } from "../i18n.js";
 import {
   lookupLazySession,
   recordMaterializedSession,
@@ -802,7 +803,7 @@ async function runPrompt(
         await sendTextChunk(
           cx,
           params.sessionId,
-          `[网络异常，正在重试 (${attempt - 1}/${MAX_TURN_ATTEMPTS - 1})…]`,
+          messages().networkRetry(attempt - 1, MAX_TURN_ATTEMPTS - 1),
           randomUUID(),
         );
         log(
@@ -902,12 +903,7 @@ async function runPrompt(
       // send-accept so every phase of the allow→restart→continue flow is
       // visibly accounted for (the allow-time hint covers the restart start).
       if (continuationRound) {
-        await sendTextChunk(
-          cx,
-          params.sessionId,
-          "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
-          randomUUID(),
-        );
+        await sendTextChunk(cx, params.sessionId, messages().sandboxResumedStatus, randomUUID());
       }
 
       try {
@@ -973,12 +969,7 @@ async function runPrompt(
     // surfacing a hard error and stopping. Skip auto-compact here: compaction
     // after a failed turn is more likely to confuse state than help.
     const errMsg = formatTurnError(lastTurnError) || "turn failed after retries";
-    await sendTextChunk(
-      cx,
-      params.sessionId,
-      `[请求失败：${errMsg}。会话仍可用，请重新发送消息重试。]`,
-      randomUUID(),
-    );
+    await sendTextChunk(cx, params.sessionId, messages().requestFailed(errMsg), randomUUID());
     return { stopReason: "end_turn" };
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
@@ -1307,7 +1298,7 @@ export async function drainBackendAfterCancel(
     }
     if (!noticed) {
       noticed = true;
-      await sendTextChunk(cx, acpSid, "[上一个回复仍在生成，等待结束后发送…]", randomUUID());
+      await sendTextChunk(cx, acpSid, messages().promptQueuedBehindTurn, randomUUID());
     }
     await sleep(DRAIN_POLL_MS);
   }
@@ -1869,7 +1860,7 @@ export async function runEventTurn(
         thinkingHintSent = true;
         await sendSessionUpdate(cx, acpSid, {
           sessionUpdate: "agent_thought_chunk",
-          content: { type: "text", text: "正在思考…" },
+          content: { type: "text", text: messages().thinkingPlaceholder },
           messageId: `thinking_${chunkMsgId}`,
         });
       }
@@ -1948,12 +1939,7 @@ export async function runEventTurn(
     // with the message lost. turn.steerQueued is definitive proof of the
     // swallow: report it at once so the user can resend immediately.
     if (ev.type === "turn.steerQueued" && !translator.turnStarted && gateArmed) {
-      await sendTextChunk(
-        cx,
-        acpSid,
-        "[消息被并入仍在生成的回合，将被丢弃，请重新发送]",
-        chunkMsgId,
-      );
+      await sendTextChunk(cx, acpSid, messages().messageSwallowedByTurn, chunkMsgId);
       return { stopReason: "max_turn_requests" };
     }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
@@ -2035,12 +2021,7 @@ export async function runEventTurn(
           }
           if (!asked.has(GENERIC_HINT_KEY)) {
             asked.add(GENERIC_HINT_KEY);
-            await sendTextChunk(
-              cx,
-              acpSid,
-              "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
-              chunkMsgId,
-            );
+            await sendTextChunk(cx, acpSid, messages().sandboxGenericDenialHint, chunkMsgId);
           }
         }
       }

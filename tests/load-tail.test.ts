@@ -10,7 +10,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
@@ -101,6 +101,12 @@ function loadParams(extra: Record<string, unknown> = {}): acp.LoadSessionRequest
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Asserts English replay titles; pin the language regardless of host env.
+  vi.stubEnv("ZCODE_ACP_LANG", "en");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("session/load tail limit", () => {

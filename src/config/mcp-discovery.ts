@@ -16,6 +16,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import { compareVersions, log } from "../utils.js";
+import { messages } from "../i18n.js";
 
 /** Information about a discovered MCP server. */
 export interface McpServerInfo {
@@ -143,31 +144,32 @@ export function loadMcpServers(): McpServerInfo[] {
  * Groups by source (config vs plugins) and aligns columns for readability.
  */
 export function formatMcpServers(servers: McpServerInfo[]): string {
+  const m = messages();
   if (servers.length === 0) {
-    return "📡 No MCP servers configured.\nUse the ZCode desktop app to add MCP servers.";
+    return m.mcpNone;
   }
 
   const configServers = servers.filter((s) => s.source === "config");
   const pluginServers = servers.filter((s) => s.source !== "config");
 
-  const lines: string[] = [`📡 MCP Servers (${servers.length})`];
+  const lines: string[] = [m.mcpHeader(servers.length)];
 
   if (configServers.length > 0) {
-    lines.push("", "From config.json:");
+    lines.push("", m.mcpFromConfig);
     for (const s of configServers) {
       lines.push(`  ${pad(s.name, 16)} ${pad(s.type, 6)} ${formatEndpoint(s)}`);
     }
   }
 
   if (pluginServers.length > 0) {
-    lines.push("", "From plugins:");
+    lines.push("", m.mcpFromPlugins);
     for (const s of pluginServers) {
       const pluginLabel = `[${s.source.replace("plugin: ", "")}]`;
       lines.push(`  ${pad(s.name, 16)} ${pad(s.type, 6)} ${formatEndpoint(s)}  ${pluginLabel}`);
     }
   }
 
-  lines.push("", "MCP tools are auto-invoked by the model when needed.");
+  lines.push("", m.mcpFooter);
   return lines.join("\n");
 }
 

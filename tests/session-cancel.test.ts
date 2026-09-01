@@ -9,12 +9,21 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { EventStreamListener, TurnMonitor } from "../src/backend/listener.js";
 import type { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { cancel, runEventTurn } from "../src/handlers/session.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
+
+// These tests assert the Chinese message table.
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "zh");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 interface FakeTurn {
   zcodeSid: string;

@@ -24,6 +24,7 @@ import {
   readSandboxConfig,
   resolveReal,
 } from "../backend/sandbox.js";
+import { messages } from "../i18n.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
@@ -159,6 +160,7 @@ export async function handleSandboxDenial(
   // Process-level fact, not the config wish: the caller gates on the same
   // flag, so a sandbox armed only via project config (no env) still flows.
   if (!server.backendSandboxed) return;
+  const m = messages();
   // The shell printed the path relative to the SESSION cwd — resolve against
   // that, not the bridge's own cwd (they differ for remote/hub clients).
   const raw = denial.isMkdir ? denial.path : path.dirname(denial.path);
@@ -182,12 +184,7 @@ export async function handleSandboxDenial(
   // win the last-match). Tell the USER why instead of a doomed popup — the
   // model only ever sees the bare EPERM in its tool output.
   if (underAny(targetReal, protectedSandboxPaths(server.sandboxRoots()))) {
-    await sendTextChunk(
-      cx,
-      acpSid,
-      "[该路径受沙箱保护(.zcode/acp 配置区或 strictGit 的 .git),不能通过弹窗放行。strictGit 可在 .zcode/acp/sandbox.json 中关闭。]",
-      randomUUID(),
-    );
+    await sendTextChunk(cx, acpSid, m.sandboxProtectedHint, randomUUID());
     return;
   }
 
@@ -197,32 +194,34 @@ export async function handleSandboxDenial(
   // the config is the only way to grant something this broad.
   const home = resolveReal(os.homedir());
   if (targetReal === "/" || targetReal === home || home.startsWith(targetReal + path.sep)) {
-    await sendTextChunk(
-      cx,
-      acpSid,
-      `[${targetReal} 范围过宽($HOME 或其上级),沙箱不会弹窗放行;确需放行请手动编辑 .zcode/acp/sandbox.json 的 allow 列表。]`,
-      randomUUID(),
-    );
+    await sendTextChunk(cx, acpSid, m.sandboxOverBroadHint(targetReal), randomUUID());
     return;
   }
 
   // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
   // memory: no popup, and the asked-mark above keeps later repeats silent.
   if (wsRoot && underAny(targetReal, readSandboxConfig(wsRoot).deny.map(resolveReal))) {
-    await sendTextChunk(
-      cx,
-      acpSid,
-      `[${targetReal} 已在 .zcode/acp/sandbox.json 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
-      randomUUID(),
-    );
+    await sendTextChunk(cx, acpSid, m.sandboxDenyListedHint(targetReal), randomUUID());
     return;
   }
 
   const options = [
-    { optionId: "sandbox_allow_always", kind: "allow_always" as const, name: "始终允许" },
-    { optionId: "sandbox_allow_once", kind: "allow_once" as const, name: "仅此一次" },
-    { optionId: "sandbox_reject_once", kind: "reject_once" as const, name: "拒绝一次" },
-    { optionId: "sandbox_reject_always", kind: "reject_always" as const, name: "始终拒绝" },
+    {
+      optionId: "sandbox_allow_always",
+      kind: "allow_always" as const,
+      name: m.sandboxOptionAllowAlways,
+    },
+    { optionId: "sandbox_allow_once", kind: "allow_once" as const, name: m.sandboxOptionAllowOnce },
+    {
+      optionId: "sandbox_reject_once",
+      kind: "reject_once" as const,
+      name: m.sandboxOptionRejectOnce,
+    },
+    {
+      optionId: "sandbox_reject_always",
+      kind: "reject_always" as const,
+      name: m.sandboxOptionRejectAlways,
+    },
   ];
   let decision: "always" | "once" | "reject_once" | "reject_always" | "deny" = "deny";
   try {
@@ -236,13 +235,13 @@ export async function handleSandboxDenial(
         sessionId: acpSid,
         toolCall: {
           toolCallId,
-          title: `沙箱写入放行:${targetReal}`,
+          title: m.sandboxPopupTitle(targetReal),
           content: [
             {
               type: "content",
               content: {
                 type: "text",
-                text: `沙箱拒绝了工作区外的写入:${targetReal}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(.zcode/acp/sandbox.json,可编辑撤销)。`,
+                text: m.sandboxPopupDetails(targetReal),
               },
             },
           ],
@@ -275,20 +274,15 @@ export async function handleSandboxDenial(
       cx,
       acpSid,
       persisted
-        ? `[已记入始终拒绝 ${targetReal}(.zcode/acp/sandbox.json 的 deny 列表,可编辑撤销)。]`
-        : `[已拒绝 ${targetReal}(配置不可写,未持久化,同类写入下次仍会询问。)]`,
+        ? m.sandboxRejectAlwaysPersisted(targetReal)
+        : m.sandboxRejectAlwaysUnpersisted(targetReal),
       randomUUID(),
     );
     return;
   }
 
   if (decision === "reject_once" || decision === "deny") {
-    await sendTextChunk(
-      cx,
-      acpSid,
-      `[已拒绝沙箱放行 ${targetReal},未保存任何决定,同类写入会再次询问;如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
-      randomUUID(),
-    );
+    await sendTextChunk(cx, acpSid, m.sandboxRejectOnceHint(targetReal), randomUUID());
     return;
   }
 
@@ -316,13 +310,8 @@ export async function handleSandboxDenial(
   turn.cancelled = true;
   turn.stopSent = true; // no stop pair needed: the whole process group dies
   server.cancelAllPendingTurns();
-  server.sandboxContinuations.set(acpSid, `[沙箱已放行 ${targetReal},请继续刚才的任务。]`);
-  await sendTextChunk(
-    cx,
-    acpSid,
-    `[沙箱已放行 ${targetReal},正在重启后端以应用新权限,随后自动继续…]`,
-    randomUUID(),
-  );
+  server.sandboxContinuations.set(acpSid, m.sandboxContinuationPrompt(targetReal));
+  await sendTextChunk(cx, acpSid, m.sandboxRestartHint(targetReal), randomUUID());
   log(`sandbox: allow granted for ${targetReal} (${decision}) — restarting backend`);
   try {
     await server.ensureBackend().close();

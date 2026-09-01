@@ -29,11 +29,14 @@ import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
 
 beforeEach(() => {
   process.env.ZCODE_ACP_SANDBOX = "1";
+  // These tests assert the Chinese message table.
+  vi.stubEnv("ZCODE_ACP_LANG", "zh");
   resetSandboxDecisionForTest();
 });
 
 afterEach(() => {
   delete process.env.ZCODE_ACP_SANDBOX;
+  vi.unstubAllEnvs();
   resetSandboxDecisionForTest();
 });
 

@@ -4,7 +4,7 @@
  * AskUserQuestion split (single + multi-select), response parsing.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   acpPermissionResponseToExitPlanMode,
@@ -21,6 +21,15 @@ import {
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../src/interaction/adapter.js";
+
+// Asserts English popup option names; pin the language regardless of host env.
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "en");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("classification", () => {
   it("distinguishes permission vs userInput methods", () => {

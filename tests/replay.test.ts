@@ -4,7 +4,7 @@
  * lock (live sends queue behind an in-flight batch for the same session).
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeMessage } from "../src/backend/types.js";
 import { enqueueSessionSend, sendSessionUpdate, withReplayBatch } from "../src/handlers/io.js";
@@ -16,6 +16,15 @@ import {
   sliceBefore,
   sliceTail,
 } from "../src/handlers/replay.js";
+
+// Asserts English collapsed titles; pin the language regardless of host env.
+beforeEach(() => {
+  vi.stubEnv("ZCODE_ACP_LANG", "en");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function msg(id: string, role: "user" | "assistant" | "system", text: string): ZcodeMessage {
   return { info: { id, role }, parts: [{ type: "text", text }] };

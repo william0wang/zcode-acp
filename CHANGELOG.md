@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-01
+
+### Added
+
+- Bilingual user-facing strings (zh/en) with `ZCODE_ACP_LANG` (`zh`/`en`).
+  When unset, the bridge inherits the ZCode app's language choice
+  (`localePreference`/`locale` in `~/.zcode/v2/setting.json`), then falls
+  back to the `LC_ALL`/`LC_MESSAGES`/`LANG` locale, defaulting to English.
+  Covers every string the bridge renders to the user in the editor: the
+  sandbox permission popup, ExitPlanMode and AskUserQuestion popup labels
+  ("Skip", "Skip this question", Include/Skip per option), slash-command
+  feedback lines, status/hint lines, the post-allow continuation prompt,
+  the changed-files card, the `/mcp` server listing, and the collapsed
+  titles built during session/load replay — previously a mix of hardcoded
+  Chinese and English. Developer-facing `log()`/`warn()` diagnostics stay
+  English; the standalone REPL TUI and the `/quota` card formatter remain
+  English-only for now.
+
 ## [0.15.0] - 2026-09-01
 
 ### Added
