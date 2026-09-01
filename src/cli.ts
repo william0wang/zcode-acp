@@ -17,7 +17,7 @@ import process from "node:process";
 
 import { main as runHub } from "./bin/hub.js";
 import { main as runQuota } from "./bin/quota.js";
-import { main as runServer } from "./index.js";
+import { main as runServer, runHeadless } from "./index.js";
 import { runRepl } from "./repl/run.js";
 import { AGENT_INFO } from "./utils.js";
 
@@ -26,6 +26,7 @@ export type Invocation =
   | { kind: "help" }
   | { kind: "repl"; explicit: boolean }
   | { kind: "server" }
+  | { kind: "serve" }
   | { kind: "hub" }
   | { kind: "quota"; args: string[] }
   | { kind: "unknown"; sub: string };
@@ -48,6 +49,8 @@ export function resolveInvocation(invokedAs: string, argv: readonly string[]): I
   switch (sub) {
     case "server":
       return { kind: "server" };
+    case "serve":
+      return { kind: "serve" };
     case "hub":
       return { kind: "hub" };
     case "quota":
@@ -69,6 +72,10 @@ Commands:
                     -i <sec>, -d detail, -p plain, provider glm|go.
   hub               Run the remote-access hub daemon (was zcode-acp-hub;
                     usually auto-spawned by bridges, rarely run by hand).
+  serve             Headless bridge for remote session-create (ADR-0014):
+                    no stdio editor, lives for remote WS clients until idle.
+                    Normally spawned by the hub, not run by hand (needs
+                    ZCODE_ACP_REMOTE=1 + ZCODE_ACP_REMOTE_TOKEN).
   server            The editor-facing ACP bridge over stdio (was
                     zcode-acp-server; editors normally launch it via the bin
                     alias without this subcommand).
@@ -107,6 +114,9 @@ async function main(): Promise<void> {
       return;
     case "server":
       await runServer();
+      return;
+    case "serve":
+      await runHeadless();
       return;
     case "hub":
       await runHub();

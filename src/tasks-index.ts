@@ -16,7 +16,8 @@
  * swallowed so they never break the session/create path.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 import { DEFAULT_MODEL_ID } from "./config/options.js";
@@ -84,6 +85,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function withSqliteRetry<T>(
   fn: (con: InstanceType<DatabaseSyncCtor>) => T,
+  dbPath: string = TASKS_INDEX_PATH,
 ): Promise<T | null> {
   const Sqlite = await loadSqlite();
   if (!Sqlite) return null; // node:sqlite unavailable (Node < 22)
@@ -92,7 +94,7 @@ async function withSqliteRetry<T>(
     // constructor itself throws (SQLITE_BUSY can surface at open time).
     let con: InstanceType<DatabaseSyncCtor> | null = null;
     try {
-      con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
+      con = new Sqlite(dbPath, { timeout: 5000 });
       return fn(con);
     } catch (e) {
       // Retry only on transient busy/locked; surface everything else.
@@ -324,5 +326,85 @@ export async function updateSessionTitle(
   } catch (e) {
     warn(`tasks-index title update skipped: ${e instanceof Error ? e.message : String(e)}`);
     return false;
+  }
+}
+
+// ---------- known workspaces (remote session-create, ADR-0014) ----------
+
+/** One known project workspace, as recorded by the App's tasks index. */
+export interface KnownWorkspace {
+  workspacePath: string;
+  sessions: number;
+  lastActive: number;
+}
+
+/**
+ * Whether a recorded workspace path may be offered for remote session
+ * creation. Excludes: degenerate roots, system temp trees (macOS /tmp is a
+ * symlink to /private/tmp — both spellings; $TMPDIR lives under /var/folders),
+ * and ~/.zcode itself (the config home, not a project). The directory must
+ * still exist — a moved/deleted project disappears from the list.
+ */
+export function isSelectableWorkspace(p: string): boolean {
+  if (!p || p === "/") return false;
+  const excluded = [
+    "/tmp",
+    "/private/tmp",
+    "/var/folders",
+    tmpdir(),
+    path.join(homedir(), ".zcode"),
+  ];
+  for (const ex of excluded) {
+    if (p === ex || p.startsWith(ex + path.sep)) return false;
+  }
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Every project workspace the tasks index has ever recorded a session for —
+ * the machine's known-projects list. Serves the hub's remote session-create
+ * API: the list gates which projects POST /api/instances accepts. A
+ * convenience bound, not a security boundary — bridge-side session
+ * materialization writes rows too, and a token holder can drive an
+ * editor-bridge session in any cwd (the real boundary is the token).
+ *
+ * Read-only and best-effort: node:sqlite unavailable → empty list; lock
+ * contention retries via withSqliteRetry; other failures warn and return
+ * empty. `dbPath` defaults to the App's index (tests inject a fixture).
+ */
+export async function listKnownWorkspaces(
+  dbPath: string = TASKS_INDEX_PATH,
+): Promise<KnownWorkspace[]> {
+  if (!existsSync(dbPath)) return [];
+  try {
+    const rows = await withSqliteRetry(
+      (con) =>
+        con
+          .prepare(
+            "SELECT workspace_path AS p, COUNT(*) AS n, MAX(updated_at) AS t " +
+              "FROM tasks WHERE deleted=0 GROUP BY workspace_key ORDER BY t DESC",
+          )
+          .all() as Array<{ p: unknown; n: unknown; t: unknown }>,
+      dbPath,
+    );
+    if (!rows) return []; // node:sqlite unavailable (Node < 22)
+    const out: KnownWorkspace[] = [];
+    for (const r of rows) {
+      const p = typeof r.p === "string" ? r.p : "";
+      if (!isSelectableWorkspace(p)) continue;
+      out.push({
+        workspacePath: p,
+        sessions: typeof r.n === "number" ? r.n : 0,
+        lastActive: typeof r.t === "number" ? r.t : 0,
+      });
+    }
+    return out;
+  } catch (e) {
+    warn(`tasks-index workspace list failed: ${e instanceof Error ? e.message : String(e)}`);
+    return [];
   }
 }

@@ -340,13 +340,19 @@ http://127.0.0.1:<hub-port>/api/health` fails, or `/api/*` returns 401.
 
 1. 401 means a token mismatch — `ZCODE_ACP_REMOTE_TOKEN` must be identical in
    the bridge env, the hub env (if run manually), and the client request.
-2. A dead hub self-heals: the next bridge heartbeat (≤10s; worst ~1min under
+2. Bridges on ≥0.17.0 self-heal after 401s (e.g. the token was rotated while
+   some windows kept the old env): the bridge keeps heartbeating and spawns a
+   replacement hub carrying its own token (≤1/min). Convergence needs the
+   mismatched hub to exit — instantly when nothing else holds the port, or via
+   its 10-minute zero-instance idle-exit. On older bridges a 401 permanently
+   stopped registration: restart the affected editor windows.
+3. A dead hub self-heals: the next bridge heartbeat (≤10s; worst ~1min under
    the spawn throttle) re-spawns the hub daemon. Retry with backoff rather
    than restarting anything by hand.
-3. Confirm the ports match: the client must reach `ZCODE_ACP_HUB_PORT`
+4. Confirm the ports match: the client must reach `ZCODE_ACP_HUB_PORT`
    (default 8377) through the tunnel, and the tunnel maps exactly that one
    port.
-4. Remote silently disabled? `ZCODE_ACP_REMOTE=1` without a token logs a
+5. Remote silently disabled? `ZCODE_ACP_REMOTE=1` without a token logs a
    warning and leaves the bridge stdio-only by design.
 
 ### Remote access: stale instance in the list / connect fails

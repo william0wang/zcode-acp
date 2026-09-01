@@ -48,6 +48,7 @@ describe("parseRemoteConfig", () => {
       hubPort: DEFAULT_HUB_PORT,
       hubHost: DEFAULT_HUB_HOST,
       bridgePort: DEFAULT_BRIDGE_PORT,
+      origin: "editor",
     });
   });
 
@@ -73,6 +74,7 @@ describe("parseRemoteConfig", () => {
       hubPort: 9000,
       hubHost: "0.0.0.0",
       bridgePort: 9001,
+      origin: "editor",
     });
   });
 });

@@ -5,6 +5,81 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-01
+
+### Added
+
+Remote session-create (ADR-0014): a remote client can start a NEW agent
+session in any of the machine's known projects, no editor required.
+
+- `GET /api/projects` (hub, token auth): the known-project list aggregated
+  from the App's `tasks-index.sqlite` — every workspace that ever ran a
+  session, filtered (system temp trees, `~/.zcode` itself, vanished
+  directories) and sorted by last activity.
+- `POST /api/instances {workspacePath}` (hub, token auth): spawns
+  `zcode-acp serve` — a headless bridge — detached in the project cwd,
+  waits for its heartbeat registration, and returns `{id, reused}`. The
+  project list gates the create: paths outside it get 403 (a convenience
+  bound, not a security boundary — the trust boundary is the token). A live
+  serve instance for the same workspace is reused instead of re-spawned.
+- `zcode-acp serve` CLI subcommand: the same ACP surface as the stdio
+  server minus the editor — spawned by the hub with remote ENV, it
+  registers back, serves remote WS clients, and exits after 10 idle
+  minutes with no clients and no running turns (ADR-0001's headless
+  counterpart). In serve mode `session/new` ignores client cwds and always
+  uses the process cwd, pinning the session cwd end to end.
+- Registration heartbeats and `/api/instances` now carry an `origin`
+  field (`"editor"` or `"serve"`, older bridges default to `"editor"`)
+  so remote UIs can label CLI-started instances and the hub can dedupe
+  them per workspace.
+
+### Fixed
+
+- A bridge rejected by the hub (401, typically a token rotation it did
+  not observe) permanently stopped registering — its sessions vanished
+  from remote until the editor window was manually restarted. 401 no
+  longer poisons the heartbeat: the bridge keeps retrying every 10s and
+  spawns a replacement hub carrying its own token, with exponential
+  backoff (60s doubling to a 10min cap) so a mixed-token fleet that
+  keeps the stale hub alive cannot churn spawn attempts forever. Once
+  the stale hub exits — immediately if the port is free, or via its
+  zero-instance idle-exit — the next spawn installs a hub that accepts
+  the bridge and everything converges without manual restarts.
+- Hardening from an adversarial review of the new remote surfaces:
+  - serve-mode cwd pinning now covers EVERY cwd entry point, not just
+    `session/new`: a durable lazy-session alias minted with an arbitrary
+    cwd on an editor bridge can no longer be resumed on a serve bridge to
+    drag it into a foreign workspace (foreign-cwd records read as unknown
+    ids; resume/load pin the root and never adopt the backend's returned
+    workspace — the value the `/fs` file endpoint scopes to).
+  - `POST /api/instances` keeps one in-flight spawn per workspace:
+    concurrent creates join the same incubation instead of racing a
+    duplicate detached process past the live-instance check.
+  - Registration answers that are neither 2xx nor 401 (e.g. the port
+    held by a non-hub service) now warn once per stretch instead of
+    silently disabling remote discovery.
+  - `listKnownWorkspaces(dbPath)` actually opens the injected path —
+    `withSqliteRetry` used to hardcode the default tasks index, so the
+    parameter only gated the existence check.
+  - The known-project list is documented as a convenience bound, not a
+    security boundary: bridge-side session materialization also writes
+    list rows, so the real trust boundary is the token itself.
+- Second adversarial round over the branch:
+  - Serve-instance dedupe (and every serve-side workspace comparison)
+    now canonicalizes paths via realpath: a whitelist row or registration
+    carrying a symlinked spelling previously never matched the serve
+    child's resolved process cwd — every create 502'd after 10s and each
+    retry spawned another duplicate serve bridge.
+  - serve mode also pins `session/list` to the project cwd (a client cwd
+    could enumerate sessions in other projects) and refuses to resume or
+    load a raw backend session id that lives in another workspace.
+  - 401 recovery resets the whole replacement-hub schedule, so a second
+    token rotation self-heals at full speed instead of inheriting the
+    previous stretch's backoff timestamp.
+  - The serve spawn forwards `ZCODE_ACP_HUB_HOST` (parity with
+    bridge-side hub spawns) and fails fast on async spawn errors instead
+    of burning the 10s registration budget.
+
 ## [0.16.2] - 2026-09-01
 
 ### Fixed

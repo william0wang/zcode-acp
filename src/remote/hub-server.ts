@@ -23,7 +23,9 @@
  * next bridge re-spawns it on demand.
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import {
@@ -36,12 +38,14 @@ import {
 } from "node:http";
 import net from "node:net";
 import path from "node:path";
+import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
+import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
   port: number;
@@ -66,6 +70,17 @@ export interface HubOptions {
    * directory this module runs from.
    */
   codePaths?: { packageJson: string; distDir: string };
+  /**
+   * Override where the remote session-create endpoints read the known-project
+   * whitelist from (tests point this at a fixture sqlite). Default: the App's
+   * tasks-index.sqlite (see listKnownWorkspaces).
+   */
+  projectsDbPath?: string;
+  /**
+   * Override how POST /api/instances spawns the headless serve bridge (tests
+   * inject a fake). Default: this node + this package's dist/cli.js.
+   */
+  spawnServe?: (opts: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcess;
 }
 
 export interface HubHandle {
@@ -89,6 +104,8 @@ interface InstanceEntry {
   workspace: string;
   sessions: SessionSummary[];
   lastSeen: number;
+  /** "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014). */
+  origin: "editor" | "serve";
 }
 
 const HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -162,6 +179,43 @@ function validSessions(raw: unknown): SessionSummary[] | null {
     });
   }
   return out;
+}
+
+/** How long POST /api/instances waits for the spawned bridge to register. */
+const SERVE_REGISTER_TIMEOUT_MS = 10_000;
+const SERVE_REGISTER_POLL_MS = 300;
+
+/** Register-origin parser: only "serve" is special; anything else is "editor". */
+function parseOrigin(raw: unknown): "editor" | "serve" {
+  return raw === "serve" ? "serve" : "editor";
+}
+
+/**
+ * Default serve-bridge spawner (remote session-create, ADR-0014): this node
+ * running this package's cli.js `serve` subcommand, detached in the project's
+ * cwd with the ENV the bridge needs to find its way back to this hub. Mirrors
+ * endpoint.ts's spawnHub: detached + unref'd (the hub must not own its life),
+ * stderr piped and tail-logged so startup failures surface instead of
+ * silently vanishing with an "ignore" pipe.
+ */
+function defaultSpawnServe(opts: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcess {
+  // dist/remote/hub-server.js → dist/cli.js (one level up).
+  const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
+  const child = spawn(process.execPath, [cliJs, "serve"], {
+    cwd: opts.cwd,
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+    env: opts.env,
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (d: string) => {
+    for (const line of d.split("\n")) {
+      if (line.trim()) warn(`serve-bridge[${opts.cwd}]: ${line}`);
+    }
+  });
+  child.once("error", (e) => warn(`serve-bridge[${opts.cwd}] spawn failed: ${e.message}`));
+  child.unref();
+  return child;
 }
 
 /**
@@ -307,6 +361,8 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     onIdleExit,
     onRestart,
     codePaths = defaultCodePaths(),
+    projectsDbPath,
+    spawnServe = defaultSpawnServe,
   } = options;
 
   /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
@@ -315,6 +371,85 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   const instances = new Map<string, InstanceEntry>();
   const proxyPairs = new Set<{ client: WebSocket; bridge: WebSocket }>();
   const timers: Array<ReturnType<typeof setInterval>> = [];
+
+  /**
+   * One in-flight serve spawn per workspace (remote session-create,
+   * ADR-0014): concurrent POSTs for the same project join the SAME
+   * incubation instead of racing a second detached process past the
+   * findServe check (check-then-act). Check-then-set is one synchronous
+   * block, so requests can only ever observe "no entry" one at a time.
+   */
+  const serveIncubations = new Map<string, Promise<{ id: string; reused: boolean }>>();
+
+  /** The live serve instance for a workspace, if any (per-workspace dedupe). */
+  const findServeInstance = (workspacePath: string): InstanceEntry | undefined => {
+    // The dedupe key must be canonical: a whitelist row (or registration) can
+    // carry a symlinked or otherwise non-canonical spelling while the serve
+    // child registers with its RESOLVED process cwd — raw string equality
+    // would never match, 502-ing every create and spawning a duplicate per
+    // retry. realpath both sides; a vanished path falls back to raw equality.
+    const key = (p: string): string => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p;
+      }
+    };
+    const wanted = key(workspacePath);
+    return Array.from(instances.values()).find(
+      (e) => e.origin === "serve" && key(e.workspace) === wanted,
+    );
+  };
+
+  /**
+   * Spawn a serve bridge and poll until it registers (or fails fast on child
+   * exit / timeout). Shared by every POST /api/instances currently incubating
+   * this workspace — all joiners see the same outcome.
+   */
+  const incubateServe = async (workspacePath: string): Promise<{ id: string; reused: boolean }> => {
+    // Async spawn failures (ENOENT — the dir vanished between the whitelist
+    // check and the spawn) arrive as an 'error' event with exitCode still
+    // null; without this flag the poll burns the full 10s budget.
+    let spawnError: Error | null = null;
+    let child: ChildProcess;
+    try {
+      child = spawnServe({
+        cwd: workspacePath,
+        env: {
+          ...process.env,
+          ZCODE_ACP_REMOTE: "1",
+          ZCODE_ACP_REMOTE_TOKEN: token,
+          ZCODE_ACP_HUB_PORT: String(port),
+          // Parity with the bridge-side spawnHub: the serve child may have to
+          // (re)spawn the hub itself, and must bind the same configured host.
+          ZCODE_ACP_HUB_HOST: host,
+        },
+      });
+      child.once("error", (e: Error) => {
+        spawnError = e;
+      });
+    } catch (e) {
+      warn(`hub: serve spawn failed: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error("serve bridge spawn failed");
+    }
+    log(`hub: spawned serve bridge for ${workspacePath} (pid ${child.pid})`);
+    const deadline = Date.now() + SERVE_REGISTER_TIMEOUT_MS;
+    for (;;) {
+      await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
+      const entry = findServeInstance(workspacePath);
+      if (entry) return { id: entry.id, reused: false };
+      // The child dying is the honest fast-fail (missing cwd perms, port
+      // exhaustion, crash) — without this check the loop burns the full 10s.
+      if (spawnError || child.exitCode !== null || child.signalCode !== null) {
+        warn(`hub: serve bridge for ${workspacePath} exited during startup`);
+        throw new Error("serve bridge exited during startup");
+      }
+      if (Date.now() > deadline) {
+        warn(`hub: serve bridge for ${workspacePath} never registered`);
+        throw new Error("serve bridge did not register in time");
+      }
+    }
+  };
 
   /**
    * Reply first, then gracefully stop (close() releases the port) and hand
@@ -449,6 +584,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           pid: e.pid,
           startedAt: e.startedAt,
           workspace: e.workspace,
+          origin: e.origin,
           sessions: e.sessions.filter((s) => winners.get(s.sessionId)?.instance === e),
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -472,6 +608,90 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       } catch {
         res.writeHead(502, { "Content-Type": "text/plain" });
         res.end("quota query failed");
+      }
+      return;
+    }
+    // GET /api/projects — the machine's known-project list (remote
+    // session-create, ADR-0014). Sourced from the App's tasks index: every
+    // workspace that ever ran a session. The list gates POST /api/instances
+    // (paths outside it are refused) — a convenience bound, not a security
+    // boundary: bridge-side session materialization also writes rows here,
+    // and a token holder can already drive an editor-bridge session in any
+    // cwd. The trust boundary is the token itself.
+    if (url.pathname === "/api/projects" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const projects = await listKnownWorkspaces(projectsDbPath);
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(projects));
+      return;
+    }
+    // POST /api/instances — create (or reuse) a headless serve bridge for one
+    // known project. The hub spawns `zcode-acp serve` detached in the project
+    // cwd and waits for its heartbeat registration; the bridge lives its own
+    // idle-timed life afterwards (ADR-0014). Dedupe: one serve instance per
+    // workspace — an existing live one is reused, and concurrent POSTs join
+    // the same in-flight incubation instead of double-spawning. Accepted
+    // bound: a hub restart clears the instance table, so a POST inside the
+    // bridges' ≤10s re-registration window may incubate a duplicate —
+    // harmless (both serve, future POSTs dedupe, an idle one exits in 10min).
+    if (url.pathname === "/api/instances" && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const body = await readJson(req);
+      const rawPath = (body as { workspacePath?: unknown } | undefined)?.workspacePath;
+      const workspacePath = typeof rawPath === "string" ? rawPath.trim() : "";
+      if (!workspacePath) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("workspacePath required");
+        return;
+      }
+      const known = await listKnownWorkspaces(projectsDbPath);
+      if (!known.some((p) => p.workspacePath === workspacePath)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("unknown project");
+        return;
+      }
+      const existing = findServeInstance(workspacePath);
+      if (existing) {
+        log(`hub: serve instance for ${workspacePath} already live (${existing.id}) — reusing`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ id: existing.id, reused: true }));
+        return;
+      }
+      let incubation = serveIncubations.get(workspacePath);
+      if (!incubation) {
+        incubation = incubateServe(workspacePath);
+        serveIncubations.set(workspacePath, incubation);
+        // Drop the entry once settled (identity-checked — a newer incubation
+        // may already have replaced it). The catch keeps the DERIVED promise
+        // handled; the original is awaited by its creating POST.
+        incubation
+          .catch(() => undefined)
+          .finally(() => {
+            if (serveIncubations.get(workspacePath) === incubation) {
+              serveIncubations.delete(workspacePath);
+            }
+          });
+      } else {
+        log(`hub: joining the incubating serve bridge for ${workspacePath}`);
+      }
+      try {
+        const out = await incubation;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(out));
+      } catch (e) {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end(e instanceof Error ? e.message : "serve bridge failed");
       }
       return;
     }
@@ -629,6 +849,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           workspace: typeof body.workspace === "string" ? body.workspace : "",
           sessions,
           lastSeen: Date.now(),
+          origin: parseOrigin(body.origin),
         });
       } else {
         instances.delete(id);

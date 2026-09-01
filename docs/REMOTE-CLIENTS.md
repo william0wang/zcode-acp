@@ -55,6 +55,8 @@ ACP editor ────── stdio ──────────┘
 | `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                            |
 | `GET /api/quota`                                      | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
 | `POST /api/upgrade`                                   | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).           |
+| `GET /api/projects`                                   | required | Known-project list (remote session-create whitelist) — see below.                            |
+| `POST /api/instances {workspacePath}`                 | required | Create (or reuse) a headless serve bridge for one known project — see below.                 |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -68,6 +70,7 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
     "pid": 72341,
     "startedAt": 1723800000000,
     "workspace": "/Users/me/proj",
+    "origin": "editor",
     "sessions": [
       {
         "sessionId": "5f0c…",
@@ -82,6 +85,9 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
 - `id` is the bridge process id — stable for that editor window's lifetime,
   unique per window.
+- `origin` is `"editor"` (a bridge an editor spawned over stdio) or
+  `"serve"` (a headless bridge created via remote session-create — see
+  below; older bridges send no field, treat as `"editor"`).
 - **On refresh, call `/api/instances?probe=1`**: the hub TCP-probes each
   registered bridge's loopback port and prunes unreachable ones before
   answering. A plain `GET` returns the heartbeat-based view, which can list a
@@ -130,6 +136,43 @@ Lifecycle timings: a bridge re-registers every 10s (the registration doubles as
 heartbeat); an instance disappears ~30s after its heartbeats stop; the hub
 exits after ~10 idle minutes with no instances and no proxies, and the next
 bridge re-spawns it on demand.
+
+## Remote session-create
+
+A remote client can start a NEW agent session in any of the machine's known
+projects — no editor required (bridge 0.17.0, ADR-0014):
+
+```text
+GET  {hub}/api/projects
+   → 200 [{"workspacePath":"/Users/me/proj","sessions":294,"lastActive":1723800000000}, …]
+
+POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
+   → 200 {"id":"47073","reused":false}
+   → 403 "unknown project"          (path not on the known-project list)
+   → 502 (spawn failed / bridge died during startup / never registered, 10s budget)
+```
+
+- `GET /api/projects` aggregates the App's tasks index: every workspace that
+  ever ran a session, filtered (system temp trees, `~/.zcode` itself,
+  vanished directories) and sorted by last activity. The POST validates
+  against this exact list — no arbitrary paths. Note this is a convenience
+  bound, not a security boundary: a token holder can already run any
+  editor-bridge session in an arbitrary cwd; the trust boundary is the
+  token itself.
+- On create the hub spawns `zcode-acp serve` — a headless bridge — detached
+  in the project's cwd and waits for its heartbeat registration (it appears
+  in `/api/instances` with `origin:"serve"` within seconds). Connect with
+  the normal `WS /acp?instance=<id>` and drive it like any instance; the
+  new conversation's cwd is the project directory regardless of what
+  `session/new` sends.
+- A live serve instance for the same workspace is reused (`reused:true`)
+  instead of spawning a second one; concurrent creates join the same
+  in-flight spawn instead of racing a duplicate.
+- Lifetime: the serve bridge exists for remote interest only. It exits ~10
+  minutes after the last client detaches AND the last running turn
+  finishes — a running turn always completes, even with all clients gone.
+  Treat a vanished serve instance like any other dead bridge: re-create it
+  on demand.
 
 ## Connecting
 
