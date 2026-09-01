@@ -9,7 +9,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { createServer, type Server } from "node:http";
 import { WebSocket } from "ws";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RemoteConfig } from "../src/remote/config.js";
 import { trackConnections } from "../src/remote/broadcast.js";
@@ -18,6 +18,12 @@ import { collectSessions, startRemoteEndpoint } from "../src/remote/endpoint.js"
 import { startHub } from "../src/remote/hub-server.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import { AGENT_INFO } from "../src/utils.js";
+
+// Hub + WS-proxy chains under full-suite parallel load can outrun vitest's 5s
+// default — and the proxied-WS tests hold inner 5s withTimeout waits that can
+// never win against an equal outer budget. 15s file-wide (the respawn test
+// already used 15s explicitly).
+vi.setConfig({ testTimeout: 15_000 });
 
 const TOKEN = "test-endpoint-token";
 

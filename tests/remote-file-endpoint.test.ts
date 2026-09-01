@@ -10,13 +10,19 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import * as acp from "@agentclientprotocol/sdk";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RemoteConfig } from "../src/remote/config.js";
 import { startRemoteEndpoint } from "../src/remote/endpoint.js";
 import { startHub } from "../src/remote/hub-server.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import { AGENT_INFO } from "../src/utils.js";
+
+// Every test here builds a real hub + loopback endpoint + proxied request
+// chain; under full-suite parallel load that chain can outrun vitest's 5s
+// default and fail spuriously. 15s matches the budget the slowest endpoint
+// test already uses.
+vi.setConfig({ testTimeout: 15_000 });
 
 const TOKEN = "test-fs-token";
 
