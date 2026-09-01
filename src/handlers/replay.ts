@@ -16,7 +16,9 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeMessage, ZcodeMessagesResult } from "../backend/types.js";
-import { messages } from "../i18n.js";
+// Aliased: this module's own helpers take a `messages: ZcodeMessage[]`
+// parameter that would shadow the plain import name.
+import { messages as i18nMessages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { throwError, withReplayBatch } from "./io.js";
@@ -315,7 +317,7 @@ function transcriptTitle(tool: string, inputJson: string): string {
   } catch {
     /* non-JSON input — fall through */
   }
-  return messages().replayToolFallback(tool);
+  return i18nMessages().replayToolFallback(tool);
 }
 
 /** <summary> line of a task-notification, entities decoded, capped at 60. */
@@ -350,11 +352,11 @@ function collapseUserText(
     const raw =
       typeof summary?.title === "string" && summary.title
         ? summary.title
-        : messages().replayCompactSummary;
+        : i18nMessages().replayCompactSummary;
     return { title: raw.length > 60 ? raw.slice(0, 57) + "…" : raw, kind: "compact" };
   }
   if (CONTEXT_HANDOFF.test(text)) {
-    return { title: messages().replayContextHandoff, kind: "context-handoff" };
+    return { title: i18nMessages().replayContextHandoff, kind: "context-handoff" };
   }
   const tool = TOOL_TRANSCRIPT.exec(text);
   if (tool) {
@@ -470,7 +472,7 @@ export async function replayMessages(
           update: {
             sessionUpdate: "tool_call",
             toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
-            title: st.title ?? histToolName ?? "tool call",
+            title: st.title ?? histToolName ?? i18nMessages().replayToolCallFallback,
             kind: "other",
             status: (st.status as acp.ToolCallStatus) ?? "completed",
             ...(content.length > 0 ? { content } : {}),

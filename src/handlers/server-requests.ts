@@ -43,8 +43,8 @@ import {
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
-import type { ClientLike } from "../remote/broadcast.js";
 import { messages } from "../i18n.js";
+import type { ClientLike } from "../remote/broadcast.js";
 import { log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -437,11 +437,12 @@ async function handleSinglePermission(
   // to have been emitted before request_permission).
   const toolCallId = p.toolCallId ?? "";
   const rawInput = p.input;
+  const m = messages();
   const tcTitle = epm
-    ? "Ready to code?"
+    ? m.popupTitleExitPlan
     : perm
-      ? `tool permission (${p.toolName ?? "?"})`
-      : "interaction";
+      ? m.popupTitleToolPermission(p.toolName ?? "?")
+      : m.popupTitleInteraction;
   const tcKind = epm ? "switch_mode" : "other";
   const toolName = epm ? "ExitPlanMode" : (p.toolName ?? "");
   const tcUpdate: acp.SessionUpdate = {

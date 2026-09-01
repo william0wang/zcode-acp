@@ -23,8 +23,12 @@ import path from "node:path";
 export type Lang = "en" | "zh";
 
 export function resolveLanguage(env: NodeJS.ProcessEnv = process.env): Lang {
-  const pick = (value: string | undefined): Lang | undefined => {
-    const v = (value ?? "").toLowerCase();
+  // Non-string values (a malformed setting.json carrying `locale: 5` must
+  // never crash the bridge — pick is reached from messages() on hot paths)
+  // read as "no preference".
+  const pick = (value: unknown): Lang | undefined => {
+    if (typeof value !== "string") return undefined;
+    const v = value.toLowerCase();
     if (v.startsWith("zh")) return "zh";
     if (v.startsWith("en")) return "en";
     return undefined;
@@ -39,22 +43,29 @@ export function resolveLanguage(env: NodeJS.ProcessEnv = process.env): Lang {
   );
 }
 
-/** The ZCode desktop app's language choice, if the settings file exists. */
-let cachedAppLocale: string | undefined | null = null; // null = not read yet
+/** The ZCode desktop app's language choice, if the settings file exists.
+ *  Memoized with an explicit flag: a settings value of literal null must
+ *  cache as "no app locale", not re-read the file on every call. */
+let appLocaleCache: string | undefined;
+let appLocaleRead = false;
 
 function appLocale(): string | undefined {
-  if (cachedAppLocale === null) {
+  if (!appLocaleRead) {
+    appLocaleRead = true;
     let locale: string | undefined;
     try {
       const raw = readFileSync(path.join(os.homedir(), ".zcode", "v2", "setting.json"), "utf8");
-      const parsed = JSON.parse(raw) as { localePreference?: string; locale?: string };
-      locale = parsed.localePreference ?? parsed.locale;
+      const parsed = JSON.parse(raw) as { localePreference?: unknown; locale?: unknown };
+      const pref =
+        typeof parsed.localePreference === "string" ? parsed.localePreference : undefined;
+      const eff = typeof parsed.locale === "string" ? parsed.locale : undefined;
+      locale = pref ?? eff;
     } catch {
       locale = undefined; // app never installed / unreadable / malformed
     }
-    cachedAppLocale = locale;
+    appLocaleCache = locale;
   }
-  return cachedAppLocale;
+  return appLocaleCache;
 }
 
 export interface Messages {
@@ -122,6 +133,26 @@ export interface Messages {
   /** Editor slash-command menu: localized descriptions for the static
    *  commands (names and argument hints stay as-is — they are tokens). */
   slashCommandDescriptions: Record<string, string>;
+  /** Auto-compaction status lines. */
+  autoCompactStart: (used: string, threshold: string) => string;
+  autoCompactTimeout: string;
+  autoCompactDone: string;
+  autoCompactFailed: (err: string) => string;
+  /** Pre-popup tool_call titles for interactive requests. */
+  popupTitleExitPlan: string;
+  popupTitleToolPermission: (tool: string) => string;
+  popupTitleInteraction: string;
+  /** Replay fallback title when a history tool has no name/title. */
+  replayToolCallFallback: string;
+  /** Background-task card title (empty description → fallback). */
+  backgroundTaskTitle: (description: string) => string;
+  /** Slash-command errors surfaced to the editor via RequestError. */
+  slashErrGoalArg: string;
+  slashErrModelArg: string;
+  slashErrSwitchFailed: (model: string) => string;
+  slashErrArg: (cmd: string) => string;
+  slashErrUnknown: (cmd: string) => string;
+  slashErrFailed: (cmd: string, msg: string) => string;
 }
 
 const zh: Messages = {
@@ -190,6 +221,22 @@ const zh: Messages = {
     mcp: "列出可用的 MCP 服务器",
     init: "创建或更新工作区 AGENTS.md 指令",
   },
+  autoCompactStart: (used, threshold) =>
+    `🔄 自动压缩: 上下文用量 ${used} ≥ 阈值 ${threshold},正在压缩…`,
+  autoCompactTimeout: "⚠ 自动压缩超时（300s）——后端可能仍在处理",
+  autoCompactDone: "✓ 自动压缩: 上下文已压缩",
+  autoCompactFailed: (err) => `⚠ 自动压缩失败: ${err}`,
+  popupTitleExitPlan: "可以开始编码了吗？",
+  popupTitleToolPermission: (tool) => `工具权限 (${tool})`,
+  popupTitleInteraction: "交互",
+  replayToolCallFallback: "工具调用",
+  backgroundTaskTitle: (d) => (d ? `[后台] ${d}` : "[后台] 任务"),
+  slashErrGoalArg: "/goal 需要目标描述",
+  slashErrModelArg: "/model 需要模型 id",
+  slashErrSwitchFailed: (model) => `模型切换失败: ${model}`,
+  slashErrArg: (cmd) => `/${cmd} 需要参数`,
+  slashErrUnknown: (cmd) => `未知命令 /${cmd}`,
+  slashErrFailed: (cmd, msg) => `${cmd} 失败: ${msg}`,
 };
 
 const en: Messages = {
@@ -262,6 +309,22 @@ const en: Messages = {
     mcp: "List available MCP servers",
     init: "Create or update workspace AGENTS.md instructions",
   },
+  autoCompactStart: (used, threshold) =>
+    `🔄 auto-compact: context usage ${used} ≥ threshold ${threshold}, compressing…`,
+  autoCompactTimeout: "⚠ auto-compact timed out (300s) — backend may still be processing",
+  autoCompactDone: "✓ auto-compact: context compressed",
+  autoCompactFailed: (err) => `⚠ auto-compact failed: ${err}`,
+  popupTitleExitPlan: "Ready to code?",
+  popupTitleToolPermission: (tool) => `tool permission (${tool})`,
+  popupTitleInteraction: "interaction",
+  replayToolCallFallback: "tool call",
+  backgroundTaskTitle: (d) => (d ? `[background] ${d}` : "[background] task"),
+  slashErrGoalArg: "/goal requires a goal description",
+  slashErrModelArg: "/model requires a model id",
+  slashErrSwitchFailed: (model) => `model switch failed for ${model}`,
+  slashErrArg: (cmd) => `/${cmd} requires an argument`,
+  slashErrUnknown: (cmd) => `unknown /${cmd}`,
+  slashErrFailed: (cmd, msg) => `${cmd} failed: ${msg}`,
 };
 
 /** Current message table — resolved per call so env changes/tests apply live. */

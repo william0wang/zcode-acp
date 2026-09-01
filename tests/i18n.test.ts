@@ -52,6 +52,25 @@ describe("resolveLanguage", () => {
     expect(resolveLanguage({})).toBe("zh");
   });
 
+  it("never crashes on non-string app locale values (number/bool/null/array/object)", async () => {
+    const { resolveLanguage } = await freshModule();
+    for (const bad of [5, true, null, [], { x: 1 }]) {
+      settingJson = JSON.stringify({ locale: bad });
+      expect(resolveLanguage({ LANG: "zh_CN" })).toBe("zh"); // falls through
+      expect(resolveLanguage({})).toBe("en"); // default
+    }
+  });
+
+  it("memoizes the app-settings read — a later file change does not flip the language", async () => {
+    const { resolveLanguage } = await freshModule();
+    settingJson = JSON.stringify({ locale: "zh-CN" });
+    expect(resolveLanguage({})).toBe("zh");
+    settingJson = JSON.stringify({ locale: "en-US" });
+    expect(resolveLanguage({})).toBe("zh"); // cached, not re-read
+    settingJson = JSON.stringify({ locale: null });
+    expect(resolveLanguage({})).toBe("zh"); // null value must not bust the cache
+  });
+
   it("falls through a missing or malformed app settings file", async () => {
     const { resolveLanguage } = await freshModule();
     settingJson = "{not json";
@@ -91,6 +110,20 @@ describe("message tables", () => {
       }
     }
     expect(zh.length).toBe(en.length);
+  });
+
+  it("slashCommandDescriptions: identical key sets covering every static command", async () => {
+    const { messages } = await freshModule();
+    const { SLASH_COMMANDS } = await import("../src/utils.js");
+    vi.stubEnv("ZCODE_ACP_LANG", "zh");
+    const zhKeys = Object.keys(messages().slashCommandDescriptions).sort();
+    vi.stubEnv("ZCODE_ACP_LANG", "en");
+    const enKeys = Object.keys(messages().slashCommandDescriptions).sort();
+    expect(enKeys).toEqual(zhKeys);
+    for (const cmd of SLASH_COMMANDS) {
+      expect(zhKeys).toContain(cmd.name);
+      expect(enKeys).toContain(cmd.name);
+    }
   });
 
   it("messages() follows env changes per call", async () => {
