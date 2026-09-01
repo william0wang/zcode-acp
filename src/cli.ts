@@ -72,7 +72,7 @@ Commands:
                     -i <sec>, -d detail, -p plain, provider glm|go.
   hub               Run the remote-access hub daemon (was zcode-acp-hub;
                     usually auto-spawned by bridges, rarely run by hand).
-  serve             Headless bridge for remote session-create (ADR-0012):
+  serve             Headless bridge for remote session-create (ADR-0014):
                     no stdio editor, lives for remote WS clients until idle.
                     Normally spawned by the hub, not run by hand (needs
                     ZCODE_ACP_REMOTE=1 + ZCODE_ACP_REMOTE_TOKEN).

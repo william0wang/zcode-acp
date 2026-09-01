@@ -241,7 +241,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
   );
 }
 
-// ---------- headless serve bridge (remote session-create, ADR-0012) ----------
+// ---------- headless serve bridge (remote session-create, ADR-0014) ----------
 
 /** How long a serve bridge stays up with no clients attached and no turn running. */
 const SERVE_IDLE_MS = 10 * 60_000;

@@ -1,6 +1,6 @@
 /**
  * Tests for the known-workspace list (remote session-create whitelist,
- * ADR-0012): listKnownWorkspaces aggregates the App's tasks index per
+ * ADR-0014): listKnownWorkspaces aggregates the App's tasks index per
  * workspace, and isSelectableWorkspace decides which recorded paths may be
  * offered to remote clients.
  *

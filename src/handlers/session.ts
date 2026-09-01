@@ -13,6 +13,7 @@
 
 import process from "node:process";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
@@ -74,6 +75,20 @@ function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: stri
  */
 function sanitizeClientCwd(client: string | undefined): string | null {
   return client && client !== "/" ? client : null;
+}
+
+/**
+ * Same-directory check tolerant of spelling: a workspace can be recorded or
+ * reported under a symlinked / non-canonical spelling while the serve bridge
+ * holds the resolved process cwd. Compare realpaths; a vanished path falls
+ * back to raw equality (both sides unchanged → still equal).
+ */
+function sameProjectDir(a: string, b: string): boolean {
+  try {
+    return realpathSync(a) === realpathSync(b);
+  } catch {
+    return a === b;
+  }
 }
 
 /**
@@ -147,7 +162,7 @@ export async function newSession(
 ): Promise<acp.NewSessionResponse> {
   // Creation is the one moment a client's cwd is trusted (the editor
   // declaring its worktree); "/" is still rejected as a degenerate root.
-  // Serve mode (ADR-0012) is the exception: a headless bridge exists for ONE
+  // Serve mode (ADR-0014) is the exception: a headless bridge exists for ONE
   // hub-chosen project — the process cwd wins and client-supplied values are
   // ignored, so the remote create-whitelist cannot be bypassed via session/new.
   const cwd = server.serveMode ? process.cwd() : (sanitizeClientCwd(params.cwd) ?? process.cwd());
@@ -217,12 +232,14 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     // (the backend session still exists — re-register the alias); one without
     // re-hydrates the pending entry so the create path below runs.
     const record = lookupLazySession(acpSid);
-    // Serve mode (ADR-0012) honors durable records for ITS OWN project only.
+    // Serve mode (ADR-0014) honors durable records for ITS OWN project only.
     // Aliases are minted by editor bridges, which trust their local client's
     // session/new cwd — a remote client can mint {sid → arbitrary cwd} there
     // and then resume it here to drag this bridge into a foreign workspace.
-    // Records from another cwd read as unknown ids.
-    if (server.serveMode && record && record.cwd !== process.cwd()) {
+    // Records from another cwd read as unknown ids. The comparison tolerates
+    // spelling differences (symlinked record cwd vs the resolved process cwd)
+    // — same project under another spelling stays resumable.
+    if (server.serveMode && record && !sameProjectDir(record.cwd, process.cwd())) {
       log(`ensureRealSession: serve mode ignores a foreign lazy record (${acpSid})`);
       throw new Error(`session ${acpSid} not found`);
     }
@@ -315,8 +332,12 @@ export async function listSessions(
 ): Promise<acp.ListSessionsResponse> {
   const backend = server.ensureBackend();
   const zcParams: Record<string, unknown> = {};
-  if (params.cwd) {
-    zcParams.workspace = workspaceFor(params.cwd);
+  // Serve mode (ADR-0014) pins the workspace: a remote client must not use a
+  // client-supplied cwd to enumerate the machine's sessions in OTHER projects
+  // (the backend scopes the listing to the workspace it is given).
+  const listCwd = server.serveMode ? process.cwd() : params.cwd;
+  if (listCwd) {
+    zcParams.workspace = workspaceFor(listCwd);
   }
 
   const resp = await backend.request(server.nextId(), "session/list", zcParams, 15000);
@@ -420,7 +441,7 @@ export async function resumeSession(
   // The Session Root never comes from the client (params.cwd is ignored):
   // start from what the bridge recorded, then let the backend's own resume
   // result correct it below — a remote client must not move a session's
-  // file scope by sending its own cwd. Serve mode (ADR-0012) skips both
+  // file scope by sending its own cwd. Serve mode (ADR-0014) skips both
   // sources: the bridge exists for ONE hub-chosen project, so the root (and
   // the workspace sent to the backend's resume) stays the process cwd.
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
@@ -457,9 +478,15 @@ export async function resumeSession(
     await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
-    // Serve mode keeps its pinned cwd (see above).
+    // Serve mode keeps its pinned cwd (see above) — and a session that
+    // genuinely lives in ANOTHER workspace is refused outright: a raw
+    // backend id from session/list elsewhere must not be replayed through
+    // a serve bridge pinned to one project.
     const backendWs = workspaceFromResumeResult(resumeResult);
     if (backendWs && !server.serveMode) cwd = backendWs;
+    if (server.serveMode && backendWs && !sameProjectDir(backendWs, process.cwd())) {
+      throw new Error("session belongs to another workspace");
+    }
   }
 
   server.registerSession(acpSid, zcodeSid);
@@ -494,7 +521,7 @@ export async function loadSession(
   // The Session Root never comes from the client (params.cwd is ignored):
   // start from what the bridge recorded, then let the backend's own resume
   // result correct it below — a remote client must not move a session's
-  // file scope by sending its own cwd. Serve mode (ADR-0012) pins the root
+  // file scope by sending its own cwd. Serve mode (ADR-0014) pins the root
   // (and the workspace sent to resume) to the process cwd throughout.
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
 
@@ -518,9 +545,13 @@ export async function loadSession(
     await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
-    // Serve mode keeps its pinned cwd (see above).
+    // Serve mode keeps its pinned cwd (see above) — and refuses sessions
+    // from another workspace outright (same rule as resumeSession).
     const backendWs = workspaceFromResumeResult(resumeResult);
     if (backendWs && !server.serveMode) cwd = backendWs;
+    if (server.serveMode && backendWs && !sameProjectDir(backendWs, process.cwd())) {
+      throw new Error("session belongs to another workspace");
+    }
   }
   server.registerSession(acpSid, zcodeSid);
   // Same as resumeSession: backend-authoritative session root for file access.

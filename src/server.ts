@@ -226,7 +226,7 @@ export class ZcodeAcpServer {
   private msgCounter = 10_000_000;
 
   /**
-   * Headless serve mode (ADR-0012): this bridge was hub-spawned for ONE known
+   * Headless serve mode (ADR-0014): this bridge was hub-spawned for ONE known
    * project (the process cwd). session/new then ignores client-supplied cwds
    * and always uses the process cwd — the remote create-whitelist stays
    * closed end to end (a client cannot steer a serve bridge into another

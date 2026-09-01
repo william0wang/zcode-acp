@@ -268,7 +268,7 @@ export async function startRemoteEndpoint(
     pid: process.pid,
     workspace: server.workspaceLabel(),
     sessions,
-    // "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0012):
+    // "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014):
     // lets the hub dedupe headless instances per workspace and label them.
     origin: config.origin,
     // Lets the hub detect that it is older than this bridge and restart
@@ -361,8 +361,12 @@ export async function startRemoteEndpoint(
       if (res.ok) {
         if (authRejected) {
           authRejected = false;
-          // Fresh ladder for any future rejection stretch.
+          // Fresh ladder for any future rejection stretch — BOTH the backoff
+          // and the next-spawn timestamp, or the next stretch's first 401
+          // would inherit the old schedule and skip its own replacement
+          // spawn for up to the 10min cap.
           authSpawnBackoffMs = SPAWN_THROTTLE_MS;
+          nextAuthSpawnAt = 0;
           log("remote: hub registration recovered after 401 rejection");
         }
         unexpectedStatus = null;

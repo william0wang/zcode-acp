@@ -215,9 +215,10 @@ POST /api/instances {workspacePath} → {"id","reused"}
 
 `/api/projects` aggregates the App's tasks index: every workspace that ever
 ran a session (system temp trees, `~/.zcode` itself, and vanished
-directories filtered out), newest activity first. The list doubles as the
-whitelist — the POST refuses (403) any path outside it, so a remote client
-can never spawn an agent in an arbitrary directory. On create the hub
+directories filtered out), newest activity first. The list gates the POST —
+paths outside it get 403 (a convenience bound, not a security boundary: a
+token holder can already drive an editor-bridge session in any cwd; the
+trust boundary is the token). On create the hub
 spawns `zcode-acp serve` — a headless bridge — in the project's cwd; it
 registers back within seconds and is reachable like any other instance. A
 live serve instance for the same workspace is reused instead of re-spawned

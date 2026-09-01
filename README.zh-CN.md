@@ -177,13 +177,14 @@ POST /api/instances {workspacePath} → {"id","reused"}
 ```
 
 `/api/projects` 聚合 App 的任务索引：所有跑过会话的项目（过滤系统临时
-目录、`~/.zcode` 自身和已不存在的目录），按最近活跃排序。这份列表同时
-就是白名单——POST 对列表之外的路径一律 403，远程永远无法在任意目录里
-启动 agent。创建时 hub 会在项目目录下拉起 `zcode-acp serve`（无头 bridge），
+目录、`~/.zcode` 自身和已不存在的目录），按最近活跃排序。这份列表约束
+POST——列表之外的路径一律 403（注意这是便利性约束而非安全边界：持有
+token 者本就能以任意 cwd 驱动 editor bridge 会话，真正的信任边界是
+token 本身）。创建时 hub 会在项目目录下拉起 `zcode-acp serve`（无头 bridge），
 数秒内注册回 hub，之后像普通实例一样可连接；同项目已有存活的 serve 实例
 则直接复用（`reused:true`）。serve bridge 只为远程连接而活：最后一个客户端
 断开且最后一个 turn 结束约 10 分钟后自动退出；其 `session/new` 无论客户端
-传什么都使用项目目录（白名单端到端闭合）。
+传什么都使用项目目录（cwd 端到端钉死在项目内）。
 
 **语义。** 所有 agent 通知广播给每个已连接客户端；权限 / elicitation 请求
 发给所有客户端，**先应答者生效**，其余客户端收到 `$/cancel_request` 关闭

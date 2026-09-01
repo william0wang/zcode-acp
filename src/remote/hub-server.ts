@@ -25,6 +25,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { realpathSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import {
@@ -103,7 +104,7 @@ interface InstanceEntry {
   workspace: string;
   sessions: SessionSummary[];
   lastSeen: number;
-  /** "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0012). */
+  /** "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014). */
   origin: "editor" | "serve";
 }
 
@@ -190,7 +191,7 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 }
 
 /**
- * Default serve-bridge spawner (remote session-create, ADR-0012): this node
+ * Default serve-bridge spawner (remote session-create, ADR-0014): this node
  * running this package's cli.js `serve` subcommand, detached in the project's
  * cwd with the ENV the bridge needs to find its way back to this hub. Mirrors
  * endpoint.ts's spawnHub: detached + unref'd (the hub must not own its life),
@@ -373,7 +374,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
 
   /**
    * One in-flight serve spawn per workspace (remote session-create,
-   * ADR-0012): concurrent POSTs for the same project join the SAME
+   * ADR-0014): concurrent POSTs for the same project join the SAME
    * incubation instead of racing a second detached process past the
    * findServe check (check-then-act). Check-then-set is one synchronous
    * block, so requests can only ever observe "no entry" one at a time.
@@ -381,10 +382,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   const serveIncubations = new Map<string, Promise<{ id: string; reused: boolean }>>();
 
   /** The live serve instance for a workspace, if any (per-workspace dedupe). */
-  const findServeInstance = (workspacePath: string): InstanceEntry | undefined =>
-    Array.from(instances.values()).find(
-      (e) => e.origin === "serve" && e.workspace === workspacePath,
+  const findServeInstance = (workspacePath: string): InstanceEntry | undefined => {
+    // The dedupe key must be canonical: a whitelist row (or registration) can
+    // carry a symlinked or otherwise non-canonical spelling while the serve
+    // child registers with its RESOLVED process cwd — raw string equality
+    // would never match, 502-ing every create and spawning a duplicate per
+    // retry. realpath both sides; a vanished path falls back to raw equality.
+    const key = (p: string): string => {
+      try {
+        return realpathSync(p);
+      } catch {
+        return p;
+      }
+    };
+    const wanted = key(workspacePath);
+    return Array.from(instances.values()).find(
+      (e) => e.origin === "serve" && key(e.workspace) === wanted,
     );
+  };
 
   /**
    * Spawn a serve bridge and poll until it registers (or fails fast on child
@@ -392,6 +407,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * this workspace — all joiners see the same outcome.
    */
   const incubateServe = async (workspacePath: string): Promise<{ id: string; reused: boolean }> => {
+    // Async spawn failures (ENOENT — the dir vanished between the whitelist
+    // check and the spawn) arrive as an 'error' event with exitCode still
+    // null; without this flag the poll burns the full 10s budget.
+    let spawnError: Error | null = null;
     let child: ChildProcess;
     try {
       child = spawnServe({
@@ -401,7 +420,13 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           ZCODE_ACP_REMOTE: "1",
           ZCODE_ACP_REMOTE_TOKEN: token,
           ZCODE_ACP_HUB_PORT: String(port),
+          // Parity with the bridge-side spawnHub: the serve child may have to
+          // (re)spawn the hub itself, and must bind the same configured host.
+          ZCODE_ACP_HUB_HOST: host,
         },
+      });
+      child.once("error", (e: Error) => {
+        spawnError = e;
       });
     } catch (e) {
       warn(`hub: serve spawn failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -415,7 +440,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       if (entry) return { id: entry.id, reused: false };
       // The child dying is the honest fast-fail (missing cwd perms, port
       // exhaustion, crash) — without this check the loop burns the full 10s.
-      if (child.exitCode !== null || child.signalCode !== null) {
+      if (spawnError || child.exitCode !== null || child.signalCode !== null) {
         warn(`hub: serve bridge for ${workspacePath} exited during startup`);
         throw new Error("serve bridge exited during startup");
       }
@@ -587,7 +612,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       return;
     }
     // GET /api/projects — the machine's known-project list (remote
-    // session-create, ADR-0012). Sourced from the App's tasks index: every
+    // session-create, ADR-0014). Sourced from the App's tasks index: every
     // workspace that ever ran a session. The list gates POST /api/instances
     // (paths outside it are refused) — a convenience bound, not a security
     // boundary: bridge-side session materialization also writes rows here,
@@ -610,7 +635,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // POST /api/instances — create (or reuse) a headless serve bridge for one
     // known project. The hub spawns `zcode-acp serve` detached in the project
     // cwd and waits for its heartbeat registration; the bridge lives its own
-    // idle-timed life afterwards (ADR-0012). Dedupe: one serve instance per
+    // idle-timed life afterwards (ADR-0014). Dedupe: one serve instance per
     // workspace — an existing live one is reused, and concurrent POSTs join
     // the same in-flight incubation instead of double-spawning. Accepted
     // bound: a hub restart clears the instance table, so a POST inside the

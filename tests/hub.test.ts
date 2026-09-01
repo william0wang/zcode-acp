@@ -4,7 +4,8 @@
  * idle-exit policy.
  */
 
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -865,11 +866,15 @@ describe("hub /api/upgrade (self-decided restart)", () => {
   });
 });
 
-describe("hub remote session-create (ADR-0012)", () => {
+describe("hub remote session-create (ADR-0014)", () => {
   const PROJECT = "/Users/dev/Develop/demo";
   const auth = { Authorization: `Bearer ${TOKEN}` };
-  /** Minimal ChildProcess stand-in: the hub only reads pid/exitCode/signalCode. */
-  let fakeChild: { pid: number; exitCode: number | null; signalCode: string | null };
+  /**
+   * Minimal ChildProcess stand-in: the hub reads pid/exitCode/signalCode and
+   * subscribes to async 'error' (ENOENT after spawn). EventEmitter supplies
+   * once(); the mutable exitCode/signalCode fields flip the death checks.
+   */
+  let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
   let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv }>;
   let spawnCount: number;
 
@@ -879,7 +884,10 @@ describe("hub remote session-create (ADR-0012)", () => {
       { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
       { workspacePath: "/Users/dev/Develop/other", sessions: 1, lastActive: 999 },
     ]);
-    fakeChild = { pid: 4242, exitCode: null, signalCode: null };
+    fakeChild = new EventEmitter() as typeof fakeChild;
+    fakeChild.pid = 4242;
+    fakeChild.exitCode = null;
+    fakeChild.signalCode = null;
     spawnCalls = [];
     spawnCount = 0;
   });
@@ -991,6 +999,34 @@ describe("hub remote session-create (ADR-0012)", () => {
     // Settled incubation is gone: the next POST reuses the registered one.
     expect(await (await post()).json()).toEqual({ id: `serve-${PROJECT}`, reused: true });
     expect(spawnCount).toBe(1);
+  });
+
+  it("dedupes across path spellings: a symlinked row matches the resolved registration", async () => {
+    // Regression: raw string equality never matched a whitelist row carrying
+    // a symlink spelling against the serve child's RESOLVED process cwd —
+    // every create 502'd after 10s and each retry spawned a duplicate.
+    const real = await mkdtemp(path.join(tmpdir(), "hub-dedupe-"));
+    const link = path.join(path.dirname(real), `${path.basename(real)}-link`);
+    await symlink(real, link);
+    try {
+      listKnownWorkspacesMock.mockResolvedValue([
+        { workspacePath: link, sessions: 1, lastActive: 1 },
+      ]);
+      const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+      // The bridge registers with its resolved cwd spelling.
+      await registerServeBridge(hub, real);
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: link }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ id: `serve-${real}`, reused: true });
+      expect(spawnCount).toBe(0);
+    } finally {
+      await rm(link, { force: true });
+      await rm(real, { recursive: true, force: true });
+    }
   });
 
   it("fails with 502 when the spawned bridge dies during startup", async () => {

@@ -329,7 +329,7 @@ export async function updateSessionTitle(
   }
 }
 
-// ---------- known workspaces (remote session-create, ADR-0012) ----------
+// ---------- known workspaces (remote session-create, ADR-0014) ----------
 
 /** One known project workspace, as recorded by the App's tasks index. */
 export interface KnownWorkspace {

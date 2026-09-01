@@ -545,7 +545,7 @@ describe("backend-loaded session tracking", () => {
   });
 });
 
-describe("serve mode cwd pinning (ADR-0012 hardening)", () => {
+describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
   // A remote client can mint {sid → arbitrary cwd} durable aliases on any
   // editor bridge (session/new trusts the local editor's cwd) and then resume
   // them on a serve bridge. Serve mode must treat foreign-cwd records as
@@ -600,16 +600,40 @@ describe("serve mode cwd pinning (ADR-0012 hardening)", () => {
     });
   });
 
-  it("resume pins the root to the process cwd and ignores a foreign backend workspace", async () => {
+  it("resume pins the root to the process cwd; a foreign-workspace session is refused", async () => {
     const server = new ZcodeAcpServer({ serveMode: true });
-    // Raw backend id whose recorded workspace is a foreign dir: even the
-    // backend's own resume answer must not move the serve bridge's root.
     const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
+    server.backend = backend;
+
+    await expect(
+      resumeSession(
+        server,
+        { sessionId: "sess_real_1", cwd: "/tmp/attacker" } as acp.ResumeSessionRequest,
+        {} as acp.AgentContext,
+      ),
+    ).rejects.toThrow("session belongs to another workspace");
+
+    // The workspace sent to the backend was pinned; the refused session
+    // records no mapping and no root.
+    const resumes = calls.filter((c) => c.method === "session/resume");
+    expect(resumes).toHaveLength(1);
+    expect(resumes[0]!.params).toMatchObject({
+      workspace: { workspacePath: process.cwd() },
+    });
+    expect(server.resolveSid("sess_real_1")).toBeUndefined();
+    expect(server.sessionCwds.get("sess_real_1")).toBeUndefined();
+  });
+
+  it("resume of the serve bridge's OWN workspace stays pinned", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    // The backend reports the same project (sameProjectDir resolves both
+    // spellings): accepted, and the recorded root stays the process cwd.
+    const { backend, calls } = fakeBackend([], [], process.cwd());
     server.backend = backend;
 
     await resumeSession(
       server,
-      { sessionId: "sess_real_1", cwd: "/tmp/attacker" } as acp.ResumeSessionRequest,
+      { sessionId: "sess_real_1" } as acp.ResumeSessionRequest,
       {} as acp.AgentContext,
     );
 
@@ -621,22 +645,24 @@ describe("serve mode cwd pinning (ADR-0012 hardening)", () => {
     expect(server.sessionCwds.get("sess_real_1")).toBe(process.cwd());
   });
 
-  it("load pins the root the same way", async () => {
+  it("load pins the root the same way and refuses foreign-workspace sessions", async () => {
     const server = new ZcodeAcpServer({ serveMode: true });
     const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
     server.backend = backend;
 
-    await loadSession(
-      server,
-      { sessionId: "sess_real_2" } as acp.LoadSessionRequest,
-      {} as acp.AgentContext,
-    );
+    await expect(
+      loadSession(
+        server,
+        { sessionId: "sess_real_2" } as acp.LoadSessionRequest,
+        {} as acp.AgentContext,
+      ),
+    ).rejects.toThrow("session belongs to another workspace");
 
     const resumes = calls.filter((c) => c.method === "session/resume");
     expect(resumes).toHaveLength(1);
     expect(resumes[0]!.params).toMatchObject({
       workspace: { workspacePath: process.cwd() },
     });
-    expect(server.sessionCwds.get("sess_real_2")).toBe(process.cwd());
+    expect(server.sessionCwds.get("sess_real_2")).toBeUndefined();
   });
 });

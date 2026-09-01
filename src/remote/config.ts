@@ -26,7 +26,7 @@ export interface RemoteConfig {
   bridgePort: number;
   /**
    * Who this bridge serves: "editor" (spawned by an editor over stdio) or
-   * "serve" (headless, hub-spawned for remote session-create, ADR-0012).
+   * "serve" (headless, hub-spawned for remote session-create, ADR-0014).
    * Rides the registration heartbeat; the hub uses it to dedupe headless
    * instances per workspace and label them for remote clients.
    */
