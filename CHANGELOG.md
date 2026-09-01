@@ -33,6 +33,38 @@ session in any of the machine's known projects, no editor required.
   so remote UIs can label CLI-started instances and the hub can dedupe
   them per workspace.
 
+### Fixed
+
+- A bridge rejected by the hub (401, typically a token rotation it did
+  not observe) permanently stopped registering — its sessions vanished
+  from remote until the editor window was manually restarted. 401 no
+  longer poisons the heartbeat: the bridge keeps retrying every 10s and
+  spawns a replacement hub carrying its own token, with exponential
+  backoff (60s doubling to a 10min cap) so a mixed-token fleet that
+  keeps the stale hub alive cannot churn spawn attempts forever. Once
+  the stale hub exits — immediately if the port is free, or via its
+  zero-instance idle-exit — the next spawn installs a hub that accepts
+  the bridge and everything converges without manual restarts.
+- Hardening from an adversarial review of the new remote surfaces:
+  - serve-mode cwd pinning now covers EVERY cwd entry point, not just
+    `session/new`: a durable lazy-session alias minted with an arbitrary
+    cwd on an editor bridge can no longer be resumed on a serve bridge to
+    drag it into a foreign workspace (foreign-cwd records read as unknown
+    ids; resume/load pin the root and never adopt the backend's returned
+    workspace — the value the `/fs` file endpoint scopes to).
+  - `POST /api/instances` keeps one in-flight spawn per workspace:
+    concurrent creates join the same incubation instead of racing a
+    duplicate detached process past the live-instance check.
+  - Registration answers that are neither 2xx nor 401 (e.g. the port
+    held by a non-hub service) now warn once per stretch instead of
+    silently disabling remote discovery.
+  - `listKnownWorkspaces(dbPath)` actually opens the injected path —
+    `withSqliteRetry` used to hardcode the default tasks index, so the
+    parameter only gated the existence check.
+  - The known-project list is documented as a convenience bound, not a
+    security boundary: bridge-side session materialization also writes
+    list rows, so the real trust boundary is the token itself.
+
 ## [0.16.2] - 2026-09-01
 
 ### Fixed

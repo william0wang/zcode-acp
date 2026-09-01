@@ -217,14 +217,26 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     // (the backend session still exists — re-register the alias); one without
     // re-hydrates the pending entry so the create path below runs.
     const record = lookupLazySession(acpSid);
+    // Serve mode (ADR-0012) honors durable records for ITS OWN project only.
+    // Aliases are minted by editor bridges, which trust their local client's
+    // session/new cwd — a remote client can mint {sid → arbitrary cwd} there
+    // and then resume it here to drag this bridge into a foreign workspace.
+    // Records from another cwd read as unknown ids.
+    if (server.serveMode && record && record.cwd !== process.cwd()) {
+      log(`ensureRealSession: serve mode ignores a foreign lazy record (${acpSid})`);
+      throw new Error(`session ${acpSid} not found`);
+    }
     if (record?.zcodeSid) {
       server.registerSession(acpSid, record.zcodeSid);
       return record.zcodeSid;
     }
     if (record) {
-      pending = { cwd: record.cwd };
+      // Serve mode pins to its process cwd even here (belt and suspenders —
+      // the guard above already proved the record's cwd matches).
+      const cwd = server.serveMode ? process.cwd() : record.cwd;
+      pending = { cwd };
       server.pendingSessions.set(acpSid, pending);
-      if (record.cwd !== "/") server.sessionCwds.set(acpSid, record.cwd);
+      if (cwd !== "/") server.sessionCwds.set(acpSid, cwd);
     }
   }
   if (!pending) throw new Error(`session ${acpSid} not found`);
@@ -408,8 +420,10 @@ export async function resumeSession(
   // The Session Root never comes from the client (params.cwd is ignored):
   // start from what the bridge recorded, then let the backend's own resume
   // result correct it below — a remote client must not move a session's
-  // file scope by sending its own cwd.
-  let cwd = authoritativeSessionCwd(server, acpSid);
+  // file scope by sending its own cwd. Serve mode (ADR-0012) skips both
+  // sources: the bridge exists for ONE hub-chosen project, so the root (and
+  // the workspace sent to the backend's resume) stays the process cwd.
+  let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
 
   // Lazy placeholders (session/new) resolve to their real backend session
   // here; alreadyLive targets skip the resume RPC because the session is live
@@ -443,8 +457,9 @@ export async function resumeSession(
     await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
+    // Serve mode keeps its pinned cwd (see above).
     const backendWs = workspaceFromResumeResult(resumeResult);
-    if (backendWs) cwd = backendWs;
+    if (backendWs && !server.serveMode) cwd = backendWs;
   }
 
   server.registerSession(acpSid, zcodeSid);
@@ -479,8 +494,9 @@ export async function loadSession(
   // The Session Root never comes from the client (params.cwd is ignored):
   // start from what the bridge recorded, then let the backend's own resume
   // result correct it below — a remote client must not move a session's
-  // file scope by sending its own cwd.
-  let cwd = authoritativeSessionCwd(server, acpSid);
+  // file scope by sending its own cwd. Serve mode (ADR-0012) pins the root
+  // (and the workspace sent to resume) to the process cwd throughout.
+  let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
 
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
@@ -502,8 +518,9 @@ export async function loadSession(
     await repairUnavailableModel(server, zcodeSid);
     // The backend's session record is the root authority: adopt its
     // workspace as the session root (heals any stale/polluted entry).
+    // Serve mode keeps its pinned cwd (see above).
     const backendWs = workspaceFromResumeResult(resumeResult);
-    if (backendWs) cwd = backendWs;
+    if (backendWs && !server.serveMode) cwd = backendWs;
   }
   server.registerSession(acpSid, zcodeSid);
   // Same as resumeSession: backend-authoritative session root for file access.

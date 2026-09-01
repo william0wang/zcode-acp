@@ -46,6 +46,8 @@ interface AdvertisedSession {
 const HEARTBEAT_MS = 10_000;
 /** Minimum spacing between hub spawn attempts (avoids spawn storms). */
 const SPAWN_THROTTLE_MS = 60_000;
+/** Cap for the 401-spawn backoff ladder (starts at SPAWN_THROTTLE_MS, doubles). */
+const AUTH_SPAWN_MAX_BACKOFF_MS = 10 * 60_000;
 /** Max ports probed above ZCODE_ACP_REMOTE_PORT before giving up. */
 const MAX_PORT_PROBES = 100;
 
@@ -249,6 +251,14 @@ export async function startRemoteEndpoint(
   const instanceId = String(process.pid);
   let stopped = false;
   let authRejected = false;
+  // 401-spawn schedule: an independent ladder from the unreachable-path
+  // throttle, because a mixed-token fleet can keep the mismatched hub alive
+  // indefinitely (its own bridges keep re-registering) — every spawn before
+  // that hub dies is a lost port race, so the attempts back off to a cap.
+  let nextAuthSpawnAt = 0;
+  let authSpawnBackoffMs = SPAWN_THROTTLE_MS;
+  // Last non-2xx/non-401 register status we warned about (once per stretch).
+  let unexpectedStatus: number | null = null;
   let spawnThrottledUntil = 0;
 
   const payload = (sessions: AdvertisedSession[]) => ({
@@ -304,15 +314,18 @@ export async function startRemoteEndpoint(
   let lastSessions: AdvertisedSession[] = [];
 
   const registerOnce = async (): Promise<void> => {
-    if (stopped || authRejected) return;
+    if (stopped) return;
     // Project-scoped session list before every heartbeat (session/list merge,
-    // ~100-300ms). Never throws; wrapped anyway so a surprise failure can't
-    // fall into the hub-spawn catch below (which would misread it as "hub
-    // unreachable").
-    try {
-      lastSessions = await collectSessions(server);
-    } catch {
-      /* keep lastSessions */
+    // ~100-300ms). Skipped while token-rejected: the payload would be refused
+    // anyway, so keep advertising lastSessions until a hub accepts us again.
+    // Never throws; wrapped anyway so a surprise failure can't fall into the
+    // hub-spawn catch below (which would misread it as "hub unreachable").
+    if (!authRejected) {
+      try {
+        lastSessions = await collectSessions(server);
+      } catch {
+        /* keep lastSessions */
+      }
     }
     try {
       const res = await postJson(
@@ -320,11 +333,45 @@ export async function startRemoteEndpoint(
         payload(lastSessions),
       );
       if (res.status === 401) {
-        authRejected = true;
-        warn(
-          "remote: hub rejected the token (401) — registration stopped, check ZCODE_ACP_REMOTE_TOKEN",
-        );
+        // Token mismatch — typically the token was rotated while this bridge
+        // (or the running hub) kept the old value. Never poison permanently:
+        // keep heartbeating so the bridge heals the moment a hub with a
+        // matching token answers, and spawn a replacement hub carrying OUR
+        // token. While a mismatched hub still holds the port the spawn loses
+        // the singleton race and exits; once that hub stops answering (it
+        // idle-exits once no bridge can register with it) the next spawn
+        // installs one that accepts us. Spawn spacing backs off to the cap —
+        // see nextAuthSpawnAt above.
+        if (!authRejected) {
+          authRejected = true;
+          warn(
+            "remote: hub rejected the token (401) — registration keeps retrying; " +
+              "a replacement hub is spawned (with backoff) until one accepts this token",
+          );
+        }
+        if (Date.now() >= nextAuthSpawnAt) {
+          nextAuthSpawnAt = Date.now() + authSpawnBackoffMs;
+          authSpawnBackoffMs = Math.min(authSpawnBackoffMs * 2, AUTH_SPAWN_MAX_BACKOFF_MS);
+          spawnHub();
+          const retry = setTimeout(() => void registerOnce(), 1500);
+          retry.unref();
+        }
         return;
+      }
+      if (res.ok) {
+        if (authRejected) {
+          authRejected = false;
+          // Fresh ladder for any future rejection stretch.
+          authSpawnBackoffMs = SPAWN_THROTTLE_MS;
+          log("remote: hub registration recovered after 401 rejection");
+        }
+        unexpectedStatus = null;
+      } else if (unexpectedStatus !== res.status) {
+        // Neither 2xx nor 401 — e.g. the port is held by a non-hub service.
+        // Without this the endpoint would be silently dead; warn once per
+        // stretch so the 10s heartbeat can't spam it.
+        unexpectedStatus = res.status;
+        warn(`remote: hub answered registration with unexpected status ${res.status}`);
       }
       // Version handshake: the hub saw a newer bridge and is exiting. It is
       // gone by now (it exits ~0.5s after replying) — re-spawn it from THIS

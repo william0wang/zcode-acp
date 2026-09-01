@@ -22,16 +22,19 @@ interface FakeRow {
 
 let rows: FakeRow[];
 
+/** Paths handed to the fake DatabaseSync constructor (dbPath pass-through). */
+const openedPaths = vi.hoisted(() => [] as string[]);
+
 /** Paths statSync reports as existing directories (everything else fails). */
 let realDirs: Set<string>;
 
 vi.mock("node:sqlite", () => {
   class DatabaseSync {
     constructor(
-      _path: string,
+      path: string,
       _options?: { timeout?: number },
     ) {
-      /* no-op */
+      openedPaths.push(path);
     }
     prepare(sql: string) {
       if (/^SELECT workspace_path AS p/i.test(sql)) {
@@ -168,5 +171,14 @@ describe("listKnownWorkspaces", () => {
     rows = [{ workspace_key: 42 as unknown as string, workspace_path: "", deleted: 0, updated_at: 1 }];
     const list = await listKnownWorkspaces("/fake/db.sqlite");
     expect(list).toEqual([]);
+  });
+
+  it("opens the injected dbPath, not the default tasks index", async () => {
+    // Regression: withSqliteRetry used to hardcode TASKS_INDEX_PATH, so the
+    // dbPath parameter only gated existsSync — fixtures read the real DB.
+    rows = [];
+    openedPaths.length = 0;
+    await listKnownWorkspaces("/fake/fixture.sqlite");
+    expect(openedPaths).toEqual(["/fake/fixture.sqlite"]);
   });
 });

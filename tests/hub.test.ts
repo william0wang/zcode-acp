@@ -967,6 +967,32 @@ describe("hub remote session-create (ADR-0012)", () => {
     expect(spawnCount).toBe(0);
   });
 
+  it("concurrent POSTs for the same workspace join one incubation (no double spawn)", async () => {
+    // Regression: findServe() and the spawn used to race across concurrent
+    // requests — both spawned a serve bridge and both answered 200.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const url = `http://127.0.0.1:${hub.port}/api/instances`;
+    const post = () =>
+      fetch(url, {
+        method: "POST",
+        headers: { ...auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT }),
+      });
+    const [a, b] = [post(), post()];
+    // One poll tick in — both requests must already share the incubation.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(spawnCount).toBe(1);
+    await registerServeBridge(hub, PROJECT);
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(ra.status).toBe(200);
+    expect(rb.status).toBe(200);
+    expect(await ra.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
+    expect(await rb.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
+    // Settled incubation is gone: the next POST reuses the registered one.
+    expect(await (await post()).json()).toEqual({ id: `serve-${PROJECT}`, reused: true });
+    expect(spawnCount).toBe(1);
+  });
+
   it("fails with 502 when the spawned bridge dies during startup", async () => {
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
     const pending = fetch(`http://127.0.0.1:${hub.port}/api/instances`, {

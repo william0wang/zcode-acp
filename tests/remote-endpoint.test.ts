@@ -6,6 +6,7 @@
  */
 
 import * as acp from "@agentclientprotocol/sdk";
+import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import { WebSocket } from "ws";
 
@@ -18,6 +19,23 @@ import { collectSessions, startRemoteEndpoint } from "../src/remote/endpoint.js"
 import { startHub } from "../src/remote/hub-server.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import { AGENT_INFO } from "../src/utils.js";
+
+// Intercept hub spawns (spawnHub has no injection point) so the 401 self-heal
+// test can count attempts and inspect the injected env. The fake child needs
+// just enough shape for spawnHub: unref(), pid, stderr?, once("error").
+const childProcessSpawn = vi.hoisted(() =>
+  vi.fn(() => {
+    const child = new EventEmitter() as unknown as import("node:child_process").ChildProcess;
+    child.unref = () => undefined;
+    child.pid = -1;
+    child.stderr = null;
+    return child;
+  }),
+);
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: childProcessSpawn,
+}));
 
 // Hub + WS-proxy chains under full-suite parallel load can outrun vitest's 5s
 // default — and the proxied-WS tests hold inner 5s withTimeout waits that can
@@ -93,6 +111,47 @@ function stopMockHub(mock: { server: Server }): Promise<void> {
     mock.server.closeAllConnections?.();
     mock.server.close(() => resolve());
   });
+}
+
+/**
+ * startMockHub variant with scripted /api/register status codes: call i gets
+ * statuses[i]; once the script runs out, the last status repeats. Used to
+ * replay token rotation (401s followed by a hub that accepts the token).
+ */
+function startScriptedMockHub(
+  bodies: Array<Record<string, unknown>>,
+  statuses: number[],
+): { port: number; ready: Promise<void>; server: Server } {
+  let calls = 0;
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      if (req.url === "/api/register") {
+        try {
+          bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          /* unreadable body — ignore */
+        }
+        const status = statuses[Math.min(calls, statuses.length - 1)] ?? 200;
+        calls++;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: status < 400 }));
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("not found");
+    });
+  });
+  const handle = { port: 0, ready: Promise.resolve(), server };
+  handle.ready = new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      handle.port = typeof addr === "object" && addr ? addr.port : 0;
+      resolve();
+    });
+  });
+  return handle;
 }
 
 describe("remote endpoint", () => {
@@ -259,6 +318,52 @@ describe("hub version handshake (bridge side)", () => {
     );
     expect(bodies.length).toBeGreaterThanOrEqual(2);
   }, 15000);
+});
+
+describe("hub 401 self-heal (token rotation)", () => {
+  it("keeps heartbeating after 401s, spawns one hub with its own token, and recovers", async () => {
+    childProcessSpawn.mockClear();
+    const bodies: Array<Record<string, unknown>> = [];
+    // Rotation replay: two 401s, then the hub accepts. The bridge must stay
+    // registration-eligible (no permanent poison) and heal on its own.
+    const mock = startScriptedMockHub(bodies, [401, 401, 200]);
+    trackStop(() => stopMockHub(mock));
+    await mock.ready;
+
+    const server = new ZcodeAcpServer();
+    const app = acp
+      .agent({ name: AGENT_INFO.name })
+      .onRequest("initialize", (ctx) => server.initialize(ctx.params));
+    trackConnections(app, server.clients);
+    const endpoint = await startRemoteEndpoint(server, app, testConfig(mock.port, 18512));
+    expect(endpoint).not.toBeNull();
+    trackStop(() => endpoint!.stop());
+
+    // Timeline: register@0ms → 401 (warn + throttled hub spawn + retry@1.5s)
+    // → 401 (spawn throttled: no second spawn, no retry) → heartbeat@10s →
+    // 200, recovered. Only the 10s heartbeat can deliver body #3 — proof the
+    // loop survived two rejections.
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (bodies.length >= 3) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 100);
+      }),
+      13_000,
+      "third register (heartbeat after repeated 401s)",
+    );
+    expect(bodies.length).toBeGreaterThanOrEqual(3);
+    // Exactly one hub spawn across both 401s (SPAWN_THROTTLE_MS holds) ...
+    expect(childProcessSpawn).toHaveBeenCalledTimes(1);
+    // ... and it carries THIS bridge's token, so the replacement hub — once
+    // it wins the port — accepts this bridge's registrations.
+    const opts = childProcessSpawn.mock.calls[0]![2] as { env: Record<string, string | undefined> };
+    expect(opts.env.ZCODE_ACP_REMOTE_TOKEN).toBe(TOKEN);
+    expect(opts.env.ZCODE_ACP_HUB_PORT).toBe(String(mock.port));
+  }, 15_000);
 });
 
 describe("running-scoped discovery payload (collectSessions)", () => {

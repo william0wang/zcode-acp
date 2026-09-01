@@ -148,14 +148,17 @@ GET  {hub}/api/projects
 
 POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
    → 200 {"id":"47073","reused":false}
-   → 403 "unknown project"          (path not on the list — the list IS the whitelist)
+   → 403 "unknown project"          (path not on the known-project list)
    → 502 (spawn failed / bridge died during startup / never registered, 10s budget)
 ```
 
 - `GET /api/projects` aggregates the App's tasks index: every workspace that
   ever ran a session, filtered (system temp trees, `~/.zcode` itself,
-  vanished directories) and sorted by last activity. No arbitrary paths are
-  ever accepted — the POST validates against this exact list.
+  vanished directories) and sorted by last activity. The POST validates
+  against this exact list — no arbitrary paths. Note this is a convenience
+  bound, not a security boundary: a token holder can already run any
+  editor-bridge session in an arbitrary cwd; the trust boundary is the
+  token itself.
 - On create the hub spawns `zcode-acp serve` — a headless bridge — detached
   in the project's cwd and waits for its heartbeat registration (it appears
   in `/api/instances` with `origin:"serve"` within seconds). Connect with
@@ -163,7 +166,8 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   new conversation's cwd is the project directory regardless of what
   `session/new` sends.
 - A live serve instance for the same workspace is reused (`reused:true`)
-  instead of spawning a second one.
+  instead of spawning a second one; concurrent creates join the same
+  in-flight spawn instead of racing a duplicate.
 - Lifetime: the serve bridge exists for remote interest only. It exits ~10
   minutes after the last client detaches AND the last running turn
   finishes — a running turn always completes, even with all clients gone.

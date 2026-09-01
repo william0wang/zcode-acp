@@ -85,6 +85,7 @@ function sleep(ms: number): Promise<void> {
  */
 async function withSqliteRetry<T>(
   fn: (con: InstanceType<DatabaseSyncCtor>) => T,
+  dbPath: string = TASKS_INDEX_PATH,
 ): Promise<T | null> {
   const Sqlite = await loadSqlite();
   if (!Sqlite) return null; // node:sqlite unavailable (Node < 22)
@@ -93,7 +94,7 @@ async function withSqliteRetry<T>(
     // constructor itself throws (SQLITE_BUSY can surface at open time).
     let con: InstanceType<DatabaseSyncCtor> | null = null;
     try {
-      con = new Sqlite(TASKS_INDEX_PATH, { timeout: 5000 });
+      con = new Sqlite(dbPath, { timeout: 5000 });
       return fn(con);
     } catch (e) {
       // Retry only on transient busy/locked; surface everything else.
@@ -366,8 +367,10 @@ export function isSelectableWorkspace(p: string): boolean {
 /**
  * Every project workspace the tasks index has ever recorded a session for —
  * the machine's known-projects list. Serves the hub's remote session-create
- * API: the list doubles as the whitelist (the hub refuses paths outside it),
- * so a remote client can never spawn an agent in an arbitrary directory.
+ * API: the list gates which projects POST /api/instances accepts. A
+ * convenience bound, not a security boundary — bridge-side session
+ * materialization writes rows too, and a token holder can drive an
+ * editor-bridge session in any cwd (the real boundary is the token).
  *
  * Read-only and best-effort: node:sqlite unavailable → empty list; lock
  * contention retries via withSqliteRetry; other failures warn and return
@@ -386,6 +389,7 @@ export async function listKnownWorkspaces(
               "FROM tasks WHERE deleted=0 GROUP BY workspace_key ORDER BY t DESC",
           )
           .all() as Array<{ p: unknown; n: unknown; t: unknown }>,
+      dbPath,
     );
     if (!rows) return []; // node:sqlite unavailable (Node < 22)
     const out: KnownWorkspace[] = [];
