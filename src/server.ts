@@ -120,6 +120,14 @@ export class ZcodeAcpServer {
    */
   readonly sandboxAskedPaths = new Map<string, Set<string>>();
   /**
+   * EACCES ("Permission denied") paths already hinted, per ACP session — the
+   * model routinely probes unreadable directories and each real path gets
+   * exactly one hint (see the filesystem-permission scan in session.ts's
+   * turn loop; kept separate from sandboxAskedPaths so one flow's debounce
+   * never silences the other).
+   */
+  readonly fsDeniedPaths = new Map<string, Set<string>>();
+  /**
    * Continuation prompts waiting to run after a sandbox allow restart, per
    * ACP session — set by the allow flow, consumed by prompt() after the
    * interrupted turn unwinds (the new turn tells the model the write is now

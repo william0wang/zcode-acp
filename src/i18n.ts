@@ -94,6 +94,9 @@ export interface Messages {
   sandboxResumedStatus: string;
   /** EPERM seen in tool output but no path could be extracted. */
   sandboxGenericDenialHint: string;
+  /** Ordinary filesystem-permission failure (EACCES) in tool output — not a
+   *  sandbox block, and nothing a popup could allow; one hint per path. */
+  fsPermDeniedHint: (path: string) => string;
   networkRetry: (attempt: number, total: number) => string;
   requestFailed: (err: string) => string;
   /** Prompt queued behind a still-generating turn (drain gate). */
@@ -183,6 +186,8 @@ const zh: Messages = {
   sandboxResumedStatus: "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
   sandboxGenericDenialHint:
     "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
+  fsPermDeniedHint: (p) =>
+    `[命令被文件系统权限拒绝(Permission denied):${p}。这不是沙箱拦截,弹窗无法放行——请检查该目录的权限(chmod/chown)或 macOS 隐私设置,或让 Agent 改用有权限的路径。(同一路径仅提示一次。)]`,
   networkRetry: (attempt, total) => `[网络异常，正在重试 (${attempt}/${total})…]`,
   requestFailed: (err) => `[请求失败：${err}。会话仍可用，请重新发送消息重试。]`,
   promptQueuedBehindTurn: "[上一个回复仍在生成，等待结束后发送…]",
@@ -268,6 +273,8 @@ const en: Messages = {
   sandboxResumedStatus: "[Sandbox backend restarted, session restored; continuing the task…]",
   sandboxGenericDenialHint:
     "[The sandbox denied a write outside the whitelist. To grant a directory: choose Allow in the popup, or edit .zcode/acp/sandbox.json and restart the session.]",
+  fsPermDeniedHint: (p) =>
+    `[A command was denied by filesystem permissions (Permission denied): ${p}. This is not a sandbox block and cannot be granted via popup — check the directory's permissions (chmod/chown) or macOS privacy settings, or steer the agent to a path it may access. (One-time notice per path.)]`,
   networkRetry: (attempt, total) => `[Network error, retrying (${attempt}/${total})…]`,
   requestFailed: (err) => `[Request failed: ${err}. The session is still usable — please resend.]`,
   promptQueuedBehindTurn: "[The previous reply is still generating; sending once it finishes…]",

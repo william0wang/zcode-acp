@@ -9,6 +9,14 @@ A standalone [Agent Client Protocol](https://agentclientprotocol.com/) (ACP) ser
 
 The server launches the ZCode headless app-server (`zcode app-server --stdio`) as a subprocess, translates its internal event stream into ACP `session/update` notifications, and bridges ZCode's interaction channel to ACP — preferring `elicitation/create` when the client supports it, and falling back to `session/request_permission` otherwise — so an editor gets a first-class, native coding-agent experience.
 
+## Why zcode-acp
+
+- **Native editor experience** — streaming diffs, permission prompts and plan mode in Zed / JetBrains' own agent panel. No side-by-side terminal.
+- **The official harness, not a reimplementation** — drives the real `zcode app-server`: native tools, skills, MCP and slash commands, auto-compaction, session resume/fork.
+- **Beyond the editor** — a full bilingual terminal REPL (`zcode-acp`, English/中文, works over SSH), phone/web access to the same sessions (`zcode-acp-remote`), opt-in writes-only sandbox. Credentials stay in `~/.zcode`.
+
+Because it drives the real ZCode client, your GLM Coding Plan comes along untouched — current perks (the 150% quota bonus, priority routing over raw API) and the plan's flat-rate economics apply exactly as in the official app. No API keys in editor settings.
+
 ## Status
 
 In active development. Core bridging, slash commands and ZCode extensions,
@@ -26,15 +34,27 @@ in place; see the project board for what's next.
 ## Install
 
 ```bash
-git clone <repo-url>
+npm install -g zcode-acp-server
+```
+
+This installs both bins: `zcode-acp-server` (what your editor launches) and
+`zcode-acp` (the unified CLI). Configure your ACP client to launch it — see
+**Configure Zed** below or your editor's ACP docs.
+
+<details>
+<summary>Install from source instead</summary>
+
+```bash
+git clone https://github.com/william0wang/zcode-acp.git
 cd zcode-acp-server
 pnpm install
 pnpm build
 ```
 
 The compiled entry point is `dist/index.js` (also exposed as the
-`zcode-acp-server` bin). Configure your ACP client to launch it — see
-**Configure Zed** below or your editor's ACP docs.
+`zcode-acp-server` bin).
+
+</details>
 
 ## Configure Zed
 
@@ -46,17 +66,19 @@ Add the server to Zed as a custom agent server. In `~/.config/zed/settings.json`
   "agent_servers": {
     "ZCode": {
       "type": "custom",
-      "command": "node",
-      "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"],
+      "command": "zcode-acp-server",
       "env": {
-        // Point at the ZCode CLI bundled inside the desktop app (not on PATH by default).
-        // See the platform-specific path below.
+        // Only needed for custom installs — the CLI is auto-discovered from
+        // the desktop app bundle or PATH (see the table below).
         "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       },
     },
   },
 }
 ```
+
+Running from source instead? Use `"command": "node"` with
+`"args": ["/absolute/path/to/zcode-acp-server/dist/index.js"]`.
 
 Restart Zed and pick **ZCode** from the agent dropdown.
 
@@ -98,7 +120,7 @@ most setups need no `ZCODE_BIN` at all — set it only for custom installs:
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`         | Hub bind address. `0.0.0.0` exposes a token-only, unencrypted surface — only for a containerized tunnel agent on a private interface (see [Remote Access](#remote-access)).                                                                                                                                                                                                                  |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`              | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                   |
 | `ZCODE_ACP_SANDBOX`                | _(unset)_           | Set to `1` to confine the agent's file writes with a macOS Seatbelt sandbox globally; per-project, set `"enabled": true` in `<workspace>/.zcode/acp/sandbox.json` instead (see [Sandbox](#sandbox)).                                                                                                                                                                                         |
-| `ZCODE_ACP_LANG`                   | _(inherited)_       | Language of the bridge's user-facing strings (popups, status/hint lines, command menu descriptions): `zh` or `en`. When unset, the bridge inherits the ZCode app's language (`localePreference`/`locale` in `~/.zcode/v2/setting.json`), then falls back to the `LC_ALL`/`LC_MESSAGES`/`LANG` locale, defaulting to English.                                                                                 |
+| `ZCODE_ACP_LANG`                   | _(inherited)_       | Language of the bridge's user-facing strings (popups, status/hint lines, command menu descriptions): `zh` or `en`. When unset, the bridge inherits the ZCode app's language (`localePreference`/`locale` in `~/.zcode/v2/setting.json`), then falls back to the `LC_ALL`/`LC_MESSAGES`/`LANG` locale, defaulting to English.                                                                 |
 
 ## Sandbox
 
@@ -456,7 +478,7 @@ Editor configs referencing `zcode-acp-server` keep working unchanged.
 
 This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.
 
-The registry submission assets live under [`registry/zcode-acp-server/`](registry/zcode-acp-server/) (`agent.json` + `icon.svg`). Once the package is published to npm, copy that directory into a fork of [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) and open a PR — the CI validates the `agent.json` schema, icon, and that `initialize` returns a non-empty `authMethods`.
+The registry submission assets live under [`registry/zcode-acp/`](registry/zcode-acp/) (`agent.json` + `icon.svg`). Once the package is published to npm, copy that directory into a fork of [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) and open a PR — the CI validates the `agent.json` schema, icon, and that `initialize` returns a non-empty `authMethods`.
 
 ## Develop
 
@@ -519,6 +541,8 @@ recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Related Projects
 
+- [glm-acp-agent](https://github.com/stefandevo/glm-acp-agent) — a self-contained ACP agent that calls the GLM API directly; zcode-acp instead bridges the real `zcode app-server`, inheriting its full official harness.
+- [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) / [codex-acp](https://github.com/agentclientprotocol/codex-acp) — official ACP adapters for the Claude and Codex CLIs; zcode-acp is the same idea for the ZCode CLI.
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) — a community Python implementation that bridges ZCode to the MCP/ACP ecosystem. The design of this server references its bridge architecture and several handling strategies.
 
 ## Acknowledgements

@@ -1,0 +1,43 @@
+# Release automation: release-please turns Conventional Commits into a
+# release PR (version bump + CHANGELOG); merging it tags the release and
+# publishes to npm via trusted publishing (OIDC — no NPM_TOKEN secret).
+# One-time manual step: add this repo + this workflow filename as a trusted
+# publisher on npmjs.com for the zcode-acp-server package.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # npm >= 11.5 for OIDC trusted publishing
+          registry-url: https://registry.npmjs.org
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+      # Scripts are skipped because build+test already ran above.
+      - run: npm publish --ignore-scripts
