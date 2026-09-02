@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.2](https://github.com/william0wang/zcode-acp/compare/v0.17.1...v0.17.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* recover sandbox continuation cold starts and stream REPL tool output ([#98](https://github.com/william0wang/zcode-acp/issues/98)) ([82b92c5](https://github.com/william0wang/zcode-acp/commit/82b92c5fd0cbd8b4d2957f168ffff552d46afac2))
+
 ## [0.17.1](https://github.com/william0wang/zcode-acp/compare/v0.17.0...v0.17.1) (2026-09-02)
 
 
