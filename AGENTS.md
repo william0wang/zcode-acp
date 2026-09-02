@@ -188,7 +188,11 @@ ZCode protocol types into ACP notifications directly — always translate.
   sandbox design lives in ADR-0011 (`.zcode/docs/adr/`): writes-only model,
   per-project config in `.zcode/acp/sandbox.json` (deny island — only the
   bridge may write it), dynamic allow = ask → persist → backend restart →
-  continuation prompt. Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
+  continuation prompt. Well-known system temp trees (/tmp → /private/tmp,
+  /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
+  and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
+  them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
+  the same reason). Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
   or `enabled: true` in that config per project (auto-created template ships
   `false`; a malformed or non-object config reads as enabled — fail closed,
   never rewrite the user's bytes). `server.backendSandboxed` is the process

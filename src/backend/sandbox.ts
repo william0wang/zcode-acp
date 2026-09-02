@@ -62,6 +62,19 @@ const DEFAULT_CACHE_DIRS = [
   "~/.node-gyp",
 ];
 
+/**
+ * Well-known system temp trees, default-writable. Tools hardcode `/tmp`
+ * (a symlink to /private/tmp) or use /var/tmp, and $TMPDIR only names the
+ * process's own /var/folders leaf — without these, `mktemp` in a script or a
+ * compiler scratch file hits an EPERM popup for plain scratch space
+ * (observed: /private/tmp/adv_backup). /private/var/folders is the per-user
+ * temp+cache tree ($TMPDIR's parent, includes DARWIN_USER_CACHE_DIR); the
+ * specific $TMPDIR leaf stays allowed for tightness. Listed in RESOLVED
+ * form — SBPL subpath filters match REAL paths, and /tmp and /var/tmp
+ * resolve into the /private entries.
+ */
+const DEFAULT_TEMP_DIRS = ["/private/tmp", "/private/var/tmp", "/private/var/folders"];
+
 /** Backend state roots that must stay writable for the bridge to function. */
 const ZCODE_STATE_DIRS = ["~/.zcode", "~/.zcode-beta", "~/.zcode-plugin"];
 
@@ -361,7 +374,7 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
       allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
     }
   }
-  for (const p of [...ZCODE_STATE_DIRS, ...DEFAULT_CACHE_DIRS]) {
+  for (const p of [...ZCODE_STATE_DIRS, ...DEFAULT_CACHE_DIRS, ...DEFAULT_TEMP_DIRS]) {
     allows.push(`(allow file-write* (subpath ${sb(resolveReal(p))}))`);
   }
   for (const allowed of input.extraAllow) {
