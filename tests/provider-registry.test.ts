@@ -6,14 +6,16 @@
  * `provider_not_configured`. These tests lock the payload schema derived from
  * the backend's `j7t` converter in zcode.cjs: apiKey is the inline union
  * `{source:"inline", value}`, apiFormat maps from kind, models is an array of
- * `{modelId}`, and every configured provider is included (registry is NOT
- * enabled-filtered like the dropdown).
+ * `{modelId}`, and every provider that HAS models is included (registry is NOT
+ * enabled-filtered like the dropdown). Providers with zero models are skipped:
+ * the backend schema requires a non-empty models array per provider and would
+ * otherwise reject the whole payload.
  *
  * All identifiers below are fictional test fixtures — no real provider names,
  * URLs, model ids, or keys are used.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ZCODE_CREDS_PATH } from "../src/utils.js";
 
@@ -68,15 +70,22 @@ const FAKE_CONFIG = {
   },
 };
 
+// Swap the creds-file contents per test; defaults to the shared FAKE_CONFIG.
+let credsFile = JSON.stringify(FAKE_CONFIG);
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
     ...actual,
     readFileSync: (p: string) => {
-      if (p === ZCODE_CREDS_PATH) return JSON.stringify(FAKE_CONFIG);
+      if (p === ZCODE_CREDS_PATH) return credsFile;
       return actual.readFileSync(p);
     },
   };
+});
+
+afterEach(() => {
+  credsFile = JSON.stringify(FAKE_CONFIG);
 });
 
 const { buildProviderRegistry } = await import("../src/config/provider-registry.js");
@@ -86,7 +95,7 @@ function providerById(reg: ReturnType<typeof buildProviderRegistry>, id: string)
 }
 
 describe("buildProviderRegistry", () => {
-  it("includes ALL providers (not enabled-filtered like the dropdown)", () => {
+  it("includes every provider that has models (not enabled-filtered like the dropdown)", () => {
     const reg = buildProviderRegistry();
     const ids = reg.providers.map((p) => p.providerId);
     expect(ids).toContain("builtin:primary");
@@ -101,6 +110,23 @@ describe("buildProviderRegistry", () => {
     expect(ids).not.toContain("builtin:no-models-key");
     // Non-empty providers still make it through.
     expect(ids).toContain("builtin:primary");
+  });
+
+  it("builds an empty payload when every provider lacks models (caller must not push it)", () => {
+    credsFile = JSON.stringify({
+      provider: {
+        "builtin:only-empty": {
+          name: "Only Empty",
+          kind: "anthropic",
+          source: "builtin",
+          models: {},
+        },
+      },
+    });
+    // The payload itself stays schema-valid; the sync CALLER is responsible
+    // for not pushing it (an empty registry applies replace-style and would
+    // clear providers synced earlier).
+    expect(buildProviderRegistry().providers).toEqual([]);
   });
 
   it("wraps apiKey as the inline union {source:'inline', value}, never a bare string", () => {
