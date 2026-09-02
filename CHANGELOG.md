@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1](https://github.com/william0wang/zcode-acp/compare/v0.18.0...v0.18.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **registry:** skip providers with zero models in provider registry ([#102](https://github.com/william0wang/zcode-acp/issues/102)) ([25fa4f4](https://github.com/william0wang/zcode-acp/commit/25fa4f4b85fa8e47ea757d14da3d70d90a3e36a9))
+
 ## [0.18.0](https://github.com/william0wang/zcode-acp/compare/v0.17.2...v0.18.0) (2026-09-02)
 
 
