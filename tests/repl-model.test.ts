@@ -107,6 +107,84 @@ describe("applyUpdate", () => {
     ]);
   });
 
+  it("captures the newest output tail per tool (progress snapshots overwrite)", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "b1",
+      title: "Bash: npm run build",
+      status: "in_progress",
+    } as SessionUpdateLike);
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "in_progress",
+      rawOutput: "compiling…",
+    } as SessionUpdateLike);
+    expect(s.toolTails["b1"]).toBe("compiling…");
+    // Progress carries the backend's cumulative snapshot — overwrite is the
+    // latest state, not an append.
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "in_progress",
+      rawOutput: "compiling… done in 3s",
+    } as SessionUpdateLike);
+    expect(s.toolTails["b1"]).toBe("compiling… done in 3s");
+  });
+
+  it("keeps the previous tail on output-less status flips", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "b1",
+      title: "Bash: sleep 200",
+      status: "in_progress",
+    } as SessionUpdateLike);
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "in_progress",
+      rawOutput: "waiting…",
+    } as SessionUpdateLike);
+    // Empty/absent rawOutput (a silent progress heartbeat, a pure status
+    // flip) must not clear the tail the footer is streaming.
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "in_progress",
+      rawOutput: "",
+    } as SessionUpdateLike);
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "completed",
+    } as SessionUpdateLike);
+    expect(s.toolTails).toEqual({ b1: "waiting…" });
+  });
+
+  it("tails are independent per toolCallId", () => {
+    let s = createTurnState();
+    for (const [id, title] of [
+      ["b1", "Bash: one"],
+      ["b2", "Bash: two"],
+    ] as const) {
+      s = applyUpdate(s, {
+        sessionUpdate: "tool_call",
+        toolCallId: id,
+        title,
+        status: "in_progress",
+      } as SessionUpdateLike);
+    }
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b1",
+      status: "completed",
+      rawOutput: "first done",
+    } as SessionUpdateLike);
+    expect(s.toolTails).toEqual({ b1: "first done" });
+  });
+
   it("flushes prose before a plan note", () => {
     let s = createTurnState();
     s = applyUpdate(s, chunk("agent_message_chunk", "here comes the plan"));

@@ -11,7 +11,7 @@
 import { Box, Static, Text, useInput, usePaste, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import stringWidth from "string-width";
 
 import {
@@ -665,6 +665,26 @@ function entryHeight(entry: ReplEntry, width: number): number {
 }
 
 /**
+ * One-line live tail of the LAST tool row's output (collapsed whitespace,
+ * last 160 chars — same convention as the thinking tail). Returned for the
+ * most recent tool entry only; older tools' tails are stale context.
+ */
+function toolTailLine(tail: string): string {
+  return `⎿ ${tail.replace(/\s+/g, " ").slice(-160)}`;
+}
+
+/** The last tool entry's live output tail, or null when it has none. */
+function lastToolTail(turn: TurnState): string | null {
+  for (let i = turn.entries.length - 1; i >= 0; i--) {
+    const e = turn.entries[i]!;
+    if (e.kind !== "tool") continue;
+    const tail = e.id ? (turn.toolTails[e.id] ?? "") : "";
+    return tail.trim() ? toolTailLine(tail) : null;
+  }
+  return null;
+}
+
+/**
  * Height of the live-turn block (entries + streaming buffers + spinner).
  * Deliberately biased HIGH: an underestimate makes the whole layout exceed
  * the terminal and ink clips from the bottom — the input box disappears. A
@@ -673,6 +693,8 @@ function entryHeight(entry: ReplEntry, width: number): number {
 function turnHeight(turn: TurnState | null, width: number): number {
   if (!turn) return 0;
   let h = turn.entries.reduce((n, e) => n + entryHeight(e, width), 0);
+  const tail = lastToolTail(turn);
+  if (tail) h += estimateLines(tail, width);
   if (turn.thinkBuf.trim()) {
     // The render collapses whitespace and keeps only the tail, but even that
     // can wrap (CJK especially) — measure it instead of assuming one line.
@@ -963,9 +985,25 @@ export function App(props: AppProps): ReactElement {
           overflow="hidden"
           justifyContent="flex-end"
         >
-          {turn.entries.map((e, i) => (
-            <EntryView key={i} entry={e} />
-          ))}
+          {(() => {
+            // Attach the live output tail to the LAST tool row: a long silent
+            // tool (build, sleep, sub-agent work) otherwise shows nothing but
+            // its title and the spinner seconds for minutes on end.
+            let tailIdx = -1;
+            for (let i = turn.entries.length - 1; i >= 0; i--) {
+              if (turn.entries[i]!.kind === "tool") {
+                tailIdx = i;
+                break;
+              }
+            }
+            const tail = lastToolTail(turn);
+            return turn.entries.map((e, i) => (
+              <Fragment key={i}>
+                <EntryView entry={e} />
+                {i === tailIdx && tail ? <Text dimColor>{tail}</Text> : null}
+              </Fragment>
+            ));
+          })()}
           {turn.thinkBuf.trim() ? (
             <Text dimColor>⎿ thinking · {turn.thinkBuf.replace(/\s+/g, " ").slice(-120)}</Text>
           ) : null}

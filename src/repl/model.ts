@@ -209,10 +209,17 @@ export interface TurnState {
   entries: ReplEntry[];
   textBuf: string;
   thinkBuf: string;
+  /**
+   * Newest output tail per toolCallId (from tool_call_update.rawOutput). The
+   * tool row itself renders only title+status by design; this is what lets
+   * the footer stream a long silent tool's progress (build, sleep, a
+   * sub-agent's work) instead of showing a frozen row + spinner seconds.
+   */
+  toolTails: Record<string, string>;
 }
 
 export function createTurnState(): TurnState {
-  return { entries: [], textBuf: "", thinkBuf: "" };
+  return { entries: [], textBuf: "", thinkBuf: "", toolTails: {} };
 }
 
 /** Extract displayable text from any content block shape (text/thought). */
@@ -251,6 +258,7 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
     entries: state.entries,
     textBuf: state.textBuf,
     thinkBuf: state.thinkBuf,
+    toolTails: state.toolTails,
   };
   switch (update.sessionUpdate) {
     case "agent_message_chunk": {
@@ -276,6 +284,15 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
     case "tool_call":
     case "tool_call_update": {
       const id = update.toolCallId ?? "";
+      // Capture the newest output tail so the footer can stream a running
+      // tool's progress (the row renders title+status only). Progress updates
+      // carry the backend's CUMULATIVE output snapshot, so a plain overwrite
+      // is the latest state; updates without output (pure status flips) keep
+      // the previous tail.
+      const raw = (update as { rawOutput?: unknown }).rawOutput;
+      if (id && typeof raw === "string" && raw.trim()) {
+        next.toolTails = { ...next.toolTails, [id]: raw };
+      }
       const title = update.title ?? id;
       const status = update.status ?? "pending";
       const idx = next.entries.findIndex((e) => e.kind === "tool" && e.id === id && id !== "");
