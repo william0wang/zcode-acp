@@ -915,6 +915,9 @@ async function runPrompt(
       // in-flight one) and the stop-recovery window after a manual cancel.
       const SEND_RETRY_INTERVAL_MS = 500;
       const SEND_RETRY_TIMEOUT_MS = 30_000;
+      // Cold-start rejections recover in seconds (observed); a longer budget
+      // would spin pointlessly when the model is PERMANENTLY unavailable.
+      const WARMUP_RETRY_TIMEOUT_MS = 10_000;
       const sendParams =
         attachments.length > 0
           ? { sessionId: zcodeSid, content: sendText, attachments }
@@ -962,9 +965,10 @@ async function runPrompt(
           // resume path); the cold-start form is transient and retries below.
           throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
         }
-        if (Date.now() - sendT0 > SEND_RETRY_TIMEOUT_MS) {
+        const budget = isBusy ? SEND_RETRY_TIMEOUT_MS : WARMUP_RETRY_TIMEOUT_MS;
+        if (Date.now() - sendT0 > budget) {
           throw new Error(
-            `zcode send failed: backend still ${isBusy ? "busy" : "warming up"} after ${Math.round(SEND_RETRY_TIMEOUT_MS / 1000)}s (${sendResp.error.message ?? ""})`,
+            `zcode send failed: ${isBusy ? "backend still busy" : "send keeps being rejected"} after ${Math.round(budget / 1000)}s (${sendResp.error.message ?? ""})`,
           );
         }
         log(

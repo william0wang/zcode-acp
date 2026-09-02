@@ -24,11 +24,13 @@ import {
   handleLocalCommand,
   isConfigArgumentMenu,
   isOneShotCommandValue,
+  lastToolTail,
   parseCommand,
   relativeTime,
   parseQuestionForm,
   selectLabel,
   seedStatusFromNewSession,
+  toolTailLine,
   type SessionUpdateLike,
 } from "../src/repl/model.js";
 
@@ -182,7 +184,47 @@ describe("applyUpdate", () => {
       status: "completed",
       rawOutput: "first done",
     } as SessionUpdateLike);
-    expect(s.toolTails).toEqual({ b1: "first done" });
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b2",
+      status: "in_progress",
+      rawOutput: "second running",
+    } as SessionUpdateLike);
+    // A later tool's update must never clobber the earlier tool's tail.
+    expect(s.toolTails).toEqual({ b1: "first done", b2: "second running" });
+  });
+
+  it("lastToolTail renders only the newest tool row's captured output", () => {
+    let s = createTurnState();
+    expect(lastToolTail(s)).toBeNull(); // no tool rows at all
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "b1",
+      title: "Bash: one",
+      status: "completed",
+      rawOutput: "first done",
+    } as SessionUpdateLike);
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call",
+      toolCallId: "b2",
+      title: "Bash: two",
+      status: "in_progress",
+    } as SessionUpdateLike);
+    expect(lastToolTail(s)).toBeNull(); // newest tool row has no tail — even though b1 does
+    s = applyUpdate(s, chunk("agent_message_chunk", "after the tools"));
+    s = applyUpdate(s, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "b2",
+      status: "in_progress",
+      rawOutput: "second running",
+    } as SessionUpdateLike);
+    expect(lastToolTail(s)).toBe("⎿ second running"); // non-tool entries after don't matter
+  });
+
+  it("toolTailLine collapses whitespace and keeps the last 160 chars", () => {
+    expect(toolTailLine("a\n  b\t\tc")).toBe("⎿ a b c");
+    const long = "x".repeat(300);
+    expect(toolTailLine(long)).toBe(`⎿ ${"x".repeat(160)}`);
   });
 
   it("flushes prose before a plan note", () => {

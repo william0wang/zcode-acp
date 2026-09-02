@@ -185,7 +185,7 @@ const zh: Messages = {
     `[已拒绝沙箱放行 ${p},未保存任何决定,同类写入会再次询问;如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
   sandboxContinuationPrompt: (p) => `[沙箱已放行 ${p},请继续刚才的任务。]`,
   sandboxContinuationFailed: (err) =>
-    `[沙箱已放行,但自动续接失败:${err}。这是后端重启后的短暂预热期错误——请重新发送一条消息(例如"继续刚才的任务")即可恢复。]`,
+    `[沙箱已放行,但自动续接失败:${err}。请重新发送一条消息(例如"继续刚才的任务")以恢复工作。]`,
   sandboxRestartHint: (p) => `[沙箱已放行 ${p},正在重启后端以应用新权限,随后自动继续…]`,
   sandboxResumedStatus: "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
   sandboxGenericDenialHint:
@@ -273,7 +273,7 @@ const en: Messages = {
     `[Sandbox grant rejected for ${p}; no decision was saved and the same write will ask again. To grant, edit the allow list in .zcode/acp/sandbox.json (bridge-written, not agent-writable).]`,
   sandboxContinuationPrompt: (p) => `[Sandbox granted ${p}; please continue the previous task.]`,
   sandboxContinuationFailed: (err) =>
-    `[Sandbox granted, but the automatic continuation failed: ${err}. Transient error from the backend restart warm-up — resend a message (e.g. "continue the previous task") to resume.]`,
+    `[Sandbox granted, but the automatic continuation failed: ${err}. Resend a message (e.g. "continue the previous task") to resume the work.]`,
   sandboxRestartHint: (p) =>
     `[Sandbox granted ${p}; restarting the backend to apply the new permission, then continuing automatically…]`,
   sandboxResumedStatus: "[Sandbox backend restarted, session restored; continuing the task…]",

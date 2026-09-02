@@ -22,6 +22,7 @@ import {
   isConfigArgumentMenu,
   isConfigCommand,
   isOneShotCommandValue,
+  lastToolTail,
   locateCaret,
   pickerWindow,
   relativeTime,
@@ -662,26 +663,6 @@ function entryHeight(entry: ReplEntry, width: number): number {
     default:
       return estimateLines(entry.text, width);
   }
-}
-
-/**
- * One-line live tail of the LAST tool row's output (collapsed whitespace,
- * last 160 chars — same convention as the thinking tail). Returned for the
- * most recent tool entry only; older tools' tails are stale context.
- */
-function toolTailLine(tail: string): string {
-  return `⎿ ${tail.replace(/\s+/g, " ").slice(-160)}`;
-}
-
-/** The last tool entry's live output tail, or null when it has none. */
-function lastToolTail(turn: TurnState): string | null {
-  for (let i = turn.entries.length - 1; i >= 0; i--) {
-    const e = turn.entries[i]!;
-    if (e.kind !== "tool") continue;
-    const tail = e.id ? (turn.toolTails[e.id] ?? "") : "";
-    return tail.trim() ? toolTailLine(tail) : null;
-  }
-  return null;
 }
 
 /**

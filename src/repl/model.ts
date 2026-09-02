@@ -222,6 +222,30 @@ export function createTurnState(): TurnState {
   return { entries: [], textBuf: "", thinkBuf: "", toolTails: {} };
 }
 
+/**
+ * One-line live tail of a tool's output (collapsed whitespace, last 160
+ * chars — same convention as the thinking tail). Exported so the footer
+ * render and its height estimate share one string.
+ */
+export function toolTailLine(tail: string): string {
+  return `⎿ ${tail.replace(/\s+/g, " ").slice(-160)}`;
+}
+
+/**
+ * The LAST tool entry's live output tail (wrapped by toolTailLine), or null
+ * when it has none. Older tools' tails are stale context and are ignored —
+ * only the most recent tool row gets the live tail.
+ */
+export function lastToolTail(turn: TurnState): string | null {
+  for (let i = turn.entries.length - 1; i >= 0; i--) {
+    const e = turn.entries[i]!;
+    if (e.kind !== "tool") continue;
+    const tail = e.id ? (turn.toolTails[e.id] ?? "") : "";
+    return tail.trim() ? toolTailLine(tail) : null;
+  }
+  return null;
+}
+
 /** Extract displayable text from any content block shape (text/thought). */
 function blockText(content: unknown): string {
   if (content && typeof content === "object" && "text" in content) {
