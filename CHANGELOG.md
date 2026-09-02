@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.1](https://github.com/william0wang/zcode-acp/compare/v0.17.0...v0.17.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* upgrade npm in release publish job for trusted publishing ([#95](https://github.com/william0wang/zcode-acp/issues/95)) ([2e9b343](https://github.com/william0wang/zcode-acp/commit/2e9b343071c5ea8e4035168af20100c3ea9ebf08))
+
 ## [0.17.0](https://github.com/william0wang/zcode-acp/compare/v0.16.2...v0.17.0) (2026-09-02)
 
 
