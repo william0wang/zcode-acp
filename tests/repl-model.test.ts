@@ -304,6 +304,16 @@ describe("parseCommand", () => {
     expect(parseCommand("")).toBe(null);
   });
 
+  it("recognizes bare shell-style quit words", () => {
+    expect(parseCommand("exit")).toBe("exit");
+    expect(parseCommand("  exit  ")).toBe("exit");
+    expect(parseCommand("quit")).toBe("exit");
+    expect(parseCommand("q")).toBe("exit");
+    // With arguments it is a prompt, not a quit.
+    expect(parseCommand("exit now")).toBe(null);
+    expect(parseCommand("Exit")).toBe(null);
+  });
+
   it("recognizes the sessions picker command", () => {
     expect(parseCommand("/sessions")).toBe("sessions");
     expect(parseCommand(" /sessions ")).toBe("sessions");
