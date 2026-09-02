@@ -117,174 +117,26 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 
 ## 沙箱
 
-两个开关任一生效（仅 macOS）：
-
-- 全局：`ZCODE_ACP_SANDBOX=1`；
-- 项目级：`<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`。该文件
-  在首次打开工作区时由桥自动创建（默认 `"enabled": false`）——把开关翻成
-  `true` 即可单独启用本项目，无需全局环境变量。运行中途翻开关，下一次
-  prompt 生效（后端以沙箱重启）；翻回 `false` 则在后端下次自然重启时停用。
-
-启用后，zcode 后端子进程——连同它执行的每一次 Bash/Edit/Write 及所有子进
-程——被包进 Seatbelt（`sandbox-exec`）沙箱：除以下位置外**一律禁止文件写入**：
-
-- 各活跃会话的工作区根目录；
-- `~/.zcode*`（后端自身的会话/数据库/日志）；
-- 系统临时目录与可再生的工具缓存（`~/Library/Caches`、`~/.cache`、
-  `~/.npm`、`~/Library/pnpm`、`~/.node-gyp`）；
-- 项目配置或放行弹窗授权的路径。
-
-读取和进程执行不受限：删除（`rm`、`mv`、截断）属于写类系统调用，写禁令
-会拦下它——无论用哪个二进制执行（`/bin/rm`、Python `shutil.rmtree`、shell
-重定向都一样）。
-
-当 Agent 尝试写白名单之外的位置时，工具报 `Operation not permitted`，桥
-通过编辑器权限弹窗给出四个选项：**仅此一次**、**始终允许**、**拒绝一次**、
-**始终拒绝**。两个“始终”由桥代写进 `<工作区>/.zcode/acp/sandbox.json`
-（首次运行自动创建——放行记入 `allow` 列表，拒绝记入 `deny` 列表并不再
-询问；编辑该文件即可撤销）；两个“一次”及关闭弹窗不保存任何东西，下次
-仍会询问。Agent 自己改不了这个文件——沙箱禁止写工作区内的
-`.zcode/acp/`，而桥在沙箱外。放行
-后后端以加宽的 profile 重启（几秒），桥自动继续被中断的任务。配置里设
-`"strictGit": true` 可让 `.git` 也走弹窗。
-
-沙箱目标是防误删误写，不是防恶意：间接逃逸（Agent 改了你的 `.bashrc`、构
-建脚本或 git hook，随后由你自己在沙箱外执行）不在防护范围——请像代码评审
-一样对待它的产出。可用 `bash scripts/verify-sandbox.sh` 手工验证
-profile（macOS，先 `pnpm build`）。
+可选的 macOS Seatbelt 写入隔离：双开关（全局 `ZCODE_ACP_SANDBOX=1`，或项目
+级在自动创建的 `<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`），
+白名单之外的写入会弹放行/拒绝确认，"始终"决定可见地持久化在该配置里；放行
+后后端自动以加宽的 profile 重启并续接被中断的任务。完整手册（英文）：
+[docs/SANDBOX.md](docs/SANDBOX.md)。
 
 ## 远程访问
 
-设置 `ZCODE_ACP_REMOTE=1` 后，bridge 会额外通过 WebSocket 接收 ACP 连接，
-手机或浏览器即可观看并驱动与编辑器**相同的会话**。Zed（或任何 stdio ACP
-编辑器）仍是主客户端并拥有进程：编辑器断开时，bridge 连同所有远程连接
-一起退出。
-
-```text
-phone / browser ──WS── 隧道 ── hub (127.0.0.1:8377, 唯一入口)
-                                │ 字节级代理
-                                ▼
-                  bridge ACP 端点 (127.0.0.1:8378+n)
-                                │ 与 stdio 同一个 AgentApp
-Zed ──────── stdio ────────────┘
-```
-
-启用方式：在上文「配置 Zed」的 `env` 里追加（Zed 会把这些合并进 agent
-的环境变量）：
-
-```json
-"ZCODE_ACP_REMOTE": "1",
-"ZCODE_ACP_REMOTE_TOKEN": "<一段足够长的随机密钥>"
-```
-
-相关环境变量（详见上文表格）：`ZCODE_ACP_REMOTE`（开关）、
-`ZCODE_ACP_REMOTE_TOKEN`（必填 token）、`ZCODE_ACP_HUB_PORT`（hub 端口，
-默认 8377）、`ZCODE_ACP_HUB_HOST`（hub 绑定地址）、
-`ZCODE_ACP_REMOTE_PORT`（bridge 端点起始端口，默认 8378）。
-
-**Hub。** 第一个启用远程的 bridge 会以 detached 方式拉起机器级单例
-`zcode-acp-hub`（监听 `ZCODE_ACP_HUB_PORT`，也可手动运行）。它只做三件事：
-token 鉴权、实例发现、字节级 WebSocket 代理——不保存会话状态、不解析 ACP。
-空闲约 10 分钟后退出，需要时再被拉起。每个 bridge 每 10 秒注册一次作为
-心跳，心跳停止约 30 秒后从发现列表移除；客户端刷新时也可调用
-`GET /api/instances?probe=1` 主动探测，立即清理不可达的实例。
-
-**远程创建会话**（ADR-0014）。远程客户端可以在本机的已知项目里直接开一个
-新会话——不需要任何编辑器在场：
-
-```text
-GET  /api/projects                  → [{"workspacePath","sessions","lastActive"}]
-POST /api/instances {workspacePath} → {"id","reused"}
-```
-
-`/api/projects` 聚合 App 的任务索引：所有跑过会话的项目（过滤系统临时
-目录、`~/.zcode` 自身和已不存在的目录），按最近活跃排序。这份列表约束
-POST——列表之外的路径一律 403（注意这是便利性约束而非安全边界：持有
-token 者本就能以任意 cwd 驱动 editor bridge 会话，真正的信任边界是
-token 本身）。创建时 hub 会在项目目录下拉起 `zcode-acp serve`（无头 bridge），
-数秒内注册回 hub，之后像普通实例一样可连接；同项目已有存活的 serve 实例
-则直接复用（`reused:true`）。serve bridge 只为远程连接而活：最后一个客户端
-断开且最后一个 turn 结束约 10 分钟后自动退出；其 `session/new` 无论客户端
-传什么都使用项目目录（cwd 端到端钉死在项目内）。
-
-**语义。** 所有 agent 通知广播给每个已连接客户端；权限 / elicitation 请求
-发给所有客户端，**先应答者生效**，其余客户端收到 `$/cancel_request` 关闭
-对话框。同一会话的并发 prompt 与单编辑器一样串行化。任一客户端声明的能力
-按 OR 合并。`/api/instances` 的每个实例带 `origin` 字段（`"editor"`＝编辑器
-stdio 桥，`"serve"`＝远程创建的无头桥），客户端可据此标注。
-
-**隧道。** 面向单端口隧道（Cloudflare Tunnel、frp）设计：只映射 hub 端口。
-frp 的 `tcp` 模式原样透传 WebSocket；Cloudflare Tunnel 会断开空闲连接，
-hub 因此在两段链路上每 30 秒发送 keepalive ping。bridge 端点本身只监听
-回环地址，永不直接暴露。
-
-要构建远程客户端（Web、移动端或 CLI）？完整的集成契约（端点、帧格式、
-生命周期时序、故障恢复、平台注意事项）见
+设置 `ZCODE_ACP_REMOTE=1` 后，bridge 会额外通过机器级 hub 守护进程把**相同
+的会话**暴露到 WebSocket——手机或浏览器可以旁观、驱动、甚至在本机已知项目里
+直接创建新会话，Zed 仍是主客户端并拥有进程。发现 API、隧道、鉴权与语义：
+[docs/REMOTE.md](docs/REMOTE.md)；客户端集成契约：
 [docs/REMOTE-CLIENTS.md](docs/REMOTE-CLIENTS.md)。
 
-## 独立配额查询 CLI（zcode-quota）
+## 统一 CLI（zcode-acp）
 
-除了 ACP server，本包还附带一个 `zcode-quota` 命令，可在**终端**里直接查询
-用量——无需编辑器，也无需 server 运行。默认在一张卡片里同时显示
-**GLM Coding Plan** 和 **Opencode Go**；传入 provider 参数可只看其中一个。
-
-GLM 凭证读取自 `~/.zcode/v2/config.json`。Opencode Go 凭证来自环境变量
-（dashboard 需要浏览器 cookie——见下方 [Opencode Go 配置](#opencode-go-配置)）。
-
-```bash
-# 双平台（默认）：GLM + Opencode Go 合并为一张卡片
-zcode-quota
-
-# 只看某一个 provider
-zcode-quota glm            # 仅 GLM Coding Plan
-zcode-quota go             # 仅 Opencode Go（rolling + weekly + monthly 三窗口）
-
-# 常驻监控：清屏并每 30s 刷新（默认）
-zcode-quota -w
-zcode-quota go -w          # 只监控 Opencode Go
-
-# 自定义刷新间隔（秒，最小 10）
-zcode-quota --watch --interval 60
-
-# 纯文本单色进度条（终端默认是彩色）
-zcode-quota --plain
-```
-
-默认情况下 CLI 会渲染热力配色（绿→黄→红）的进度条，并把用量数字叠在条内，
-这样每行更紧凑。传 `--plain`（或 `-p`）切回经典的 `█`/`░` 单色布局。当 stdout
-被管道或重定向时，彩色也会自动关闭，保证捕获到的输出干净。
-
-watch 模式会原地清屏重绘卡片，效果类似 `top`/`htop`。按 `Ctrl-C` 退出。
-之所以设最小间隔 10s，是因为配额 API 内部有 10s 缓存——更短的间隔只会一直
-返回过期的缓存值，没有意义。
-
-未全局安装时，可直接运行构建产物：
-
-```bash
-node dist/bin/quota.js -w
-```
-
-### Opencode Go 配置
-
-Opencode Go 订阅用量没有 JSON API——CLI 抓取的是登录后的 dashboard 页面
-`opencode.ai/workspace/<id>/go`，因此需要你的浏览器 `auth` cookie。设置两个
-环境变量：
-
-```bash
-export OPENCODE_GO_WORKSPACE_ID="wrk_你的工作区id"
-export OPENCODE_GO_AUTH_COOKIE="Fe26.2**你的cookie值"
-```
-
-获取方式：
-
-1. **Workspace ID**——打开 `https://opencode.ai`，进入你的 Go 工作区，从 URL
-   里复制 `wrk_…` id（`https://opencode.ai/workspace/<wrk_…>/go`）。
-2. **Auth cookie**——打开浏览器开发者工具（F12）→ Application → Cookies →
-   `opencode.ai` → 复制名为 `auth` 的 cookie 值（以 `Fe26.2**` 开头）。
-
-未设置这两个变量时，默认的双平台模式会**静默退化为只显示 GLM**（不报错）。
-若明确运行 `zcode-quota go` 但未配置，会打印一条配置提示。把它们加到 shell
-配置文件（`~/.zshrc` / `~/.bashrc`）即可持久化。
+本包所有能力收敛在一条命令下：交互式终端聊天 REPL（原生滚动回溯）、套餐
+用量卡片（`zcode-acp quota`，GLM + Opencode Go）、远程 hub 守护进程
+（`zcode-acp hub`）以及编辑器调用的 stdio server（`zcode-acp server`）。
+REPL 按键、补全、历史与配额配置详见 [docs/CLI.md](docs/CLI.md)。
 
 ## ACP Registry
 
@@ -336,6 +188,9 @@ CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` �
 
 - [架构](docs/ARCHITECTURE.md) —— 事件流、双路径去重、模块职责
 - [协议](docs/PROTOCOL.md) —— ZCode JSON-RPC 协议细节
+- [沙箱](docs/SANDBOX.md) —— 沙箱完整手册（开关、白名单、弹窗、验证）
+- [远程访问](docs/REMOTE.md) —— hub、发现 API、隧道、远程创建会话
+- [统一 CLI](docs/CLI.md) —— REPL、配额卡片、hub/server 子命令
 - [开发](docs/DEVELOPMENT.md) —— 本地开发、调试、新增扩展方法
 - [故障排查](docs/TROUBLESHOOTING.md) —— 常见问题排查
 
