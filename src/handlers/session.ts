@@ -129,6 +129,15 @@ function workspaceFromResumeResult(result: unknown): string | null {
 async function syncProviderRegistry(server: ZcodeAcpServer, cwd: string): Promise<void> {
   try {
     const registry = buildProviderRegistry();
+    if (registry.providers.length === 0) {
+      // Every configured provider lacks models (or none are configured). The
+      // empty payload is schema-valid, but the backend applies registries
+      // replace-style — pushing it would CLEAR providers synced earlier. Most
+      // users configure no third-party provider at all, so this is the common
+      // path, not an error.
+      log("provider-registry: no usable providers — skipping sync");
+      return;
+    }
     const resp = await server
       .ensureBackend()
       .request(
