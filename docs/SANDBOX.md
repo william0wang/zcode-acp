@@ -19,8 +19,10 @@ Seatbelt (`sandbox-exec`) profile that denies file writes everywhere except:
 
 - the workspace root(s) of your live sessions,
 - `~/.zcode*` (the backend's own sessions/db/logs),
-- the system temp directory and regenerable tool caches (`~/Library/Caches`,
-  `~/.cache`, `~/.npm`, `~/Library/pnpm`, `~/.node-gyp`),
+- the well-known system temp trees — `/tmp` (→ `/private/tmp`), `/var/tmp`,
+  and the per-user `/var/folders` tree that `$TMPDIR` lives in — plus
+  regenerable tool caches (`~/Library/Caches`, `~/.cache`, `~/.npm`,
+  `~/Library/pnpm`, `~/.node-gyp`),
 - paths granted via the per-project config or the allow popup.
 
 Reads and process execution stay open: deletion (`rm`, `mv`, truncation) is a

@@ -15,12 +15,15 @@ set -euo pipefail
 command -v sandbox-exec >/dev/null || { echo "SKIP: sandbox-exec not available (non-macOS?)"; exit 0; }
 [ -f dist/backend/sandbox.js ] || { echo "FAIL: dist not built — run pnpm build first"; exit 1; }
 
-# Fixtures live under /tmp, NOT $TMPDIR — the profile allowlists TMPDIR, so
-# fixtures there would be swallowed by that rule and prove nothing. /tmp is
-# symlinked to /private/tmp on macOS; the generator realpaths it.
-WS=$(mktemp -d /tmp/sbv-ws-XXXXXX)/project && mkdir -p "$WS/.zcode/acp"
-OUTSIDE=$(mktemp -d /tmp/sbv-out-XXXXXX)
-DENIED=$(mktemp -d /tmp/sbv-denied-XXXXXX)
+# Fixtures live under HOME, outside every allowlist (~/.zcode*, caches, temp
+# trees) — writes there must be denied by the base rule. They used to live
+# under /tmp, but the system temp trees (/tmp → /private/tmp, /var/tmp,
+# /var/folders) are DEFAULT-ALLOWED now, so /tmp fixtures would prove nothing.
+# /tmp must NOT be used for denied fixtures NOR relied on as denied; the
+# tmp-allowed check below covers the default-allow side.
+WS=$(mktemp -d "$HOME/.sbv-ws-XXXXXX")/project && mkdir -p "$WS/.zcode/acp"
+OUTSIDE=$(mktemp -d "$HOME/.sbv-out-XXXXXX")
+DENIED=$(mktemp -d "$HOME/.sbv-denied-XXXXXX")
 ISLAND="$WS/.zcode/acp"
 echo "decoy" > "$DENIED/decoy.txt"
 
@@ -76,6 +79,11 @@ check "deny island write denied"   "$SANDBOX touch $ISLAND/nope.json" 1
 check "config allow honored"       "$SANDBOX touch $OUTSIDE/yes.txt" 0
 # /dev/null: git and shell redirect idioms break without this allow.
 check "/dev/null writable"         "$SANDBOX sh -c 'echo x > /dev/null'" 0
+# Well-known temp trees are default-allowed: tools hardcode /tmp and $TMPDIR
+# is only the per-user /var/folders leaf. Both spellings must work.
+check "/tmp writable"              "$SANDBOX touch /tmp/.sbv-tmp-allowed" 0
+check "/private/tmp writable"      "$SANDBOX touch /private/tmp/.sbv-tmp-allowed" 0
+rm -f /tmp/.sbv-tmp-allowed /private/tmp/.sbv-tmp-allowed
 # The profile self-denies its own dir: a sandboxed process must not be able
 # to race/symlink/occupy the next respawn's profile.
 check "profile self-denied"        "$SANDBOX sh -c 'echo evil > $PROFILE'" 1

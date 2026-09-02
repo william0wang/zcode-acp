@@ -290,6 +290,14 @@ describe("buildSandboxProfile", () => {
     // /dev/null must be writable — git and `2>/dev/null` idioms break without
     // it ("could not open '/dev/null'", observed in review probes).
     expect(profile).toContain('(allow file-write-data (literal "/dev/null"))');
+    // Well-known system temp trees are default-allowed in RESOLVED form:
+    // tools hardcode /tmp (symlink → /private/tmp) or /var/tmp, and $TMPDIR
+    // names only the per-user /var/folders leaf. An /tmp allow entry resolves
+    // to the same line — no duplicate alias emission.
+    expect(profile).toContain('(allow file-write* (subpath "/private/tmp"))');
+    expect(profile).toContain('(allow file-write* (subpath "/private/var/tmp"))');
+    expect(profile).toContain('(allow file-write* (subpath "/private/var/folders"))');
+    expect(profile.match(/subpath "\/private\/tmp"/g)).toHaveLength(1);
     // The profile's own dir self-denies LAST — the agent runs with $TMPDIR
     // writable and must not touch the next respawn's profile.
     const profile2 = buildSandboxProfile({
