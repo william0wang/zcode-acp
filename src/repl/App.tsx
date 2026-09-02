@@ -11,7 +11,7 @@
 import { Box, Static, Text, useInput, usePaste, type Key } from "ink";
 import Spinner from "ink-spinner";
 import { Chalk } from "chalk";
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import stringWidth from "string-width";
 
 import {
@@ -22,6 +22,7 @@ import {
   isConfigArgumentMenu,
   isConfigCommand,
   isOneShotCommandValue,
+  lastToolTail,
   locateCaret,
   pickerWindow,
   relativeTime,
@@ -673,6 +674,8 @@ function entryHeight(entry: ReplEntry, width: number): number {
 function turnHeight(turn: TurnState | null, width: number): number {
   if (!turn) return 0;
   let h = turn.entries.reduce((n, e) => n + entryHeight(e, width), 0);
+  const tail = lastToolTail(turn);
+  if (tail) h += estimateLines(tail, width);
   if (turn.thinkBuf.trim()) {
     // The render collapses whitespace and keeps only the tail, but even that
     // can wrap (CJK especially) — measure it instead of assuming one line.
@@ -963,9 +966,25 @@ export function App(props: AppProps): ReactElement {
           overflow="hidden"
           justifyContent="flex-end"
         >
-          {turn.entries.map((e, i) => (
-            <EntryView key={i} entry={e} />
-          ))}
+          {(() => {
+            // Attach the live output tail to the LAST tool row: a long silent
+            // tool (build, sleep, sub-agent work) otherwise shows nothing but
+            // its title and the spinner seconds for minutes on end.
+            let tailIdx = -1;
+            for (let i = turn.entries.length - 1; i >= 0; i--) {
+              if (turn.entries[i]!.kind === "tool") {
+                tailIdx = i;
+                break;
+              }
+            }
+            const tail = lastToolTail(turn);
+            return turn.entries.map((e, i) => (
+              <Fragment key={i}>
+                <EntryView entry={e} />
+                {i === tailIdx && tail ? <Text dimColor>{tail}</Text> : null}
+              </Fragment>
+            ));
+          })()}
           {turn.thinkBuf.trim() ? (
             <Text dimColor>⎿ thinking · {turn.thinkBuf.replace(/\s+/g, " ").slice(-120)}</Text>
           ) : null}

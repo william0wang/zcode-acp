@@ -647,13 +647,32 @@ export async function prompt(
     // (ensureBackend respawns; ensureRealSession/subscribe-recovery reloads
     // the session into it). The user's preempt/ESC during the continuation
     // still cancels it — the round registers itself in pendingTurns.
-    return runPrompt(
-      server,
-      { sessionId: params.sessionId, prompt: [{ type: "text", text: continuation }] },
-      cx,
-      `sandbox-cont-${randomUUID()}`,
-      true,
-    );
+    try {
+      return await runPrompt(
+        server,
+        { sessionId: params.sessionId, prompt: [{ type: "text", text: continuation }] },
+        cx,
+        `sandbox-cont-${randomUUID()}`,
+        true,
+      );
+    } catch (e) {
+      // The chained round runs right after a sandbox-allow respawn, inside
+      // the fresh backend's warm-up window. A failure here used to propagate
+      // as an RPC error and leave the session dead-silent with the
+      // continuation lost — the user had to blindly resend to recover
+      // (observed in production logs: "历史任务使用的模型已不可用" rejected
+      // the automatic send, a manual resend a minute later went through).
+      // Tell the user what happened and how to resume instead.
+      const err = e instanceof Error ? e.message : String(e);
+      warn(`sandbox: continuation prompt failed: ${err}`);
+      await sendTextChunk(
+        cx,
+        params.sessionId,
+        messages().sandboxContinuationFailed(err),
+        randomUUID(),
+      ).catch(() => undefined);
+      return { stopReason: "cancelled" };
+    }
   }
   return result;
 }
@@ -896,6 +915,9 @@ async function runPrompt(
       // in-flight one) and the stop-recovery window after a manual cancel.
       const SEND_RETRY_INTERVAL_MS = 500;
       const SEND_RETRY_TIMEOUT_MS = 30_000;
+      // Cold-start rejections recover in seconds (observed); a longer budget
+      // would spin pointlessly when the model is PERMANENTLY unavailable.
+      const WARMUP_RETRY_TIMEOUT_MS = 10_000;
       const sendParams =
         attachments.length > 0
           ? { sessionId: zcodeSid, content: sendText, attachments }
@@ -935,19 +957,22 @@ async function runPrompt(
           sendErrCode === 1308 ||
           sendErrMsg.includes("prompt is running") ||
           sendErrMsg.includes("already running");
-        if (!isBusy) {
-          // Non-busy error (auth, malformed, stale model, etc.) — don't
-          // retry, surface it. The stale-history-model case is repaired
-          // before the send (repairUnavailableModel on every resume path).
+        const isWarming = isTransientSendError(sendResp.error.message ?? "");
+        if (!isBusy && !isWarming) {
+          // Permanent error (auth, malformed, a truly removed model, …) —
+          // don't retry, surface it. The stale-history-model case is
+          // repaired before the send (repairUnavailableModel on every
+          // resume path); the cold-start form is transient and retries below.
           throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
         }
-        if (Date.now() - sendT0 > SEND_RETRY_TIMEOUT_MS) {
+        const budget = isBusy ? SEND_RETRY_TIMEOUT_MS : WARMUP_RETRY_TIMEOUT_MS;
+        if (Date.now() - sendT0 > budget) {
           throw new Error(
-            `zcode send failed: backend still busy after ${Math.round(SEND_RETRY_TIMEOUT_MS / 1000)}s (${sendResp.error.message ?? ""})`,
+            `zcode send failed: ${isBusy ? "backend still busy" : "send keeps being rejected"} after ${Math.round(budget / 1000)}s (${sendResp.error.message ?? ""})`,
           );
         }
         log(
-          `  [send] backend busy (${sendResp.error.message ?? ""}), retrying in ${SEND_RETRY_INTERVAL_MS}ms`,
+          `  [send] backend ${isBusy ? "busy" : "cold-start reject"} (${sendResp.error.message ?? ""}), retrying in ${SEND_RETRY_INTERVAL_MS}ms`,
         );
       }
 
@@ -1724,6 +1749,20 @@ async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string):
   } catch (e) {
     warn(`model repair check failed: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+/**
+ * Cold-start send rejection worth retrying: right after a sandbox-allow
+ * respawn, the reloaded session's recorded model briefly reads as
+ * unavailable while the fresh backend finishes loading its model list — the
+ * same send succeeds seconds later (verified in production: the automatic
+ * continuation was rejected with "历史任务使用的模型已不可用", a manual
+ * resend a minute later went through). Matches the backend's Chinese wording
+ * plus a generic English form.
+ */
+export function isTransientSendError(message: string): boolean {
+  const m = message.toLowerCase();
+  return m.includes("模型已不可用") || /model .*(unavailable|no longer available)/.test(m);
 }
 
 /** Get or create the session-level ProjectionDiffer (persists across turns). */

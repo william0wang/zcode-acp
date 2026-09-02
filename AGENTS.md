@@ -212,6 +212,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   call site (see `handlers/server-requests.ts`) when sending server→client
   requests; the SDK types also require the `toolCall` field on permission
   requests (Zed renders the popup against it).
+- **Releases are fully automated** (release-please + npm OIDC trusted
+  publishing, zero npm secrets): land conventional commits on `main`, merge
+  the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish
+  happen by themselves. Never hand-bump `package.json` version. A publish
+  failure with 404 on PUT is an npm-side trusted-publisher mismatch, not the
+  workflow. Public doc: `docs/RELEASING.md`; setup + troubleshooting runbook:
+  `.zcode/docs/releasing-runbook.md` (gitignored).
 
 ## Docs to read before sensitive changes
 
