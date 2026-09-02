@@ -9,6 +9,14 @@
 
 本服务端以子进程方式启动 ZCode 无头 app-server（`zcode app-server --stdio`），将其内部事件流翻译为 ACP `session/update` 通知，并把 ZCode 的交互通道桥接到 ACP —— 当客户端支持时优先使用 `elicitation/create`，否则回退到 `session/request_permission` —— 从而让编辑器获得原生的、一流的编码助手体验。
 
+## 为什么选 zcode-acp
+
+- **编辑器原生体验** —— 流式改动以真实 diff 呈现，权限确认、计划模式都走 Zed / JetBrains 自己的 agent 面板，无需并排终端。
+- **官方 harness，而非重新实现** —— 驱动真实的 `zcode app-server`：原生工具、skills、MCP 与斜杠命令、自动压缩、会话恢复/分叉。
+- **不止于编辑器** —— 完整的双语终端 REPL（`zcode-acp`，中/英可切换，SSH 下可用），手机/网页访问相同会话（`zcode-acp-remote`），可选的只限写入沙箱。凭据留在 `~/.zcode`。
+
+由于驱动的是真实 ZCode 客户端，你现有的 GLM Coding Plan 原样生效——当前的套餐权益（150% 额度加成、高于直连 API 的请求优先级）和包月计费方式都和在官方 App 中一致。编辑器设置无需任何 API key。
+
 ## 状态
 
 早期开发中。核心框架已就绪，功能正在陆续加入。进度请看项目看板。
@@ -23,14 +31,25 @@
 ## 安装
 
 ```bash
-git clone <repo-url>
+npm install -g zcode-acp-server
+```
+
+会同时安装两个 bin：`zcode-acp-server`（编辑器调用）和 `zcode-acp`（统一 CLI）。
+在你的 ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你的编辑器的 ACP 文档。
+
+<details>
+<summary>改为从源码安装</summary>
+
+```bash
+git clone https://github.com/william0wang/zcode-acp.git
 cd zcode-acp-server
 pnpm install
 pnpm build
 ```
 
-编译产物入口为 `dist/index.js`（同时作为 `zcode-acp-server` bin 暴露）。在你的
-ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你的编辑器的 ACP 文档。
+编译产物入口为 `dist/index.js`（同时作为 `zcode-acp-server` bin 暴露）。
+
+</details>
 
 ## 在 Zed 中配置
 
@@ -42,17 +61,19 @@ ACP 客户端里配置启动它 —— 见下方的 **在 Zed 中配置** 或你
   "agent_servers": {
     "ZCode": {
       "type": "custom",
-      "command": "node",
-      "args": ["/absolute/path/to/zcode-acp-server/dist/index.js"],
+      "command": "zcode-acp-server",
       "env": {
-        // 指向桌面应用内置的 ZCode CLI（默认不在 PATH 上）。
-        // 各平台路径见下方表格。
+        // 仅自定义安装时需要——CLI 会从桌面应用内置路径或 PATH 自动发现
+        // （见下方表格）。
         "ZCODE_BIN": "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
       },
     },
   },
 }
 ```
+
+从源码运行？改用 `"command": "node"` 与
+`"args": ["/absolute/path/to/zcode-acp-server/dist/index.js"]`。
 
 重启 Zed，然后从 agent 下拉菜单中选择 **ZCode**。
 
@@ -92,7 +113,7 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`      | hub 绑定地址。`0.0.0.0` 会暴露仅 token 保护的明文面——只用于容器化隧道 agent 所在的私网接口（见[远程访问](#远程访问)）。                                                                                                                                                             |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`           | bridge ACP 端点的起始回环端口。每个 bridge（每个编辑器窗口）自动递增取下一个空闲端口。                                                                                                                                                                                              |
 | `ZCODE_ACP_SANDBOX`                | _（未设置）_     | 设为 `1` 全局启用 macOS Seatbelt 沙箱限制 Agent 的文件写入；项目级则在 `<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`（见[沙箱](#沙箱)）。                                                                                                                               |
-| `ZCODE_ACP_LANG`                   | _（继承）_       | 桥的用户可见文案（弹窗、状态/提示行、命令菜单描述）语言：`zh` 或 `en`。未设置时继承 ZCode APP 的语言设置（`~/.zcode/v2/setting.json` 的 `localePreference`/`locale`），再退回 `LC_ALL`/`LC_MESSAGES`/`LANG` 区域设置，默认英文。                                                                                                                       |
+| `ZCODE_ACP_LANG`                   | _（继承）_       | 桥的用户可见文案（弹窗、状态/提示行、命令菜单描述）语言：`zh` 或 `en`。未设置时继承 ZCode APP 的语言设置（`~/.zcode/v2/setting.json` 的 `localePreference`/`locale`），再退回 `LC_ALL`/`LC_MESSAGES`/`LANG` 区域设置，默认英文。                                                    |
 
 ## 沙箱
 
@@ -269,7 +290,7 @@ export OPENCODE_GO_AUTH_COOKIE="Fe26.2**你的cookie值"
 
 本服务端兼容 [ACP Registry](https://agentclientprotocol.com/get-started/registry)。它在 `initialize` 时声明一个 `agent` 类型的认证方法——GLM API key 由 ZCode 后端从 `~/.zcode/v2/config.json` 读取，**编辑器侧无需配置任何凭据**。
 
-Registry 提交资产位于 [`registry/zcode-acp-server/`](registry/zcode-acp-server/)（`agent.json` + `icon.svg`）。包发布到 npm 后，将该目录复制到 [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) 的 fork 中并提 PR——CI 会校验 `agent.json` schema、图标，以及 `initialize` 返回的 `authMethods` 非空。
+Registry 提交资产位于 [`registry/zcode-acp/`](registry/zcode-acp/)（`agent.json` + `icon.svg`）。包发布到 npm 后，将该目录复制到 [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) 的 fork 中并提 PR——CI 会校验 `agent.json` schema、图标，以及 `initialize` 返回的 `authMethods` 非空。
 
 ## 开发
 
@@ -325,6 +346,8 @@ commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELO
 
 ## 相关项目
 
+- [glm-acp-agent](https://github.com/stefandevo/glm-acp-agent) —— 自包含的 ACP agent，直接调用 GLM API；zcode-acp 则桥接真实的 `zcode app-server`，继承其完整的官方 harness。
+- [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp) / [codex-acp](https://github.com/agentclientprotocol/codex-acp) —— Claude 与 Codex CLI 的官方 ACP 适配器；zcode-acp 是同一思路在 ZCode CLI 上的实现。
 - [zcode-open-bridge](https://github.com/tizerluo/zcode-open-bridge) —— 一个社区 Python 实现，将 ZCode 接入 MCP/ACP 生态。本项目参考了它的桥接架构和若干处理策略。
 
 ## 致谢

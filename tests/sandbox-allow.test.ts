@@ -19,7 +19,11 @@ import process from "node:process";
 import type * as acp from "@agentclientprotocol/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { extractSandboxDenial, handleSandboxDenial } from "../src/handlers/sandbox-allow.js";
+import {
+  extractPermDeniedPath,
+  extractSandboxDenial,
+  handleSandboxDenial,
+} from "../src/handlers/sandbox-allow.js";
 import {
   readSandboxConfig,
   resetSandboxDecisionForTest,
@@ -118,6 +122,45 @@ describe("extractSandboxDenial", () => {
     expect(extractSandboxDenial("all good")).toBeNull();
     expect(extractSandboxDenial("some file: Operation not permitted")).toBeNull();
     expect(extractSandboxDenial("relative/x: Operation not permitted")).toBeNull();
+  });
+});
+
+describe("extractPermDeniedPath", () => {
+  it("extracts the path from POSIX EACCES output", () => {
+    expect(extractPermDeniedPath("ls: /Users/x/sealed: Permission denied\n")).toBe(
+      "/Users/x/sealed",
+    );
+    expect(extractPermDeniedPath("cat: /etc/sudoers: Permission denied")).toBe("/etc/sudoers");
+  });
+
+  it("extracts from JSON-escaped tool payload text", () => {
+    const json = JSON.stringify({
+      kind: "result",
+      result: { content: "Exit code 1\nls: /var/db/ocurity: Permission denied" },
+    });
+    expect(extractPermDeniedPath(json)).toBe("/var/db/ocurity");
+  });
+
+  it("extracts explicit ./ and ../ relative paths (resolved by the caller)", () => {
+    expect(extractPermDeniedPath("cp: ./secrets/key: Permission denied")).toBe("./secrets/key");
+    expect(extractPermDeniedPath("rm: ../sealed/x.txt: Permission denied")).toBe("../sealed/x.txt");
+  });
+
+  it("extracts the zsh redirect form (path after the phrase)", () => {
+    expect(extractPermDeniedPath("zsh:1: permission denied: /Users/x/run.sh")).toBe(
+      "/Users/x/run.sh",
+    );
+  });
+
+  it("returns null without the phrase or without a parsable path", () => {
+    expect(extractPermDeniedPath("all good")).toBeNull();
+    expect(extractPermDeniedPath("open: Permission denied")).toBeNull();
+    expect(extractPermDeniedPath("relative/x: Permission denied")).toBeNull();
+  });
+
+  it("does not fire on sandbox EPERM text (mutually exclusive phrases)", () => {
+    expect(extractPermDeniedPath("touch: /a/b: Operation not permitted")).toBeNull();
+    expect(extractPermDeniedPath("Error: EPERM: operation not permitted, open '/a/b'")).toBeNull();
   });
 });
 

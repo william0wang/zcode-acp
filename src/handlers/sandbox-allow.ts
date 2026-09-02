@@ -98,6 +98,24 @@ export function extractSandboxDenial(text: string): SandboxDenial | null {
 /** How long the allow popup may hang before it counts as a rejection. */
 const ASK_TIMEOUT_MS = 120_000;
 
+/**
+ * Extract the path from an ordinary filesystem-permission failure (EACCES —
+ * "Permission denied"), as printed by POSIX tools (`ls: /a/b: Permission
+ * denied`) and zsh redirects (`zsh:1: permission denied: /a/b`). Unlike a
+ * sandbox EPERM the bridge can never "allow" this — no popup fixes chmod or
+ * ownership — so the turn loop surfaces it as a one-time hint instead of
+ * raising an ask. Same boundary rules as extractSandboxDenial: explicit ./
+ * and ../ relative paths are returned as-is (resolved by the caller), bare
+ * relative fragments and quoted paths are not matched.
+ */
+export function extractPermDeniedPath(text: string): string | null {
+  if (!text.toLowerCase().includes("permission denied")) return null;
+  const generic = /(?:^|[\s"([{])((?:\/|\.{1,2}\/)[^\s"\\:]+): permission denied/i.exec(text);
+  if (generic) return generic[1]!;
+  const zsh = /permission denied: ((?:\/|\.{1,2}\/)[^\s"\\:]+)/i.exec(text);
+  return zsh ? zsh[1]! : null;
+}
+
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("sandbox ask timed out")), ms);

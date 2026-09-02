@@ -12,12 +12,14 @@
  */
 
 import process from "node:process";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
+import { resolveReal } from "../backend/sandbox.js";
 import type {
   ZcodeCreateResult,
   ZcodeListResult,
@@ -54,6 +56,7 @@ import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
 import {
+  extractPermDeniedPath,
   extractSandboxDenial,
   GENERIC_HINT_KEY,
   handleSandboxDenial,
@@ -2040,25 +2043,25 @@ export async function runEventTurn(
       await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
     }
 
-    // Sandbox write-denial (ADR-0011): the tool output reached the editor
-    // above; now check it for an EPERM outside the Seatbelt whitelist and
-    // run the dynamic-allow flow (ask → persist → kill backend → the turn
-    // unwinds as cancelled; prompt() fires the continuation). Gated on the
-    // PROCESS fact backendSandboxed (not the config wish) — EPERM can only
-    // come from a sandboxed process; unsandboxed EPERM is ordinary filesystem
-    // permissions. Only on tool.updated so mid-stream deltas aren't scanned.
-    if (ev.type === "tool.updated" && server.backendSandboxed) {
+    // Filesystem-permission failure surfacing (the tool output itself already
+    // reached the editor above). Two scans, both only on tool.updated so
+    // mid-stream deltas aren't scanned, and both skipping read-only tools —
+    // their output merely ECHOES text, and acting on it would raise a phantom
+    // ask for a path nothing tried to touch.
+    if (ev.type === "tool.updated") {
       const outputText = JSON.stringify(ev.payload ?? {});
       const toolCallId = String((ev.payload as { toolCallId?: unknown })?.toolCallId ?? "");
-      // Read-only tools merely ECHO text — an EPERM string in their output
-      // is not their own syscall failing, and acting on it would raise a
-      // phantom ask for a path nothing tried to write.
       const toolName = (translator.toolNames.get(toolCallId) ?? "").toLowerCase();
       // Case-insensitive: zsh prints redirects as "operation not permitted".
-      if (
-        !READ_ONLY_TOOLS.has(toolName) &&
-        outputText.toLowerCase().includes("operation not permitted")
-      ) {
+      const lower = outputText.toLowerCase();
+      const scannable = !READ_ONLY_TOOLS.has(toolName);
+      if (scannable && server.backendSandboxed && lower.includes("operation not permitted")) {
+        // Sandbox write-denial (ADR-0011): EPERM outside the Seatbelt
+        // whitelist → dynamic-allow flow (ask → persist → kill backend → the
+        // turn unwinds as cancelled; prompt() fires the continuation). Gated
+        // on the PROCESS fact backendSandboxed (not the config wish) — EPERM
+        // can only come from a sandboxed process; unsandboxed EPERM is
+        // ordinary filesystem permissions.
         const denial = extractSandboxDenial(outputText);
         if (denial) {
           await handleSandboxDenial(server, cx, acpSid, turn, denial, toolCallId);
@@ -2073,6 +2076,30 @@ export async function runEventTurn(
           if (!asked.has(GENERIC_HINT_KEY)) {
             asked.add(GENERIC_HINT_KEY);
             await sendTextChunk(cx, acpSid, messages().sandboxGenericDenialHint, chunkMsgId);
+          }
+        }
+      } else if (scannable && lower.includes("permission denied")) {
+        // EACCES — ordinary filesystem permissions, sandbox or not. Nothing
+        // the bridge can "allow" (no popup fixes chmod/ownership), so surface
+        // it as a one-time hint per path per session; without it the model
+        // silently swallows the failure and reroutes, and the user never
+        // learns why the command died.
+        const deniedPath = extractPermDeniedPath(outputText);
+        if (deniedPath) {
+          const cwd = server.sessionCwds.get(acpSid);
+          const real = resolveReal(
+            path.isAbsolute(deniedPath)
+              ? deniedPath
+              : path.resolve(cwd ?? process.cwd(), deniedPath),
+          );
+          let hinted = server.fsDeniedPaths.get(acpSid);
+          if (!hinted) {
+            hinted = new Set();
+            server.fsDeniedPaths.set(acpSid, hinted);
+          }
+          if (!hinted.has(real)) {
+            hinted.add(real);
+            await sendTextChunk(cx, acpSid, messages().fsPermDeniedHint(real), chunkMsgId);
           }
         }
       }
