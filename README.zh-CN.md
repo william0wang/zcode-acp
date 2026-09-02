@@ -344,6 +344,13 @@ CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` �
 欢迎贡献！请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 了解环境搭建、代码风格、
 commit 约定和 PR 检查清单。重要变更记录在 [CHANGELOG.md](CHANGELOG.md)。
 
+感谢每一位贡献者（由[贡献者图谱](https://github.com/william0wang/zcode-acp/graphs/contributors)
+自动生成，覆盖全部历史贡献者）：
+
+<a href="https://github.com/william0wang/zcode-acp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=william0wang/zcode-acp" alt="贡献者" />
+</a>
+
 ## 相关项目
 
 - [glm-acp-agent](https://github.com/stefandevo/glm-acp-agent) —— 自包含的 ACP agent，直接调用 GLM API；zcode-acp 则桥接真实的 `zcode app-server`，继承其完整的官方 harness。

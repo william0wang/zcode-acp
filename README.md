@@ -539,6 +539,13 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for setup,
 code style, commit conventions, and the PR checklist. Notable changes are
 recorded in [CHANGELOG.md](CHANGELOG.md).
 
+Thanks to everyone who has contributed (updated automatically from the
+[contributors graph](https://github.com/william0wang/zcode-acp/graphs/contributors)):
+
+<a href="https://github.com/william0wang/zcode-acp/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=william0wang/zcode-acp" alt="Contributors" />
+</a>
+
 ## Related Projects
 
 - [glm-acp-agent](https://github.com/stefandevo/glm-acp-agent) — a self-contained ACP agent that calls the GLM API directly; zcode-acp instead bridges the real `zcode app-server`, inheriting its full official harness.
