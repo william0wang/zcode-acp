@@ -376,6 +376,9 @@ export type ReplCommand = "exit" | "sessions" | "new" | null;
 export function parseCommand(text: string): ReplCommand {
   const t = text.trim();
   if (t === "/exit" || t === "/quit" || t === "/q") return "exit";
+  // Shell muscle memory types `exit` without the slash — accept the bare
+  // forms too (no whitespace-separated args: "exit now" stays a prompt).
+  if (t === "exit" || t === "quit" || t === "q") return "exit";
   if (t === "/sessions") return "sessions";
   if (t === "/new") return "new";
   return null;
