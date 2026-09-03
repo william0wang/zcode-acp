@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/william0wang/zcode-acp/compare/v0.18.3...v0.19.0) (2026-09-03)
+
+
+### Features
+
+* **remote:** per-project session history and terminal-REPL session-create (ADR-0015, ADR-0016) ([#111](https://github.com/william0wang/zcode-acp/issues/111)) ([95bd694](https://github.com/william0wang/zcode-acp/commit/95bd694d2c1a910dd8e9cdaef05b240e82aa0db1))
+
 ## [0.18.3](https://github.com/william0wang/zcode-acp/compare/v0.18.2...v0.18.3) (2026-09-03)
 
 
