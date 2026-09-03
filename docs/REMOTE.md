@@ -39,7 +39,11 @@ manually). It does three things only: token auth, instance discovery, and
 byte-level proxying (ACP WebSocket plus read-only session files) — no session
 state, no path semantics. It exits after ~10 idle minutes and is re-spawned
 on demand. Each bridge registers every 10s as a heartbeat and drops out of
-discovery ~30s after it stops.
+discovery ~30s after it stops. **Sandbox inheritance is self-healed:** a hub
+born inside the Seatbelt wrap (a sandboxed backend spawned it — marked via
+`ZCODE_ACP_SANDBOX_ACTIVE`) relaunches itself through launchd, outside the
+sandbox, before binding; inside the sandbox macOS would refuse its opening of
+the visible session terminal (TCC), breaking remote session-create.
 
 **Discovery API** (for client authors; fields are additive-only):
 

@@ -284,6 +284,14 @@ export class ZcodeAcpServer {
         workspaces,
         extraAllow: [...extraAllow, ...this.sandboxOnceAllows],
       });
+      // Birth-mark the wrapped process: the marker is inherited down any
+      // spawn chain (a hub (re)spawned below a sandboxed backend carries
+      // it), and the hub's boot check uses it to self-relaunch outside the
+      // sandbox via launchd — a hub born inside Seatbelt cannot open the
+      // visible terminal (macOS TCC attributes its `open -a Terminal` to
+      // "Sandbox" and Terminal silently refuses), and Seatbelt itself can
+      // never be escaped from within.
+      env.ZCODE_ACP_SANDBOX_ACTIVE = "1";
     }
     this.backend = new ZcodeBackend(argv, env);
     return this.backend;
