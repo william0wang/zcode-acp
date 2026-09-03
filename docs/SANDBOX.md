@@ -42,7 +42,9 @@ that file — the sandbox denies
 writes to `.zcode/acp/` inside the workspace while the bridge (outside the
 sandbox) writes it on your behalf. After an allow, the backend restarts with
 the widened profile (a few seconds; the bridge auto-continues the interrupted
-task). Set `"strictGit": true` in the config to also put `.git` behind the
+task). Approvals are batched for a short window, so several pending popups
+granted in a row share ONE restart instead of each killing the others. Set
+`"strictGit": true` in the config to also put `.git` behind the
 popup.
 
 Ordinary filesystem permission failures (`Permission denied`, EACCES — a

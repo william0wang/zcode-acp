@@ -187,8 +187,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   /private/tmp, $TMPDIR under /var/folders) silently fails to match. The
   sandbox design lives in ADR-0011 (`.zcode/docs/adr/`): writes-only model,
   per-project config in `.zcode/acp/sandbox.json` (deny island — only the
-  bridge may write it), dynamic allow = ask → persist → backend restart →
-  continuation prompt. Well-known system temp trees (/tmp → /private/tmp,
+  bridge may write it), dynamic allow = ask → persist → BATCHED backend
+  restart (3s window: grants collect, then one cancel-wave + continuation
+  + close — a per-approval restart killed sibling popups still pending on
+  other denied paths; the flush sets a continuation ONLY for sessions with
+  a turn still in flight, orphans would hijack a later cancelled prompt).
+  Ask debounce marks are timestamps: a user decision (or a structural
+  hint) pins forever; a FAILED ask (timeout / killed by another grant's
+  restart / instantly-rejecting client) cools down 60s and may re-ask —
+  the old permanent mute left the model on a bare EPERM with no way out. Well-known system temp trees (/tmp → /private/tmp,
   /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
   and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
   them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
