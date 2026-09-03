@@ -46,17 +46,18 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint                                              | Auth     | Purpose                                                                                      |
-| ----------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------- |
-| `GET /api/health`                                     | none     | Liveness probe; `200` body `ok`.                                                             |
-| `GET /api/instances`                                  | required | Registered bridge instances. Add `?probe=1` to verify first.                                 |
-| `GET /api/instances/{id}/status`                      | required | Real-time per-session running status of one bridge.                                          |
-| `POST /api/instances/{id}/sessions/{sessionId}/close` | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).        |
-| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                            |
-| `GET /api/quota`                                      | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed. |
-| `POST /api/upgrade`                                   | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).           |
-| `GET /api/projects`                                   | required | Known-project list (remote session-create whitelist) — see below.                            |
-| `POST /api/instances {workspacePath}`                 | required | Create (or reuse) a headless serve bridge for one known project — see below.                 |
+| Endpoint                                               | Auth     | Purpose                                                                                                         |
+| ------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------- |
+| `GET /api/health`                                      | none     | Liveness probe; `200` body `ok`.                                                                                |
+| `GET /api/instances`                                   | required | Registered bridge instances. Add `?probe=1` to verify first.                                                    |
+| `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                             |
+| `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                           |
+| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                               |
+| `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                    |
+| `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                              |
+| `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                               |
+| `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session). |
+| `POST /api/instances {workspacePath}`                  | required | Create (or reuse) a headless serve bridge for one known project — see below.                                    |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -149,7 +150,8 @@ GET  {hub}/api/projects
 POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
    → 200 {"id":"47073","reused":false}
    → 403 "unknown project"          (path not on the known-project list)
-   → 502 (spawn failed / bridge died during startup / never registered, 10s budget)
+   → 502 (spawn failed / bridge died during startup / never registered;
+          ~10s headless, ~20s when a terminal window is opened)
 ```
 
 - `GET /api/projects` aggregates the App's tasks index: every workspace that
@@ -159,20 +161,80 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   bound, not a security boundary: a token holder can already run any
   editor-bridge session in an arbitrary cwd; the trust boundary is the
   token itself.
-- On create the hub spawns `zcode-acp serve` — a headless bridge — detached
-  in the project's cwd and waits for its heartbeat registration (it appears
-  in `/api/instances` with `origin:"serve"` within seconds). Connect with
-  the normal `WS /acp?instance=<id>` and drive it like any instance; the
-  new conversation's cwd is the project directory regardless of what
-  `session/new` sends.
-- A live serve instance for the same workspace is reused (`reused:true`)
-  instead of spawning a second one; concurrent creates join the same
-  in-flight spawn instead of racing a duplicate.
-- Lifetime: the serve bridge exists for remote interest only. It exits ~10
-  minutes after the last client detaches AND the last running turn
-  finishes — a running turn always completes, even with all clients gone.
-  Treat a vanished serve instance like any other dead bridge: re-create it
-  on demand.
+- On create the hub incubates a VISIBLE interactive REPL in the machine's
+  terminal (ADR-0016, macOS): the project's owner gets a real local CLI
+  window, and its bridge registers with the hub like any serve instance (it
+  appears in `/api/instances` with `origin:"serve"` — allow up to ~20s for
+  the GUI round-trip). Headless machines, SSH sessions, or
+  `ZCODE_ACP_HUB_TERMINAL=0` fall back to the detached `zcode-acp serve`
+  bridge of the original design. Connect with the normal
+  `WS /acp?instance=<id>` and drive it like any instance; the new
+  conversation's cwd is the project directory regardless of what
+  `session/new` sends (session roots are pinned in both surfaces).
+- **Which terminal opens** (nothing is auto-detected — the hub is a
+  background process and macOS has no default-terminal setting):
+  `ZCODE_ACP_HUB_TERMINAL_COMMAND` (a shell command; `{script}` is replaced
+  by the quoted script path) wins over `ZCODE_ACP_HUB_TERMINAL_APP`, which
+  is matched against built-in launch recipes: Terminal and iTerm run the
+  script via `open -a` (both execute `.command`); WezTerm, kitty, Alacritty,
+  and Ghostty are driven by their own CLI (`open -na <app> --args … -e …`);
+  any other name passes through to `open -a` as-is. Default: Terminal.app.
+  Warp cannot execute scripts or commands programmatically at all
+  (warpdotdev/warp#1917, #3959, #9083) — naming it warns, and the flow
+  degrades to the headless bridge after the register timeout.
+- A live serve-origin instance for the same workspace is reused
+  (`reused:true`) instead of spawning a second one; concurrent creates join
+  the same in-flight spawn instead of racing a duplicate.
+- Lifetime depends on the surface: a terminal-REPL instance lives while its
+  window lives (the owner closing it retires the bridge — re-create on
+  demand); the headless fallback exists for remote interest only and exits
+  ~10 minutes after the last client detaches AND the last running turn
+  finishes. Treat any vanished instance like a dead bridge.
+
+## Resuming a closed session
+
+Discovery lists only currently-running conversations. To find and reopen a
+PREVIOUS one — including conversations no bridge currently holds — use the
+per-project history listing (ADR-0015):
+
+```text
+GET {hub}/api/projects/sessions?workspacePath=/Users/me/proj
+  → 200 {"workspacePath":"/Users/me/proj",
+         "instance":{"id":"47073","origin":"serve"},
+         "sessions":[
+           {"sessionId":"sess_9f2…","title":"Fix login bug",
+            "cwd":"/Users/me/proj","updatedAt":"2026-09-01T10:00:00.000Z",
+            "live":false,"running":false}, …],
+         "nextCursor":{"before":1723800000000,"beforeId":"sess_9f2…"}}
+  → 400 "workspacePath required" / "invalid limit/before …"
+  → 403 "unknown project"          (path not on the known-project list)
+  → 502 (spawn failed / bridge unreachable / broken list)
+```
+
+- The listing is the project's backend session store — closed conversations
+  included. `live` marks conversations currently advertised by a bridge (the
+  same membership as discovery); `running` marks an in-flight turn. Titles
+  are the store's authoritative ones.
+- **Pagination** (projects can hold dozens of sessions): rows come
+  newest-first (`updatedAt` descending). `?limit=<n>` sets the page size
+  (default 20, max 200); the previous response's `nextCursor` splits into
+  `?before=<ms-epoch>&beforeId=<sessionId>` for the next older page — the
+  composite cursor names the exact last row, so timestamps tied across a
+  page boundary are never skipped or repeated. `nextCursor: null` means
+  there are no older sessions. Order is total (id tiebreak), so
+  paging never repeats or skips rows.
+- The first listing of a cold project incubates its serve bridge (the same
+  machinery as remote session-create; budget ~12s) — later listings and the
+  follow-up load reuse it.
+- Resume with the existing flow: `POST /api/instances` (answers
+  `reused:true` with the listing's instance), attach
+  `WS /acp?instance=<id>`, then
+  `session/load {"sessionId":"<the listed id>"}` — history replays and the
+  conversation continues with `session/prompt`.
+- `sessionId` here is the backend store id (`sess_…`), which `session/load`
+  accepts as-is (pass-through resume). The same conversation may also appear
+  in discovery under a different (ACP) id — treat discovery as the
+  live-attention surface and this listing as the browse/resume surface.
 
 ## Connecting
 

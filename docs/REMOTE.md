@@ -68,14 +68,36 @@ ran a session (system temp trees, `~/.zcode` itself, and vanished
 directories filtered out), newest activity first. The list gates the POST —
 paths outside it get 403 (a convenience bound, not a security boundary: a
 token holder can already drive an editor-bridge session in any cwd; the
-trust boundary is the token). On create the hub
-spawns `zcode-acp serve` — a headless bridge — in the project's cwd; it
-registers back within seconds and is reachable like any other instance. A
-live serve instance for the same workspace is reused instead of re-spawned
-(`reused:true`). The serve bridge lives for remote interest only: it exits
-~10 minutes after the last client detaches and the last turn finishes, and
-its `session/new` always uses the project cwd regardless of what a client
-sends.
+trust boundary is the token). On create the hub incubates a VISIBLE
+interactive REPL in the machine's terminal (ADR-0016, macOS; headless/SSH or
+`ZCODE_ACP_HUB_TERMINAL=0` falls back to the detached headless
+`zcode-acp serve`); its bridge registers back within seconds (budget ~20s)
+and is reachable like any other instance. The hub itself is a background
+process with no terminal, so nothing is auto-detected: the target terminal
+resolves as `ZCODE_ACP_HUB_TERMINAL_COMMAND` → `ZCODE_ACP_HUB_TERMINAL_APP`
+(built-in launch recipes for Terminal, iTerm, WezTerm, kitty, Alacritty,
+Ghostty; other names pass through to `open -a`) → plain Terminal.app. Warp
+cannot execute scripts or commands programmatically (warpdotdev/warp#1917,
+#3959) and is deliberately unsupported — it degrades to the headless bridge.
+A live serve-origin instance for
+the same workspace is reused instead of re-spawned (`reused:true`). A
+terminal-REPL instance lives while its window lives; the headless fallback
+exits ~10 minutes after the last client detaches and the last turn
+finishes. Session roots are pinned to the project cwd in both surfaces
+regardless of what a client sends.
+
+**Remote session-resume** (ADR-0015). Remote clients can also reopen a
+PREVIOUS conversation of a project — including closed ones no bridge
+currently advertises (discovery lists only running conversations):
+
+```text
+GET /api/projects/sessions?workspacePath=… → {workspacePath, instance, sessions}
+```
+
+The listing is the project's full backend session store; the hub incubates
+the project's serve bridge on first listing and reuses it after. Resume is
+the normal attach flow with `session/load` on a listed backend id. See
+`docs/REMOTE-CLIENTS.md` ("Resuming a closed session") for the client contract.
 
 `sessions` lists the project's **currently running** conversations (live
 editor tabs and remote attachments) under the same ACP session ids the

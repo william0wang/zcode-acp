@@ -25,7 +25,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import {
@@ -36,9 +36,11 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import { EventEmitter } from "node:events";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -77,10 +79,17 @@ export interface HubOptions {
    */
   projectsDbPath?: string;
   /**
-   * Override how POST /api/instances spawns the headless serve bridge (tests
-   * inject a fake). Default: this node + this package's dist/cli.js.
+   * Override how the remote session-create endpoints spawn a bridge (tests
+   * inject a fake). Default: this node + this package's dist/cli.js — an
+   * interactive REPL in a visible terminal for session-create ("repl"),
+   * a detached headless serve bridge for background queries ("serve").
    */
-  spawnServe?: (opts: { cwd: string; env: NodeJS.ProcessEnv }) => ChildProcess;
+  spawnServe?: (opts: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    /** "repl" = visible terminal (session-create); "serve" = detached headless. */
+    kind: "repl" | "serve";
+  }) => ChildProcess | Promise<ChildProcess>;
 }
 
 export interface HubHandle {
@@ -191,14 +200,206 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 }
 
 /**
- * Default serve-bridge spawner (remote session-create, ADR-0014): this node
- * running this package's cli.js `serve` subcommand, detached in the project's
- * cwd with the ENV the bridge needs to find its way back to this hub. Mirrors
- * endpoint.ts's spawnHub: detached + unref'd (the hub must not own its life),
- * stderr piped and tail-logged so startup failures surface instead of
- * silently vanishing with an "ignore" pipe.
+ * The REPL-in-a-terminal incubation budget (ADR-0016): a visible terminal
+ * adds a GUI round-trip (Terminal app launch, REPL boot, its bridge child)
+ * ahead of the hub registration — double the headless budget.
  */
-function defaultSpawnServe(opts: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcess {
+const REPL_REGISTER_TIMEOUT_MS = 20_000;
+/** `open -a <terminal>` must answer fast or the incubation falls back. */
+const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
+/** Set ZCODE_ACP_HUB_TERMINAL=0 to keep remote session-create headless. */
+const TERMINAL_GATE_ENV = "ZCODE_ACP_HUB_TERMINAL";
+
+/** Single-quote for sh: ' → '\'' . */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** How the hub hands the .command script to a terminal (ADR-0016). */
+export type TerminalLaunch =
+  /** ZCODE_ACP_HUB_TERMINAL_COMMAND: a shell command; `{script}` (if present)
+   * is replaced by the quoted script path, else the path is appended. */
+  | { kind: "shell"; command: string }
+  /** `.command`-executing apps (Terminal, iTerm): `open -a <app> <script>`. */
+  | { kind: "openApp"; app: string }
+  /** Terminals driven by their own CLI: `open -na <app> --args <args> <sh>
+   * <script>` — args come first, the script program is appended. */
+  | { kind: "openAppArgs"; app: string; args: string[] };
+
+/**
+ * Built-in launch recipes for well-known macOS terminals (ADR-0016 §5). Each
+ * mechanism is the app's documented, verified way to run a command in a fresh
+ * window: Terminal and iTerm execute `.command` files handed over via open;
+ * WezTerm's `start --` runs an alternative program (wezterm.org/cli/start.html);
+ * kitty takes the program as normal positional arguments
+ * (sw.kovidgoyal.net/kitty/invocation); Alacritty and Ghostty support the
+ * common `-e` flag. The script does its own `cd`, so no per-app cwd flags.
+ * Warp is deliberately ABSENT — it cannot execute `.command` files (#1917)
+ * and has no programmatic command execution at all (URI scheme opens dirs
+ * only; still an open request in #3959/#9083). Hyper is absent for the same
+ * reason (#3677).
+ */
+const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
+  terminal: { kind: "openApp", app: "Terminal" },
+  apple_terminal: { kind: "openApp", app: "Terminal" },
+  iterm: { kind: "openApp", app: "iTerm" },
+  iterm2: { kind: "openApp", app: "iTerm" },
+  wezterm: { kind: "openAppArgs", app: "WezTerm", args: ["start", "--"] },
+  kitty: { kind: "openAppArgs", app: "kitty", args: [] },
+  alacritty: { kind: "openAppArgs", app: "Alacritty", args: ["-e"] },
+  ghostty: { kind: "openAppArgs", app: "Ghostty", args: ["-e"] },
+};
+
+/**
+ * Pick how to open the REPL script. The hub is a background daemon — its env
+ * carries no terminal and macOS has no default-terminal setting — so nothing
+ * is detected. Priority: the explicit command template (the universal escape
+ * hatch) → a built-in launcher by app name (aliases are case- and
+ * `.app`-suffix-insensitive) → plain Terminal.app. Warp gets a special warning
+ * because it accepts the open but cannot run the script; any other unmatched
+ * name passes through to `open -a` unchanged.
+ */
+export function resolveTerminalLaunch(env: NodeJS.ProcessEnv): {
+  launch: TerminalLaunch;
+  warning?: string;
+} {
+  const command = (env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim();
+  if (command) return { launch: { kind: "shell", command } };
+  const raw = (env.ZCODE_ACP_HUB_TERMINAL_APP ?? "").trim();
+  const name = raw.toLowerCase().replace(/\.app$/, "");
+  const launcher = TERMINAL_APP_LAUNCHERS[name];
+  if (launcher) return { launch: launcher };
+  if (name === "warp") {
+    return {
+      launch: { kind: "openApp", app: raw || "Warp" },
+      warning:
+        "Warp cannot execute .command scripts (warpdotdev/warp#1917) and has no " +
+        "programmatic command execution (warpdotdev/warp#3959, #9083) — the window " +
+        "will idle and session-create falls back to a headless bridge after the " +
+        "register timeout; set ZCODE_ACP_HUB_TERMINAL_COMMAND to drive Warp another way",
+    };
+  }
+  return { launch: { kind: "openApp", app: raw || "Terminal" } };
+}
+
+/**
+ * The .command script body. The incubation env MUST be embedded as exports:
+ * the script runs in a fresh shell spawned by the terminal app, which
+ * inherits launchd's environment — NOT the hub's — so without them the REPL
+ * would boot as a plain local session and never register back (the
+ * incubation would stall into its timeout). Everything ZCODE_ACP_* travels;
+ * values are single-quoted.
+ */
+export function terminalReplScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
+  const exports = Object.keys(env)
+    .filter((k) => k.startsWith("ZCODE_ACP_"))
+    .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
+  return [
+    "#!/bin/sh",
+    `# Hub-incubated REPL session (ADR-0016): closing this window ends the bridge.`,
+    `cd ${shQuote(cwd)} || exit 1`,
+    ...exports,
+    `exec ${shQuote(process.execPath)} ${shQuote(cliJs)}`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Spawn session-create as a VISIBLE interactive REPL (ADR-0016): write a
+ * throwaway .command script (`cd <project> && exec node cli.js`) and hand it
+ * to a terminal (resolveTerminalLaunch) — the user gets a real terminal
+ * window running the local CLI instead of an invisible daemon. The REPL's
+ * bridge child inherits the remote ENV, so the incubation registers exactly
+ * like a serve bridge; closing the window ends the bridge (its lifetime
+ * follows the terminal, the ADR-0001 anchor). Returns null when a terminal
+ * can't be used — platform, gated off via ZCODE_ACP_HUB_TERMINAL, or the
+ * open failing (headless/SSH) — and the caller falls back to the detached
+ * serve spawn.
+ */
+async function spawnTerminalRepl(opts: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<ChildProcess | null> {
+  if (process.platform !== "darwin") return null;
+  const gate = (process.env[TERMINAL_GATE_ENV] ?? "").trim().toLowerCase();
+  if (["0", "false", "off"].includes(gate)) return null;
+  const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
+  const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "repl.command");
+  writeFileSync(script, terminalReplScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
+  chmodSync(script, 0o700);
+  const { launch, warning } = resolveTerminalLaunch(process.env);
+  if (warning) warn(`hub: ${warning}`);
+  let argv: string[];
+  if (launch.kind === "shell") {
+    const rendered = launch.command.includes("{script}")
+      ? launch.command.replace("{script}", shQuote(script))
+      : `${launch.command} ${shQuote(script)}`;
+    argv = ["/bin/sh", "-c", rendered];
+  } else if (launch.kind === "openApp") {
+    argv = ["open", "-a", launch.app, script];
+  } else {
+    argv = ["open", "-na", launch.app, "--args", ...launch.args, "/bin/sh", script];
+  }
+  // Async spawn — spawnSync would freeze the hub's event loop (WS proxying,
+  // heartbeats for every live bridge) for up to the full timeout while a GUI
+  // app cold-starts.
+  const errChunks: Buffer[] = [];
+  const opened = await new Promise<{ error?: Error; timedOut?: boolean; code?: number | null }>(
+    (resolve) => {
+      const child = spawn(argv[0]!, argv.slice(1), { stdio: ["ignore", "ignore", "pipe"] });
+      child.stderr?.on("data", (c: Buffer) => errChunks.push(c));
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ timedOut: true });
+      }, TERMINAL_OPEN_TIMEOUT_MS);
+      child.once("error", (e: Error) => {
+        clearTimeout(timer);
+        resolve({ error: e });
+      });
+      child.once("exit", (code: number | null) => {
+        clearTimeout(timer);
+        resolve({ code });
+      });
+    },
+  );
+  if (opened.error || opened.timedOut || opened.code !== 0) {
+    const detail = opened.timedOut
+      ? `timed out after ${TERMINAL_OPEN_TIMEOUT_MS}ms`
+      : (opened.error?.message ?? Buffer.concat(errChunks).toString("utf8").trim()) ||
+        `exit ${opened.code ?? "?"}`;
+    warn(`hub: no terminal window for ${opts.cwd} (${detail}) — falling back to a headless bridge`);
+    return null;
+  }
+  log(`hub: opened a Terminal REPL for ${opts.cwd}`);
+  // `open` has already exited; incubation only needs a child that reads as
+  // alive until the bridge registers. A window that dies early surfaces as
+  // the register timeout — the terminal window itself shows the reason.
+  const fake = new EventEmitter() as ChildProcess & {
+    pid: number;
+    exitCode: number | null;
+    signalCode: string | null;
+  };
+  fake.pid = -1;
+  fake.exitCode = null;
+  fake.signalCode = null;
+  return fake as unknown as ChildProcess;
+}
+
+/**
+ * Default bridge spawner for the remote session-create endpoints: a visible
+ * terminal REPL for session-create (ADR-0016, macOS + not gated off), a
+ * detached headless serve bridge otherwise (the ADR-0014 original — also the
+ * fallback whenever the terminal window can't be opened).
+ */
+async function defaultSpawnServe(opts: {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  kind: "repl" | "serve";
+}): Promise<ChildProcess> {
+  if (opts.kind === "repl") {
+    const viaTerminal = await spawnTerminalRepl(opts);
+    if (viaTerminal) return viaTerminal;
+  }
   // dist/remote/hub-server.js → dist/cli.js (one level up).
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
   const child = spawn(process.execPath, [cliJs, "serve"], {
@@ -268,6 +469,65 @@ function portOpen(port: number, timeoutMs: number): Promise<boolean> {
     socket.once("timeout", () => done(false));
     socket.once("error", () => done(false));
     socket.connect(port, "127.0.0.1");
+  });
+}
+
+/** Body cap for a bridge's GET /sessions answer (session lists are small). */
+const MAX_SESSION_LIST_BYTES = 4 * 1024 * 1024;
+/**
+ * A cold bridge must spawn its backend before the store answers, so the
+ * budget covers an incubation plus one session/list round-trip (the bridge
+ * gives its own query 15s).
+ */
+const SESSION_LIST_TIMEOUT_MS = 12_000;
+
+/**
+ * Fetch a bridge's GET /sessions payload (ADR-0015), forwarding the
+ * pagination query ("?limit=..&before=.."). Resolves with the parsed JSON;
+ * rejects on transport failure, a non-200 answer, truncation, or a non-JSON
+ * body — the caller turns every rejection into a 502.
+ */
+function fetchBridgeSessions(
+  port: number,
+  query = "",
+): Promise<{ sessions?: unknown[]; nextCursor?: unknown }> {
+  return new Promise((resolve, reject) => {
+    const req = httpGet({ host: "127.0.0.1", port, path: `/sessions${query}` }, (up) => {
+      if ((up.statusCode ?? 500) !== 200) {
+        up.resume();
+        reject(new Error(`bridge answered ${up.statusCode ?? "?"}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      up.on("data", (c: Buffer) => {
+        size += c.length;
+        if (size > MAX_SESSION_LIST_BYTES) {
+          up.destroy();
+          reject(new Error("bridge session list too large"));
+          return;
+        }
+        chunks.push(c);
+      });
+      up.on("end", () => {
+        try {
+          resolve(
+            JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              sessions?: unknown[];
+              nextCursor?: unknown;
+            },
+          );
+        } catch {
+          reject(new Error("bridge returned an invalid session list"));
+        }
+      });
+      up.on("error", () => reject(new Error("bridge session list failed")));
+    });
+    req.on("error", () => reject(new Error("bridge unreachable")));
+    req.setTimeout(SESSION_LIST_TIMEOUT_MS, () => {
+      req.destroy();
+      reject(new Error("bridge session list timed out"));
+    });
   });
 }
 
@@ -379,7 +639,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * findServe check (check-then-act). Check-then-set is one synchronous
    * block, so requests can only ever observe "no entry" one at a time.
    */
-  const serveIncubations = new Map<string, Promise<{ id: string; reused: boolean }>>();
+  // Single-flight incubation per workspace (see joinIncubation below).
+  const serveIncubations = new Map<
+    string,
+    { kind: "repl" | "serve"; promise: Promise<{ id: string; reused: boolean }> }
+  >();
 
   /** The live serve instance for a workspace, if any (per-workspace dedupe). */
   const findServeInstance = (workspacePath: string): InstanceEntry | undefined => {
@@ -402,19 +666,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   };
 
   /**
-   * Spawn a serve bridge and poll until it registers (or fails fast on child
-   * exit / timeout). Shared by every POST /api/instances currently incubating
-   * this workspace — all joiners see the same outcome.
+   * Spawn a bridge and poll until it registers (or fails fast on child exit /
+   * timeout). Shared by every incubating endpoint for this workspace — all
+   * joiners see the same outcome. Kind picks the spawn surface: "repl" opens
+   * a visible terminal (remote session-create, ADR-0016), "serve" the
+   * detached headless bridge (background listing, ADR-0015).
    */
-  const incubateServe = async (workspacePath: string): Promise<{ id: string; reused: boolean }> => {
+  const incubateServe = async (
+    workspacePath: string,
+    kind: "repl" | "serve",
+  ): Promise<{ id: string; reused: boolean }> => {
     // Async spawn failures (ENOENT — the dir vanished between the whitelist
     // check and the spawn) arrive as an 'error' event with exitCode still
-    // null; without this flag the poll burns the full 10s budget.
+    // null; without this flag the poll burns the full budget.
     let spawnError: Error | null = null;
     let child: ChildProcess;
     try {
-      child = spawnServe({
+      child = await spawnServe({
         cwd: workspacePath,
+        kind,
         env: {
           ...process.env,
           ZCODE_ACP_REMOTE: "1",
@@ -423,6 +693,13 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           // Parity with the bridge-side spawnHub: the serve child may have to
           // (re)spawn the hub itself, and must bind the same configured host.
           ZCODE_ACP_HUB_HOST: host,
+          // ADR-0016: the incubated bridge registers as THIS project's serve
+          // bridge (the hub's per-workspace dedupe matches it) and pins its
+          // session roots to the project cwd, so ADR-0014's whitelist
+          // semantics survive the visible-terminal lifecycle. The detached
+          // serve path ignores both (it hardcodes origin/serveMode itself).
+          ZCODE_ACP_REMOTE_ORIGIN: "serve",
+          ZCODE_ACP_REMOTE_PIN_CWD: "1",
         },
       });
       child.once("error", (e: Error) => {
@@ -432,14 +709,19 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       warn(`hub: serve spawn failed: ${e instanceof Error ? e.message : String(e)}`);
       throw new Error("serve bridge spawn failed");
     }
-    log(`hub: spawned serve bridge for ${workspacePath} (pid ${child.pid})`);
-    const deadline = Date.now() + SERVE_REGISTER_TIMEOUT_MS;
+    log(
+      `hub: spawned ${kind === "repl" ? "terminal REPL" : "serve bridge"} for ${workspacePath} (pid ${child.pid})`,
+    );
+    const budget = kind === "repl" ? REPL_REGISTER_TIMEOUT_MS : SERVE_REGISTER_TIMEOUT_MS;
+    const deadline = Date.now() + budget;
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
       const entry = findServeInstance(workspacePath);
       if (entry) return { id: entry.id, reused: false };
       // The child dying is the honest fast-fail (missing cwd perms, port
-      // exhaustion, crash) — without this check the loop burns the full 10s.
+      // exhaustion, crash) — without this check the loop burns the full budget.
+      // (A terminal REPL reports through the window itself, so only the
+      // timeout applies there.)
       if (spawnError || child.exitCode !== null || child.signalCode !== null) {
         warn(`hub: serve bridge for ${workspacePath} exited during startup`);
         throw new Error("serve bridge exited during startup");
@@ -449,6 +731,37 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         throw new Error("serve bridge did not register in time");
       }
     }
+  };
+
+  /**
+   * Single-flight incubation per workspace: concurrent endpoint calls join one
+   * spawn instead of racing duplicates. A "serve" caller (the listing) joins
+   * ANY in-flight incubation — the outcome it waits for is "a serve bridge is
+   * registered", whichever surface spawned it. A "repl" caller (session-
+   * create) joins only another repl: the visible window IS the feature
+   * (ADR-0016), so it never piggybacks on an invisible listing spawn.
+   */
+  const joinIncubation = (
+    workspacePath: string,
+    kind: "repl" | "serve",
+  ): Promise<{ id: string; reused: boolean }> => {
+    const inflight = serveIncubations.get(workspacePath);
+    if (inflight && (inflight.kind === kind || kind === "serve")) {
+      log(`hub: joining the incubating serve bridge for ${workspacePath}`);
+      return inflight.promise;
+    }
+    const promise = incubateServe(workspacePath, kind);
+    serveIncubations.set(workspacePath, { kind, promise });
+    // Drop the entry once settled (identity-checked — a newer incubation may
+    // already have replaced it). The catch keeps the DERIVED promise handled;
+    // the original is awaited by its creating request.
+    promise
+      .catch(() => undefined)
+      .finally(() => {
+        const current = serveIncubations.get(workspacePath);
+        if (current && current.promise === promise) serveIncubations.delete(workspacePath);
+      });
+    return promise;
   };
 
   /**
@@ -632,15 +945,105 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.end(JSON.stringify(projects));
       return;
     }
-    // POST /api/instances — create (or reuse) a headless serve bridge for one
-    // known project. The hub spawns `zcode-acp serve` detached in the project
-    // cwd and waits for its heartbeat registration; the bridge lives its own
-    // idle-timed life afterwards (ADR-0014). Dedupe: one serve instance per
-    // workspace — an existing live one is reused, and concurrent POSTs join
-    // the same in-flight incubation instead of double-spawning. Accepted
-    // bound: a hub restart clears the instance table, so a POST inside the
-    // bridges' ≤10s re-registration window may incubate a duplicate —
-    // harmless (both serve, future POSTs dedupe, an idle one exits in 10min).
+    // GET /api/projects/sessions?workspacePath=… — the project's backend
+    // session store (ADR-0015), including closed ones no bridge advertises.
+    // Discovery stays running-scoped by design; this is the deliberate
+    // "resume an old session" surface. PAGINATED (long-lived projects hold
+    // dozens of sessions): ?limit= (default 20, max 200) rows newest-first,
+    // ?before=<ms> resumes an older page; the answer's nextCursor (null on
+    // the last page) feeds the next call. Same whitelist gate as
+    // POST /api/instances (the check bounds which cwds may incubate a serve
+    // bridge), then the ADR-0014 incubation ensures a serve bridge and the
+    // query proxies to its loopback /sessions. The answer wraps the bridge
+    // payload with the instance a list-then-load client attaches to
+    // (session/load reuses the same one).
+    if (url.pathname === "/api/projects/sessions" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const workspacePath = (url.searchParams.get("workspacePath") ?? "").trim();
+      if (!workspacePath) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("workspacePath required");
+        return;
+      }
+      // Pagination forwarding: validate here so a bad page request fails
+      // fast with 400 instead of surfacing as the bridge's 502.
+      const pagination = new URLSearchParams();
+      for (const name of ["limit", "before"]) {
+        const raw = url.searchParams.get(name);
+        if (raw === null) continue;
+        if (!/^\d+$/.test(raw) || (name === "limit" && parseInt(raw, 10) < 1)) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end(`invalid ${name} — positive integer expected`);
+          return;
+        }
+        pagination.set(name, raw);
+      }
+      const beforeId = url.searchParams.get("beforeId");
+      if (beforeId !== null) {
+        if (!/^[\w.:-]+$/.test(beforeId)) {
+          res.writeHead(400, { "Content-Type": "text/plain" });
+          res.end("invalid beforeId — session id expected");
+          return;
+        }
+        pagination.set("beforeId", beforeId);
+      }
+      const known = await listKnownWorkspaces(projectsDbPath);
+      if (!known.some((p) => p.workspacePath === workspacePath)) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end("unknown project");
+        return;
+      }
+      try {
+        let entry = findServeInstance(workspacePath);
+        if (!entry) {
+          // "serve": a background listing must not pop a terminal window
+          // (ADR-0015) — only session-create does (ADR-0016). joinIncubation
+          // makes concurrent listings (and a listing racing a create) share
+          // one spawn instead of doubling bridges.
+          await joinIncubation(workspacePath, "serve");
+          entry = findServeInstance(workspacePath);
+        }
+        if (!entry) {
+          throw new Error("serve bridge did not register");
+        }
+        const qs = pagination.toString();
+        const payload = await fetchBridgeSessions(entry.port, qs ? `?${qs}` : "");
+        res.writeHead(200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        });
+        res.end(
+          JSON.stringify({
+            workspacePath,
+            instance: { id: entry.id, origin: entry.origin },
+            ...(Array.isArray(payload.sessions)
+              ? { sessions: payload.sessions }
+              : { sessions: [] }),
+            nextCursor: payload.nextCursor ?? null,
+          }),
+        );
+      } catch (e) {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end(e instanceof Error ? e.message : "session list failed");
+      }
+      return;
+    }
+    // POST /api/instances — create (or reuse) a bridge for one known project.
+    // Session-create incubates a VISIBLE interactive REPL in the user's
+    // terminal (ADR-0016, macOS; ZCODE_ACP_HUB_TERMINAL=0 / headless falls
+    // back to the detached `zcode-acp serve` of ADR-0014). The hub waits for
+    // the bridge's heartbeat registration; the bridge lives its own life
+    // afterwards (a terminal REPL until the window closes, a serve bridge on
+    // its idle timer). Dedupe: one serve-origin instance per workspace — an
+    // existing live one is reused, and concurrent POSTs join the same
+    // in-flight incubation instead of double-spawning. Accepted bound: a hub
+    // restart clears the instance table, so a POST inside the bridges' ≤10s
+    // re-registration window may incubate a duplicate — harmless (both serve,
+    // future POSTs dedupe, an idle one exits in 10min).
     if (url.pathname === "/api/instances" && req.method === "POST") {
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
@@ -668,23 +1071,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.end(JSON.stringify({ id: existing.id, reused: true }));
         return;
       }
-      let incubation = serveIncubations.get(workspacePath);
-      if (!incubation) {
-        incubation = incubateServe(workspacePath);
-        serveIncubations.set(workspacePath, incubation);
-        // Drop the entry once settled (identity-checked — a newer incubation
-        // may already have replaced it). The catch keeps the DERIVED promise
-        // handled; the original is awaited by its creating POST.
-        incubation
-          .catch(() => undefined)
-          .finally(() => {
-            if (serveIncubations.get(workspacePath) === incubation) {
-              serveIncubations.delete(workspacePath);
-            }
-          });
-      } else {
-        log(`hub: joining the incubating serve bridge for ${workspacePath}`);
-      }
+      // Session-create incubates a VISIBLE terminal REPL (ADR-0016) — the
+      // user gets a real local CLI window, not an invisible daemon; the
+      // detached serve spawn is the fallback (no GUI / gated off / macOS
+      // open failure).
+      const incubation = joinIncubation(workspacePath, "repl");
       try {
         const out = await incubation;
         res.writeHead(200, { "Content-Type": "application/json" });
