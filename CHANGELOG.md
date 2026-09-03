@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.3](https://github.com/william0wang/zcode-acp/compare/v0.18.2...v0.18.3) (2026-09-03)
+
+
+### Bug Fixes
+
+* **sandbox:** batch allow-restarts into one window with cooldown asks and chained continuations ([#107](https://github.com/william0wang/zcode-acp/issues/107)) ([2570a12](https://github.com/william0wang/zcode-acp/commit/2570a12e1ffc1ef87f7e02f23afc8dbe58578304))
+
 ## [0.18.2](https://github.com/william0wang/zcode-acp/compare/v0.18.1...v0.18.2) (2026-09-02)
 
 
