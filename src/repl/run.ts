@@ -458,19 +458,44 @@ export async function runRepl(): Promise<void> {
     clientInfo: { name: "zcode-acp", title: "zcode-acp REPL", version: AGENT_INFO.version },
   });
 
+  // Hub-incubated session resume (ADR-0017): the .command script exports the
+  // requested backend session id, so a remotely resumed conversation boots
+  // straight into it instead of a fresh prompt line. Empty when started by
+  // hand — plain local runs never see the variable.
+  const bootResumeSid = (process.env.ZCODE_ACP_RESUME_SESSION ?? "").trim();
   try {
-    const fresh = await cx.buildSession(process.cwd()).start();
-    if (resumedDuringStartup) {
-      // The user picked a session from /sessions while this cold-start
-      // round-trip was still in flight — the fresh placeholder is already
-      // obsolete and its default status must not overwrite the resumed
-      // session's own seeded selects. Discard it, keep what they expect.
-      fresh.dispose();
+    if (bootResumeSid) {
+      // Boot directly into the requested session; on a failed load (store
+      // entry gone, foreign workspace refused by serve mode) fall back to a
+      // fresh one so the window still lands on a usable prompt line — the
+      // failure note stays visible above.
+      const resumed = await resumeInto({
+        sessionId: bootResumeSid,
+        cwd: process.cwd(),
+        title: null,
+        updatedAt: null,
+      });
+      if (resumed === "failed") {
+        const fresh = await cx.buildSession(process.cwd()).start();
+        activeSession = fresh;
+        status = seedStatusFromNewSession(status, fresh.newSessionResponse);
+      }
+      // "superseded" (the user raced a /sessions pick during this load)
+      // leaves the state to whichever swap went last — no fallback.
     } else {
-      activeSession = fresh;
-      // The initial config options ride the session/new response body, not a
-      // notification — seed the status from it; later switches push updates.
-      status = seedStatusFromNewSession(status, activeSession.newSessionResponse);
+      const fresh = await cx.buildSession(process.cwd()).start();
+      if (resumedDuringStartup) {
+        // The user picked a session from /sessions while this cold-start
+        // round-trip was still in flight — the fresh placeholder is already
+        // obsolete and its default status must not overwrite the resumed
+        // session's own seeded selects. Discard it, keep what they expect.
+        fresh.dispose();
+      } else {
+        activeSession = fresh;
+        // The initial config options ride the session/new response body, not a
+        // notification — seed the status from it; later switches push updates.
+        status = seedStatusFromNewSession(status, activeSession.newSessionResponse);
+      }
     }
   } catch (err) {
     entries = [
@@ -716,9 +741,13 @@ export async function runRepl(): Promise<void> {
    * request goes out or every replayed message is dropped by the SDK's
    * update router. `attachSession` is @internal in the typings but stable at
    * runtime — the only client-side path from a raw sessionId to update
-   * routing (`buildSession().start()` only covers session/new).
+   * routing (`buildSession().start()` only covers session/new). Resolves
+   * "loaded" once the restored history is seeded, "failed" when the load
+   * request errored (a note is printed; the attached session stays put —
+   * the caller decides any fallback), "superseded" when another swap went
+   * first and owns the state now.
    */
-  async function resumeInto(picked: SessionSummary): Promise<void> {
+  async function resumeInto(picked: SessionSummary): Promise<"loaded" | "failed" | "superseded"> {
     const gen = ++swapGen;
     const loaded = (
       cx as unknown as {
@@ -749,11 +778,11 @@ export async function runRepl(): Promise<void> {
         configOptions?: acp.SessionConfigOption[] | null;
         replayMeta?: { replayedMessages?: number; totalMessages?: number; hasMore?: boolean };
       };
-      if (gen !== swapGen) return; // another swap went first — this load is stale
+      if (gen !== swapGen) return "superseded"; // another swap went first — this load is stale
       status = seedStatusFromNewSession(status, resp);
       resumeMeta = resp.replayMeta ?? null;
     } catch (err) {
-      if (gen !== swapGen) return; // stale — another swap owns the state now
+      if (gen !== swapGen) return "superseded"; // stale — another swap owns the state now
       replayMode = false;
       replayTurn = null;
       entries = [
@@ -764,7 +793,7 @@ export async function runRepl(): Promise<void> {
         },
       ];
       rerender();
-      return;
+      return "failed";
     } finally {
       loadSettled = true;
     }
@@ -779,6 +808,7 @@ export async function runRepl(): Promise<void> {
       { kind: "note", text: `resumed "${title}"${truncated || " — history restored above"}` },
     ];
     rerender();
+    return "loaded";
   }
 
   /** Fresh welcome panel entry; reused by startup and `/new`. */
