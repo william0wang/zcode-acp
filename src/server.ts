@@ -18,6 +18,7 @@ import {
 import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
+import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { AGENT_INFO, PROTOCOL_VERSION, log, warn } from "./utils.js";
 
@@ -116,9 +117,12 @@ export class ZcodeAcpServer {
   /**
    * Deny paths already asked about, per ACP session — the debounce behind
    * the allow popup (the model retries the same path and must not re-ask).
-   * Includes rejected/timed-out asks.
+   * Value is the ask timestamp: Infinity after a user decision or a
+   * structural hint; a FAILED ask (timeout / dead channel / killed by
+   * another grant's restart) keeps its timestamp and re-asks after the
+   * cooldown (see handleSandboxDenial).
    */
-  readonly sandboxAskedPaths = new Map<string, Set<string>>();
+  readonly sandboxAskedPaths = new Map<string, Map<string, number>>();
   /**
    * EACCES ("Permission denied") paths already hinted, per ACP session — the
    * model routinely probes unreadable directories and each real path gets
@@ -129,11 +133,21 @@ export class ZcodeAcpServer {
   readonly fsDeniedPaths = new Map<string, Set<string>>();
   /**
    * Continuation prompts waiting to run after a sandbox allow restart, per
-   * ACP session — set by the allow flow, consumed by prompt() after the
+   * ACP session — set by the batch flush, consumed by prompt() after the
    * interrupted turn unwinds (the new turn tells the model the write is now
    * permitted and to resume the task).
    */
   readonly sandboxContinuations = new Map<string, string>();
+  /**
+   * Batched sandbox allow-restarts (ADR-0011): approvals collect for one
+   * window, then flushSandboxGrants() (handlers/sandbox-allow.ts) performs a
+   * single cancel-wave + continuation + backend close. One restart per
+   * popup used to kill the sibling popups still pending on other denied
+   * paths.
+   */
+  readonly sandboxRestartBatcher = new SandboxRestartBatcher((grants) =>
+    flushSandboxGrants(this, grants),
+  );
   /**
    * Whether the current backend subprocess was spawned under sandbox-exec.
    * Process-level fact (not config wish): EPERM in tool output can only come

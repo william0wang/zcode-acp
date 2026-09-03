@@ -648,16 +648,26 @@ export async function prompt(
   cx: acp.AgentContext,
   requestId: number | string,
 ): Promise<acp.PromptResponse> {
-  const result = await runPrompt(server, params, cx, requestId);
-  const continuation = server.sandboxContinuations.get(params.sessionId);
-  if (continuation && result.stopReason === "cancelled") {
+  let result = await runPrompt(server, params, cx, requestId);
+  // Sandbox-allow continuation chaining, BOUNDED: each batched restart
+  // cancels the in-flight round and queues a continuation for prompt() to
+  // consume. A LATER batch (the user approving a second popup seconds after
+  // the first window flushed) cancels the continuation round itself and
+  // queues its own continuation — with single-shot consumption that entry
+  // would be orphaned and later hijack an UNRELATED cancelled prompt (ESC,
+  // preempt, drain gate). Loop so each cancelled round adopts the newest
+  // continuation; the bound keeps a pathological cycle from chaining
+  // forever.
+  for (let hop = 0; hop < 3; hop++) {
+    const continuation = server.sandboxContinuations.get(params.sessionId);
+    if (!continuation || result.stopReason !== "cancelled") break;
     server.sandboxContinuations.delete(params.sessionId);
     // Same request, fresh round: runPrompt re-enters the whole machinery
     // (ensureBackend respawns; ensureRealSession/subscribe-recovery reloads
     // the session into it). The user's preempt/ESC during the continuation
     // still cancels it — the round registers itself in pendingTurns.
     try {
-      return await runPrompt(
+      result = await runPrompt(
         server,
         { sessionId: params.sessionId, prompt: [{ type: "text", text: continuation }] },
         cx,
@@ -680,9 +690,18 @@ export async function prompt(
         messages().sandboxContinuationFailed(err),
         randomUUID(),
       ).catch(() => undefined);
+      // A leftover continuation for THIS cancelled round is now orphaned —
+      // drop it rather than let a later cancelled prompt adopt it.
+      server.sandboxContinuations.delete(params.sessionId);
       return { stopReason: "cancelled" };
     }
   }
+  // prompt() is returning: nothing may consume this session's continuation
+  // afterwards, so unconditionally drop any entry that slipped in late
+  // (e.g. a flush timer firing inside the end_turn epilogue window, before
+  // the finally deletes the pendingTurns entry) — leaving it would let an
+  // unrelated cancelled prompt adopt it later.
+  server.sandboxContinuations.delete(params.sessionId);
   return result;
 }
 
@@ -2112,17 +2131,17 @@ export async function runEventTurn(
         // ordinary filesystem permissions.
         const denial = extractSandboxDenial(outputText);
         if (denial) {
-          await handleSandboxDenial(server, cx, acpSid, turn, denial, toolCallId);
+          await handleSandboxDenial(server, cx, acpSid, denial, toolCallId);
           if (turn.cancelled) return { stopReason: "cancelled" };
         } else {
           // No path parsed — one generic hint per session, not one per retry.
           let asked = server.sandboxAskedPaths.get(acpSid);
           if (!asked) {
-            asked = new Set();
+            asked = new Map();
             server.sandboxAskedPaths.set(acpSid, asked);
           }
-          if (!asked.has(GENERIC_HINT_KEY)) {
-            asked.add(GENERIC_HINT_KEY);
+          if (asked.get(GENERIC_HINT_KEY) === undefined) {
+            asked.set(GENERIC_HINT_KEY, Number.POSITIVE_INFINITY);
             await sendTextChunk(cx, acpSid, messages().sandboxGenericDenialHint, chunkMsgId);
           }
         }

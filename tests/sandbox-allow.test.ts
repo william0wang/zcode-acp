@@ -22,7 +22,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   extractPermDeniedPath,
   extractSandboxDenial,
+  flushSandboxGrants,
   handleSandboxDenial,
+  SandboxRestartBatcher,
+  SANDBOX_ASK_RETRY_MS,
+  SANDBOX_RESTART_BATCH_MS,
 } from "../src/handlers/sandbox-allow.js";
 import {
   readSandboxConfig,
@@ -167,6 +171,7 @@ describe("extractPermDeniedPath", () => {
 /** Server + context stubs shared by the handleSandboxDenial cases. */
 function makeStubs(decisionOptionId: string) {
   const closed = vi.fn().mockResolvedValue(undefined);
+  const batchFlush = vi.fn();
   const server = {
     // The live process is sandboxed — the flow's process-level gate.
     backendSandboxed: true,
@@ -177,13 +182,14 @@ function makeStubs(decisionOptionId: string) {
     },
     cancelAllPendingTurns: vi.fn(),
     sandboxOnceAllows: new Set<string>(),
-    sandboxAskedPaths: new Map<string, Set<string>>(),
+    sandboxAskedPaths: new Map<string, Map<string, number>>(),
     sandboxContinuations: new Map<string, string>(),
+    sandboxRestartBatcher: new SandboxRestartBatcher(batchFlush),
   } as unknown as ZcodeAcpServer;
   const request = vi.fn().mockResolvedValue({ outcome: { optionId: decisionOptionId } });
   const notify = vi.fn().mockResolvedValue(undefined);
   const cx = { request, notify } as unknown as acp.AgentContext;
-  return { server, cx, closed, request, notify };
+  return { server, cx, closed, request, notify, batchFlush };
 }
 
 describe("handleSandboxDenial", () => {
@@ -191,14 +197,17 @@ describe("handleSandboxDenial", () => {
 
   beforeEach(() => {
     wsRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-allow-")));
+    // The restart-batching window runs on a timer; drive it deterministically.
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     rmSync(wsRoot, { recursive: true, force: true });
   });
 
-  it("always-allow persists to the project config, arms restart + continuation", async () => {
-    const { server, cx, closed, request } = makeStubs("sandbox_allow_always");
+  it("always-allow persists to the project config, arms the batched restart", async () => {
+    const { server, cx, closed, request, batchFlush } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
     const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
@@ -206,7 +215,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: path.join(wsRoot, "..", "outside", "decoy.txt"),
         isMkdir: false,
@@ -223,22 +231,27 @@ describe("handleSandboxDenial", () => {
     expect(readSandboxConfig(wsRoot).allow).toEqual([
       path.dirname(path.join(wsRoot, "..", "outside", "decoy.txt")),
     ]);
-    expect(turn.cancelled).toBe(true);
-    expect(turn.stopSent).toBe(true);
-    expect(server.sandboxContinuations.get("acp_a")).toContain("请继续刚才的任务");
-    expect(closed).toHaveBeenCalledTimes(1);
+    // The restart is BATCHED: the grant is queued, but nothing is cancelled
+    // or closed until the window flushes (other pending popups survive).
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    expect(batchFlush).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(SANDBOX_RESTART_BATCH_MS);
+    expect(batchFlush).toHaveBeenCalledTimes(1);
+    const batch = batchFlush.mock.calls[0]?.[0] as Map<string, string[]>;
+    expect(batch.get("acp_a")).toEqual([
+      path.dirname(path.join(wsRoot, "..", "outside", "decoy.txt")),
+    ]);
   });
 
   it("relative denial paths resolve against the session cwd before the ask", async () => {
     const { server, cx, request } = makeStubs("sandbox_allow_once");
     server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
       { path: "../outside/f.txt", isMkdir: false },
       "tc_rel",
     );
@@ -265,7 +278,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
       "tc_reject",
     );
@@ -291,7 +303,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
       "tc_rejectonce",
     );
@@ -322,7 +333,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
       "tc_denyhit",
     );
@@ -336,13 +346,11 @@ describe("handleSandboxDenial", () => {
   it("timeout / unknown outcome persists NOTHING (no hidden rejection memory)", async () => {
     const { server, cx } = makeStubs("some_other_client_button");
     server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
       "tc_unknown",
     );
@@ -360,7 +368,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(os.homedir(), "sbx-echoed.txt"), isMkdir: false },
       "tc_home",
     );
@@ -380,7 +387,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, ".zcode", "acp", "sandbox.json"), isMkdir: false },
       "tc_island",
     );
@@ -405,7 +411,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       { path: path.join(wsRoot, ".git", "index.lock"), isMkdir: false },
       "tc_git",
     );
@@ -418,7 +423,6 @@ describe("handleSandboxDenial", () => {
   it("case-variant island paths (.ZCODE/ACP) are also protected on darwin", async () => {
     const { server, cx, request, closed } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
     const real = process.platform;
     Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
     try {
@@ -426,7 +430,6 @@ describe("handleSandboxDenial", () => {
         server,
         cx,
         "acp_a",
-        turn,
         { path: path.join(wsRoot, ".ZCODE", "ACP", "sandbox.json"), isMkdir: false },
         "tc_case",
       );
@@ -444,13 +447,11 @@ describe("handleSandboxDenial", () => {
     writeFileSync(target, JSON.stringify({ enabled: true, allow: [] }));
     mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
     symlinkSync(target, sandboxConfigPath(wsRoot));
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: "/opt/data/file.txt",
         isMkdir: false,
@@ -465,15 +466,13 @@ describe("handleSandboxDenial", () => {
   });
 
   it("once-allow keeps the root in bridge-lifetime memory only", async () => {
-    const { server, cx, closed } = makeStubs("sandbox_allow_once");
+    const { server, cx, batchFlush } = makeStubs("sandbox_allow_once");
     server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: "/opt/data/file.txt",
         isMkdir: false,
@@ -483,8 +482,8 @@ describe("handleSandboxDenial", () => {
 
     expect(server.sandboxOnceAllows.has("/opt/data")).toBe(true);
     expect(readSandboxConfig(wsRoot).allow).toEqual([]);
-    expect(turn.cancelled).toBe(true);
-    expect(closed).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(SANDBOX_RESTART_BATCH_MS);
+    expect(batchFlush).toHaveBeenCalledTimes(1);
   });
 
   it("rejection leaves everything untouched (no restart, no continuation)", async () => {
@@ -496,7 +495,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: "/opt/data/file.txt",
         isMkdir: false,
@@ -511,13 +509,11 @@ describe("handleSandboxDenial", () => {
 
   it("debounces repeat asks for the same directory within a session", async () => {
     const { server, cx, request } = makeStubs("sandbox_reject");
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: "/opt/data/one.txt",
         isMkdir: false,
@@ -528,7 +524,6 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      turn,
       {
         path: "/opt/data/two.txt",
         isMkdir: false,
@@ -540,8 +535,9 @@ describe("handleSandboxDenial", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it("a failed ask keeps the sandbox unchanged", async () => {
+  it("a failed ask keeps the sandbox unchanged; the path re-asks after a cooldown", async () => {
     const closed = vi.fn().mockResolvedValue(undefined);
+    const batchFlush = vi.fn();
     const server = {
       backendSandboxed: true,
       ensureBackend: () => ({ close: closed }),
@@ -551,30 +547,161 @@ describe("handleSandboxDenial", () => {
       },
       cancelAllPendingTurns: vi.fn(),
       sandboxOnceAllows: new Set<string>(),
-      sandboxAskedPaths: new Map<string, Set<string>>(),
+      sandboxAskedPaths: new Map<string, Map<string, number>>(),
       sandboxContinuations: new Map<string, string>(),
+      sandboxRestartBatcher: new SandboxRestartBatcher(batchFlush),
     } as unknown as ZcodeAcpServer;
+    const request = vi.fn().mockRejectedValue(new Error("client gone"));
     const cx = {
-      request: vi.fn().mockRejectedValue(new Error("client gone")),
+      request,
       notify: vi.fn().mockResolvedValue(undefined),
     } as unknown as acp.AgentContext;
     const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
 
+    const denial = { path: "/opt/data/file.txt", isMkdir: false } as const;
+    await handleSandboxDenial(server, cx, "acp_a", denial, "tc_1");
+
+    expect(turn.cancelled).toBe(false);
+    expect(closed).not.toHaveBeenCalled();
+    // The mark is a FINITE timestamp (a cooldown), not Infinity: the ask died
+    // of the environment (timeout, dead channel, or another grant's batched
+    // restart killing it), never a user decision — a permanent mute would
+    // leave the model hitting a bare EPERM with no way out.
+    const mark = server.sandboxAskedPaths.get("acp_a")?.get("/opt/data");
+    expect(mark).toBeDefined();
+    expect(mark).not.toBe(Number.POSITIVE_INFINITY);
+
+    // Inside the cooldown an instantly-rejecting client is NOT re-asked (no
+    // popup storm); after it, the same denial may ask again.
+    await handleSandboxDenial(server, cx, "acp_a", denial, "tc_2");
+    expect(request).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(SANDBOX_ASK_RETRY_MS + 1);
+    await handleSandboxDenial(server, cx, "acp_a", denial, "tc_3");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("two approvals inside one window share a single restart flush", async () => {
+    const { server, cx, closed, batchFlush } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+
+    // Two parallel denials on different paths, both approved (the popups
+    // would previously kill each other via per-approval restarts).
     await handleSandboxDenial(
       server,
       cx,
       "acp_a",
-      turn,
-      {
-        path: "/opt/data/file.txt",
-        isMkdir: false,
-      },
-      "tc_1",
+      { path: path.join(wsRoot, "..", "outside", "a.txt"), isMkdir: false },
+      "tc_a",
+    );
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: "/opt/other/b.txt", isMkdir: false },
+      "tc_b",
     );
 
-    expect(turn.cancelled).toBe(false);
+    // Nothing restarted yet — both grants are only queued, so sibling
+    // popups (and the turns behind them) survive the window.
     expect(closed).not.toHaveBeenCalled();
-    // The asked-mark still landed — no retry loop hammering a dead client.
-    expect(server.sandboxAskedPaths.get("acp_a")?.size).toBe(1);
+    expect(server.cancelAllPendingTurns).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(SANDBOX_RESTART_BATCH_MS);
+    expect(batchFlush).toHaveBeenCalledTimes(1);
+    const batch = batchFlush.mock.calls[0]?.[0] as Map<string, string[]>;
+    expect(batch.get("acp_a")).toEqual([
+      path.dirname(path.join(wsRoot, "..", "outside", "a.txt")),
+      "/opt/other",
+    ]);
+  });
+});
+
+describe("SandboxRestartBatcher", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("dedupes the same path and flushes once per window", () => {
+    const flush = vi.fn();
+    const batcher = new SandboxRestartBatcher(flush, 1000);
+    batcher.add("s1", "/a");
+    batcher.add("s1", "/a"); // duplicate — ignored
+    batcher.add("s1", "/b");
+    batcher.add("s2", "/c"); // another session joins the same batch
+    expect(flush).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1000);
+    expect(flush).toHaveBeenCalledTimes(1);
+    const batch = flush.mock.calls[0]?.[0] as Map<string, string[]>;
+    expect(batch.get("s1")).toEqual(["/a", "/b"]);
+    expect(batch.get("s2")).toEqual(["/c"]);
+    // The window re-arms for grants arriving after a flush.
+    batcher.add("s1", "/d");
+    vi.advanceTimersByTime(1000);
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("flushSandboxGrants", () => {
+  /** Minimal SandboxFlushTarget: a fake backend + the server state maps. */
+  function makeTarget(backend: { close(): Promise<void>; isDead: boolean } | null) {
+    const closed = vi.fn().mockResolvedValue(undefined);
+    const target = {
+      cancelAllPendingTurns: vi.fn(),
+      sandboxContinuations: new Map<string, string>(),
+      sessionMap: new Map<string, string>(),
+      pendingTurns: new Map<number | string, { zcodeSid: string }>(),
+      backend: backend === null ? null : { close: closed, isDead: backend.isDead },
+    };
+    return { target, closed };
+  }
+
+  it("cancels all turns, sets one continuation for LIVE sessions, nulls + closes the backend", () => {
+    const { target, closed } = makeTarget({ close: async () => undefined, isDead: false });
+    target.sessionMap.set("acp_a", "z1");
+    target.pendingTurns.set(1, { zcodeSid: "z1" }); // in-flight turn for acp_a
+    target.sessionMap.set("acp_b", "z2"); // session exists, turn already finished
+
+    flushSandboxGrants(
+      target,
+      new Map([
+        ["acp_a", ["/a", "/b"]],
+        ["acp_b", ["/c"]],
+      ]),
+    );
+
+    expect(target.cancelAllPendingTurns).toHaveBeenCalledTimes(1);
+    expect(target.sandboxContinuations.get("acp_a")).toContain("/a");
+    expect(target.sandboxContinuations.get("acp_a")).toContain("/b");
+    // Non-live session: NO continuation — an orphaned entry would later be
+    // consumed by an unrelated cancelled prompt (ESC/preempt) as an automatic
+    // "continue" round.
+    expect(target.sandboxContinuations.has("acp_b")).toBe(false);
+    // The reference is dropped before the async kill so a racing
+    // ensureBackend() respawns instead of adopting the dying backend.
+    expect(target.backend).toBeNull();
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("kills the backend even for non-live sessions — grants need the respawn to apply", () => {
+    const { target, closed } = makeTarget({ close: async () => undefined, isDead: false });
+    flushSandboxGrants(target, new Map([["acp_a", ["/a"]]]));
+    expect(target.backend).toBeNull();
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips the kill when the backend is already gone (no respawn-then-kill churn)", () => {
+    const { target, closed } = makeTarget({ close: async () => undefined, isDead: true });
+    target.sessionMap.set("acp_a", "z1");
+    target.pendingTurns.set(1, { zcodeSid: "z1" });
+    flushSandboxGrants(target, new Map([["acp_a", ["/a"]]]));
+    // Continuation still lands for the live session; the dead backend is
+    // left alone for the lazy respawn to handle.
+    expect(target.sandboxContinuations.get("acp_a")).toContain("/a");
+    expect(target.backend).not.toBeNull();
+    expect(closed).not.toHaveBeenCalled();
   });
 });

@@ -26,7 +26,7 @@ import {
 } from "../backend/sandbox.js";
 import { messages } from "../i18n.js";
 import { log, warn } from "../utils.js";
-import type { PendingTurn, ZcodeAcpServer } from "../server.js";
+import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 
 /** A sandbox write-denial observed in tool output. */
@@ -99,6 +99,128 @@ export function extractSandboxDenial(text: string): SandboxDenial | null {
 const ASK_TIMEOUT_MS = 120_000;
 
 /**
+ * How long approvals collect into one restart batch (ADR-0011). The old flow
+ * restarted the backend on EVERY approval; a second popup still pending on
+ * another denied path was killed by that restart and — worse — its debounce
+ * mark permanently muted the re-ask, so the model kept hitting a bare EPERM
+ * with no way out. Approvals inside one window now share a single restart
+ * and continuation.
+ */
+export const SANDBOX_RESTART_BATCH_MS = 3000;
+
+/**
+ * Cooldown before a FAILED ask (timeout, dead channel, killed by another
+ * grant's restart) may re-ask the same path. No cooldown at all would storm
+ * on instantly-rejecting clients; the old permanent mute left the model
+ * hitting a bare EPERM with no way out. A USER decision pins the path
+ * forever instead (see handleSandboxDenial).
+ */
+const SANDBOX_ASK_RETRY_MS = 60_000;
+export { SANDBOX_ASK_RETRY_MS };
+
+/**
+ * Collects approved grants and fires ONE flush per batch window. Kept here
+ * (not in server.ts) so tests drive the batching against a stub flush
+ * without constructing a whole ZcodeAcpServer.
+ */
+export class SandboxRestartBatcher {
+  private readonly grants = new Map<string, string[]>();
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(
+    private readonly flush: (grants: Map<string, string[]>) => void,
+    private readonly batchMs: number = SANDBOX_RESTART_BATCH_MS,
+  ) {}
+
+  /** Add one approved path for a session; the first add arms the window. */
+  add(acpSid: string, grantedReal: string): void {
+    const list = this.grants.get(acpSid) ?? [];
+    if (!list.includes(grantedReal)) list.push(grantedReal);
+    this.grants.set(acpSid, list);
+    if (this.timer) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.grants.size === 0) return;
+      const batch = new Map(this.grants);
+      this.grants.clear();
+      this.flush(batch);
+    }, this.batchMs);
+    this.timer.unref?.();
+  }
+}
+
+/**
+ * What flushSandboxGrants needs from the server (satisfied structurally by
+ * ZcodeAcpServer; tests stub it). Keeping the flush standalone makes the
+ * cancel-wave / continuation / kill sequencing unit-testable without a
+ * whole server.
+ */
+export interface SandboxFlushTarget {
+  cancelAllPendingTurns(): void;
+  readonly sandboxContinuations: Map<string, string>;
+  /** acpSid → live zcode session id. */
+  readonly sessionMap: Map<string, string>;
+  /** In-flight turns; entries are deleted when the turn's prompt returns. */
+  readonly pendingTurns: Map<number | string, { zcodeSid: string }>;
+  /** The backend to close; the flush nulls it (respawn stays lazy). */
+  backend: { close(): Promise<void>; readonly isDead: boolean } | null;
+}
+
+/**
+ * One batched sandbox allow-restart (ADR-0011; driven by
+ * SandboxRestartBatcher): cancel every in-flight turn — they share the
+ * backend and would otherwise hang on the dead reader — queue one
+ * continuation per session listing ALL granted paths, and close the backend
+ * once. The next ensureBackend() respawns under the widened profile
+ * (persisted config entries + bridge-lifetime once-allows).
+ */
+export function flushSandboxGrants(
+  target: SandboxFlushTarget,
+  grants: Map<string, string[]>,
+): void {
+  const m = messages();
+  const count = [...grants.values()].reduce((n, ps) => n + ps.length, 0);
+  target.cancelAllPendingTurns();
+  // Continuations ONLY for sessions with a turn still in flight: those turn
+  // loops unwind on the cancelled flag and prompt() consumes the
+  // continuation as it returns. A session whose turn already finished
+  // naturally during the batch window has nobody to consume the entry — an
+  // orphan would later hijack an UNRELATED cancelled prompt (ESC, preempt,
+  // drain gate) into an automatic "continue" round.
+  const liveZcode = new Set<string>();
+  for (const t of target.pendingTurns.values()) liveZcode.add(t.zcodeSid);
+  for (const [sid, paths] of grants) {
+    const z = target.sessionMap.get(sid);
+    if (z !== undefined && liveZcode.has(z)) {
+      target.sandboxContinuations.set(sid, m.sandboxContinuationPrompt(paths));
+    } else {
+      log(`sandbox: no in-flight turn — ${paths.length} grant(s) apply on next spawn`);
+    }
+  }
+  const dying = target.backend;
+  if (!dying || dying.isDead) {
+    // Already gone (e.g. a late approval after an earlier batch restarted):
+    // the grants live in the config / once-allows, and the next
+    // ensureBackend() spawns with them — respawning here just to close the
+    // new process again would churn.
+    log(`sandbox: backend already gone — ${count} grant(s) apply on next spawn`);
+    return;
+  }
+  // Drop the reference BEFORE the async kill: the turn loops unwind on the
+  // cancelled flag while the kill is still in flight, and prompt()'s
+  // continuation round reaches ensureBackend() the moment its first round
+  // returns — with the old reference still held it would adopt the dying
+  // backend instead of respawning under the widened profile.
+  target.backend = null;
+  log(`sandbox: restarting backend with ${count} granted path(s)`);
+  dying
+    .close()
+    .catch((e: unknown) =>
+      warn(`sandbox: backend kill failed: ${e instanceof Error ? e.message : String(e)}`),
+    );
+}
+
+/**
  * Extract the path from an ordinary filesystem-permission failure (EACCES —
  * "Permission denied"), as printed by POSIX tools (`ls: /a/b: Permission
  * denied`) and zsh redirects (`zsh:1: permission denied: /a/b`). Unlike a
@@ -163,15 +285,14 @@ function underAny(target: string, bases: string[]): boolean {
 
 /**
  * Ask the user to allow the directory behind a sandbox denial and, on
- * approval, arm the restart (kill backend, flag the turn cancelled, queue
- * the continuation prompt). Best-effort: any failure keeps the sandbox
- * exactly as it was.
+ * approval, queue the grant into the batched restart (see
+ * SandboxRestartBatcher — one restart per window, not one per approval).
+ * Best-effort: any failure keeps the sandbox exactly as it was.
  */
 export async function handleSandboxDenial(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
-  turn: PendingTurn,
   denial: SandboxDenial,
   toolCallId: string,
 ): Promise<void> {
@@ -188,20 +309,30 @@ export async function handleSandboxDenial(
     path.isAbsolute(raw) ? raw : path.resolve(cwd ?? process.cwd(), raw),
   );
 
-  // Debounce: one ask per path per session — the model retries the same
-  // denied path and must not spam the popup; rejected/timeout asks count.
+  // Debounce: one ask per path per session. The mark carries the ask
+  // timestamp — a USER decision pins it forever (Infinity); an ask that died
+  // of the environment merely cools down for SANDBOX_ASK_RETRY_MS and may
+  // re-ask afterwards.
   let asked = server.sandboxAskedPaths.get(acpSid);
   if (!asked) {
-    asked = new Set();
+    asked = new Map();
     server.sandboxAskedPaths.set(acpSid, asked);
   }
-  if (asked.has(targetReal)) return;
-  asked.add(targetReal);
+  const prior = asked.get(targetReal);
+  if (
+    prior !== undefined &&
+    (prior === Number.POSITIVE_INFINITY || Date.now() - prior < SANDBOX_ASK_RETRY_MS)
+  ) {
+    return;
+  }
+  asked.set(targetReal, Date.now());
 
   // Island / strictGit denials are unallowable by construction (their denies
   // win the last-match). Tell the USER why instead of a doomed popup — the
-  // model only ever sees the bare EPERM in its tool output.
+  // model only ever sees the bare EPERM in its tool output. Structural:
+  // hinted once, pinned forever.
   if (underAny(targetReal, protectedSandboxPaths(server.sandboxRoots()))) {
+    asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxProtectedHint, randomUUID());
     return;
   }
@@ -212,6 +343,7 @@ export async function handleSandboxDenial(
   // the config is the only way to grant something this broad.
   const home = resolveReal(os.homedir());
   if (targetReal === "/" || targetReal === home || home.startsWith(targetReal + path.sep)) {
+    asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxOverBroadHint(targetReal), randomUUID());
     return;
   }
@@ -219,6 +351,7 @@ export async function handleSandboxDenial(
   // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
   // memory: no popup, and the asked-mark above keeps later repeats silent.
   if (wsRoot && underAny(targetReal, readSandboxConfig(wsRoot).deny.map(resolveReal))) {
+    asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxDenyListedHint(targetReal), randomUUID());
     return;
   }
@@ -275,13 +408,21 @@ export async function handleSandboxDenial(
     else if (oid === "sandbox_reject_always") decision = "reject_always";
     else if (oid === "sandbox_reject_once") decision = "reject_once";
   } catch (e) {
-    // Popup failed/timed out or the client rejected the request itself —
-    // keep the sandbox unchanged; the asked-mark prevents a retry loop.
+    // Popup failed/timed out or the client channel died — including a kill
+    // by ANOTHER grant's batched restart. This ask never got a user
+    // decision; the timestamp stays as-is, so the path merely cools down
+    // (SANDBOX_ASK_RETRY_MS) and may re-ask afterwards — never permanently
+    // muted, never free to storm.
     warn(
       `sandbox: allow ask for ${targetReal} failed: ${e instanceof Error ? e.message : String(e)}`,
     );
     return;
   }
+
+  // A real outcome reached the client and came back (including an unknown
+  // optionId the user picked): the user SAW this ask — pin the debounce
+  // forever, whatever they chose.
+  asked.set(targetReal, Number.POSITIVE_INFINITY);
 
   if (decision === "reject_always") {
     // The user's denial is persisted VISIBLY into the project config — never
@@ -319,21 +460,12 @@ export async function handleSandboxDenial(
     server.sandboxOnceAllows.add(targetReal);
   }
 
-  // Arm the restart: flag the turn so the loop unwinds as cancelled instead
-  // of polling a dead reader, queue the continuation prompt, kill the
-  // backend process group (next ensureBackend() respawns with the widened
-  // profile — once-allows and the persisted config are both folded in).
-  // Other sessions' in-flight turns are cancelled too — they share this
-  // backend and would otherwise hang on the dead reader.
-  turn.cancelled = true;
-  turn.stopSent = true; // no stop pair needed: the whole process group dies
-  server.cancelAllPendingTurns();
-  server.sandboxContinuations.set(acpSid, m.sandboxContinuationPrompt(targetReal));
+  // Arm the BATCHED restart: this grant joins the current window; the flush
+  // (see SandboxRestartBatcher) cancels every pending turn, queues a
+  // continuation per session listing ALL granted paths, and closes the
+  // backend once (next ensureBackend() respawns with the widened profile —
+  // once-allows and the persisted config are both folded in).
+  server.sandboxRestartBatcher.add(acpSid, targetReal);
   await sendTextChunk(cx, acpSid, m.sandboxRestartHint(targetReal), randomUUID());
-  log(`sandbox: allow granted for ${targetReal} (${decision}) — restarting backend`);
-  try {
-    await server.ensureBackend().close();
-  } catch (e) {
-    warn(`sandbox: backend kill failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
+  log(`sandbox: allow granted for ${targetReal} (${decision}) — restart batched`);
 }

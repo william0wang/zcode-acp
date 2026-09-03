@@ -88,8 +88,9 @@ export interface Messages {
   sandboxRejectAlwaysPersisted: (path: string) => string;
   sandboxRejectAlwaysUnpersisted: (path: string) => string;
   sandboxRejectOnceHint: (path: string) => string;
-  /** Continuation prompt sent to the model after an allow restart. */
-  sandboxContinuationPrompt: (path: string) => string;
+  /** Continuation prompt sent to the model after an allow restart (all
+   *  paths granted in one restart batch are listed together). */
+  sandboxContinuationPrompt: (paths: string[]) => string;
   /** The chained continuation round itself failed (backend warm-up window). */
   sandboxContinuationFailed: (err: string) => string;
   sandboxRestartHint: (path: string) => string;
@@ -183,10 +184,11 @@ const zh: Messages = {
     `[已拒绝 ${p}(配置不可写,未持久化,同类写入下次仍会询问。)]`,
   sandboxRejectOnceHint: (p) =>
     `[已拒绝沙箱放行 ${p},未保存任何决定,同类写入会再次询问;如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
-  sandboxContinuationPrompt: (p) => `[沙箱已放行 ${p},请继续刚才的任务。]`,
+  sandboxContinuationPrompt: (ps) => `[沙箱已放行 ${ps.join("、")},请继续刚才的任务。]`,
   sandboxContinuationFailed: (err) =>
     `[沙箱已放行,但自动续接失败:${err}。请重新发送一条消息(例如"继续刚才的任务")以恢复工作。]`,
-  sandboxRestartHint: (p) => `[沙箱已放行 ${p},正在重启后端以应用新权限,随后自动继续…]`,
+  sandboxRestartHint: (p) =>
+    `[沙箱已放行 ${p},数秒内将合并重启后端以应用新权限;若重启后任务未自动继续,请重新发送一条消息(例如"继续刚才的任务")。]`,
   sandboxResumedStatus: "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
   sandboxGenericDenialHint:
     "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
@@ -271,11 +273,12 @@ const en: Messages = {
     `[Rejected ${p} (config not writable, nothing persisted; the same write will ask again.)]`,
   sandboxRejectOnceHint: (p) =>
     `[Sandbox grant rejected for ${p}; no decision was saved and the same write will ask again. To grant, edit the allow list in .zcode/acp/sandbox.json (bridge-written, not agent-writable).]`,
-  sandboxContinuationPrompt: (p) => `[Sandbox granted ${p}; please continue the previous task.]`,
+  sandboxContinuationPrompt: (ps) =>
+    `[Sandbox granted ${ps.join(", ")}; please continue the previous task.]`,
   sandboxContinuationFailed: (err) =>
     `[Sandbox granted, but the automatic continuation failed: ${err}. Resend a message (e.g. "continue the previous task") to resume the work.]`,
   sandboxRestartHint: (p) =>
-    `[Sandbox granted ${p}; restarting the backend to apply the new permission, then continuing automatically…]`,
+    `[Sandbox granted ${p}; the backend restarts in a few seconds to apply it (approvals meanwhile join the same restart). If the task does not auto-continue after the restart, resend a message (e.g. "continue the previous task").]`,
   sandboxResumedStatus: "[Sandbox backend restarted, session restored; continuing the task…]",
   sandboxGenericDenialHint:
     "[The sandbox denied a write outside the whitelist. To grant a directory: choose Allow in the popup, or edit .zcode/acp/sandbox.json and restart the session.]",
