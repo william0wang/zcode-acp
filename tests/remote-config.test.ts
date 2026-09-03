@@ -49,6 +49,7 @@ describe("parseRemoteConfig", () => {
       hubHost: DEFAULT_HUB_HOST,
       bridgePort: DEFAULT_BRIDGE_PORT,
       origin: "editor",
+      pinCwd: false,
     });
   });
 
@@ -75,7 +76,24 @@ describe("parseRemoteConfig", () => {
       hubHost: "0.0.0.0",
       bridgePort: 9001,
       origin: "editor",
+      pinCwd: false,
     });
+  });
+
+  it("reads the hub-incubation overrides (origin, cwd pin) — ADR-0016", () => {
+    // A hub-incubated terminal REPL registers as the project's serve bridge
+    // and pins its session roots to the process cwd.
+    const config = parseRemoteConfig({
+      ...BASE_ENV,
+      ZCODE_ACP_REMOTE_ORIGIN: "serve",
+      ZCODE_ACP_REMOTE_PIN_CWD: "1",
+    });
+    expect(config?.origin).toBe("serve");
+    expect(config?.pinCwd).toBe(true);
+    // Any other spelling reads as editor / unpinned (parseOrigin's rule).
+    const loose = parseRemoteConfig({ ...BASE_ENV, ZCODE_ACP_REMOTE_ORIGIN: "editor" });
+    expect(loose?.origin).toBe("editor");
+    expect(loose?.pinCwd).toBe(false);
   });
 });
 

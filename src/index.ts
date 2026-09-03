@@ -78,12 +78,16 @@ function buildAllCommands() {
 }
 
 export async function main(): Promise<void> {
+  // Remote config is parsed BEFORE the server exists: a hub-incubated REPL
+  // bridge (ADR-0016) arrives with ZCODE_ACP_REMOTE_PIN_CWD=1, and the pin
+  // must hold from the very first session/new — not from the endpoint start.
+  const remoteConfigEarly = parseRemoteConfig();
   // stdout is the outbound channel to the client; stdin is inbound.
   const outbound = Writable.toWeb(process.stdout);
   const inbound = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
   const stream = acp.ndJsonStream(outbound, inbound);
-  const server = new ZcodeAcpServer();
+  const server = new ZcodeAcpServer({ serveMode: remoteConfigEarly?.pinCwd === true });
 
   // Load all commands once at startup (they don't change mid-session).
   const allCommands = buildAllCommands();
@@ -132,9 +136,8 @@ export async function main(): Promise<void> {
   // Remote access (opt-in via ENV): serve the same app on a loopback WS/HTTP
   // endpoint and register with the machine-level hub. Failures warn and leave
   // the stdio link untouched.
-  const remoteConfig = parseRemoteConfig();
-  if (remoteConfig) {
-    remoteHandle = await startRemoteEndpoint(server, app, remoteConfig);
+  if (remoteConfigEarly) {
+    remoteHandle = await startRemoteEndpoint(server, app, remoteConfigEarly);
   }
 }
 

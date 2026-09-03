@@ -32,7 +32,13 @@ vi.mock("../src/tasks-index.js", () => ({
   listKnownWorkspaces: listKnownWorkspacesMock,
 }));
 
-import { resetQuotaCacheForTest, startHub, type HubHandle } from "../src/remote/hub-server.js";
+import {
+  resetQuotaCacheForTest,
+  resolveTerminalLaunch,
+  startHub,
+  terminalReplScript,
+  type HubHandle,
+} from "../src/remote/hub-server.js";
 import { AGENT_INFO } from "../src/utils.js";
 
 const TOKEN = "test-hub-token";
@@ -875,7 +881,7 @@ describe("hub remote session-create (ADR-0014)", () => {
    * once(); the mutable exitCode/signalCode fields flip the death checks.
    */
   let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
-  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv }>;
+  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }>;
   let spawnCount: number;
 
   beforeEach(() => {
@@ -893,7 +899,7 @@ describe("hub remote session-create (ADR-0014)", () => {
   });
 
   function spawnServeSpy() {
-    return (opts: { cwd: string; env: NodeJS.ProcessEnv }) => {
+    return (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
       spawnCount++;
       spawnCalls.push(opts);
       return fakeChild as unknown as import("node:child_process").ChildProcess;
@@ -930,9 +936,7 @@ describe("hub remote session-create (ADR-0014)", () => {
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
     const url = `http://127.0.0.1:${hub.port}/api/instances`;
     expect((await fetch(url, { method: "POST" })).status).toBe(401);
-    expect(
-      (await fetch(url, { method: "POST", headers: auth, body: "{}" })).status,
-    ).toBe(400);
+    expect((await fetch(url, { method: "POST", headers: auth, body: "{}" })).status).toBe(400);
     const res = await fetch(url, {
       method: "POST",
       headers: { ...auth, "Content-Type": "application/json" },
@@ -954,8 +958,15 @@ describe("hub remote session-create (ADR-0014)", () => {
     await new Promise((r) => setTimeout(r, 400));
     expect(spawnCount).toBe(1);
     expect(spawnCalls[0]!.cwd).toBe(PROJECT);
+    // Session-create incubates a VISIBLE terminal REPL (ADR-0016); the stub
+    // stands in for whichever surface the platform picked.
+    expect(spawnCalls[0]!.kind).toBe("repl");
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE).toBe("1");
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_TOKEN).toBe(TOKEN);
+    // ADR-0016 ENV: register as the project's serve bridge + pin session
+    // roots to the project cwd (ADR-0014 whitelist semantics).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_ORIGIN).toBe("serve");
+    expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_PIN_CWD).toBe("1");
     await registerServeBridge(hub, PROJECT);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1061,5 +1072,343 @@ describe("hub remote session-create (ADR-0014)", () => {
     const byId = Object.fromEntries(list.map((e) => [e.id, e.origin]));
     expect(byId[`serve-${PROJECT}`]).toBe("serve");
     expect(byId["editor-1"]).toBe("editor");
+  });
+});
+
+describe("hub project session history (ADR-0015)", () => {
+  const PROJECT = "/Users/dev/Develop/demo";
+  const auth = { Authorization: `Bearer ${TOKEN}` };
+  const STORE = [
+    {
+      sessionId: "sess_closed",
+      title: "Old work",
+      updatedAt: "2026-08-01T10:00:00.000Z",
+      live: false,
+      running: false,
+    },
+    {
+      sessionId: "sess_live",
+      title: "Current",
+      updatedAt: "2026-09-01T10:00:00.000Z",
+      live: true,
+      running: false,
+    },
+  ];
+
+  let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
+  let spawnCount: number;
+
+  beforeEach(() => {
+    listKnownWorkspacesMock.mockReset();
+    listKnownWorkspacesMock.mockResolvedValue([
+      { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
+    ]);
+    fakeChild = new EventEmitter() as typeof fakeChild;
+    fakeChild.pid = 4242;
+    fakeChild.exitCode = null;
+    fakeChild.signalCode = null;
+    spawnCount = 0;
+  });
+
+  /** Fake bridge loopback HTTP server serving GET /sessions (records the URL). */
+  function startSessionsBridge(
+    status = 200,
+  ): Promise<{ port: number; seenUrl: () => string | null }> {
+    return new Promise((resolve) => {
+      let seen: string | null = null;
+      const server = createServer((req, res) => {
+        seen = req.url ?? "";
+        res.writeHead(status, { "Content-Type": "application/json" });
+        // Real bridge semantics: a continued page carries the next cursor,
+        // an under-limit first page has none.
+        const cursor = (req.url ?? "").includes("before=") ? 1234 : null;
+        res.end(JSON.stringify({ sessions: STORE, nextCursor: cursor }));
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({
+          port: typeof addr === "object" && addr ? addr.port : 0,
+          seenUrl: () => seen,
+        });
+      });
+      track(server, (s) => new Promise<void>((r) => s.close(() => r())));
+    });
+  }
+
+  async function registerServeBridge(hub: HubHandle, port: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id: `serve-${PROJECT}`,
+          workspace: PROJECT,
+          origin: "serve",
+          port,
+          pid: 4242,
+        }),
+      ),
+    });
+    expect(res.ok).toBe(true);
+  }
+
+  it("requires auth, a workspacePath, and a whitelisted project", async () => {
+    const hub = await startTestHub();
+    const url = `http://127.0.0.1:${hub.port}/api/projects/sessions`;
+    expect((await fetch(url)).status).toBe(401);
+    expect((await fetch(url, { headers: auth })).status).toBe(400);
+    const res = await fetch(`${url}?workspacePath=${encodeURIComponent("/etc")}`, {
+      headers: auth,
+    });
+    expect(res.status).toBe(403);
+    expect(await res.text()).toBe("unknown project");
+  });
+
+  it("proxies the live serve bridge's list and wraps it with the instance", async () => {
+    const bridge = await startSessionsBridge();
+    const hub = await startTestHub();
+    await registerServeBridge(hub, bridge.port);
+
+    const res = await fetch(
+      `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}`,
+      { headers: auth },
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      workspacePath: PROJECT,
+      instance: { id: `serve-${PROJECT}`, origin: "serve" },
+      sessions: STORE,
+      nextCursor: null,
+    });
+    // No pagination params — the bridge gets a bare /sessions.
+    expect(bridge.seenUrl()).toBe("/sessions");
+  });
+
+  it("forwards pagination params to the bridge and passes nextCursor through", async () => {
+    const bridge = await startSessionsBridge();
+    const hub = await startTestHub();
+    await registerServeBridge(hub, bridge.port);
+
+    const res = await fetch(
+      `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}&limit=5&before=1000&beforeId=sess_004`,
+      { headers: auth },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { nextCursor: unknown };
+    expect(bridge.seenUrl()).toBe("/sessions?limit=5&before=1000&beforeId=sess_004");
+    expect(body.nextCursor).toBe(1234);
+  });
+
+  it("answers 400 for malformed pagination params without spawning", async () => {
+    const bridge = await startSessionsBridge();
+    const hub = await startTestHub();
+    await registerServeBridge(hub, bridge.port);
+    const url = `http://127.0.0.1:${hub.port}/api/projects/sessions`;
+
+    expect(
+      (
+        await fetch(`${url}?workspacePath=${encodeURIComponent(PROJECT)}&limit=0`, {
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${url}?workspacePath=${encodeURIComponent(PROJECT)}&limit=00`, {
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${url}?workspacePath=${encodeURIComponent(PROJECT)}&before=abc`, {
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${url}?workspacePath=${encodeURIComponent(PROJECT)}&beforeId=bad%20id`, {
+          headers: auth,
+        })
+      ).status,
+    ).toBe(400);
+    expect(bridge.seenUrl()).toBeNull();
+  });
+
+  it("incubates a serve bridge when none is live, then reuses it", async () => {
+    const bridge = await startSessionsBridge();
+    let seenKind: "repl" | "serve" | null = null;
+    const hub = await startTestHub({
+      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
+        spawnCount++;
+        seenKind = opts.kind;
+        // The spawned bridge registers itself moments after boot.
+        void fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            registerBody({
+              id: `serve-${opts.cwd}`,
+              workspace: opts.cwd,
+              origin: "serve",
+              port: bridge.port,
+              pid: 4242,
+            }),
+          ),
+        });
+        return fakeChild as unknown as import("node:child_process").ChildProcess;
+      },
+    });
+    const url = `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}`;
+
+    const res = await fetch(url, { headers: auth });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { instance: { id: string }; sessions: unknown[] };
+    expect(body.instance).toEqual({ id: `serve-${PROJECT}`, origin: "serve" });
+    expect(body.sessions).toEqual(STORE);
+    expect(spawnCount).toBe(1);
+    // A background listing must not pop a terminal window — detached serve only.
+    expect(seenKind).toBe("serve");
+
+    // A second listing joins the now-registered bridge — no second spawn.
+    expect((await fetch(url, { headers: auth })).status).toBe(200);
+    expect(spawnCount).toBe(1);
+  });
+
+  it("joins one incubation when two listings race (no double spawn)", async () => {
+    const bridge = await startSessionsBridge();
+    const hub = await startTestHub({
+      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
+        spawnCount++;
+        // Register late enough that BOTH listings find no live instance and
+        // must join the in-flight incubation instead of spawning their own.
+        const timer = setTimeout(() => {
+          void fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(
+              registerBody({
+                id: `serve-${opts.cwd}`,
+                workspace: opts.cwd,
+                origin: "serve",
+                port: bridge.port,
+                pid: 4242,
+              }),
+            ),
+          });
+        }, 700);
+        timer.unref?.();
+        return fakeChild as unknown as import("node:child_process").ChildProcess;
+      },
+    });
+    const url = `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}`;
+
+    const [a, b] = await Promise.all([
+      fetch(url, { headers: auth }),
+      fetch(url, { headers: auth }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(spawnCount).toBe(1);
+  });
+
+  it("answers 502 when the bridge serves a broken list", async () => {
+    const bridge = await startSessionsBridge(500);
+    const hub = await startTestHub();
+    await registerServeBridge(hub, bridge.port);
+
+    const res = await fetch(
+      `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}`,
+      { headers: auth },
+    );
+    expect(res.status).toBe(502);
+    expect(await res.text()).toContain("bridge answered 500");
+  });
+});
+
+describe("terminal launch resolution (ADR-0016)", () => {
+  it("prefers the explicit command template over everything", () => {
+    const out = resolveTerminalLaunch({
+      ZCODE_ACP_HUB_TERMINAL_COMMAND: "my-term --run {script}",
+      ZCODE_ACP_HUB_TERMINAL_APP: "iTerm",
+    });
+    expect(out.launch).toEqual({ kind: "shell", command: "my-term --run {script}" });
+    expect(out.warning).toBeUndefined();
+  });
+
+  it("maps well-known apps to their verified launch mechanism", () => {
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "WezTerm" }).launch).toEqual({
+      kind: "openAppArgs",
+      app: "WezTerm",
+      args: ["start", "--"],
+    });
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "kitty" }).launch).toEqual({
+      kind: "openAppArgs",
+      app: "kitty",
+      args: [],
+    });
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "ghostty" }).launch).toEqual({
+      kind: "openAppArgs",
+      app: "Ghostty",
+      args: ["-e"],
+    });
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Alacritty" }).launch).toEqual({
+      kind: "openAppArgs",
+      app: "Alacritty",
+      args: ["-e"],
+    });
+    // .command executors; aliases are case- and .app-suffix-insensitive.
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "iTerm.app" }).launch).toEqual({
+      kind: "openApp",
+      app: "iTerm",
+    });
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "iterm2" }).launch).toEqual({
+      kind: "openApp",
+      app: "iTerm",
+    });
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Apple_Terminal" }).launch).toEqual({
+      kind: "openApp",
+      app: "Terminal",
+    });
+  });
+
+  it("warns on Warp — it cannot run scripts or commands programmatically", () => {
+    const out = resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Warp" });
+    expect(out.launch).toEqual({ kind: "openApp", app: "Warp" });
+    expect(out.warning).toContain("warpdotdev/warp#1917");
+    expect(out.warning).toContain("ZCODE_ACP_HUB_TERMINAL_COMMAND");
+  });
+
+  it("passes unknown apps through to open -a and defaults to Terminal.app", () => {
+    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "MyTerm" }).launch).toEqual({
+      kind: "openApp",
+      app: "MyTerm",
+    });
+    expect(resolveTerminalLaunch({}).launch).toEqual({ kind: "openApp", app: "Terminal" });
+    // The hub is a background process — its own env has no terminal, and
+    // TERM_PROGRAM (at best an accident of how the hub was launched) is
+    // never consulted.
+    expect(resolveTerminalLaunch({ TERM_PROGRAM: "iTerm.app" }).launch).toEqual({
+      kind: "openApp",
+      app: "Terminal",
+    });
+  });
+});
+
+describe("terminal REPL script (ADR-0016)", () => {
+  it("embeds the hub's ZCODE_ACP_* env so the fresh terminal shell registers", () => {
+    const body = terminalReplScript("/Users/me/proj", "/opt/cli.js", {
+      PATH: "/usr/bin",
+      ZCODE_ACP_REMOTE: "1",
+      ZCODE_ACP_REMOTE_TOKEN: "tok it's",
+      ZCODE_ACP_REMOTE_ORIGIN: "serve",
+    });
+    expect(body).toContain("cd '/Users/me/proj' || exit 1");
+    expect(body).toContain("export ZCODE_ACP_REMOTE='1'");
+    expect(body).toContain("export ZCODE_ACP_REMOTE_TOKEN='tok it'\\''s'");
+    expect(body).toContain("export ZCODE_ACP_REMOTE_ORIGIN='serve'");
+    expect(body).toContain("exec '");
+    expect(body).not.toContain("PATH=");
   });
 });

@@ -15,6 +15,16 @@
  *                                 containerized tunnel agent)
  *   ZCODE_ACP_REMOTE_PORT=8378    bridge endpoint start port (auto-increment
  *                                 when taken; loopback only)
+ *   ZCODE_ACP_REMOTE_ORIGIN=serve registration origin override (ADR-0016: a
+ *                                 REPL incubated by the hub in a visible
+ *                                 terminal registers as "serve" so the
+ *                                 per-workspace dedupe treats it as THE
+ *                                 project's remote bridge)
+ *   ZCODE_ACP_REMOTE_PIN_CWD=1    pin every session root to the process cwd
+ *                                 (bridge-wide serveMode; ADR-0016: keeps
+ *                                 ADR-0014's whitelist semantics for a
+ *                                 hub-incubated REPL, whose bridge would
+ *                                 otherwise trust a remote client's cwd)
  */
 
 import { warn } from "../utils.js";
@@ -31,6 +41,14 @@ export interface RemoteConfig {
    * instances per workspace and label them for remote clients.
    */
   origin: "editor" | "serve";
+  /**
+   * Pin every session root to the process cwd (serveMode for the bridge).
+   * Set by the hub when it incubates a REPL in a visible terminal
+   * (ADR-0016): the REPL bridge is a stdio bridge by lifecycle, but its
+   * sessions must obey ADR-0014's whitelist semantics — a remote client
+   * must not steer them into arbitrary directories.
+   */
+  pinCwd: boolean;
 }
 
 export const DEFAULT_HUB_PORT = 8377;
@@ -64,7 +82,8 @@ export function parseRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteC
     hubPort: parsePort(env.ZCODE_ACP_HUB_PORT, DEFAULT_HUB_PORT, "ZCODE_ACP_HUB_PORT"),
     hubHost: (env.ZCODE_ACP_HUB_HOST ?? "").trim() || DEFAULT_HUB_HOST,
     bridgePort: parsePort(env.ZCODE_ACP_REMOTE_PORT, DEFAULT_BRIDGE_PORT, "ZCODE_ACP_REMOTE_PORT"),
-    origin: "editor",
+    origin: (env.ZCODE_ACP_REMOTE_ORIGIN ?? "").trim() === "serve" ? "serve" : "editor",
+    pinCwd: (env.ZCODE_ACP_REMOTE_PIN_CWD ?? "").trim() === "1",
   };
 }
 
@@ -81,5 +100,6 @@ export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConf
     hubHost: (env.ZCODE_ACP_HUB_HOST ?? "").trim() || DEFAULT_HUB_HOST,
     bridgePort: parsePort(env.ZCODE_ACP_REMOTE_PORT, DEFAULT_BRIDGE_PORT, "ZCODE_ACP_REMOTE_PORT"),
     origin: "editor",
+    pinCwd: false,
   };
 }
