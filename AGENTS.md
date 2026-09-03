@@ -216,6 +216,19 @@ ZCode protocol types into ACP notifications directly — always translate.
   armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
   the template would silently disarm). `/dev/null` must stay write-allowed
   or every `git commit` breaks.
+- **A hub born inside the Seatbelt wrap silently breaks session-create**:
+  macOS TCC attributes the hub's `open -a Terminal` to the requester identity
+  "Sandbox" and Terminal refuses the document — while `open` itself exits 0,
+  so `spawnTerminalRepl` reads success, the incubation burns its 20s budget,
+  and every remote create 502s. Seatbelt cannot be escaped from within, so
+  the fix is launchd (it lives outside): every sandboxed backend spawn is
+  birth-marked `ZCODE_ACP_SANDBOX_ACTIVE` (server.ts ensureBackend — NOT the
+  same signal as `ZCODE_ACP_SANDBOX`, which a user may legitimately set
+  globally), and the hub boot-checks the marker and relaunches itself via
+  `launchctl bootstrap gui/$UID` + kickstart before binding
+  (src/remote/hub-sandbox.ts; plist in a temp mkdtemp, launchd reads the path
+  itself). Don't reconnect this through `open` retries or TCC prompts — the
+  attribution is the problem, not a missing permission.
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast

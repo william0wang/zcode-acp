@@ -12,6 +12,13 @@
  * Refuses to start without ZCODE_ACP_REMOTE_TOKEN — the hub is the only public
  * entry point and never runs unauthenticated. Exits 0 on EADDRINUSE: another
  * hub already owns the port, which is the desired machine-singleton behaviour.
+ *
+ * If the hub finds itself INSIDE our Seatbelt wrap (ZCODE_ACP_SANDBOX_ACTIVE,
+ * birth-marked onto every sandboxed backend spawn and inherited down the
+ * chain), it relaunches itself via launchd — which lives OUTSIDE the sandbox —
+ * before binding: a sandboxed hub cannot open the visible session terminal
+ * (macOS TCC refuses the request attributed to "Sandbox"), and Seatbelt can
+ * never be escaped from within. See src/remote/hub-sandbox.ts.
  */
 
 import { spawn } from "node:child_process";
@@ -19,6 +26,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { parseHubConfig } from "../remote/config.js";
+import { sandboxBorn, selfRelaunchOutsideSandbox } from "../remote/hub-sandbox.js";
 import { startHub } from "../remote/hub-server.js";
 import { log, warn } from "../utils.js";
 
@@ -51,6 +59,20 @@ function respawnSelf(): void {
 export async function main(): Promise<void> {
   const config = parseHubConfig();
   if (!config) process.exit(1);
+  // Born inside our Seatbelt wrap (a sandboxed backend spawned this hub and
+  // the marker was inherited): relaunch via launchd, which lives OUTSIDE the
+  // sandbox. The port is not bound yet, so the relaunched instance binds
+  // cleanly. If the relaunch fails, keep running degraded — everything but
+  // the visible terminal still works — and say so loudly.
+  if (sandboxBorn()) {
+    const hubJs = fileURLToPath(new URL("../bin/hub.js", import.meta.url));
+    if (selfRelaunchOutsideSandbox({ nodePath: process.execPath, hubJs })) process.exit(0);
+    warn(
+      "hub: running INSIDE a Seatbelt sandbox — macOS will refuse this hub's " +
+        "open of the visible session terminal (TCC), so remote session-create " +
+        "falls back to a headless bridge",
+    );
+  }
   const hub = await startHub({
     port: config.hubPort,
     host: config.hubHost,
