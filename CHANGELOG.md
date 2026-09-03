@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.1](https://github.com/william0wang/zcode-acp/compare/v0.19.0...v0.19.1) (2026-09-03)
+
+
+### Bug Fixes
+
+* **hub:** self-relaunch outside the sandbox via launchd when born wrapped ([#114](https://github.com/william0wang/zcode-acp/issues/114)) ([eac374f](https://github.com/william0wang/zcode-acp/commit/eac374fc481f943ed9ea6e904c0196a392f26440))
+
 ## [0.19.0](https://github.com/william0wang/zcode-acp/compare/v0.18.3...v0.19.0) (2026-09-03)
 
 
