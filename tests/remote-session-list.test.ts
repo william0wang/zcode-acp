@@ -1,10 +1,12 @@
 /**
- * Session history endpoint (ADR-0015): the bridge-side GET /sessions handler
- * through a real loopback HTTP server with an in-memory ZcodeAcpServer and a
- * fake backend. Proves the FULL store listing (closed conversations included —
- * the counterpart to the running-scoped discovery payload), the per-entry
- * live/running flags a remote resume picker renders, and the pagination that
- * keeps long-lived projects browsable (newest first, limit + before cursor).
+ * Session history endpoint (ADR-0015, amended by ADR-0017): the bridge-side
+ * GET /sessions handler through a real loopback HTTP server with an
+ * in-memory ZcodeAcpServer and a fake backend. Proves that currently
+ * executing conversations (live or running on this bridge) are EXCLUDED —
+ * they belong to discovery, and resuming one would load it onto a second
+ * bridge — that closed conversations list with the compatibility row shape,
+ * and the pagination that keeps long-lived projects browsable (newest first,
+ * limit + before cursor, exclusion applied before the window).
  */
 
 import { createServer, type Server } from "node:http";
@@ -70,7 +72,7 @@ function fixture(n: number): Array<{ sessionId: string; title: string; updatedAt
 }
 
 describe("session history endpoint", () => {
-  it("lists the full store — closed sessions included — with live/running flags", async () => {
+  it("excludes sessions this bridge holds live; closed ones list with the row shape", async () => {
     const server = new ZcodeAcpServer();
     server.backend = listBackend([
       { sessionId: "sess_closed", title: "Old work", updatedAt: 800 },
@@ -91,12 +93,17 @@ describe("session history endpoint", () => {
       }>;
       nextCursor: { before: number; beforeId: string } | null;
     };
-    const byId = Object.fromEntries(body.sessions.map((s) => [s.sessionId, s]));
-    expect(Object.keys(byId).sort()).toEqual(["sess_closed", "sess_live"]);
-    // Closed conversation: full entry, no live alias on this bridge.
-    expect(byId.sess_closed).toMatchObject({ title: "Old work", live: false, running: false });
-    expect(typeof byId.sess_closed!.updatedAt).toBe("string");
-    expect(byId.sess_live).toMatchObject({ title: "Current", live: true, running: false });
+    // The executing conversation belongs to discovery, not to the resume
+    // surface — offering it here would let a client load it onto a second
+    // bridge (ADR-0015 as amended by ADR-0017).
+    expect(body.sessions.map((s) => s.sessionId)).toEqual(["sess_closed"]);
+    expect(body.sessions[0]).toMatchObject({
+      title: "Old work",
+      // Shape-compat fields: constant false now.
+      live: false,
+      running: false,
+    });
+    expect(typeof body.sessions[0]!.updatedAt).toBe("string");
     // Fewer rows than the page size — no continuation.
     expect(body.nextCursor).toBeNull();
   });
@@ -198,7 +205,7 @@ describe("session history endpoint", () => {
     expect((await fetch(`${base}/sessions?beforeId=bad%20id`)).status).toBe(400);
   });
 
-  it("marks a conversation with an in-flight turn as running", async () => {
+  it("excludes a conversation with an in-flight turn", async () => {
     const server = new ZcodeAcpServer();
     server.backend = listBackend([{ sessionId: "sess_live", title: "busy", updatedAt: 900 }]);
     server.registerSession("s-live", "sess_live");
@@ -206,19 +213,50 @@ describe("session history endpoint", () => {
     server.pendingTurns.set(7, { zcodeSid: "sess_live", cancelled: false });
 
     const res = await fetch(`${await bootList(server)}/sessions`);
-    const body = (await res.json()) as { sessions: Array<{ sessionId: string; running: boolean }> };
-    expect(body.sessions[0]).toMatchObject({ sessionId: "sess_live", running: true });
+    const body = (await res.json()) as { sessions: unknown[] };
+    expect(body.sessions).toEqual([]);
   });
 
-  it("treats a backend-id-only attachment (pass-through resume) as live", async () => {
+  it("excludes a backend-id-only attachment (pass-through resume)", async () => {
     const server = new ZcodeAcpServer();
     server.backend = listBackend([{ sessionId: "sess_direct", title: "remote", updatedAt: 900 }]);
     server.registerSession("sess_direct", "sess_direct");
     server.markSessionActive("sess_direct");
 
     const res = await fetch(`${await bootList(server)}/sessions`);
-    const body = (await res.json()) as { sessions: Array<{ sessionId: string; live: boolean }> };
-    expect(body.sessions[0]).toMatchObject({ sessionId: "sess_direct", live: true });
+    const body = (await res.json()) as { sessions: unknown[] };
+    expect(body.sessions).toEqual([]);
+  });
+
+  it("filters executing sessions BEFORE windowing, so pages stay dense", async () => {
+    // Regression: excluding after the slice would burn page slots on hidden
+    // rows and strand cursor positions. The live row is dropped pre-sort, so
+    // limit=1 serves the newest RESUMABLE row and the cursor chains on.
+    const server = new ZcodeAcpServer();
+    server.backend = listBackend([
+      { sessionId: "sess_old", title: "old", updatedAt: 800 },
+      { sessionId: "sess_mid", title: "mid", updatedAt: 850 },
+      { sessionId: "sess_busy", title: "busy", updatedAt: 900 },
+    ]);
+    server.registerSession("s-busy", "sess_busy");
+    server.markSessionActive("s-busy");
+    const base = await bootList(server);
+    type Body = {
+      sessions: Array<{ sessionId: string }>;
+      nextCursor: { before: number; beforeId: string } | null;
+    };
+
+    const page1 = (await (await fetch(`${base}/sessions?limit=1`)).json()) as Body;
+    expect(page1.sessions.map((s) => s.sessionId)).toEqual(["sess_mid"]);
+    expect(page1.nextCursor).toEqual({ before: 850, beforeId: "sess_mid" });
+
+    const page2 = (await (
+      await fetch(
+        `${base}/sessions?limit=1&before=${page1.nextCursor!.before}&beforeId=${page1.nextCursor!.beforeId}`,
+      )
+    ).json()) as Body;
+    expect(page2.sessions.map((s) => s.sessionId)).toEqual(["sess_old"]);
+    expect(page2.nextCursor).toBeNull();
   });
 
   it("answers 405 for non-GET and 502 when the backend list fails", async () => {

@@ -24,7 +24,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -79,15 +79,17 @@ export interface HubOptions {
    */
   projectsDbPath?: string;
   /**
-   * Override how the remote session-create endpoints spawn a bridge (tests
-   * inject a fake). Default: this node + this package's dist/cli.js — an
-   * interactive REPL in a visible terminal for session-create ("repl"),
-   * a detached headless serve bridge for background queries ("serve").
+   * Override how the remote session-create / session-resume endpoints spawn
+   * a bridge (tests inject a fake). Default: this node + this package's
+   * dist/cli.js — an interactive REPL in a visible terminal for
+   * session-create and session-resume ("repl"; resume carries the requested
+   * session in ZCODE_ACP_RESUME_SESSION), a detached headless serve bridge
+   * for background queries ("serve").
    */
   spawnServe?: (opts: {
     cwd: string;
     env: NodeJS.ProcessEnv;
-    /** "repl" = visible terminal (session-create); "serve" = detached headless. */
+    /** "repl" = visible terminal (session-create/-resume); "serve" = detached headless. */
     kind: "repl" | "serve";
   }) => ChildProcess | Promise<ChildProcess>;
 }
@@ -115,6 +117,13 @@ interface InstanceEntry {
   lastSeen: number;
   /** "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014). */
   origin: "editor" | "serve";
+  /**
+   * Hub-incubation correlation (ADR-0016/0017): the nonce this bridge's
+   * incubation spawned it with, echoed from ZCODE_ACP_SPAWN_NONCE. Absent on
+   * bridges started by hand or by older hubs — the incubation poll falls back
+   * to any nonce-less registration for them.
+   */
+  nonce?: string;
 }
 
 const HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -165,6 +174,15 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown> |
       : null;
   } catch {
     return null;
+  }
+}
+
+/** realpath spelling of p; a vanished path falls back to raw equality. */
+function canonicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
   }
 }
 
@@ -633,74 +651,94 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   const timers: Array<ReturnType<typeof setInterval>> = [];
 
   /**
-   * One in-flight serve spawn per workspace (remote session-create,
+   * Single-flight incubation per workspace (remote session-create,
    * ADR-0014): concurrent POSTs for the same project join the SAME
    * incubation instead of racing a second detached process past the
    * findServe check (check-then-act). Check-then-set is one synchronous
    * block, so requests can only ever observe "no entry" one at a time.
+   * A resume incubation keys by session instead (ADR-0017) — concurrent
+   * resumes of different sessions each get their own window.
    */
-  // Single-flight incubation per workspace (see joinIncubation below).
+  // Single-flight incubation (see joinIncubation below).
   const serveIncubations = new Map<
     string,
-    { kind: "repl" | "serve"; promise: Promise<{ id: string; reused: boolean }> }
+    { kind: "repl" | "serve" | "resume"; promise: Promise<{ id: string; reused: boolean }> }
   >();
 
-  /** The live serve instance for a workspace, if any (per-workspace dedupe). */
-  const findServeInstance = (workspacePath: string): InstanceEntry | undefined => {
+  /** Live serve instances for a workspace, oldest registration first. */
+  const findServeInstances = (workspacePath: string): InstanceEntry[] => {
     // The dedupe key must be canonical: a whitelist row (or registration) can
     // carry a symlinked or otherwise non-canonical spelling while the serve
     // child registers with its RESOLVED process cwd — raw string equality
     // would never match, 502-ing every create and spawning a duplicate per
     // retry. realpath both sides; a vanished path falls back to raw equality.
-    const key = (p: string): string => {
-      try {
-        return realpathSync(p);
-      } catch {
-        return p;
-      }
-    };
-    const wanted = key(workspacePath);
-    return Array.from(instances.values()).find(
-      (e) => e.origin === "serve" && key(e.workspace) === wanted,
+    const wanted = canonicalPath(workspacePath);
+    return Array.from(instances.values()).filter(
+      (e) => e.origin === "serve" && canonicalPath(e.workspace) === wanted,
     );
   };
+
+  /** The live serve instance for a workspace, if any (per-workspace dedupe). */
+  const findServeInstance = (workspacePath: string): InstanceEntry | undefined =>
+    findServeInstances(workspacePath)[0];
 
   /**
    * Spawn a bridge and poll until it registers (or fails fast on child exit /
    * timeout). Shared by every incubating endpoint for this workspace — all
-   * joiners see the same outcome. Kind picks the spawn surface: "repl" opens
-   * a visible terminal (remote session-create, ADR-0016), "serve" the
-   * detached headless bridge (background listing, ADR-0015).
+   * joiners see the same outcome. Kind picks the spawn surface and the
+   * payload: "repl" opens a visible terminal (remote session-create,
+   * ADR-0016), "resume" a visible terminal that boots straight into the
+   * requested session (ADR-0017), "serve" the detached headless bridge
+   * (background listing, ADR-0015).
    */
   const incubateServe = async (
     workspacePath: string,
-    kind: "repl" | "serve",
+    kind: "repl" | "serve" | "resume",
+    sessionId?: string,
   ): Promise<{ id: string; reused: boolean }> => {
     // Async spawn failures (ENOENT — the dir vanished between the whitelist
     // check and the spawn) arrive as an 'error' event with exitCode still
     // null; without this flag the poll burns the full budget.
     let spawnError: Error | null = null;
     let child: ChildProcess;
+    // Incubation correlation (ADR-0016/0017): the spawned bridge echoes this
+    // back on every registration, so the poll pairs THIS spawn with ITS
+    // registration even when several incubations race for one workspace.
+    // terminalReplScript exports the var into the terminal's fresh shell; the
+    // detached serve spawn inherits it directly.
+    const nonce = randomUUID();
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ZCODE_ACP_REMOTE: "1",
+      ZCODE_ACP_REMOTE_TOKEN: token,
+      ZCODE_ACP_HUB_PORT: String(port),
+      ZCODE_ACP_SPAWN_NONCE: nonce,
+      // Parity with the bridge-side spawnHub: the serve child may have to
+      // (re)spawn the hub itself, and must bind the same configured host.
+      ZCODE_ACP_HUB_HOST: host,
+      // ADR-0016: the incubated bridge registers as THIS project's serve
+      // bridge (the hub's per-workspace dedupe matches it) and pins its
+      // session roots to the project cwd, so ADR-0014's whitelist
+      // semantics survive the visible-terminal lifecycle. The detached
+      // serve path ignores both (it hardcodes origin/serveMode itself).
+      ZCODE_ACP_REMOTE_ORIGIN: "serve",
+      ZCODE_ACP_REMOTE_PIN_CWD: "1",
+    };
+    if (kind === "resume") {
+      // ADR-0017: the requested session rides the env — terminalReplScript
+      // exports every ZCODE_ACP_* var into the terminal's fresh shell, so the
+      // REPL boots into it. The detached serve fallback ignores it; the
+      // client attaches to the serve bridge and session/loads there instead.
+      env.ZCODE_ACP_RESUME_SESSION = sessionId;
+    }
     try {
+      // Resume shares session-create's visible-terminal surface (and its
+      // detached-serve fallback for headless machines); only a background
+      // listing spawns the headless form — it must never pop a window.
       child = await spawnServe({
         cwd: workspacePath,
-        kind,
-        env: {
-          ...process.env,
-          ZCODE_ACP_REMOTE: "1",
-          ZCODE_ACP_REMOTE_TOKEN: token,
-          ZCODE_ACP_HUB_PORT: String(port),
-          // Parity with the bridge-side spawnHub: the serve child may have to
-          // (re)spawn the hub itself, and must bind the same configured host.
-          ZCODE_ACP_HUB_HOST: host,
-          // ADR-0016: the incubated bridge registers as THIS project's serve
-          // bridge (the hub's per-workspace dedupe matches it) and pins its
-          // session roots to the project cwd, so ADR-0014's whitelist
-          // semantics survive the visible-terminal lifecycle. The detached
-          // serve path ignores both (it hardcodes origin/serveMode itself).
-          ZCODE_ACP_REMOTE_ORIGIN: "serve",
-          ZCODE_ACP_REMOTE_PIN_CWD: "1",
-        },
+        kind: kind === "serve" ? "serve" : "repl",
+        env,
       });
       child.once("error", (e: Error) => {
         spawnError = e;
@@ -710,13 +748,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       throw new Error("serve bridge spawn failed");
     }
     log(
-      `hub: spawned ${kind === "repl" ? "terminal REPL" : "serve bridge"} for ${workspacePath} (pid ${child.pid})`,
+      `hub: spawned ${
+        kind === "resume" ? "resume REPL" : kind === "repl" ? "terminal REPL" : "serve bridge"
+      } for ${workspacePath} (pid ${child.pid})`,
     );
-    const budget = kind === "repl" ? REPL_REGISTER_TIMEOUT_MS : SERVE_REGISTER_TIMEOUT_MS;
+    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : REPL_REGISTER_TIMEOUT_MS;
     const deadline = Date.now() + budget;
+    // A resume incubates NEXT TO the serve bridge the listing already
+    // incubated, and several incubations can race for one workspace: the poll
+    // matches only a registration that is neither a pre-existing instance nor
+    // another incubation's bridge. A nonce-less registration means a bridge
+    // older than the nonce protocol — accept it, or a legacy spawn could
+    // never satisfy its own incubation.
+    const preexisting = new Set<string>(
+      kind === "resume" ? findServeInstances(workspacePath).map((e) => e.id) : [],
+    );
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
-      const entry = findServeInstance(workspacePath);
+      const candidates = findServeInstances(workspacePath).filter((e) => !preexisting.has(e.id));
+      const entry = candidates.find((e) => e.nonce === nonce) ?? candidates.find((e) => !e.nonce);
       if (entry) return { id: entry.id, reused: false };
       // The child dying is the honest fast-fail (missing cwd perms, port
       // exhaustion, crash) — without this check the loop burns the full budget.
@@ -736,30 +786,36 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   /**
    * Single-flight incubation per workspace: concurrent endpoint calls join one
    * spawn instead of racing duplicates. A "serve" caller (the listing) joins
-   * ANY in-flight incubation — the outcome it waits for is "a serve bridge is
-   * registered", whichever surface spawned it. A "repl" caller (session-
-   * create) joins only another repl: the visible window IS the feature
-   * (ADR-0016), so it never piggybacks on an invisible listing spawn.
+   * ANY in-flight incubation keyed to its workspace — the outcome it waits for
+   * is "a serve bridge is registered", whichever surface spawned it. A "repl"
+   * caller (session-create) joins only another repl: the visible window IS the
+   * feature (ADR-0016), so it never piggybacks on an invisible listing spawn.
+   * A "resume" caller joins only the exact same session (ADR-0017) — its map
+   * key carries the session id, so resumes of different sessions each get
+   * their own window.
    */
   const joinIncubation = (
     workspacePath: string,
-    kind: "repl" | "serve",
+    kind: "repl" | "serve" | "resume",
+    sessionId?: string,
   ): Promise<{ id: string; reused: boolean }> => {
-    const inflight = serveIncubations.get(workspacePath);
+    const mapKey =
+      kind === "resume" ? `${workspacePath}\u0000resume\u0000${sessionId ?? ""}` : workspacePath;
+    const inflight = serveIncubations.get(mapKey);
     if (inflight && (inflight.kind === kind || kind === "serve")) {
       log(`hub: joining the incubating serve bridge for ${workspacePath}`);
       return inflight.promise;
     }
-    const promise = incubateServe(workspacePath, kind);
-    serveIncubations.set(workspacePath, { kind, promise });
+    const promise = incubateServe(workspacePath, kind, sessionId);
+    serveIncubations.set(mapKey, { kind, promise });
     // Drop the entry once settled (identity-checked — a newer incubation may
     // already have replaced it). The catch keeps the DERIVED promise handled;
     // the original is awaited by its creating request.
     promise
       .catch(() => undefined)
       .finally(() => {
-        const current = serveIncubations.get(workspacePath);
-        if (current && current.promise === promise) serveIncubations.delete(workspacePath);
+        const current = serveIncubations.get(mapKey);
+        if (current && current.promise === promise) serveIncubations.delete(mapKey);
       });
     return promise;
   };
@@ -1032,18 +1088,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       return;
     }
-    // POST /api/instances — create (or reuse) a bridge for one known project.
+    // POST /api/instances — create (or reuse) a bridge for one known project,
+    // or RESUME one of its closed sessions (optional sessionId, ADR-0017).
     // Session-create incubates a VISIBLE interactive REPL in the user's
     // terminal (ADR-0016, macOS; ZCODE_ACP_HUB_TERMINAL=0 / headless falls
-    // back to the detached `zcode-acp serve` of ADR-0014). The hub waits for
-    // the bridge's heartbeat registration; the bridge lives its own life
-    // afterwards (a terminal REPL until the window closes, a serve bridge on
-    // its idle timer). Dedupe: one serve-origin instance per workspace — an
-    // existing live one is reused, and concurrent POSTs join the same
-    // in-flight incubation instead of double-spawning. Accepted bound: a hub
-    // restart clears the instance table, so a POST inside the bridges' ≤10s
-    // re-registration window may incubate a duplicate — harmless (both serve,
-    // future POSTs dedupe, an idle one exits in 10min).
+    // back to the detached `zcode-acp serve` of ADR-0014). With a sessionId —
+    // the backend store id from the ADR-0015 listing — the hub incubates a
+    // visible REPL that boots straight into that session, EVEN when a serve
+    // bridge is already live (the listing incubated one; a resume must still
+    // surface on the desktop). The hub waits for the bridge's heartbeat
+    // registration; the bridge lives its own life afterwards (a terminal REPL
+    // until the window closes, a serve bridge on its idle timer). Dedupe: one
+    // serve-origin instance per workspace for plain creates — an existing
+    // live one is reused, and concurrent POSTs join the same in-flight
+    // incubation instead of double-spawning; resume POSTs join only the
+    // identical session. Accepted bound: a hub restart clears the instance
+    // table, so a POST inside the bridges' ≤10s re-registration window may
+    // incubate a duplicate — harmless (both serve, future POSTs dedupe, an
+    // idle one exits in 10min).
     if (url.pathname === "/api/instances" && req.method === "POST") {
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
@@ -1058,10 +1120,36 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.end("workspacePath required");
         return;
       }
+      // Optional session resume (ADR-0017); the shape mirrors beforeId's.
+      const rawSid = (body as { sessionId?: unknown } | undefined)?.sessionId;
+      const resumeSid = typeof rawSid === "string" ? rawSid.trim() : "";
+      if (resumeSid && !/^[\w.:-]+$/.test(resumeSid)) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("invalid sessionId — session id expected");
+        return;
+      }
       const known = await listKnownWorkspaces(projectsDbPath);
       if (!known.some((p) => p.workspacePath === workspacePath)) {
         res.writeHead(403, { "Content-Type": "text/plain" });
         res.end("unknown project");
+        return;
+      }
+      if (resumeSid) {
+        // Resume never reuses the live serve bridge: the window IS the
+        // feature, and the answer must be the NEW instance so the attaching
+        // client and the terminal share one bridge (and one backend process)
+        // for the session. A bogus id still opens the window — the REPL
+        // shows the load failure and falls back to a fresh session, the same
+        // honesty as a window that dies early (ADR-0016 §4).
+        const incubation = joinIncubation(workspacePath, "resume", resumeSid);
+        try {
+          const out = await incubation;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(out));
+        } catch (e) {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end(e instanceof Error ? e.message : "serve bridge failed");
+        }
         return;
       }
       const existing = findServeInstance(workspacePath);
@@ -1241,6 +1329,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           sessions,
           lastSeen: Date.now(),
           origin: parseOrigin(body.origin),
+          // Incubation correlation (ADR-0016/0017); absent for hand-started
+          // bridges. A re-registration (heartbeat) refreshes it — a bridge's
+          // nonce never changes, so this is inert in practice.
+          ...(typeof body.nonce === "string" && body.nonce ? { nonce: body.nonce } : {}),
         });
       } else {
         instances.delete(id);

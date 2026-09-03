@@ -1,14 +1,19 @@
 /**
- * Remote session history endpoint (ADR-0015), served on the bridge's loopback
- * HTTP server and wrapped by the hub at
+ * Remote session history endpoint (ADR-0015, amended by ADR-0017), served on
+ * the bridge's loopback HTTP server and wrapped by the hub at
  * GET /api/projects/sessions?workspacePath=…
  *
  * Discovery (the heartbeat payload) deliberately lists only RUNNING-scoped
  * sessions — deriving membership from the store would flood it with every
  * retired conversation. This endpoint is the deliberate counterpart: the
- * project's ENTIRE backend session store, including closed conversations no
- * bridge currently holds, so a remote client can pick one and resume it with
- * `session/load` (pass-through resume accepts raw backend ids).
+ * project's backend session store, closed conversations included, so a
+ * remote client can pick one and resume it with `session/load` (pass-through
+ * resume accepts raw backend ids). Conversations this bridge currently
+ * holds — live, or with a turn in flight — are NOT listed: they are
+ * discovery's subject, and offering them for resume would let a client load
+ * one onto a second bridge (two backend processes, one conversation).
+ * Sessions held by a DIFFERENT bridge of the same workspace are invisible
+ * here — the two id spaces are unreconciled by design (ADR-0015 §5).
  *
  * Long-lived projects hold dozens of sessions, so the listing is PAGINATED:
  * newest first (updatedAt descending, sessionId descending as the tiebreak so
@@ -17,14 +22,15 @@
  * row of the previous page, so one millisecond holding more rows than a page
  * never skips or repeats them. The response carries `nextCursor`
  * (`{before, beforeId}`, null on the last page). The backend `session/list`
- * has no native pagination — the full store arrives once and is windowed
- * here; entries are tiny, so that round-trip is cheap.
+ * has no native pagination — the full store arrives once, the live/running
+ * exclusion applies BEFORE the window, and only then is it windowed here;
+ * entries are tiny, so that round-trip is cheap.
  *
- * Each entry carries `live` (this bridge currently holds the conversation
- * with real activity) and `running` (a turn is in flight) so a client can
- * render state from this one call. The workspace is never client-chosen:
- * `listSessions` pins serve mode to the process cwd (ADR-0014), and the
- * editor case passes the bridge's own project cwd.
+ * Returned rows keep the `live`/`running` fields for shape compatibility —
+ * they are always false now (executing conversations never reach a page).
+ * The workspace is never client-chosen: `listSessions` pins serve mode to
+ * the process cwd (ADR-0014), and the editor case passes the bridge's own
+ * project cwd.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -96,10 +102,22 @@ async function handleList(server: ZcodeAcpServer, req: IncomingMessage, res: Ser
   }
 
   const { sessions } = await listSessions(server, { cwd: server.projectCwd() });
+  // Executing conversations are not resumable history: this bridge's live
+  // sessions (discovery membership, hasActivity-gated) and its in-flight
+  // turns are excluded BEFORE sorting and windowing, so pages stay dense and
+  // every cursor keeps naming the exact next row.
+  const running = runningZcodeSids(server);
+  const live = new Set<string>();
+  for (const [acpSid, summary] of server.sessionSummaries) {
+    if (!summary.hasActivity) continue;
+    const zcodeSid = server.resolveSid(acpSid);
+    if (zcodeSid) live.add(zcodeSid);
+  }
+  const resumable = sessions.filter((s) => !live.has(s.sessionId) && !running.has(s.sessionId));
   // Newest first; the id tiebreak makes the order total, and the composite
   // cursor names the exact last row, so pages never repeat or skip rows —
   // even when a single millisecond holds more rows than a page.
-  const sorted = [...sessions].sort(
+  const sorted = [...resumable].sort(
     (a, b) =>
       updatedAtMs(b.updatedAt) - updatedAtMs(a.updatedAt) ||
       (a.sessionId > b.sessionId ? -1 : a.sessionId < b.sessionId ? 1 : 0),
@@ -123,21 +141,10 @@ async function handleList(server: ZcodeAcpServer, req: IncomingMessage, res: Ser
       ? { before: updatedAtMs(lastRow.updatedAt), beforeId: lastRow.sessionId }
       : null;
 
-  // live/running flags are computed once for the PAGE — the membership gates
-  // are the same as discovery's heartbeat payload.
-  const running = runningZcodeSids(server);
-  const live = new Set<string>();
-  for (const [acpSid, summary] of server.sessionSummaries) {
-    if (!summary.hasActivity) continue;
-    const zcodeSid = server.resolveSid(acpSid);
-    if (zcodeSid) live.add(zcodeSid);
-  }
+  // The flags stay in the row shape but are constant false: a conversation
+  // that was live or running was filtered out above and never reaches a page.
   const body = JSON.stringify({
-    sessions: page.map((s) => ({
-      ...s,
-      live: live.has(s.sessionId),
-      running: running.has(s.sessionId),
-    })),
+    sessions: page.map((s) => ({ ...s, live: false, running: false })),
     nextCursor,
   });
   res.writeHead(200, {

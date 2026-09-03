@@ -274,6 +274,11 @@ export async function startRemoteEndpoint(
     // "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014):
     // lets the hub dedupe headless instances per workspace and label them.
     origin: config.origin,
+    // Hub-incubation correlation (ADR-0016/0017): the hub generates a nonce
+    // per spawn and matches its registration poll against it — several
+    // incubations can race for one workspace, and without this one's poll
+    // could claim another's bridge. Bridges started by hand carry none.
+    ...(process.env.ZCODE_ACP_SPAWN_NONCE ? { nonce: process.env.ZCODE_ACP_SPAWN_NONCE } : {}),
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,

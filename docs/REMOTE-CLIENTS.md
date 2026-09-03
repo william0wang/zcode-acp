@@ -46,18 +46,18 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint                                               | Auth     | Purpose                                                                                                         |
-| ------------------------------------------------------ | -------- | --------------------------------------------------------------------------------------------------------------- |
-| `GET /api/health`                                      | none     | Liveness probe; `200` body `ok`.                                                                                |
-| `GET /api/instances`                                   | required | Registered bridge instances. Add `?probe=1` to verify first.                                                    |
-| `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                             |
-| `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                           |
-| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                               |
-| `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                    |
-| `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                              |
-| `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                               |
-| `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session). |
-| `POST /api/instances {workspacePath}`                  | required | Create (or reuse) a headless serve bridge for one known project — see below.                                    |
+| Endpoint                                               | Auth     | Purpose                                                                                                                                                     |
+| ------------------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/health`                                      | none     | Liveness probe; `200` body `ok`.                                                                                                                            |
+| `GET /api/instances`                                   | required | Registered bridge instances. Add `?probe=1` to verify first.                                                                                                |
+| `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                                                                         |
+| `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                                                                       |
+| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                                                                           |
+| `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                                                                |
+| `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                          |
+| `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                           |
+| `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                             |
+| `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal REPL (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -209,12 +209,23 @@ GET {hub}/api/projects/sessions?workspacePath=/Users/me/proj
   → 400 "workspacePath required" / "invalid limit/before …"
   → 403 "unknown project"          (path not on the known-project list)
   → 502 (spawn failed / bridge unreachable / broken list)
+
+POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
+                                "sessionId":"sess_9f2…"}
+  → 200 {"id":"47080","reused":false}   (a NEW instance: the terminal window's bridge)
+  → 400 "invalid sessionId — session id expected"
+  → 502 (spawn failed / never registered; ~20s — a terminal window opens)
 ```
 
 - The listing is the project's backend session store — closed conversations
-  included. `live` marks conversations currently advertised by a bridge (the
-  same membership as discovery); `running` marks an in-flight turn. Titles
-  are the store's authoritative ones.
+  included, and conversations currently executing on this project's bridge
+  (live, or with a turn in flight) EXCLUDED: those belong to discovery, and
+  resuming one would load it onto a second bridge. The `live`/`running`
+  fields stay in the row shape for compatibility but are always `false`.
+  Titles are the store's authoritative ones. A conversation held by a
+  DIFFERENT bridge (e.g. an open editor window) cannot be detected here —
+  the two id spaces are unreconciled by design; check discovery first if in
+  doubt.
 - **Pagination** (projects can hold dozens of sessions): rows come
   newest-first (`updatedAt` descending). `?limit=<n>` sets the page size
   (default 20, max 200); the previous response's `nextCursor` splits into
@@ -226,11 +237,23 @@ GET {hub}/api/projects/sessions?workspacePath=/Users/me/proj
 - The first listing of a cold project incubates its serve bridge (the same
   machinery as remote session-create; budget ~12s) — later listings and the
   follow-up load reuse it.
-- Resume with the existing flow: `POST /api/instances` (answers
-  `reused:true` with the listing's instance), attach
-  `WS /acp?instance=<id>`, then
+- **Resume in the App (no local surface)**: `POST /api/instances` with just
+  the `workspacePath` (answers `reused:true` with the listing's instance),
+  attach `WS /acp?instance=<id>`, then
   `session/load {"sessionId":"<the listed id>"}` — history replays and the
-  conversation continues with `session/prompt`.
+  conversation continues with `session/prompt`, entirely in the client.
+- **Resume on the desktop (ADR-0017)**: `POST /api/instances` with the
+  `sessionId` too — the hub incubates a VISIBLE terminal REPL that boots
+  straight into that conversation (history replays in the window; the same
+  terminal/`ZCODE_ACP_HUB_TERMINAL` selection and headless fallback as
+  session-create). This happens EVEN when a serve bridge is already live
+  (the listing incubated one) — the answer is always the NEW instance, the
+  bridge the window runs on; attach to it and `session/load` the same id to
+  follow along in the client (both surfaces then share one bridge, one
+  backend process). A bogus id still opens the window: the REPL shows the
+  load failure and falls back to a fresh session. Resuming the same session
+  twice pops two windows; only identical concurrent requests share one
+  incubation.
 - `sessionId` here is the backend store id (`sess_…`), which `session/load`
   accepts as-is (pass-through resume). The same conversation may also appear
   in discovery under a different (ACP) id — treat discovery as the

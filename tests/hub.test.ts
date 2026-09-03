@@ -1327,6 +1327,135 @@ describe("hub project session history (ADR-0015)", () => {
   });
 });
 
+describe("hub terminal-REPL session resume (ADR-0017)", () => {
+  const PROJECT = "/Users/dev/Develop/demo";
+  const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const post = (hub: HubHandle, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify(body),
+    });
+
+  let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
+  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }>;
+
+  beforeEach(() => {
+    listKnownWorkspacesMock.mockReset();
+    listKnownWorkspacesMock.mockResolvedValue([
+      { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
+    ]);
+    fakeChild = new EventEmitter() as typeof fakeChild;
+    fakeChild.pid = 4242;
+    fakeChild.exitCode = null;
+    fakeChild.signalCode = null;
+    spawnCalls = [];
+  });
+
+  function spawnServeSpy(): (opts: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    kind: "repl" | "serve";
+  }) => import("node:child_process").ChildProcess {
+    return (opts) => {
+      spawnCalls.push(opts);
+      return fakeChild as unknown as import("node:child_process").ChildProcess;
+    };
+  }
+
+  async function registerServeBridge(hub: HubHandle, id: string, nonce?: string): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id,
+          workspace: PROJECT,
+          origin: "serve",
+          port: BASE_PORT + 50,
+          pid: 4242,
+          ...(nonce ? { nonce } : {}),
+        }),
+      ),
+    });
+    expect(res.ok).toBe(true);
+  }
+
+  it("incubates a visible resume REPL even when a serve bridge is already live", async () => {
+    // The ADR-0015 listing always incubates a headless serve bridge first —
+    // reusing it here (the old behaviour) is exactly why a resume never
+    // surfaced on the desktop. The POST must spawn a terminal surface with
+    // the requested session in the env, and answer with the NEW instance.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    await registerServeBridge(hub, "listing-serve");
+    const pending = post(hub, { workspacePath: PROJECT, sessionId: "sess_closed" });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.kind).toBe("repl");
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_closed");
+    // The fresh bridge registers with its incubation nonce: the poll pairs
+    // with it, never with the pre-existing listing bridge (whose id would
+    // put the client's session/load on a different process than the window).
+    await registerServeBridge(hub, "resume-repl", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "resume-repl", reused: false });
+  });
+
+  it("carries the resume env into the .command script so the terminal shell boots into the session", () => {
+    // terminalReplScript exports every ZCODE_ACP_* var; the resume id rides
+    // the same channel (hub-server adds it to the incubation env).
+    const body = terminalReplScript(PROJECT, "/opt/cli.js", {
+      ZCODE_ACP_REMOTE: "1",
+      ZCODE_ACP_RESUME_SESSION: "sess_closed",
+    });
+    expect(body).toContain("export ZCODE_ACP_RESUME_SESSION='sess_closed'");
+  });
+
+  it("joins one incubation for identical concurrent resumes, but not a different session", async () => {
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const first = post(hub, { workspacePath: PROJECT, sessionId: "sess_a" });
+    const sameSid = post(hub, { workspacePath: PROJECT, sessionId: "sess_a" });
+    const otherSid = post(hub, { workspacePath: PROJECT, sessionId: "sess_b" });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(2); // sess_a shares one spawn; sess_b is its own
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_a");
+    expect(spawnCalls[1]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_b");
+    // Each window's bridge registers with its OWN nonce — the polls must not
+    // cross-claim (a crossed answer would attach the client to the wrong
+    // bridge and load the session on two backend processes).
+    await registerServeBridge(hub, "resume-a", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    await registerServeBridge(hub, "resume-b", spawnCalls[1]!.env.ZCODE_ACP_SPAWN_NONCE);
+    const [ra, rs, ro] = await Promise.all([first, sameSid, otherSid]);
+    expect(await ra.json()).toEqual({ id: "resume-a", reused: false });
+    expect(await rs.json()).toEqual({ id: "resume-a", reused: false });
+    expect(await ro.json()).toEqual({ id: "resume-b", reused: false });
+  });
+
+  it("rejects a malformed sessionId without spawning", async () => {
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const res = await post(hub, { workspacePath: PROJECT, sessionId: "bad id" });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toBe("invalid sessionId — session id expected");
+    expect(spawnCalls).toHaveLength(0);
+    // Unknown projects still gate the resume spawn like a create.
+    const unknown = await post(hub, { workspacePath: "/etc", sessionId: "sess_x" });
+    expect(unknown.status).toBe(403);
+  });
+
+  it("answers 502 when the resume REPL never registers", async () => {
+    // The child-death fast-fail fires on the first poll tick — no need to
+    // wait out the full 20s GUI budget.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const pending = post(hub, { workspacePath: PROJECT, sessionId: "sess_closed" });
+    await new Promise((r) => setTimeout(r, 400));
+    fakeChild.exitCode = 1; // the window died before its bridge registered
+    const res = await pending;
+    expect(res.status).toBe(502);
+    expect(await res.text()).toBe("serve bridge exited during startup");
+  });
+});
+
 describe("terminal launch resolution (ADR-0016)", () => {
   it("prefers the explicit command template over everything", () => {
     const out = resolveTerminalLaunch({
