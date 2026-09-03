@@ -1844,16 +1844,29 @@ export async function runEventTurn(
   // never kills: only a freeze sustained past STALE_FREEZE_MS ends the turn,
   // reply-fetch first, stop as the last resort.
   const STALE_FREEZE_MS = 600_000;
+  // Upstream ACP clients commonly enforce their own idle deadline (some use
+  // 300s). A session/read watermark can prove that ZCode is still
+  // working even when its event stream is quiet, but that proof is otherwise
+  // invisible beyond this bridge.  Forward a state-bearing update at a modest
+  // cadence so the client's deadline observes the same authoritative progress.
+  const UPSTREAM_PROGRESS_INTERVAL_MS = 60_000;
   let lastProtocolProgressAt = Date.now();
   let nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
   let lastWatermarkAdvanceAt = Date.now();
-  let watermark = "";
+  let lastUpstreamProgressAt = Date.now();
+  let watermark: string | null = null;
+  let pendingWatermarkProgress: ZcodeProjection | null = null;
   const noteWatermark = (proj: ZcodeProjection | null): void => {
     if (!proj) return;
     const next = `${proj.contextUsed ?? 0}/${proj.totalTokenCount ?? 0}/${proj.turnCount ?? 0}/${proj.currentTurnId ?? ""}`;
+    if (watermark === null) {
+      watermark = next;
+      return;
+    }
     if (next !== watermark) {
       watermark = next;
       lastWatermarkAdvanceAt = Date.now();
+      pendingWatermarkProgress = proj;
     }
   };
   let lastStallCheck = Date.now();
@@ -1873,6 +1886,48 @@ export async function runEventTurn(
   const recordProtocolProgress = (): void => {
     lastProtocolProgressAt = Date.now();
     nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
+    lastUpstreamProgressAt = lastProtocolProgressAt;
+    pendingWatermarkProgress = null;
+  };
+
+  const forwardAuthoritativeProgress = async (): Promise<void> => {
+    if (Date.now() - lastUpstreamProgressAt < UPSTREAM_PROGRESS_INTERVAL_MS) return;
+
+    const proj = pendingWatermarkProgress;
+    const used = proj ? proj.contextUsed || proj.totalTokenCount || 0 : 0;
+    const activeToolId = [...translator.seenToolIds].find(
+      (toolId) => !translator.finalToolIds.has(toolId),
+    );
+    if (!proj && !activeToolId) return;
+
+    try {
+      if (proj) {
+        // Reuse normal UsageDelta dispatch so a projection that reports a zero
+        // contextWindow gets the configured model limit instead of emitting an
+        // invalid/empty context bar.  The token count itself comes directly
+        // from the authoritative session/read projection.
+        await dispatchEvent(
+          server,
+          cx,
+          acpSid,
+          { kind: "UsageDelta", used, size: proj.contextWindow ?? 0 },
+          chunkMsgId,
+        );
+      } else if (activeToolId) {
+        await sendSessionUpdate(cx, acpSid, {
+          sessionUpdate: "tool_call_update",
+          toolCallId: activeToolId,
+          status: "in_progress",
+        });
+      }
+      lastUpstreamProgressAt = Date.now();
+      pendingWatermarkProgress = null;
+    } catch (e) {
+      // Liveness forwarding is best-effort.  A detached client must not kill
+      // the ZCode turn; normal event dispatch or the stale policy will still
+      // settle it through the existing paths.
+      warn(`authoritative progress update failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   while (true) {
@@ -1999,6 +2054,7 @@ export async function runEventTurn(
         lastStallCheck = Date.now();
         const proj = await monitor.pollOnce();
         noteWatermark(proj);
+        await forwardAuthoritativeProgress();
         if (proj?.status === "idle") {
           // A single idle probe can also fire mid-work: the backend is silent
           // during the model's thinking/connection phase and may report idle
@@ -2013,6 +2069,7 @@ export async function runEventTurn(
           }
           const proj2 = await monitor.pollOnce();
           noteWatermark(proj2);
+          await forwardAuthoritativeProgress();
           if (proj2?.status === "idle" && !listener.hasQueuedEvents()) {
             // Turn completed but the event was lost (double-confirmed).
             if (!emittedText) {

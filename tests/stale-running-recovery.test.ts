@@ -160,6 +160,91 @@ describe("stall termination policy (watermark-based)", () => {
     expect(control.backend.send).not.toHaveBeenCalled();
   });
 
+  it("forwards evidence-backed progress during an ACP-visible silent window", async () => {
+    // An upstream ACP client may enforce an idle deadline shorter than this
+    // bridge's 10-minute stale-freeze budget.  The bridge's authoritative
+    // session/read probes must therefore surface real progress before that
+    // client gives up: usage when the watermark advances, or an in-progress
+    // refresh for a known active tool.  Transcript text is not a heartbeat.
+    const control = staleRunningBackend();
+    control.setWatermarkMode("advance");
+    const turn = prompt(setup(control.backend), params, cx, 4);
+    let settled = false;
+    void turn.then(() => {
+      settled = true;
+    });
+    await waitForSend(control.sendRequests);
+
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "started", toolCallId: "tool-live", toolName: "Bash" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(cx.notify).mockClear();
+
+    // Omnigent's default ACP idle deadline is 300 seconds.  At least four
+    // throttled, state-bearing updates over this interval leave comfortable
+    // scheduling headroom without flooding clients.
+    await vi.advanceTimersByTimeAsync(301_000);
+
+    const updates = vi
+      .mocked(cx.notify)
+      .mock.calls.map(([, payload]) => (payload as { update?: acp.SessionUpdate }).update);
+    const progress = updates.filter(
+      (update) =>
+        update?.sessionUpdate === "usage_update" ||
+        (update?.sessionUpdate === "tool_call_update" && update.status === "in_progress"),
+    );
+    expect(progress.length).toBeGreaterThanOrEqual(4);
+    expect(
+      updates.some(
+        (update) =>
+          update?.sessionUpdate === "agent_message_chunk" ||
+          update?.sessionUpdate === "agent_thought_chunk",
+      ),
+    ).toBe(false);
+    expect(settled).toBe(false);
+
+    control.emit({ type: "turn.completed", payload: { resultType: "success" } });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+  });
+
+  it("refreshes a known active tool while its watermark is inside the stale budget", async () => {
+    // A long quiet tool may not consume tokens, so its watermark can remain
+    // frozen legitimately for part of the 10-minute grace period.  Refreshing
+    // the existing card is state-bearing and must keep a shorter upstream ACP
+    // idle deadline alive without creating transcript rows.
+    const control = staleRunningBackend();
+    control.setWatermarkMode("frozen");
+    const turn = prompt(setup(control.backend), params, cx, 5);
+    await waitForSend(control.sendRequests);
+
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "started", toolCallId: "tool-quiet", toolName: "Bash" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(cx.notify).mockClear();
+
+    await vi.advanceTimersByTimeAsync(301_000);
+
+    const updates = vi
+      .mocked(cx.notify)
+      .mock.calls.map(([, payload]) => (payload as { update?: acp.SessionUpdate }).update);
+    const refreshes = updates.filter(
+      (update) =>
+        update?.sessionUpdate === "tool_call_update" &&
+        update.toolCallId === "tool-quiet" &&
+        update.status === "in_progress",
+    );
+    expect(refreshes.length).toBeGreaterThanOrEqual(4);
+
+    control.emit({ type: "turn.completed", payload: { resultType: "success" } });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+  });
+
   it("ends a watermark-frozen turn after the stale-freeze budget (no output → stop)", async () => {
     // PR #85's original goal stays: a projection stuck at `running` whose
     // watermark never advances must eventually converge instead of hanging

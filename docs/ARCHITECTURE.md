@@ -265,7 +265,7 @@ editor still has it open).
     | turn.cancelled      | -> cancelled
     | no protocol         |
     | progress (120s)     | -> check read watermark
-    |   watermark moved   | -> defer decision (alive)
+    |   watermark moved   | -> forward throttled usage -> defer (alive)
     |   frozen < 10 min   | -> defer decision
     |   frozen >= 10 min  | -> fetch reply -> end_turn
     |                       |   no reply, no output -> max_turn_requests
@@ -282,8 +282,13 @@ the turn runs; the lock is only held during finalisation. Instead the 15s
 stall-reconcile reads feed a liveness watermark
 (`contextUsed`/`totalTokenCount`/`turnCount`/`currentTurnId` from
 `session/read`): an advancing watermark proves a silently-working turn
-(typically a sub-agent) and defers the terminal decision indefinitely, while
-a watermark frozen for 10 minutes (STALE_FREEZE_MS) marks the projection as
+(typically a sub-agent) and defers the terminal decision indefinitely. Because
+an upstream ACP client can have a shorter idle deadline than this bridge, the
+bridge also forwards authoritative progress at most once per minute: a
+`usage_update` when the watermark advances, or an `in_progress` refresh for a
+known active tool while its watermark is temporarily quiet. These updates are
+state-bearing; the bridge never fabricates transcript text as a heartbeat. A
+watermark frozen for 10 minutes (STALE_FREEZE_MS) still marks the projection as
 truly stale — the turn then ends gently (reply fetch first, bounded stop only
 when nothing was ever delivered). Already-queued events win the deadline race
 and are consumed first.
