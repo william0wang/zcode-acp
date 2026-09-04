@@ -202,6 +202,7 @@ export type ReplEntry =
   | { kind: "assistant"; text: string }
   | { kind: "tool"; id?: string; title: string; status: string }
   | { kind: "note"; text: string }
+  | { kind: "plan"; text: string }
   | { kind: "welcome"; info: WelcomeInfo };
 
 /** Live snapshot of a turn in progress (null textBuf/thinkBuf = not streaming). */
@@ -256,6 +257,31 @@ function blockText(content: unknown): string {
 }
 
 /**
+ * Plan text for an ExitPlanMode approval popup. The bridge ships it as the
+ * permission request's `toolCall.rawInput` — `{ plan: string }` on current
+ * backends (server-requests.ts also copies it into the tool_call's content
+ * blocks). A bare string passes through; any other object falls back to
+ * pretty-printed JSON so the reviewer never sees an empty popup. Null when
+ * nothing readable is there.
+ */
+export function planTextFromRawInput(raw: unknown): string | null {
+  if (typeof raw === "string") return raw.trim() ? raw : null;
+  if (raw && typeof raw === "object") {
+    const plan = (raw as { plan?: unknown }).plan;
+    if (typeof plan === "string" && plan.trim()) return plan;
+    // An empty object carries nothing worth showing.
+    if (Object.keys(raw).length === 0) return null;
+    try {
+      const json = JSON.stringify(raw, null, 2);
+      return json.trim() ? json : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
  * Fold pending stream buffers into entries. The live tail renders entries
  * first and the streaming buffers last, so a segment that starts later must
  * not stay buffered below entries that streamed earlier — flush on every
@@ -285,6 +311,18 @@ export function applyUpdate(state: TurnState, update: SessionUpdate): TurnState 
     toolTails: state.toolTails,
   };
   switch (update.sessionUpdate) {
+    case "user_message_chunk": {
+      // User turns reach the REPL through two paths — replayed history and the
+      // bridge's echo of a remote client's prompt (io.ts echoUserPromptToOthers).
+      // Both were silently dropped before (no case here), welding neighbouring
+      // assistant text across turn boundaries and hiding what a remote turn was
+      // even asked. A user chunk is a hard boundary: flush pending buffers so
+      // the prompt lands exactly between what streamed before and after it.
+      flushBuffers(next);
+      const chunk = blockText(update.content);
+      if (chunk.trim()) next.entries = [...next.entries, { kind: "user", text: chunk }];
+      return next;
+    }
     case "agent_message_chunk": {
       const chunk = blockText(update.content);
       // Entering prose flushes the thought stream as its own dim entry.
@@ -393,6 +431,10 @@ export interface SessionSummary {
   cwd: string;
   title?: string | null;
   updatedAt?: string | null;
+  /** Session is live on a hub instance right now — attachable with live updates. */
+  live?: boolean;
+  /** A turn is running on the owning instance right now. */
+  running?: boolean;
 }
 
 /**

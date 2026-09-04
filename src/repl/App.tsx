@@ -245,6 +245,16 @@ function EntryView({ entry }: { entry: ReplEntry }): ReactElement {
       );
     case "note":
       return <Text dimColor>-- {entry.text}</Text>;
+    case "plan":
+      // Plan approvals print the full plan into the scrollback (the footer
+      // popup cannot scroll a long document); it stays as the record of what
+      // was approved.
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text dimColor>── plan ──</Text>
+          <Text>{colorizeCodeFences(entry.text)}</Text>
+        </Box>
+      );
     case "welcome":
       return <WelcomeView info={entry.info} />;
   }
@@ -1065,6 +1075,10 @@ function SessionPicker({
         const title = s.title?.trim() || "untitled";
         const age = relativeTime(s.updatedAt);
         const elsewhere = s.cwd && s.cwd !== cwd ? ` · ${s.cwd}` : "";
+        // Live sessions are owned by another bridge instance right now —
+        // picking one attaches through the hub and streams updates as they
+        // happen (ADR-0018) instead of replaying a frozen local snapshot.
+        const live = s.live ? (s.running ? " · live ●" : " · live") : "";
         return (
           <Box key={s.sessionId} paddingLeft={1}>
             <Text color={abs === index ? "cyan" : undefined}>
@@ -1074,6 +1088,7 @@ function SessionPicker({
             <Text dimColor>
               {" "}
               {age ? `· ${age}` : ""}· {s.sessionId.slice(0, 8)}
+              {live}
               {elsewhere}
             </Text>
           </Box>
