@@ -10,7 +10,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { Readable, Writable } from "node:stream";
+import { type Duplex, Readable, Writable } from "node:stream";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import type { ActiveSession } from "@agentclientprotocol/sdk";
 import { render } from "ink";
 import { createElement } from "react";
+import type { WebSocket } from "ws";
 import { z } from "zod";
 
 import { queryQuota } from "../quota/index.js";
@@ -41,6 +42,7 @@ import {
   handleLocalCommand,
   parseCommand,
   parseQuestionForm,
+  planTextFromRawInput,
   seedStatusFromNewSession,
   selectLabel,
   type QuestionForm,
@@ -49,6 +51,14 @@ import {
   type TurnState,
 } from "./model.js";
 import { HISTORY_MAX, historyPath, loadHistory, pushHistory, saveHistory } from "./history.js";
+import {
+  fetchInstances,
+  openHubSocket,
+  resolveHubClient,
+  sameWorkspace,
+  type HubInstance,
+  type HubSocket,
+} from "./hub.js";
 import { createLineEditor, replaceText, type LineEditor } from "./input-buffer.js";
 
 export async function runRepl(): Promise<void> {
@@ -170,6 +180,19 @@ export async function runRepl(): Promise<void> {
   // scrollback with thousands of lines in one burst — a bounded recent tail
   // gives context without the wall-of-text scroll jump.
   const RESUME_TAIL_LIMIT = 50;
+  // Hub-proxied attach (ADR-0018): budget for the WebSocket open round-trip.
+  const REMOTE_OPEN_TIMEOUT_MS = 5000;
+  // Non-null while a hub-proxied remote attach is live: the raw socket pair
+  // feeding the remote connection. Teardown is client-side only — the owning
+  // serve bridge and its session are never touched.
+  let remote: { ws: WebSocket; duplex: Duplex } | null = null;
+  // ACP context of the connection that owns activeSession — the local bridge
+  // (assigned once cx exists) or, while attached, the remote bridge.
+  // Out-of-band calls (session/cancel) must reach the OWNING connection.
+  let activeCx: acp.ClientContext | null = null;
+  // Hub discovery from env; null = no hub configured — the picker then works
+  // exactly as before this feature existed.
+  const hubRef = resolveHubClient();
   const sleep = (ms: number): Promise<null> =>
     new Promise((resolve) => setTimeout(() => resolve(null), ms));
   // Prompts submitted while another turn runs (or before the session is
@@ -350,96 +373,119 @@ export async function runRepl(): Promise<void> {
     Writable.toWeb(child.stdin! as Writable),
     Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>,
   );
-  const app = acp
-    .client({ name: "zcode-acp" })
-    .onRequest("session/request_permission", async (ctx) => {
-      // A remote client (mobile/hub) may answer the broadcast request first;
-      // the bridge then cancels this losing copy and the SDK aborts
-      // ctx.signal — settle here so our picker dismisses instead of hanging.
-      const id = await new Promise<string | null>((resolve) => {
-        const onAbort = () => {
-          permissionResolver = null;
-          permission = null;
+  // One ACP client connection with the REPL's full handler chain — used for
+  // the local bridge AND, per attach, for hub-proxied remote bridges
+  // (ADR-0018): both peers are plain ACP agents, and permission, elicitation,
+  // and turn-state handling are identical.
+  function buildConnection(acpStream: acp.Stream): acp.ClientConnection {
+    const app = acp
+      .client({ name: "zcode-acp" })
+      .onRequest("session/request_permission", async (ctx) => {
+        // A remote client (mobile/hub) may answer the broadcast request first;
+        // the bridge then cancels this losing copy and the SDK aborts
+        // ctx.signal — settle here so our picker dismisses instead of hanging.
+        const id = await new Promise<string | null>((resolve) => {
+          const onAbort = () => {
+            permissionResolver = null;
+            permission = null;
+            rerender();
+            resolve(null);
+          };
+          ctx.signal.addEventListener("abort", onAbort, { once: true });
+          permissionResolver = (v) => {
+            ctx.signal.removeEventListener("abort", onAbort);
+            resolve(v);
+          };
+          const options = ctx.params.options.map((o) => ({ id: o.optionId, name: o.name }));
+          // ExitPlanMode arrives as an approve/reject permission pair (see
+          // interaction/adapter.ts). The plan text rides toolCall.rawInput
+          // ({plan}); the footer popup cannot scroll a long document, so print
+          // the full plan into the transcript and keep the popup to a pointer.
+          const isPlan =
+            options.length === 2 && options.every((o) => o.id === "approve" || o.id === "reject");
+          const raw = ctx.params.toolCall?.rawInput;
+          let detail: string | undefined;
+          if (isPlan) {
+            const plan = planTextFromRawInput(raw);
+            if (plan) {
+              entries = [...entries, { kind: "plan", text: plan }];
+              const firstLine = plan.split("\n").find((l) => l.trim()) ?? "";
+              detail = `plan printed above — ${firstLine.trim().slice(0, 80)}`;
+            } else {
+              detail = "(no plan text in the request)";
+            }
+          } else {
+            detail = typeof raw === "string" ? raw : undefined;
+          }
+          permission = {
+            heading: isPlan ? "plan approval" : "permission requested",
+            title: ctx.params.toolCall?.title ?? "tool call",
+            detail,
+            options,
+          };
           rerender();
-          resolve(null);
-        };
-        ctx.signal.addEventListener("abort", onAbort, { once: true });
-        permissionResolver = (v) => {
-          ctx.signal.removeEventListener("abort", onAbort);
-          resolve(v);
-        };
-        const options = ctx.params.options.map((o) => ({ id: o.optionId, name: o.name }));
-        // ExitPlanMode arrives as an approve/reject permission pair (see
-        // interaction/adapter.ts); head it as a plan approval and show the
-        // plan text so the decision is actually reviewable.
-        const isPlan =
-          options.length === 2 && options.every((o) => o.id === "approve" || o.id === "reject");
-        const raw = ctx.params.toolCall?.rawInput;
-        permission = {
-          heading: isPlan ? "plan approval" : "permission requested",
-          title: ctx.params.toolCall?.title ?? "tool call",
-          detail: typeof raw === "string" ? raw : undefined,
-          options,
-        };
+        });
+        permissionResolver = null;
+        permission = null;
         rerender();
-      });
-      permissionResolver = null;
-      permission = null;
-      rerender();
-      return id === null
-        ? { outcome: { outcome: "cancelled" } }
-        : { outcome: { outcome: "selected", optionId: id } };
-    })
-    .onRequest("elicitation/create", async (ctx) => {
-      // AskUserQuestion arrives as the bridge's form elicitation. Each
-      // question walks the picker sequentially; skipped questions omit
-      // their key (the backend treats them as unanswered).
-      const forms = parseQuestionForm(ctx.params);
-      if (!forms) return { action: "decline", reason: "unsupported elicitation form" };
-      const content: Record<string, string | string[]> = {};
-      for (const form of forms) {
-        const answer = await askQuestion(form, ctx.signal);
-        // A remote client winning the broadcast aborts our request via
-        // ctx.signal — stop answering instead of walking remaining questions.
-        if (ctx.signal.aborted) return { action: "decline", reason: "cancelled" };
-        if (answer === null) continue; // skipped
-        if (form.multiSelect) {
-          const merged = [...answer.picked, ...(answer.custom ? [answer.custom] : [])];
-          if (merged.length > 0) content[form.key] = merged;
-        } else {
-          content[form.key] = answer.custom || answer.picked[0] || "";
+        return id === null
+          ? { outcome: { outcome: "cancelled" } }
+          : { outcome: { outcome: "selected", optionId: id } };
+      })
+      .onRequest("elicitation/create", async (ctx) => {
+        // AskUserQuestion arrives as the bridge's form elicitation. Each
+        // question walks the picker sequentially; skipped questions omit
+        // their key (the backend treats them as unanswered).
+        const forms = parseQuestionForm(ctx.params);
+        if (!forms) return { action: "decline", reason: "unsupported elicitation form" };
+        const content: Record<string, string | string[]> = {};
+        for (const form of forms) {
+          const answer = await askQuestion(form, ctx.signal);
+          // A remote client winning the broadcast aborts our request via
+          // ctx.signal — stop answering instead of walking remaining questions.
+          if (ctx.signal.aborted) return { action: "decline", reason: "cancelled" };
+          if (answer === null) continue; // skipped
+          if (form.multiSelect) {
+            const merged = [...answer.picked, ...(answer.custom ? [answer.custom] : [])];
+            if (merged.length > 0) content[form.key] = merged;
+          } else {
+            content[form.key] = answer.custom || answer.picked[0] || "";
+          }
         }
-      }
-      return { action: "accept", content };
-    })
-    // Out-of-band turn indicator broadcast by the bridge on every prompt start
-    // and end. Drives turns the REPL did NOT start itself: a mobile/second
-    // client prompting this session must render here too — without it those
-    // updates would be silently dropped (the pump only folds updates while a
-    // turn is active).
-    .onNotification(
-      "$/zcode/turnState",
-      z.object({ sessionId: z.string(), running: z.boolean() }),
-      (ctx) => {
-        if (!activeSession || ctx.params.sessionId !== activeSession.sessionId) return;
-        if (ctx.params.running) {
-          // Local prompts already opened the turn in startTurn; idempotent.
-          if (!turnActive && !replayMode) {
-            turn = createTurnState();
-            turnActive = true;
+        return { action: "accept", content };
+      })
+      // Out-of-band turn indicator broadcast by the bridge on every prompt start
+      // and end. Drives turns the REPL did NOT start itself: a mobile/second
+      // client prompting this session must render here too — without it those
+      // updates would be silently dropped (the pump only folds updates while a
+      // turn is active).
+      .onNotification(
+        "$/zcode/turnState",
+        z.object({ sessionId: z.string(), running: z.boolean() }),
+        (ctx) => {
+          if (!activeSession || ctx.params.sessionId !== activeSession.sessionId) return;
+          if (ctx.params.running) {
+            // Local prompts already opened the turn in startTurn; idempotent.
+            if (!turnActive && !replayMode) {
+              turn = createTurnState();
+              turnActive = true;
+              rerender();
+            }
+          } else if (turnActive && !promptInFlight) {
+            // Remote turn finished (no stop message reaches non-initiators).
+            entries = [...entries, ...finishTurn(turn ?? createTurnState())];
+            turn = null;
+            turnActive = false;
+            drainQueue();
             rerender();
           }
-        } else if (turnActive && !promptInFlight) {
-          // Remote turn finished (no stop message reaches non-initiators).
-          entries = [...entries, ...finishTurn(turn ?? createTurnState())];
-          turn = null;
-          turnActive = false;
-          drainQueue();
-          rerender();
-        }
-      },
-    )
-    .connect(stream);
+        },
+      )
+      .connect(acpStream);
+    return app;
+  }
+
+  const app = buildConnection(stream);
   const cx = app.agent;
 
   // Advertise form-elicitation so AskUserQuestion routes here as a
@@ -569,6 +615,15 @@ export async function runRepl(): Promise<void> {
         } else if (turnActive) {
           turn = applyUpdate(turn ?? createTurnState(), msg.update);
           rerender();
+        } else if (msg.update.sessionUpdate === "user_message_chunk") {
+          // A remote-initiated prompt's echo lands BEFORE the turnState
+          // running notification (separate frames through the hub): open the
+          // turn here so the prompt text renders instead of being dropped.
+          // The running:true that follows is idempotent; running:false closes
+          // this turn exactly like any remote turn.
+          turn = applyUpdate(createTurnState(), msg.update);
+          turnActive = true;
+          rerender();
         } else if (statusChanged) {
           rerender();
         }
@@ -667,7 +722,9 @@ export async function runRepl(): Promise<void> {
   function onCancelTurn(): void {
     if (!activeSession || !turn) return;
     try {
-      void cx.notify("session/cancel", { sessionId: activeSession.sessionId });
+      // The connection that OWNS the active session — the local bridge, or
+      // the hub-proxied remote bridge while attached (ADR-0018).
+      void (activeCx ?? cx).notify("session/cancel", { sessionId: activeSession.sessionId });
     } catch {
       // best-effort; a second ctrl-c exits outright
     }
@@ -675,8 +732,10 @@ export async function runRepl(): Promise<void> {
 
   /**
    * `/sessions`: list this project's sessions via ACP `session/list` (the
-   * backend filters by workspace), let the user pick one interactively, then
-   * resume it with `session/load` (full history replayed into the transcript).
+   * backend filters by workspace), merge in sessions currently live on hub
+   * instances (ADR-0018, marked `live`), let the user pick one interactively,
+   * then attach: through the hub when the session is live somewhere (live
+   * updates), otherwise a local `session/load` resume (tail replay).
    */
   async function openSessionPicker(): Promise<void> {
     if (turnActive) {
@@ -714,6 +773,42 @@ export async function runRepl(): Promise<void> {
       title: s.title ?? null,
       updatedAt: s.updatedAt ?? null,
     }));
+    // Live view (ADR-0018): merge sessions currently registered on hub
+    // instances for this project. Best-effort — no hub configured, hub down,
+    // or auth trouble just means no `live` markers and plain local resumes,
+    // exactly like before the feature existed.
+    const liveOn = new Map<string, { inst: HubInstance; running: boolean }>();
+    if (hubRef) {
+      try {
+        for (const inst of await fetchInstances(hubRef, { timeoutMs: 2000 })) {
+          if (!sameWorkspace(inst.workspace, process.cwd())) continue;
+          for (const s of inst.sessions ?? []) {
+            liveOn.set(s.sessionId, { inst, running: s.status === "running" });
+          }
+        }
+      } catch {
+        // hub unreachable — local list only
+      }
+    }
+    for (const [sid, { inst, running }] of liveOn) {
+      const existing = items.find((s) => s.sessionId === sid);
+      const meta = inst.sessions?.find((s) => s.sessionId === sid);
+      if (existing) {
+        existing.live = true;
+        existing.running = running;
+        existing.title = existing.title ?? meta?.title ?? null;
+        existing.updatedAt = existing.updatedAt ?? meta?.updatedAt ?? null;
+      } else {
+        items.push({
+          sessionId: sid,
+          cwd: inst.workspace ?? "",
+          title: meta?.title ?? null,
+          updatedAt: meta?.updatedAt ?? null,
+          live: true,
+          running,
+        });
+      }
+    }
     if (items.length === 0) {
       entries = [...entries, { kind: "note", text: "no previous sessions in this project yet" }];
       rerender();
@@ -730,7 +825,9 @@ export async function runRepl(): Promise<void> {
     const picked = items.find((s) => s.sessionId === sid);
     if (sid && picked) {
       resumedDuringStartup = true;
-      await resumeInto(picked);
+      const live = liveOn.get(sid);
+      if (hubRef && live) await attachRemote(picked, live.inst);
+      else await resumeInto(picked);
     }
   }
 
@@ -754,6 +851,10 @@ export async function runRepl(): Promise<void> {
         attachSession(response: { sessionId: string }): ActiveSession;
       }
     ).attachSession({ sessionId: picked.sessionId });
+    // Switching to a LOCAL session tears down any hub attach first: its
+    // socket, connection context, and permission-handler slot must not
+    // outlive the swap.
+    closeRemoteAttach();
     activeSession?.dispose();
     activeSession = loaded;
     replayTurn = createTurnState();
@@ -765,6 +866,7 @@ export async function runRepl(): Promise<void> {
       replayedMessages?: number;
       totalMessages?: number;
       hasMore?: boolean;
+      turnActive?: boolean;
     } | null = null;
     try {
       const resp = (await cx.request("session/load", {
@@ -795,10 +897,19 @@ export async function runRepl(): Promise<void> {
       rerender();
       return "failed";
     } finally {
-      loadSettled = true;
+      // Same generation guard as attachRemote: a stale resume resolving after
+      // a newer swap must not end that swap's replay drain early.
+      if (gen === swapGen) loadSettled = true;
     }
     const title = picked.title?.trim() || picked.sessionId.slice(0, 8);
     const m = resumeMeta;
+    // Loaded mid-turn (e.g. a hub client prompted this local bridge while the
+    // REPL was detached): the running flag rides the load response — no start
+    // notification will fire for an already-started turn.
+    if (m?.turnActive && !turnActive) {
+      turn = createTurnState();
+      turnActive = true;
+    }
     const truncated =
       m?.hasMore && typeof m.replayedMessages === "number" && typeof m.totalMessages === "number"
         ? ` — showing last ${m.replayedMessages} of ${m.totalMessages} messages`
@@ -809,6 +920,199 @@ export async function runRepl(): Promise<void> {
     ];
     rerender();
     return "loaded";
+  }
+
+  /**
+   * Client-side teardown of a hub-proxied attach. Never touches the owning
+   * bridge: closing the proxied socket just removes this client from the
+   * owner's broadcast registry — the session (and any turn on it) continues.
+   */
+  function closeRemoteAttach(): void {
+    if (!remote) return;
+    try {
+      remote.ws.close();
+    } catch {
+      // ignore
+    }
+    remote = null;
+    activeCx = null;
+  }
+
+  /**
+   * Attach to a session live on ANOTHER bridge instance through the hub's WS
+   * proxy (ADR-0018): the REPL becomes a second ACP client at the owner, so
+   * replay and live stream are native client fan-out — the only way to watch
+   * a session another process is driving (the CLI's own backend holds just a
+   * frozen resident snapshot of those). Any failure falls back to the plain
+   * local resume.
+   */
+  async function attachRemote(picked: SessionSummary, inst: HubInstance): Promise<void> {
+    if (!hubRef) return;
+    const gen = ++swapGen;
+    let socket: HubSocket | null = null;
+    // A remote client can race a prompt into the CURRENT session during the
+    // attach's await windows; swapping then would orphan that turn (same
+    // discipline as /new) — bail out and stay put instead.
+    const racedTurn = (): boolean => {
+      if (gen !== swapGen) {
+        socket?.ws.close();
+        return true;
+      }
+      if (turnActive) {
+        socket?.ws.close();
+        entries = [
+          ...entries,
+          { kind: "note", text: "a turn started while attaching — staying in the current session" },
+        ];
+        rerender();
+        return true;
+      }
+      return false;
+    };
+    try {
+      socket = await openHubSocket(hubRef, inst.id, REMOTE_OPEN_TIMEOUT_MS);
+      const sock = socket;
+      if (racedTurn()) return;
+      const rapp = buildConnection(
+        acp.ndJsonStream(
+          Writable.toWeb(sock.duplex),
+          Readable.toWeb(sock.duplex) as ReadableStream<Uint8Array>,
+        ),
+      );
+      const rcx = rapp.agent;
+      // The bridge answers only initialize until the handshake completes —
+      // same requirement as the local connection's startup.
+      await rcx.request("initialize", {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          elicitation: { form: {} },
+        },
+        clientInfo: { name: "zcode-acp", title: "zcode-acp REPL", version: AGENT_INFO.version },
+      });
+      if (racedTurn()) return;
+      // Attach BEFORE the load request goes out — same ordering constraint as
+      // the local resume, or every replayed update is dropped by the SDK's
+      // update router.
+      const loaded = (
+        rcx as unknown as { attachSession(response: { sessionId: string }): ActiveSession }
+      ).attachSession({ sessionId: picked.sessionId });
+      // Loss detection: the hub or the owning bridge going away must not leave
+      // a frozen "live" view (or the pump spinning on a dead read).
+      sock.ws.once("close", () => {
+        // Recovery only when THIS socket is still the active attach. The
+        // generation is deliberately not consulted: if a second attach is
+        // still mid-flight, the first attach's session IS the live view, so
+        // its loss must recover; once another attach (or /new) owns the slot,
+        // the ws identity check is what makes this handler inert.
+        if (remote?.ws !== sock.ws) return;
+        remote = null;
+        activeCx = null;
+        // The remote stream is dead — no stop or turnState will ever arrive,
+        // so any open turn UI is force-closed here rather than left spinning.
+        if (turnActive) {
+          entries = [
+            ...entries,
+            ...finishTurn(turn ?? createTurnState(), "remote connection lost"),
+          ];
+          turn = null;
+          turnActive = false;
+          promptInFlight = false;
+        }
+        entries = [
+          ...entries,
+          {
+            kind: "note",
+            text: "remote attach lost — starting a fresh local session (use /sessions to reload)",
+          },
+        ];
+        rerender();
+        void startFreshSession();
+      });
+      // Any previous attach is torn down first — its socket, its connection
+      // context, and its permission-handler slot all go with it.
+      closeRemoteAttach();
+      activeSession?.dispose();
+      activeSession = loaded;
+      activeCx = rcx;
+      remote = { ws: sock.ws, duplex: sock.duplex };
+      replayTurn = createTurnState();
+      replayMode = true;
+      loadSettled = false;
+      rerender();
+      let resp: {
+        configOptions?: acp.SessionConfigOption[] | null;
+        replayMeta?: {
+          replayedMessages?: number;
+          totalMessages?: number;
+          hasMore?: boolean;
+          turnActive?: boolean;
+        };
+      };
+      try {
+        resp = (await rcx.request("session/load", {
+          sessionId: picked.sessionId,
+          cwd: process.cwd(),
+          mcpServers: [],
+          // Tail replay (ADR-0003), same bound as the local resume.
+          _meta: { zcode: { limit: RESUME_TAIL_LIMIT } },
+        })) as typeof resp;
+      } finally {
+        // The whole backlog is queued once the load resolves — without this
+        // the pump waits for a quiet window that never opens. Generation
+        // guarded: a stale load resolving after a newer swap (which owns the
+        // flag now) must not end that swap's replay drain early.
+        if (gen === swapGen) loadSettled = true;
+      }
+      if (gen !== swapGen) return; // stale — another swap owns the state now
+      status = seedStatusFromNewSession(status, resp);
+      const m = resp.replayMeta ?? null;
+      // A turn already running at attach time (the mobile mid-turn — the main
+      // scenario) never sends a start notification we could hear; this flag in
+      // the load response is the only signal.
+      if (m?.turnActive && !turnActive) {
+        turn = createTurnState();
+        turnActive = true;
+      }
+      const title = picked.title?.trim() || picked.sessionId.slice(0, 8);
+      const truncated =
+        m?.hasMore && typeof m.replayedMessages === "number" && typeof m.totalMessages === "number"
+          ? ` — showing last ${m.replayedMessages} of ${m.totalMessages} messages`
+          : "";
+      entries = [
+        ...entries,
+        {
+          kind: "note",
+          text: `attached live "${title}" via hub (${inst.origin ?? "remote"} instance ${inst.id.slice(0, 8)})${truncated}`,
+        },
+      ];
+      rerender();
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      if (gen !== swapGen) return; // another swap owns the state now
+      try {
+        socket?.ws.close();
+      } catch {
+        // ignore
+      }
+      // Only this attach's own state may be cleared here: a failure BEFORE
+      // installation leaves the previous attach's socket live in `remote`,
+      // and clearing it would orphan that ws (its permission fan-out would
+      // keep reaching this REPL with nothing left to close it).
+      if (socket && remote?.ws === socket.ws) {
+        remote = null;
+        activeCx = null;
+      }
+      entries = [
+        ...entries,
+        { kind: "note", text: `remote attach failed (${why}) — loading locally instead` },
+      ];
+      rerender();
+      // Fall back to the plain local load. If the swap had already completed,
+      // resumeInto disposes the (now stream-less) remote session itself; if it
+      // hadn't, it disposes the previous session as any resume would.
+      await resumeInto(picked);
+    }
   }
 
   /** Fresh welcome panel entry; reused by startup and `/new`. */
@@ -876,6 +1180,9 @@ export async function runRepl(): Promise<void> {
         rerender();
         return;
       }
+      // `/new` means a fresh LOCAL session: a hub-proxied attach is torn down
+      // first (client-side only — the owner keeps running).
+      closeRemoteAttach();
       activeSession?.dispose();
       activeSession = fresh;
       status = seedStatusFromNewSession(status, fresh.newSessionResponse);
@@ -938,6 +1245,13 @@ export async function runRepl(): Promise<void> {
     // not skip the child shutdown and leave the process hanging.
     try {
       activeSession?.dispose();
+    } catch {
+      // ignore
+    }
+    try {
+      // Closing the proxied socket only detaches this client — the owning
+      // serve bridge and its session are never touched from here.
+      closeRemoteAttach();
     } catch {
       // ignore
     }

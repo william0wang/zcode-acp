@@ -41,6 +41,7 @@ import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { tmpdir } from "node:os";
+import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
@@ -837,6 +838,22 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
 
   const wss = new WebSocketServer({ noServer: true });
 
+  /**
+   * Reject a WS upgrade with a real HTTP status before destroying. A bare
+   * destroy leaves the client's upgrade request hanging on an opaque
+   * ECONNRESET — the `ws` client surfaces that as an error on its internal
+   * upgrade request with no clean signal, so machine clients (the REPL's hub
+   * client included) hang or crash on it instead of reading the reason.
+   */
+  const rejectUpgrade = (socket: Duplex, status: number, reason: string): void => {
+    try {
+      socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
+    } catch {
+      // best-effort — the destroy below is the actual rejection
+    }
+    socket.destroy();
+  };
+
   const server: Server = createServer((req, res) => {
     // Async handler failures (malformed URL, aborted body) must never escape
     // into the event loop — warn and drop the connection.
@@ -849,18 +866,18 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     if (url.pathname !== "/acp") {
-      socket.destroy();
+      rejectUpgrade(socket, 404, "Not Found");
       return;
     }
     if (!authorized(req, url, token)) {
       warn("hub: unauthorized WS upgrade rejected");
-      socket.destroy();
+      rejectUpgrade(socket, 401, "Unauthorized");
       return;
     }
     const entry = instances.get(url.searchParams.get("instance") ?? "");
     if (!entry) {
       warn("hub: WS upgrade for unknown instance rejected");
-      socket.destroy();
+      rejectUpgrade(socket, 404, "Unknown Instance");
       return;
     }
     // Dial the bridge's loopback endpoint before accepting the client side,
@@ -883,7 +900,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     });
     bridge.once("error", (e) => {
       warn(`hub: dial bridge :${entry.port} failed: ${e.message}`);
-      socket.destroy();
+      rejectUpgrade(socket, 502, "Bridge Unreachable");
     });
   });
 

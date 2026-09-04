@@ -26,6 +26,7 @@ import {
   isOneShotCommandValue,
   lastToolTail,
   parseCommand,
+  planTextFromRawInput,
   relativeTime,
   parseQuestionForm,
   selectLabel,
@@ -723,5 +724,59 @@ describe("formatQuotaLine", () => {
     expect(formatQuotaLine({ kind: "auth_error" })).toBeNull();
     expect(formatQuotaLine({ kind: "unavailable" })).toBeNull();
     expect(formatQuotaLine(null)).toBeNull();
+  });
+});
+
+describe("user_message_chunk", () => {
+  const userChunk = (text: string): SessionUpdateLike =>
+    ({ sessionUpdate: "user_message_chunk", content: { type: "text", text } }) as SessionUpdateLike;
+
+  it("renders user turns as entries instead of dropping them", () => {
+    // Replayed history and the remote-prompt echo both arrive as user chunks;
+    // without this case, neighbouring assistant text welded across the turn
+    // boundary and the prompt vanished from the transcript.
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_message_chunk", "answer one"));
+    s = applyUpdate(s, userChunk("second question"));
+    s = applyUpdate(s, chunk("agent_message_chunk", "answer two"));
+    const done = finishTurn(s);
+    expect(done.map((e) => e.kind)).toEqual(["assistant", "user", "assistant"]);
+    expect(done[1]).toMatchObject({ kind: "user", text: "second question" });
+  });
+
+  it("flushes a pending thought stream before the user turn lands", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, chunk("agent_thought_chunk", "pondering"));
+    s = applyUpdate(s, userChunk("next prompt"));
+    const done = finishTurn(s);
+    expect(done.map((e) => e.kind)).toEqual(["thinking", "user"]);
+  });
+
+  it("ignores whitespace-only user chunks", () => {
+    let s = createTurnState();
+    s = applyUpdate(s, userChunk("   \n"));
+    expect(finishTurn(s)).toEqual([]);
+  });
+});
+
+describe("planTextFromRawInput", () => {
+  it("passes a bare string through", () => {
+    expect(planTextFromRawInput("## plan\n- step")).toBe("## plan\n- step");
+    expect(planTextFromRawInput("   ")).toBeNull();
+  });
+
+  it("extracts the plan field from the object shape the bridge ships", () => {
+    expect(planTextFromRawInput({ plan: "- do X\n- do Y", other: 1 })).toBe("- do X\n- do Y");
+  });
+
+  it("falls back to pretty-printed JSON for unknown object shapes", () => {
+    expect(planTextFromRawInput({ steps: ["a"] })).toBe('{\n  "steps": [\n    "a"\n  ]\n}');
+  });
+
+  it("returns null for empty objects and non-objects", () => {
+    expect(planTextFromRawInput({})).toBeNull();
+    expect(planTextFromRawInput({ plan: "   " })).toBe('{\n  "plan": "   "\n}');
+    expect(planTextFromRawInput(undefined)).toBeNull();
+    expect(planTextFromRawInput(42)).toBeNull();
   });
 });

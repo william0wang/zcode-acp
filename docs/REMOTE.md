@@ -109,6 +109,16 @@ editor uses — attaching by id joins the conversation's live notification
 stream, and the hub dedupes sessions shared by several bridges of the same
 project.
 
+**The local REPL is a hub client too** (ADR-0018). Bare `zcode-acp` in a
+shell with the hub env (`ZCODE_ACP_REMOTE_TOKEN` + `ZCODE_ACP_HUB_PORT`)
+merges sessions that are live on hub instances into its `/sessions` picker
+(marked `live`, `●` while a turn runs) and attaches to them through the hub's
+WS proxy as a second ACP client — replay on attach, then live updates, so a
+conversation being driven from the phone advances on the desktop in real
+time. Without a hub configured or reachable, the picker and resumes behave
+exactly as before. Attaching never touches the owning bridge: leaving the
+REPL (or `/new`) only detaches this client.
+
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the
 security boundary. A proxied connection stays bound to one instance; switching
