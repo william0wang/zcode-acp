@@ -906,17 +906,22 @@ describe("hub remote session-create (ADR-0014)", () => {
     };
   }
 
-  async function registerServeBridge(hub: HubHandle, workspace: string): Promise<void> {
+  async function registerServeBridge(
+    hub: HubHandle,
+    workspace: string,
+    opts: { id?: string; nonce?: string } = {},
+  ): Promise<void> {
     const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
         registerBody({
-          id: `serve-${workspace}`,
+          id: opts.id ?? `serve-${workspace}`,
           workspace,
           origin: "serve",
           port: BASE_PORT + 50,
           pid: 4242,
+          ...(opts.nonce ? { nonce: opts.nonce } : {}),
         }),
       ),
     });
@@ -973,17 +978,31 @@ describe("hub remote session-create (ADR-0014)", () => {
     expect(await res.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
   });
 
-  it("reuses an existing serve instance instead of spawning a second one", async () => {
+  it("create ALWAYS incubates a visible REPL even when a serve bridge is already live", async () => {
+    // Regression (ADR-0016 amendment): the App flow lists project history
+    // first, which incubates a headless serve bridge — the old reuse made
+    // every subsequent create answer reused:true and run invisibly in the
+    // background, so the promised terminal window could never open. The POST
+    // must spawn a terminal surface and answer with ITS new instance.
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
-    await registerServeBridge(hub, PROJECT);
-    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+    await registerServeBridge(hub, PROJECT); // the listing's headless bridge
+    const pending = fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
       method: "POST",
       headers: { ...auth, "Content-Type": "application/json" },
       body: JSON.stringify({ workspacePath: PROJECT }),
     });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCount).toBe(1);
+    expect(spawnCalls[0]!.kind).toBe("repl");
+    // The window's bridge registers with its incubation nonce: the poll pairs
+    // with it, never with the pre-existing headless listing bridge.
+    await registerServeBridge(hub, PROJECT, {
+      id: "serve-window",
+      nonce: spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    const res = await pending;
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ id: `serve-${PROJECT}`, reused: true });
-    expect(spawnCount).toBe(0);
+    expect(await res.json()).toEqual({ id: "serve-window", reused: false });
   });
 
   it("concurrent POSTs for the same workspace join one incubation (no double spawn)", async () => {
@@ -1007,9 +1026,17 @@ describe("hub remote session-create (ADR-0014)", () => {
     expect(rb.status).toBe(200);
     expect(await ra.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
     expect(await rb.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
-    // Settled incubation is gone: the next POST reuses the registered one.
-    expect(await (await post()).json()).toEqual({ id: `serve-${PROJECT}`, reused: true });
-    expect(spawnCount).toBe(1);
+    // Settled incubation is gone, and create never reuses: the next POST
+    // incubates a second window of its own (nonce-paired, so the answer is
+    // the new registration, not the bridge above).
+    const next = post();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(spawnCount).toBe(2);
+    await registerServeBridge(hub, PROJECT, {
+      id: "serve-window-2",
+      nonce: spawnCalls[1]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    expect(await (await next).json()).toEqual({ id: "serve-window-2", reused: false });
   });
 
   it("dedupes across path spellings: a symlinked row matches the resolved registration", async () => {
@@ -1019,20 +1046,49 @@ describe("hub remote session-create (ADR-0014)", () => {
     const real = await mkdtemp(path.join(tmpdir(), "hub-dedupe-"));
     const link = path.join(path.dirname(real), `${path.basename(real)}-link`);
     await symlink(real, link);
+    // The listing proxies the bridge's /sessions — a bare fake server stands
+    // in for the loopback endpoint the reused instance would answer on.
+    const sessions = track(
+      await new Promise<{ server: Server; port: number }>((resolve) => {
+        const server = createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ sessions: [], nextCursor: null }));
+        });
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+        });
+      }),
+      ({ server }) => new Promise<void>((r) => server.close(() => r())),
+    );
     try {
       listKnownWorkspacesMock.mockResolvedValue([
         { workspacePath: link, sessions: 1, lastActive: 1 },
       ]);
       const hub = await startTestHub({ spawnServe: spawnServeSpy() });
-      // The bridge registers with its resolved cwd spelling.
-      await registerServeBridge(hub, real);
-      const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      // The bridge registers with its resolved cwd spelling; the listing is
+      // asked with the symlinked whitelist spelling.
+      const reg = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
         method: "POST",
-        headers: { ...auth, "Content-Type": "application/json" },
-        body: JSON.stringify({ workspacePath: link }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          registerBody({
+            id: `serve-${real}`,
+            workspace: real,
+            origin: "serve",
+            port: sessions.port,
+            pid: 4242,
+          }),
+        ),
       });
+      expect(reg.ok).toBe(true);
+      const res = await fetch(
+        `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(link)}`,
+        { headers: auth },
+      );
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ id: `serve-${real}`, reused: true });
+      const body = (await res.json()) as { instance: { id: string } };
+      expect(body.instance).toEqual({ id: `serve-${real}`, origin: "serve" });
       expect(spawnCount).toBe(0);
     } finally {
       await rm(link, { force: true });

@@ -182,9 +182,14 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   Warp cannot execute scripts or commands programmatically at all
   (warpdotdev/warp#1917, #3959, #9083) — naming it warns, and the flow
   degrades to the headless bridge after the register timeout.
-- A live serve-origin instance for the same workspace is reused
-  (`reused:true`) instead of spawning a second one; concurrent creates join
-  the same in-flight spawn instead of racing a duplicate.
+- Create NEVER reuses a live serve-origin instance (ADR-0016 amendment):
+  the App flow lists project history first, which incubates a headless serve
+  bridge, and reuse meant the promised terminal window could never open once
+  a project was browsed. Every create incubates its own window and answers
+  with the NEW instance; concurrent identical creates join the same in-flight
+  spawn instead of racing a duplicate. A client that wants a HEADLESS attach
+  should not POST at all — attach to the instance id the history listing
+  already returns.
 - Lifetime depends on the surface: a terminal-REPL instance lives while its
   window lives (the owner closing it retires the bridge — re-create on
   demand); the headless fallback exists for remote interest only and exits
@@ -237,11 +242,13 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
 - The first listing of a cold project incubates its serve bridge (the same
   machinery as remote session-create; budget ~12s) — later listings and the
   follow-up load reuse it.
-- **Resume in the App (no local surface)**: `POST /api/instances` with just
-  the `workspacePath` (answers `reused:true` with the listing's instance),
-  attach `WS /acp?instance=<id>`, then
-  `session/load {"sessionId":"<the listed id>"}` — history replays and the
-  conversation continues with `session/prompt`, entirely in the client.
+- **Resume in the App (no local surface)**: attach DIRECTLY to the instance
+  the listing already returned (`WS /acp?instance=<listing instance id>` —
+  no POST; a bare POST would now pop a desktop window, see the amendment
+  above), then `session/load {"sessionId":"<the listed id>"}` — history
+  replays and the conversation continues with `session/prompt`, entirely in
+  the client. A cold project (no listing yet) lists first — the listing IS
+  the headless incubator.
 - **Resume on the desktop (ADR-0017)**: `POST /api/instances` with the
   `sessionId` too — the hub incubates a VISIBLE terminal REPL that boots
   straight into that conversation (history replays in the window; the same
