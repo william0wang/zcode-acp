@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.1](https://github.com/william0wang/zcode-acp/compare/v0.21.0...v0.21.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **remote:** session-create always incubates a visible terminal REPL (ADR-0016 amendment) ([#124](https://github.com/william0wang/zcode-acp/issues/124)) ([8f8ff61](https://github.com/william0wang/zcode-acp/commit/8f8ff61d2972c5507dc03871ae5897b920037f7d))
+
 ## [0.21.0](https://github.com/william0wang/zcode-acp/compare/v0.20.1...v0.21.0) (2026-09-04)
 
 
