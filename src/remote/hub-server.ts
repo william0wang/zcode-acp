@@ -755,14 +755,17 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     );
     const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : REPL_REGISTER_TIMEOUT_MS;
     const deadline = Date.now() + budget;
-    // A resume incubates NEXT TO the serve bridge the listing already
-    // incubated, and several incubations can race for one workspace: the poll
-    // matches only a registration that is neither a pre-existing instance nor
-    // another incubation's bridge. A nonce-less registration means a bridge
-    // older than the nonce protocol — accept it, or a legacy spawn could
-    // never satisfy its own incubation.
+    // A visible-terminal incubation (create OR resume) runs NEXT TO the serve
+    // bridge the listing already incubated, and several incubations can race
+    // for one workspace: the poll matches only a registration that is neither
+    // a pre-existing instance nor another incubation's bridge — otherwise a
+    // create would answer with the listing's headless bridge and the window
+    // would never be the returned instance. Only "serve" (the ensure-a-bridge
+    // listing) accepts any live registration. A nonce-less registration means
+    // a bridge older than the nonce protocol — accept it, or a legacy spawn
+    // could never satisfy its own incubation.
     const preexisting = new Set<string>(
-      kind === "resume" ? findServeInstances(workspacePath).map((e) => e.id) : [],
+      kind === "serve" ? [] : findServeInstances(workspacePath).map((e) => e.id),
     );
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
@@ -1105,24 +1108,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       return;
     }
-    // POST /api/instances — create (or reuse) a bridge for one known project,
-    // or RESUME one of its closed sessions (optional sessionId, ADR-0017).
-    // Session-create incubates a VISIBLE interactive REPL in the user's
-    // terminal (ADR-0016, macOS; ZCODE_ACP_HUB_TERMINAL=0 / headless falls
-    // back to the detached `zcode-acp serve` of ADR-0014). With a sessionId —
-    // the backend store id from the ADR-0015 listing — the hub incubates a
-    // visible REPL that boots straight into that session, EVEN when a serve
-    // bridge is already live (the listing incubated one; a resume must still
-    // surface on the desktop). The hub waits for the bridge's heartbeat
-    // registration; the bridge lives its own life afterwards (a terminal REPL
-    // until the window closes, a serve bridge on its idle timer). Dedupe: one
-    // serve-origin instance per workspace for plain creates — an existing
-    // live one is reused, and concurrent POSTs join the same in-flight
-    // incubation instead of double-spawning; resume POSTs join only the
-    // identical session. Accepted bound: a hub restart clears the instance
-    // table, so a POST inside the bridges' ≤10s re-registration window may
-    // incubate a duplicate — harmless (both serve, future POSTs dedupe, an
-    // idle one exits in 10min).
+    // POST /api/instances — create a bridge for one known project, or RESUME
+    // one of its closed sessions (optional sessionId, ADR-0017). BOTH paths
+    // incubate a VISIBLE interactive REPL in the user's terminal (ADR-0016 as
+    // amended, macOS; ZCODE_ACP_HUB_TERMINAL=0 / headless falls back to the
+    // detached `zcode-acp serve` of ADR-0014). Without a sessionId the REPL
+    // starts a fresh conversation; with one — the backend store id from the
+    // ADR-0015 listing — it boots straight into that session. Neither path
+    // reuses a live serve bridge: the App flow always runs the history
+    // listing first, which incubates a headless serve instance, and reuse
+    // would mean the window can never open (the pre-amendment behaviour).
+    // The hub waits for the bridge's heartbeat registration; the bridge lives
+    // its own life afterwards (a terminal REPL until the window closes, a
+    // serve bridge on its idle timer). Concurrent identical POSTs join one
+    // in-flight incubation; a create and a resume, or two different sessions,
+    // each get their own window. Accepted bound: a hub restart clears the
+    // instance table, so a POST inside the bridges' ≤10s re-registration
+    // window may incubate a duplicate — harmless (the extra window is
+    // closable; background serve bridges dedupe by workspace elsewhere).
     if (url.pathname === "/api/instances" && req.method === "POST") {
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
@@ -1169,17 +1172,15 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         }
         return;
       }
-      const existing = findServeInstance(workspacePath);
-      if (existing) {
-        log(`hub: serve instance for ${workspacePath} already live (${existing.id}) — reusing`);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ id: existing.id, reused: true }));
-        return;
-      }
-      // Session-create incubates a VISIBLE terminal REPL (ADR-0016) — the
-      // user gets a real local CLI window, not an invisible daemon; the
-      // detached serve spawn is the fallback (no GUI / gated off / macOS
-      // open failure).
+      // Session-create ALWAYS incubates a VISIBLE terminal REPL (ADR-0016 as
+      // amended): the App flow lists the project's history first, which
+      // incubates a headless serve bridge — reusing that instance (the
+      // original behaviour) meant a window could NEVER open once the project
+      // was browsed, and every create ran invisibly in the background. The
+      // answer is the NEW window's instance; concurrent identical POSTs join
+      // one incubation, and the detached headless serve spawn remains the
+      // fallback (no GUI / gated off / open failure). Clients that want a
+      // headless attach use the listing's instance id instead of this POST.
       const incubation = joinIncubation(workspacePath, "repl");
       try {
         const out = await incubation;
