@@ -19,7 +19,9 @@
  * passes ?probe=1 to /api/instances: the hub TCP-probes each registered
  * loopback port and prunes unreachable bridges before answering — no periodic
  * probing, the cost is paid only when someone refreshes. When no instance is
- * registered and no proxy is active for `idleExitMs`, the hub exits — the
+ * registered and no proxy is active for `idleExitMs`, the hub re-reads the
+ * user config LIVE: remote still enabled → stays resident (phone-driven
+ * create/resume must work with zero local bridges); disabled → exits, and the
  * next bridge re-spawns it on demand.
  */
 
@@ -58,7 +60,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
-import { remoteTerminalPrefs } from "./config.js";
+import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
 import { formatQuotaDock } from "../quota/format.js";
@@ -100,6 +102,13 @@ export interface HubOptions {
    * tasks-index.sqlite (see listKnownWorkspaces).
    */
   projectsDbPath?: string;
+  /**
+   * Override the idle-exit stay-alive check (tests pin it). Default: live
+   * re-read of the user config (remoteEnabledLive) — remote still enabled
+   * means the hub stays resident so a phone can create/resume at any time;
+   * only an explicit disable retires the daemon.
+   */
+  stayAliveCheck?: () => boolean;
   /**
    * Override how the remote session-create / session-resume endpoints spawn
    * a bridge (tests inject a fake). Default: this node + this package's
@@ -790,6 +799,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     onRestart,
     codePaths = defaultCodePaths(),
     projectsDbPath,
+    stayAliveCheck = () => remoteEnabledLive(),
     spawnServe = defaultSpawnServe,
   } = options;
 
@@ -1663,8 +1673,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   pinger.unref();
   timers.push(pinger);
 
-  // Idle exit: with nothing registered and nobody proxied, the hub exits; the
-  // next bridge re-spawns it on demand (see endpoint.ts).
+  // Idle exit: with nothing registered and nobody proxied for idleExitMs, the
+  // hub checks whether remote access is STILL enabled (live config re-read) —
+  // enabled means stay resident (a phone must be able to create/resume at any
+  // time, even with zero local bridges); disabled means retire, and the next
+  // bridge re-spawns the hub on demand (see endpoint.ts).
   const idleCheck = setInterval(
     () => {
       if (instances.size > 0 || proxyPairs.size > 0) {
@@ -1673,7 +1686,12 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       if (idleSince === null) idleSince = Date.now();
       if (Date.now() - idleSince >= idleExitMs) {
-        log("hub: idle for too long with no instances — exiting");
+        if (stayAliveCheck()) {
+          log("hub: idle with no instances, but remote is still enabled — staying resident");
+          idleSince = Date.now();
+          return;
+        }
+        log("hub: idle for too long with no instances and remote disabled — exiting");
         clearInterval(idleCheck);
         void close().finally(() => onIdleExit?.());
       }

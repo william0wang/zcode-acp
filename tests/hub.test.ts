@@ -725,6 +725,7 @@ describe("hub idle exit", () => {
     let exited = false;
     const hub = await startTestHub({
       idleExitMs: 150,
+      stayAliveCheck: () => false,
       onIdleExit: () => {
         exited = true;
       },
@@ -744,6 +745,26 @@ describe("hub idle exit", () => {
     });
     await new Promise((r) => setTimeout(r, 500));
     expect(exited).toBe(true);
+  });
+
+  it("stays resident past the idle window while remote is still enabled", async () => {
+    let exited = false;
+    const hub = await startTestHub({
+      idleExitMs: 150,
+      stayAliveCheck: () => true,
+      onIdleExit: () => {
+        exited = true;
+      },
+    });
+    // No registrations, no proxies — three full idle windows elapse.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(exited).toBe(false);
+    // Still serving: the port answers.
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    await hub.close();
   });
 });
 

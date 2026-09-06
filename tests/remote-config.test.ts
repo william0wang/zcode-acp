@@ -17,6 +17,7 @@ import {
   DEFAULT_HUB_PORT,
   parseHubConfig,
   parseRemoteConfig,
+  remoteEnabledLive,
   remoteTerminalPrefs,
 } from "../src/remote/config.js";
 
@@ -147,7 +148,13 @@ describe("parseRemoteConfig (config file > env)", () => {
 
   it("the file wins over env for every field it sets", () => {
     writeConfig({
-      remote: { enabled: true, token: "filetok", hubPort: 9001, hubHost: "10.0.0.1", bridgePort: 9002 },
+      remote: {
+        enabled: true,
+        token: "filetok",
+        hubPort: 9001,
+        hubHost: "10.0.0.1",
+        bridgePort: 9002,
+      },
     });
     const config = parseRemoteConfig(
       env({
@@ -169,9 +176,7 @@ describe("parseRemoteConfig (config file > env)", () => {
 
   it("env fills the fields the file leaves unset", () => {
     writeConfig({ remote: { enabled: true } });
-    const config = parseRemoteConfig(
-      env({ ...BASE_ENV, ZCODE_ACP_HUB_PORT: "9000" }),
-    );
+    const config = parseRemoteConfig(env({ ...BASE_ENV, ZCODE_ACP_HUB_PORT: "9000" }));
     expect(config?.token).toBe("secret");
     expect(config?.hubPort).toBe(9000);
   });
@@ -257,5 +262,26 @@ describe("remoteTerminalPrefs (file > env, live-read)", () => {
       app: "iTerm",
       command: "my-term {script}",
     });
+  });
+});
+
+describe("remoteEnabledLive (hub idle stay-alive check)", () => {
+  it("follows the env with no config file", () => {
+    expect(remoteEnabledLive(env(BASE_ENV))).toBe(true);
+    expect(remoteEnabledLive(env({ ...BASE_ENV, ZCODE_ACP_REMOTE: "0" }))).toBe(false);
+    expect(remoteEnabledLive(env())).toBe(false);
+  });
+
+  it("an explicit file `enabled` wins over env (both directions)", () => {
+    writeConfig({ remote: { enabled: false } });
+    expect(remoteEnabledLive(env(BASE_ENV))).toBe(false);
+    writeConfig({ remote: { enabled: true } });
+    expect(remoteEnabledLive(env({ ...BASE_ENV, ZCODE_ACP_REMOTE: "0" }))).toBe(true);
+  });
+
+  it("a malformed config file reads as absent (env decides)", () => {
+    writeRawConfig("not json");
+    expect(remoteEnabledLive(env(BASE_ENV))).toBe(true);
+    expect(remoteEnabledLive(env({ ...BASE_ENV, ZCODE_ACP_REMOTE: "0" }))).toBe(false);
   });
 });
