@@ -22,6 +22,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { resolveRuntime } from "./runtime.js";
 import { log, warn } from "./utils.js";
 
 /** Path to Martty's Node wrapper (bin/martty.js), or null when not installed. */
@@ -43,11 +44,23 @@ export function agentEntryJs(): string {
 
 /**
  * Martty argv (after the wrapper script) wiring the bridge in as its agent.
- * `process.execPath` avoids PATH/shebang differences across platforms.
+ * The interpreter defaults to the dual-runtime choice (bun --smol when
+ * available, else the current Node binary) — absolute paths avoid PATH/shebang
+ * differences across platforms, and each --agent-arg is exactly one argv
+ * token, so interpreter flags ride as their own tokens before the entry.
  * Pure — exported for unit tests.
  */
-export function buildTuiArgs(agentJs: string): string[] {
-  return ["--agent", process.execPath, "--agent-arg", agentJs];
+export function buildTuiArgs(
+  agentJs: string,
+  interp: { command: string; preArgs: string[] } = resolveRuntime(),
+): string[] {
+  return [
+    "--agent",
+    interp.command,
+    ...interp.preArgs.map((a) => ["--agent-arg", a]).flat(),
+    "--agent-arg",
+    agentJs,
+  ];
 }
 
 /**

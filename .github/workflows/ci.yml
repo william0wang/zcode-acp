@@ -63,3 +63,44 @@ jobs:
         # Headless wiring check (ADR-0020): martty --check-runtime spawns the
         # built bridge and runs the ACP initialize handshake.
         run: pnpm run smoke:tui
+
+  bun-runtime:
+    # Dual-runtime path (src/runtime.ts): with Bun >=1.4 on PATH the bridge
+    # re-execs into `bun --smol` — keep that path covered so Node↔Bun drift
+    # is caught in CI, not in a user's editor.
+    name: Bun runtime
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: pnpm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Test (vitest hosted by Bun)
+        run: bun x vitest run
+
+      - name: Smoke under Bun (re-exec path)
+        run: |
+          bun --version
+          node dist/cli.js server < /dev/null
+          node dist/cli.js tui --check

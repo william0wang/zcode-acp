@@ -35,7 +35,7 @@ describe("hub sandbox self-relaunch", () => {
 
   it("builds a plist with the hub argv, the env (marker stripped), and XML escaping", () => {
     const plist = buildHubRelaunchPlist({
-      nodePath: "/usr/bin/node",
+      interpreter: ["/usr/bin/node"],
       hubJs: "/opt/acp/dist/bin/hub.js",
       env: {
         ZCODE_ACP_REMOTE_TOKEN: "to&k<'s>",
@@ -60,7 +60,7 @@ describe("hub sandbox self-relaunch", () => {
   it("self-relaunches: bootstrap then kickstart, plist in a fresh temp dir", () => {
     execFileSyncMock.mockReturnValue(Buffer.alloc(0));
     const ok = selfRelaunchOutsideSandbox({
-      nodePath: "/usr/bin/node",
+      interpreter: ["/usr/bin/node"],
       hubJs: "/opt/acp/dist/bin/hub.js",
     });
     expect(ok).toBe(true);
@@ -89,7 +89,7 @@ describe("hub sandbox self-relaunch", () => {
       return Buffer.alloc(0);
     });
     expect(
-      selfRelaunchOutsideSandbox({ nodePath: "/usr/bin/node", hubJs: "/opt/acp/dist/bin/hub.js" }),
+      selfRelaunchOutsideSandbox({ interpreter: ["/usr/bin/node"], hubJs: "/opt/acp/dist/bin/hub.js" }),
     ).toBe(true);
     expect(execFileSyncMock.mock.calls.map((c) => c[1][0])).toEqual([
       "bootstrap",
@@ -105,7 +105,7 @@ describe("hub sandbox self-relaunch", () => {
       return Buffer.alloc(0);
     });
     expect(
-      selfRelaunchOutsideSandbox({ nodePath: "/usr/bin/node", hubJs: "/opt/acp/dist/bin/hub.js" }),
+      selfRelaunchOutsideSandbox({ interpreter: ["/usr/bin/node"], hubJs: "/opt/acp/dist/bin/hub.js" }),
     ).toBe(false);
     // 3 bootstrap attempts (with bootout between), never a blind kickstart —
     // that would revive the stale job definition.

@@ -53,7 +53,8 @@ function xmlEscape(s: string): string {
  * machine-singleton behaviour).
  */
 export function buildHubRelaunchPlist(opts: {
-  nodePath: string;
+  /** Interpreter argv prefix (e.g. ["bun", "--smol"] or [nodePath]). */
+  interpreter: string[];
   hubJs: string;
   env: NodeJS.ProcessEnv;
   logPath: string;
@@ -69,9 +70,9 @@ export function buildHubRelaunchPlist(opts: {
     <string>${HUB_LAUNCH_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${xmlEscape(opts.nodePath)}</string>
-        <string>${xmlEscape(opts.hubJs)}</string>
-        <string>hub</string>
+${[...opts.interpreter, opts.hubJs, "hub"]
+  .map((a) => `        <string>${xmlEscape(a)}</string>`)
+  .join("\n")}
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -107,7 +108,8 @@ ${envEntries.map(pair).join("\n")}
  * unreplaced definition is never attempted.
  */
 export function selfRelaunchOutsideSandbox(opts: {
-  nodePath: string;
+  /** Interpreter argv prefix (e.g. ["bun", "--smol"] or [nodePath]). */
+  interpreter: string[];
   hubJs: string;
   logPath?: string;
 }): boolean {

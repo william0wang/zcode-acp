@@ -82,6 +82,24 @@ Running from source instead? Use `"command": "node"` with
 
 Restart Zed and pick **ZCode** from the agent dropdown.
 
+### Runtime: Bun (optional, lower memory)
+
+The bridge and hub run on Node by default. If a Bun **>= 1.4** install is
+found (`~/.bun/bin/bun`, Homebrew, or `PATH`), they automatically re-exec into
+`bun --smol` — idle RSS drops from ~81 MB to ~48 MB per process, which adds up
+when running many concurrent sessions. Nothing to configure; install Bun and
+restart the editor/CLI. Bun < 1.4 is ignored (no benefit over Node).
+
+Force the old behavior (troubleshooting) with:
+
+```jsonc
+"env": { "ZCODE_ACP_RUNTIME": "node" } // in the editor config, or export it
+```
+
+Note: the `zcode` backend subprocess always needs real Node (it uses
+`node:sea`, which Bun does not implement) — installing Bun changes the
+runtime of the bridge/hub only, and Node >= 22 remains a requirement.
+
 ### `ZCODE_BIN` per platform
 
 The CLI is resolved in this order: `ZCODE_BIN` → a `zcode` found on `PATH` →

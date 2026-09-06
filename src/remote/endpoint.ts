@@ -27,6 +27,7 @@ import {
 import { WebSocketServer } from "ws";
 
 import type { ZcodeAcpServer } from "../server.js";
+import { runtimeSpawnParts } from "../runtime.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import { createFileHandler } from "./file-endpoint.js";
 import { createSessionCloseHandler } from "./session-close-endpoint.js";
@@ -288,7 +289,7 @@ export async function startRemoteEndpoint(
     try {
       // dist/remote/endpoint.js → dist/bin/hub.js (one level up, then bin/).
       const hubJs = fileURLToPath(new URL("../bin/hub.js", import.meta.url));
-      const child = spawn(process.execPath, [hubJs], {
+      const child = spawn(...runtimeSpawnParts(hubJs), {
         detached: true,
         // Surface the daemon's stderr through the bridge's diagnostics — a
         // detached "ignore" pipe silently eats startup failures.
