@@ -28,12 +28,13 @@ recalls history. `/help` inside the TUI lists everything.
 Two Martty behaviors worth knowing:
 
 - **Resumed sessions keep their context but not their on-screen history.**
-  Martty rebuilds transcripts from its own local recording, so attaching to
-  a session created elsewhere (the editor, the phone app, a previous remote
-  window) starts a visually empty transcript — the status line says
-  `resumed <id> — previous transcript was not replayed`. The conversation
-  itself is live: your next prompt runs with the full history in the
-  backend.
+  A fresh TUI boot starts a new `session/new`, and `/resume` uses ACP
+  `session/resume` — which by protocol design carries no message history —
+  so attaching to a session created elsewhere (the editor, the phone app, a
+  previous remote window) starts a visually empty transcript (the status
+  line notes `resumed <id> — previous transcript was not replayed`). The
+  conversation itself is live: your next prompt runs with the full history
+  in the backend.
 - **Sessions persist in the ZCode backend** like every other client of this
   bridge — close the TUI any time; the conversation stays available to your
   editor and to `/resume`.

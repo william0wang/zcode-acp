@@ -255,9 +255,9 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
   terminal/`ZCODE_ACP_HUB_TERMINAL` selection and headless fallback as
   session-create). The window lands on the right session — later prompts run
   with the full history in the backend — but the TUI does not render the
-  previous transcript (it rebuilds transcripts only from its own recording;
-  its status line says `resumed <id> — previous transcript was not
-  replayed`). This happens EVEN when a serve bridge is already live
+  previous transcript (a fresh boot is a session/new and `/resume` prefers
+  session/resume, which carries no history by protocol design; its status
+  line says `resumed <id> — previous transcript was not replayed`). This happens EVEN when a serve bridge is already live
   (the listing incubated one) — the answer is always the NEW instance, the
   bridge the window runs on; attach to it and `session/load` the same id to
   follow along in the client (both surfaces then share one bridge, one

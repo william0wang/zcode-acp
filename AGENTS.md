@@ -119,12 +119,14 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **The interactive CLI is Martty, a dependency — never hand-roll UI here**
   (ADR-0020): bare `zcode-acp` spawns `martty --agent node --agent-arg
   <dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.
-  Martty does NOT render agent-replayed history on attach — its transcript
-  comes from its own local recording — so the session/new boot-resume
-  interception passes `replayHistory:false` (a full replay would only stall
-  the boot; the status line says "resumed <id> — previous transcript was
-  not replayed"). Martty passes its full env to the spawned agent, which is
-  how ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
+  Martty only folds history replay that arrives on a session/LOAD it
+  initiated, as chunk deltas (complete user_message/agent_message updates do
+  NOT fold — verified 0.2.35); boot always sends session/new (fresh-session
+  semantics) and /resume prefers session/resume (no replay by ACP design).
+  The session/new boot-resume interception therefore passes
+  `replayHistory:false` — a full replay would only stall the boot. Martty
+  passes its full env to the spawned agent, which is how
+  ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
   (= `martty --check-runtime` over the built bridge) is the CI smoke.
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
