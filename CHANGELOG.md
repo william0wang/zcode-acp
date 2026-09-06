@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.1](https://github.com/william0wang/zcode-acp/compare/v0.25.0...v0.25.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **tui:** keep quota dock resident during turns and show reset as a clock time ([#141](https://github.com/william0wang/zcode-acp/issues/141)) ([df79531](https://github.com/william0wang/zcode-acp/commit/df795313fe9d4de167273bfa7fc7e0699534bd63))
+
 ## [0.25.0](https://github.com/william0wang/zcode-acp/compare/v0.24.0...v0.25.0) (2026-09-06)
 
 
