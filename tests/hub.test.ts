@@ -35,6 +35,7 @@ vi.mock("../src/tasks-index.js", () => ({
 import {
   resetQuotaCacheForTest,
   resolveTerminalLaunch,
+  sanitizeTabTitle,
   startHub,
   terminalTuiScript,
   type HubHandle,
@@ -973,6 +974,8 @@ describe("hub remote session-create (ADR-0014)", () => {
     // roots to the project cwd (ADR-0014 whitelist semantics).
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_ORIGIN).toBe("serve");
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_PIN_CWD).toBe("1");
+    // Tab title default: no conversation to name, so the project names it.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("demo");
     await registerServeBridge(hub, PROJECT);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1420,7 +1423,12 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     };
   }
 
-  async function registerServeBridge(hub: HubHandle, id: string, nonce?: string): Promise<void> {
+  async function registerServeBridge(
+    hub: HubHandle,
+    id: string,
+    nonce?: string,
+    port: number = BASE_PORT + 50,
+  ): Promise<void> {
     const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1429,7 +1437,7 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
           id,
           workspace: PROJECT,
           origin: "serve",
-          port: BASE_PORT + 50,
+          port,
           pid: 4242,
           ...(nonce ? { nonce } : {}),
         }),
@@ -1450,6 +1458,9 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.kind).toBe("tui");
     expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_closed");
+    // Dead listing port → the title lookup fails fast → the project names
+    // the tab (the lookup must never block or break the window).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("demo");
     // The fresh bridge registers with its incubation nonce: the poll pairs
     // with it, never with the pre-existing listing bridge (whose id would
     // put the client's session/load on a different process than the window).
@@ -1475,6 +1486,54 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(body).not.toContain("DSH_IRRELEVANT");
   });
 
+  it("names the tab via OSC 0 when a title rides the incubation env", () => {
+    // Terminals otherwise name the tab after the running process ("node");
+    // the script emits OSC 0 before exec, and martty never sets a terminal
+    // title itself, so the name survives until the window closes.
+    const withTitle = terminalTuiScript(PROJECT, "/opt/cli.js", {
+      ZCODE_ACP_TAB_TITLE: "Fix the login bug",
+    });
+    expect(withTitle).toContain("export ZCODE_ACP_TAB_TITLE='Fix the login bug'");
+    expect(withTitle).toContain(`printf '\\033]0;%s\\007' "$ZCODE_ACP_TAB_TITLE"`);
+    expect(terminalTuiScript(PROJECT, "/opt/cli.js", {})).not.toContain("033]0");
+  });
+
+  it("titles the resume tab with the conversation title from the live serve bridge", async () => {
+    // The App browses history through a serve bridge; the same /sessions
+    // listing is the title source for the resumed tab (the conversation
+    // title, sanitized — model-generated summaries must not carry escape
+    // sequences into the terminal).
+    let seenUrl = "";
+    const bridge = createServer((req, res) => {
+      seenUrl = req.url ?? "";
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          sessions: [
+            { sessionId: "sess_closed", title: "Fix the login bug", updatedAt: 2 },
+            { sessionId: "sess_other", title: "Other", updatedAt: 1 },
+          ],
+        }),
+      );
+    });
+    const bridgePort = await new Promise<number>((resolve) => {
+      bridge.listen(0, "127.0.0.1", () => {
+        const addr = bridge.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    await registerServeBridge(hub, "listing-serve", undefined, bridgePort);
+    const pending = post(hub, { workspacePath: PROJECT, sessionId: "sess_closed" });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("Fix the login bug");
+    expect(seenUrl).toBe("/sessions?limit=200");
+    await registerServeBridge(hub, "resume-repl", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    expect((await pending).status).toBe(200);
+    await new Promise<void>((r) => bridge.close(() => r()));
+  });
+
   it("joins one incubation for identical concurrent resumes, but not a different session", async () => {
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
     const first = post(hub, { workspacePath: PROJECT, sessionId: "sess_a" });
@@ -1484,6 +1543,8 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(spawnCalls).toHaveLength(2); // sess_a shares one spawn; sess_b is its own
     expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_a");
     expect(spawnCalls[1]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_b");
+    // No live serve bridge → no title lookup → the project names the tab.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("demo");
     // Each window's bridge registers with its OWN nonce — the polls must not
     // cross-claim (a crossed answer would attach the client to the wrong
     // bridge and load the session on two backend processes).
@@ -1516,6 +1577,23 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     const res = await pending;
     expect(res.status).toBe(502);
     expect(await res.text()).toBe("serve bridge exited during startup");
+  });
+});
+
+describe("tab title sanitization", () => {
+  it("strips control chars (no OSC/CSI injection), collapses whitespace, caps length", () => {
+    // An ESC in a model-generated summary would otherwise inject terminal
+    // sequences through the tab-title printf.
+    expect(sanitizeTabTitle("Fix\u001b]0;evil\u0007 tab")).toBe("Fix ]0;evil tab");
+    expect(sanitizeTabTitle(" a \n\t b ")).toBe("a b");
+    expect(sanitizeTabTitle("x".repeat(120))).toHaveLength(80);
+  });
+
+  it("empty or non-string values read as undefined (caller falls back)", () => {
+    expect(sanitizeTabTitle("   ")).toBeUndefined();
+    expect(sanitizeTabTitle("")).toBeUndefined();
+    expect(sanitizeTabTitle(undefined)).toBeUndefined();
+    expect(sanitizeTabTitle(42)).toBeUndefined();
   });
 });
 

@@ -264,7 +264,12 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
   bridge the window runs on; attach to it and `session/load` the same id to
   follow along in the client (both surfaces then share one bridge, one
   backend process). A bogus id still opens the window: the bridge logs the
-  load failure and starts a fresh session instead. Resuming the same session
+  load failure and starts a fresh session instead. The terminal tab is named
+  after the conversation: the hub reads the title from the serve bridge's
+  session history (best-effort, 2s budget — a miss falls back to the project
+  name) and the launch script emits it as an OSC 0 title before starting the
+  CLI (Martty never sets a terminal title itself, so the name sticks).
+  Resuming the same session
   twice pops two windows; only identical concurrent requests share one
   incubation.
 - `sessionId` here is the backend store id (`sess_…`), which `session/load`
