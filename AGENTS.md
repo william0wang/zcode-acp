@@ -47,6 +47,7 @@ src/
 │   ├── mcp-discovery.ts    Discover MCP servers from config + plugins
 │   ├── auto-compact.ts     Threshold-based auto-compaction
 │   ├── options.ts          Config options (model/mode/thought dropdowns)
+│   ├── user-config.ts      Global user config (~/.config/zcode-acp/config.json)
 │   └── runtime-model.ts    Model switching overlay
 ├── translators/          ZCode event → ACP translation
 │   ├── event-translator.ts  Stream event → InternalEvent
@@ -116,6 +117,18 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **User remote prefs live in `~/.config/zcode-acp/config.json`, NOT env**:
+  the hub is a detached daemon that idle-exits (~10 min) and is re-spawned by
+  whichever bridge needs it next, so its birth env rotates between
+  GUI-launched editors (no shell vars) and interactive shells — env-carried
+  preferences (terminal app!) drifted with every hub rebirth. Precedence per
+  field: config file (`remote.*`, XDG aware) → env var → default; env stays a
+  full fallback so existing setups keep working. Terminal prefs are re-read
+  LIVE at every incubation (`remoteTerminalPrefs`); token/ports apply when the
+  hub is next (re)born. Per-process plumbing (`ZCODE_ACP_REMOTE_ORIGIN`,
+  `_PIN_CWD`, `ZCODE_ACP_RESUME_SESSION`) is deliberately env-only — per-role
+  state, never file-configurable. The TUI script's env embedding is still
+  load-bearing for file-less setups (the .command shell sources no rc).
 - **The interactive CLI is Martty, a dependency — never hand-roll UI here**
   (ADR-0020): bare `zcode-acp` spawns `martty --agent node --agent-arg
   <dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.

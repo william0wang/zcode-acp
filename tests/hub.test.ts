@@ -1514,67 +1514,67 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
 
 describe("terminal launch resolution (ADR-0016)", () => {
   it("prefers the explicit command template over everything", () => {
-    const out = resolveTerminalLaunch({
-      ZCODE_ACP_HUB_TERMINAL_COMMAND: "my-term --run {script}",
-      ZCODE_ACP_HUB_TERMINAL_APP: "iTerm",
-    });
+    const out = resolveTerminalLaunch(
+      {},
+      { command: "my-term --run {script}", app: "iTerm" },
+    );
     expect(out.launch).toEqual({ kind: "shell", command: "my-term --run {script}" });
     expect(out.warning).toBeUndefined();
   });
 
   it("maps well-known apps to their verified launch mechanism", () => {
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "WezTerm" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "WezTerm" }).launch).toEqual({
       kind: "openAppArgs",
       app: "WezTerm",
       args: ["start", "--"],
     });
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "kitty" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "kitty" }).launch).toEqual({
       kind: "openAppArgs",
       app: "kitty",
       args: [],
     });
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "ghostty" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "ghostty" }).launch).toEqual({
       kind: "openAppArgs",
       app: "Ghostty",
       args: ["-e"],
     });
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Alacritty" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "Alacritty" }).launch).toEqual({
       kind: "openAppArgs",
       app: "Alacritty",
       args: ["-e"],
     });
     // .command executors; aliases are case- and .app-suffix-insensitive.
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "iTerm.app" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "iTerm.app" }).launch).toEqual({
       kind: "openApp",
       app: "iTerm",
     });
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "iterm2" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "iterm2" }).launch).toEqual({
       kind: "openApp",
       app: "iTerm",
     });
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Apple_Terminal" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "Apple_Terminal" }).launch).toEqual({
       kind: "openApp",
       app: "Terminal",
     });
   });
 
   it("warns on Warp — it cannot run scripts or commands programmatically", () => {
-    const out = resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "Warp" });
+    const out = resolveTerminalLaunch({}, { app: "Warp" });
     expect(out.launch).toEqual({ kind: "openApp", app: "Warp" });
     expect(out.warning).toContain("warpdotdev/warp#1917");
     expect(out.warning).toContain("ZCODE_ACP_HUB_TERMINAL_COMMAND");
   });
 
   it("passes unknown apps through to open -a and defaults to Terminal.app", () => {
-    expect(resolveTerminalLaunch({ ZCODE_ACP_HUB_TERMINAL_APP: "MyTerm" }).launch).toEqual({
+    expect(resolveTerminalLaunch({}, { app: "MyTerm" }).launch).toEqual({
       kind: "openApp",
       app: "MyTerm",
     });
-    expect(resolveTerminalLaunch({}).launch).toEqual({ kind: "openApp", app: "Terminal" });
+    expect(resolveTerminalLaunch({}, {}).launch).toEqual({ kind: "openApp", app: "Terminal" });
     // The hub is a background process — its own env has no terminal, and
     // TERM_PROGRAM (at best an accident of how the hub was launched) is
     // never consulted.
-    expect(resolveTerminalLaunch({ TERM_PROGRAM: "iTerm.app" }).launch).toEqual({
+    expect(resolveTerminalLaunch({ TERM_PROGRAM: "iTerm.app" }, {}).launch).toEqual({
       kind: "openApp",
       app: "Terminal",
     });

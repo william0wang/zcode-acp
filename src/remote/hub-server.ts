@@ -47,6 +47,8 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
+import type { TerminalPrefs } from "../config/user-config.js";
+import { remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
@@ -226,8 +228,6 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 const TUI_REGISTER_TIMEOUT_MS = 20_000;
 /** `open -a <terminal>` must answer fast or the incubation falls back. */
 const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
-/** Set ZCODE_ACP_HUB_TERMINAL=0 to keep remote session-create headless. */
-const TERMINAL_GATE_ENV = "ZCODE_ACP_HUB_TERMINAL";
 
 /** Single-quote for sh: ' → '\'' . */
 function shQuote(s: string): string {
@@ -270,21 +270,24 @@ const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
 };
 
 /**
- * Pick how to open the TUI script. The hub is a background daemon — its env
- * carries no terminal and macOS has no default-terminal setting — so nothing
- * is detected. Priority: the explicit command template (the universal escape
- * hatch) → a built-in launcher by app name (aliases are case- and
- * `.app`-suffix-insensitive) → plain Terminal.app. Warp gets a special warning
- * because it accepts the open but cannot run the script; any other unmatched
- * name passes through to `open -a` unchanged.
+ * Pick how to open the TUI script. Preferences arrive pre-merged from
+ * `remoteTerminalPrefs` (config file first, env fallback — see config.ts);
+ * only the app-name normalization lives here. Priority: the explicit command
+ * template (the universal escape hatch) → a built-in launcher by app name
+ * (aliases are case- and `.app`-suffix-insensitive) → plain Terminal.app
+ * (macOS has no default-terminal setting to detect). Warp gets a special
+ * warning because it accepts the open but cannot run the script; any other
+ * unmatched name passes through to `open -a` unchanged.
  */
-export function resolveTerminalLaunch(env: NodeJS.ProcessEnv): {
+export function resolveTerminalLaunch(
+  env: NodeJS.ProcessEnv,
+  prefs: TerminalPrefs = remoteTerminalPrefs(env),
+): {
   launch: TerminalLaunch;
   warning?: string;
 } {
-  const command = (env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim();
-  if (command) return { launch: { kind: "shell", command } };
-  const raw = (env.ZCODE_ACP_HUB_TERMINAL_APP ?? "").trim();
+  if (prefs.command) return { launch: { kind: "shell", command: prefs.command } };
+  const raw = prefs.app ?? "";
   const name = raw.toLowerCase().replace(/\.app$/, "");
   const launcher = TERMINAL_APP_LAUNCHERS[name];
   if (launcher) return { launch: launcher };
@@ -340,8 +343,12 @@ async function spawnTerminalTui(opts: {
   env: NodeJS.ProcessEnv;
 }): Promise<ChildProcess | null> {
   if (process.platform !== "darwin") return null;
-  const gate = (process.env[TERMINAL_GATE_ENV] ?? "").trim().toLowerCase();
-  if (["0", "false", "off"].includes(gate)) return null;
+  // Terminal prefs are read LIVE here (config file first, env fallback): the
+  // hub outlives the shells that configured it, and its birth env rotates
+  // between GUI editors and interactive shells — only the file is stable.
+  // Set remote.terminal.enabled=false in ~/.config/zcode-acp/config.json (or
+  // ZCODE_ACP_HUB_TERMINAL=0) to keep remote session-create headless.
+  if (!remoteTerminalPrefs(process.env).enabled) return null;
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
   const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "tui.command");
   writeFileSync(script, terminalTuiScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
