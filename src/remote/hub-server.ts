@@ -76,6 +76,12 @@ export interface HubOptions {
   /** WebSocket keepalive ping interval (default 30s; tunnels drop idle links). */
   pingIntervalMs?: number;
   /**
+   * How long a visible-terminal incubation (session-create/-resume) waits for
+   * the spawned bridge's registration (default TUI_REGISTER_TIMEOUT_MS; tests
+   * shrink it).
+   */
+  tuiRegisterTimeoutMs?: number;
+  /**
    * Fires when the hub decided it should restart onto newer on-disk code
    * (a newer bridge registered, or POST /api/upgrade found the dist newer).
    * The standalone daemon re-spawns a replacement before exiting (see
@@ -779,6 +785,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     heartbeatTimeoutMs = HEARTBEAT_TIMEOUT_MS,
     idleExitMs = IDLE_EXIT_MS,
     pingIntervalMs = PING_INTERVAL_MS,
+    tuiRegisterTimeoutMs = TUI_REGISTER_TIMEOUT_MS,
     onIdleExit,
     onRestart,
     codePaths = defaultCodePaths(),
@@ -880,6 +887,21 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // Must ride the env verbatim — martty reads it once at process start.
       env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
+    if (kind === "tui") {
+      // Remote session-create binding: pre-generate the ACP session id BOTH
+      // the TUI window and the attaching phone adopt on their first
+      // session/new (ZCODE_ACP_BOOT_CREATE_SESSION tells the bridge to MINT it
+      // lazily rather than load an existing conversation). Without it each
+      // side mints its own placeholder — two sessions that never meet, the
+      // phone's conversation invisible in the window (verified by the
+      // 2026-09-06 diagnosis: martty drops every update addressed to the
+      // phone's session id, and its banner never yields).
+      env.ZCODE_ACP_RESUME_SESSION = randomUUID();
+      env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
+      // Same banner handshake as resume: the auto-submitted trigger drops
+      // martty's welcome banner so the window reveals the shared conversation.
+      env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
+    }
     if (kind !== "serve") {
       // Tab title (both visible-terminal kinds): a resume carries the
       // conversation's title when the hub resolved it; session-create and a
@@ -909,7 +931,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         kind === "resume" ? "resume TUI" : kind === "tui" ? "terminal TUI" : "serve bridge"
       } for ${workspacePath} (pid ${child.pid})`,
     );
-    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : TUI_REGISTER_TIMEOUT_MS;
+    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : tuiRegisterTimeoutMs;
     const deadline = Date.now() + budget;
     // A visible-terminal incubation (create OR resume) runs NEXT TO the serve
     // bridge the listing already incubated, and several incubations can race
@@ -937,6 +959,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         throw new Error("serve bridge exited during startup");
       }
       if (Date.now() > deadline) {
+        // Slow-window fallback (session-create only): the TUI missed its
+        // registration budget (GUI cold start, skill/plugin scans ahead of the
+        // hub registration). A 502 makes the App retry, and every retry
+        // incubates ANOTHER window — the observed placeholder storm. Answer
+        // with the workspace's live headless serve bridge instead: the App
+        // attaches and can talk at once, and the late window registers on its
+        // own and is merely closable (ADR-0014 semantics unchanged — the
+        // headless serve spawn is already the documented no-GUI fallback).
+        if (kind === "tui") {
+          const fallback = findServeInstance(workspacePath);
+          if (fallback) {
+            warn(
+              `hub: TUI for ${workspacePath} slow to register — ` +
+                `falling back to the live serve bridge`,
+            );
+            return { id: fallback.id, reused: true };
+          }
+        }
         warn(`hub: serve bridge for ${workspacePath} never registered`);
         throw new Error("serve bridge did not register in time");
       }

@@ -1652,6 +1652,105 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
   });
 });
 
+describe("hub terminal-TUI session create (session binding + slow-window fallback)", () => {
+  const PROJECT = "/Users/dev/Develop/demo";
+  const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const post = (hub: HubHandle, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify(body),
+    });
+
+  let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
+  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }>;
+
+  beforeEach(() => {
+    listKnownWorkspacesMock.mockReset();
+    listKnownWorkspacesMock.mockResolvedValue([
+      { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
+    ]);
+    fakeChild = new EventEmitter() as typeof fakeChild;
+    fakeChild.pid = 4242;
+    fakeChild.exitCode = null;
+    fakeChild.signalCode = null;
+    spawnCalls = [];
+  });
+
+  function spawnServeSpy(): (opts: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    kind: "tui" | "serve";
+  }) => import("node:child_process").ChildProcess {
+    return (opts) => {
+      spawnCalls.push(opts);
+      return fakeChild as unknown as import("node:child_process").ChildProcess;
+    };
+  }
+
+  async function registerServeBridge(hub: HubHandle, id: string, nonce?: string): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id,
+          workspace: PROJECT,
+          origin: "serve",
+          port: BASE_PORT + 50,
+          pid: 4242,
+          ...(nonce ? { nonce } : {}),
+        }),
+      ),
+    });
+    expect(res.ok).toBe(true);
+  }
+
+  it("incubates the create TUI with the shared-session bind env", async () => {
+    // P1 (2026-09-06 diagnosis): the create TUI and the attaching phone each
+    // minted their own placeholder session — martty dropped every phone
+    // update on the id mismatch and its banner never yielded. The hub now
+    // pre-generates the session id and the bridge binds every first
+    // session/new of the incubated connection pair to it.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const pending = post(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.kind).toBe("tui");
+    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBe("1");
+    // A hub-pre-generated placeholder id (UUID, same shape the bridge mints).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
+    // Banner handshake: the auto-submitted trigger drops martty's welcome
+    // banner so the window reveals the shared conversation.
+    expect(spawnCalls[0]!.env.DSH_TUI_AUTOPROMPT).toBe(BOOT_RESUME_TRIGGER);
+    await registerServeBridge(hub, "create-tui", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "create-tui", reused: false });
+  });
+
+  it("answers a slow-to-register create with the live serve bridge instead of a 502", async () => {
+    // P3: the 20s registration budget 502'd the POST and every App retry
+    // incubated ANOTHER window (the observed placeholder storm). A live
+    // headless serve bridge takes over the attach; the late window registers
+    // on its own and is merely closable.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy(), tuiRegisterTimeoutMs: 700 });
+    await registerServeBridge(hub, "listing-serve"); // the listing's headless bridge
+    const res = await post(hub, { workspacePath: PROJECT });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ id: "listing-serve", reused: true });
+  });
+
+  it("still 502s a slow create when no serve bridge can take over", async () => {
+    const hub = await startTestHub({ spawnServe: spawnServeSpy(), tuiRegisterTimeoutMs: 700 });
+    const res = await post(hub, { workspacePath: PROJECT });
+    expect(res.status).toBe(502);
+    expect(await res.text()).toBe("serve bridge did not register in time");
+  });
+});
+
 describe("tab title sanitization", () => {
   it("strips control chars (no OSC/CSI injection), collapses whitespace, caps length", () => {
     // An ESC in a model-generated summary would otherwise inject terminal

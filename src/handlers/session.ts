@@ -181,6 +181,25 @@ export function consumeBootResumeTarget(): string | null {
   return target || null;
 }
 
+/** Env marking a hub-incubated create TUI's pre-generated session bind. */
+const BOOT_CREATE_BIND_ENV = "ZCODE_ACP_BOOT_CREATE_SESSION";
+
+/**
+ * Read and consume the hub's session-create binding: when the create flag is
+ * set, the RESUME-env value is a hub-PRE-GENERATED placeholder id (not an
+ * existing conversation) that the boot path MINTS lazily instead of loading.
+ * Consumes both envs together (the resume path must not see them); returns
+ * null unless the create flag is set.
+ */
+function consumeBootCreateBind(): string | null {
+  const flag = process.env[BOOT_CREATE_BIND_ENV] ?? "";
+  delete process.env[BOOT_CREATE_BIND_ENV];
+  if (flag !== "1") return null;
+  const target = (process.env[BOOT_RESUME_ENV] ?? "").trim();
+  delete process.env[BOOT_RESUME_ENV];
+  return target || null;
+}
+
 /**
  * Banner-handshake trigger for a boot-resumed TUI (ADR-0017 follow-up).
  * Martty's welcome banner paints INSTEAD of the transcript and only dives
@@ -221,6 +240,48 @@ export async function newSession(
   // so a phone app's session/new must not become a quota-dock target.
   if (server.marttyConnectionRoots.has(clientConnectionRoot(client))) {
     startQuotaRefresher(server);
+  }
+  // Hub session-create binding (remote create, ADR-0016): adopt the hub's
+  // pre-generated session id (see server.bootCreateBindSession) so the TUI
+  // window and the attaching phone share ONE session. Unlike the one-shot
+  // resume env below, the bind persists — each connection claims it on its
+  // FIRST session/new only (a later session/new, e.g. the TUI's /new, mints
+  // a fresh placeholder as usual).
+  if (server.bootCreateBindSession === null) {
+    const bound = consumeBootCreateBind();
+    if (bound) server.bootCreateBindSession = bound;
+  }
+  const bindRoot = clientConnectionRoot(client);
+  if (server.bootCreateBindSession !== null && !server.bootCreateBindClaimed.has(bindRoot)) {
+    server.bootCreateBindClaimed.add(bindRoot);
+    const bindSid = server.bootCreateBindSession;
+    // First claim MINTS the shared LAZY placeholder (no backend session until
+    // first use — an abandoned create window leaves nothing behind); later
+    // claims (the phone, sibling windows) adopt it as-is.
+    if (!server.pendingSessions.has(bindSid) && !server.resolveSid(bindSid)) {
+      const cwd = server.serveMode
+        ? process.cwd()
+        : (sanitizeClientCwd(params.cwd) ?? process.cwd());
+      server.pendingSessions.set(bindSid, { cwd, mcpServers: params.mcpServers });
+      server.sessionCwds.set(bindSid, cwd);
+      rememberLazySession(bindSid, cwd);
+      server.titleEligibleSessions.add(bindSid);
+      log(`session/new (create-bind) → ${bindSid} cwd=${cwd}`);
+    }
+    // Same banner handshake as boot-resume: the TUI's auto-submitted trigger
+    // (DSH_TUI_AUTOPROMPT) drops martty's welcome banner so the window shows
+    // the shared conversation instead of waiting for local input.
+    if (isMarttyClient(server)) {
+      server.bootResumeTriggerConnection = bindRoot;
+    }
+    const modes = await buildModes(server, null);
+    server.lastMode.set(bindSid, modes.currentModeId);
+    emitBootUsageUpdate(server, bindSid);
+    return {
+      sessionId: bindSid,
+      modes,
+      configOptions: await buildConfigOptions(server, null, bindRoot),
+    };
   }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
