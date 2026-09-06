@@ -245,6 +245,53 @@ describe("stall termination policy (watermark-based)", () => {
     await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
   });
 
+  it("does not infer end_turn while a known tool is active past the stale budget", async () => {
+    // A frozen projection does not override the foreground tool lifecycle.
+    // TaskOutput and other long-running tools can legitimately cross the
+    // generic 10-minute stale budget; treating their in-progress card as
+    // delivered output would falsely report success while the backend still
+    // owns the prompt.
+    const control = staleRunningBackend();
+    control.setWatermarkMode("frozen");
+    const turn = prompt(setup(control.backend), params, cx, 6);
+    let settled: acp.PromptResponse | undefined;
+    void turn.then((value) => {
+      settled = value;
+    });
+    await waitForSend(control.sendRequests);
+
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "started", toolCallId: "tool-long", toolName: "TaskOutput" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(cx.notify).mockClear();
+
+    await vi.advanceTimersByTimeAsync(700_000);
+
+    expect(settled).toBeUndefined();
+    expect(control.backend.send).not.toHaveBeenCalled();
+    const refreshes = vi
+      .mocked(cx.notify)
+      .mock.calls.map(([, payload]) => (payload as { update?: acp.SessionUpdate }).update)
+      .filter(
+        (update) =>
+          update?.sessionUpdate === "tool_call_update" &&
+          update.toolCallId === "tool-long" &&
+          update.status === "in_progress",
+      );
+    expect(refreshes.length).toBeGreaterThanOrEqual(9);
+
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "result", toolCallId: "tool-long", result: { content: "done" } },
+    });
+    control.emit({ type: "turn.completed", payload: { resultType: "success" } });
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+  });
+
   it("ends a watermark-frozen turn after the stale-freeze budget (no output → stop)", async () => {
     // PR #85's original goal stays: a projection stuck at `running` whose
     // watermark never advances must eventually converge instead of hanging
@@ -271,8 +318,9 @@ describe("stall termination policy (watermark-based)", () => {
   });
 
   it("ends a watermark-frozen turn gently when output was already delivered", async () => {
-    // Same freeze, but a tool card was already streamed: the turn is treated
-    // as completed-but-terminal-event-lost — end_turn, no backend stop.
+    // Same freeze, but a completed tool card was already streamed: the turn
+    // is treated as completed-but-terminal-event-lost — end_turn, no backend
+    // stop. A nonterminal tool is covered separately and must stay alive.
     const control = staleRunningBackend();
     control.setWatermarkMode("frozen");
     const turn = prompt(setup(control.backend), params, cx, 3);
@@ -285,6 +333,10 @@ describe("stall termination policy (watermark-based)", () => {
     control.emit({
       type: "tool.updated",
       payload: { kind: "started", toolCallId: "tool-1", toolName: "Read" },
+    });
+    control.emit({
+      type: "tool.updated",
+      payload: { kind: "result", toolCallId: "tool-1", result: { content: "done" } },
     });
     await vi.advanceTimersByTimeAsync(0);
 

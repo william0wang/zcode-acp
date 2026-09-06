@@ -266,6 +266,7 @@ editor still has it open).
     | no protocol         |
     | progress (120s)     | -> check read watermark
     |   watermark moved   | -> forward throttled usage -> defer (alive)
+    |   active tool       | -> refresh in_progress -> defer (alive)
     |   frozen < 10 min   | -> defer decision
     |   frozen >= 10 min  | -> fetch reply -> end_turn
     |                       |   no reply, no output -> max_turn_requests
@@ -289,9 +290,11 @@ bridge also forwards authoritative progress at most once per minute: a
 known active tool while its watermark is temporarily quiet. These updates are
 state-bearing; the bridge never fabricates transcript text as a heartbeat. A
 watermark frozen for 10 minutes (STALE_FREEZE_MS) still marks the projection as
-truly stale — the turn then ends gently (reply fetch first, bounded stop only
-when nothing was ever delivered). Already-queued events win the deadline race
-and are consumed first.
+truly stale unless a known foreground tool remains nonterminal. An active tool
+is direct lifecycle evidence that the turn has not completed, so the bridge
+keeps waiting and refreshing its existing card. Without an active tool, the
+turn ends gently (reply fetch first, bounded stop only when nothing was ever
+delivered). Already-queued events win the deadline race and are consumed first.
 
 ### Tool lifecycle
 

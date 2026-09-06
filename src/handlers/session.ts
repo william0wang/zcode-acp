@@ -1841,8 +1841,9 @@ export async function runEventTurn(
   // (verified: a sub-agent turn advanced the watermark for 5+ minutes with
   // zero stream events). A live turn may still freeze the watermark for a
   // while (long CoT, quiet tools — observed 60s+ pauses), so a freeze alone
-  // never kills: only a freeze sustained past STALE_FREEZE_MS ends the turn,
-  // reply-fetch first, stop as the last resort.
+  // never kills: only a freeze sustained past STALE_FREEZE_MS with no known
+  // active foreground tool ends the turn, reply-fetch first, stop as the last
+  // resort.
   const STALE_FREEZE_MS = 600_000;
   // Upstream ACP clients commonly enforce their own idle deadline (some use
   // 300s). A session/read watermark can prove that ZCode is still
@@ -1943,14 +1944,24 @@ export async function runEventTurn(
         return { stopReason: "max_turn_requests" };
       } else {
         const frozenMs = Date.now() - lastWatermarkAdvanceAt;
-        if (frozenMs < STALE_FREEZE_MS) {
+        const activeTools = [...translator.seenToolIds].filter(
+          (toolId) => !translator.finalToolIds.has(toolId),
+        ).length;
+        if (activeTools > 0) {
+          // A nonterminal foreground tool is direct evidence that the turn is
+          // not complete, even when token/turn counters are quiet. In
+          // particular, TaskOutput can legitimately span the generic stale
+          // budget while the backend still owns the prompt. Keep forwarding
+          // its state-bearing refreshes instead of inventing end_turn.
+          log(
+            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with ${activeTools} active tool(s); deferring terminal decision`,
+          );
+          nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
+        } else if (frozenMs < STALE_FREEZE_MS) {
           // The read watermark moved recently — direct evidence the backend is
           // still making progress (typically a sub-agent or slow tool working
           // behind a silent stream). Keep waiting; the 15s stall-reconcile
           // below keeps refreshing the watermark via session/read.
-          const activeTools = [...translator.seenToolIds].filter(
-            (toolId) => !translator.finalToolIds.has(toolId),
-          ).length;
           log(
             `  [stall] watermark advanced within the last ${Math.round(frozenMs / 1000)}s (activeTools=${activeTools}); deferring terminal decision`,
           );
