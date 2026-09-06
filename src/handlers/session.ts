@@ -29,10 +29,15 @@ import type {
 import {
   buildModes,
   buildConfigOptions,
+  DEFAULT_MODEL_ID,
+  DEFAULT_PROVIDER_ID,
   formatModelValue,
   loadAllModels,
+  modelContextWindow,
+  parseModelValue,
 } from "../config/options.js";
-import { emitInitialUsage } from "../config/model-cache.js";
+import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
+import { forceRefreshQuota, startQuotaRefresher } from "../quota/live.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import { messages } from "../i18n.js";
@@ -210,6 +215,13 @@ export async function newSession(
   params: acp.NewSessionRequest,
   client?: acp.AgentContext,
 ): Promise<acp.NewSessionResponse> {
+  // Martty bookkeeping (ADR-0021): start the lazy refresher when THIS
+  // connection is martty. Identity is per-connection — recorded at the
+  // connection's own initialize (server.ts), never the sticky process flag,
+  // so a phone app's session/new must not become a quota-dock target.
+  if (server.marttyConnectionRoots.has(clientConnectionRoot(client))) {
+    startQuotaRefresher(server);
+  }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
     try {
@@ -246,6 +258,7 @@ export async function newSession(
           });
         }
       }
+      emitBootUsageUpdate(server, bootResume);
       return {
         sessionId: bootResume,
         modes: loaded.modes,
@@ -284,11 +297,58 @@ export async function newSession(
   // pending session's real values arrive via updates once materialized).
   const modes = await buildModes(server, null);
   server.lastMode.set(acpSid, modes.currentModeId);
+  emitBootUsageUpdate(server, acpSid);
   return {
     sessionId: acpSid,
     modes,
-    configOptions: await buildConfigOptions(server, null),
+    configOptions: await buildConfigOptions(server, null, clientConnectionRoot(client)),
   };
+}
+
+/**
+ * Initial usage_update after a session/new binding (ADR-0021): martty only —
+ * unlike emitInitialUsage this does NOT skip used=0, so the TUI's context
+ * window (size at least) shows from the very first screen. Deferred past the
+ * session/new response via setImmediate: a pre-response notification carries
+ * a session id the client has not adopted yet and would be dropped.
+ */
+function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
+  if (!isMarttyClient(server)) return;
+  const cx = server.clients.broadcast();
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const zcodeSid = server.resolveSid(acpSid);
+        let used = 0;
+        if (zcodeSid) {
+          const backend = server.ensureBackend();
+          const resp = await backend.request(
+            server.nextId(),
+            "session/read",
+            { sessionId: zcodeSid },
+            5000,
+          );
+          const proj = ((resp.result ?? {}) as { projection?: ZcodeProjection }).projection;
+          used = proj?.contextUsed || proj?.totalTokenCount || 0;
+        }
+        let providerId = loadAllModels()[0]?.providerId ?? DEFAULT_PROVIDER_ID;
+        let modelId = loadAllModels()[0]?.modelId ?? DEFAULT_MODEL_ID;
+        if (zcodeSid) {
+          ({ providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid)));
+        }
+        await sendSessionUpdate(cx, acpSid, {
+          sessionUpdate: "usage_update",
+          used,
+          size: modelContextWindow(providerId, modelId),
+        });
+      } catch (e) {
+        log(
+          `session/new: boot usage_update failed (non-fatal): ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    })();
+  });
 }
 
 /**
@@ -652,7 +712,7 @@ export async function resumeSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   return {
     modes,
-    configOptions: await buildConfigOptions(server, zcodeSid),
+    configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
   };
 }
 
@@ -770,7 +830,7 @@ export async function loadSession(
   const turnActive = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
   const result = {
     modes,
-    configOptions: await buildConfigOptions(server, zcodeSid),
+    configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
     // Additive replay metadata — the anchor for load_earlier pagination.
     replayMeta: { ...slice.meta, turnActive },
   };
@@ -1260,6 +1320,9 @@ async function runPrompt(
     // runtime was demonstrably live through this turn.
     server.markSessionActive(params.sessionId);
     server.markBackendLoaded(params.sessionId);
+    // Turn end = quota refresh point (ADR-0021): usage moved, the dock should
+    // catch up immediately instead of waiting for the 60s interval.
+    void forceRefreshQuota();
     // Report "running" only while no other turn for the session took over
     // (preempt): the preempting turn's own running:true must survive.
     const stillBusy = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
@@ -1287,6 +1350,17 @@ export async function setConfigOptionHandler(
 ): Promise<acp.SetSessionConfigOptionResponse> {
   if (typeof params.value !== "string") {
     throw new Error(`unsupported config value type: ${String(params.value)}`);
+  }
+  // The `quota` option (ADR-0021) is a read-only display channel for the TUI
+  // dock — setting it is a no-op that returns the current options unchanged.
+  if (params.configId === "quota") {
+    return {
+      configOptions: await buildConfigOptions(
+        server,
+        server.resolveSid(params.sessionId) ?? null,
+        clientConnectionRoot(cx),
+      ),
+    };
   }
   // Materialize a lazy session/new placeholder on first use.
   const zcodeSid = await ensureRealSession(server, params.sessionId);
@@ -2646,7 +2720,7 @@ export async function emitModeIfChanged(
     const last = server.lastMode.get(acpSid);
     if (last === modes.currentModeId) return;
     server.lastMode.set(acpSid, modes.currentModeId);
-    const options = await buildConfigOptions(server, zcodeSid);
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
     await sendSessionUpdate(cx, acpSid, {
       sessionUpdate: "config_option_update",
       configOptions: options,

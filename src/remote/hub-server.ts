@@ -25,7 +25,16 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import type { Dirent } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import {
@@ -51,6 +60,8 @@ import type { TerminalPrefs } from "../config/user-config.js";
 import { remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
+import { formatQuotaDock } from "../quota/format.js";
+import { queryQuota } from "../quota/index.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
@@ -335,6 +346,53 @@ export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.Proces
   ].join("\n");
 }
 
+/** Stale TUI scripts older than this are swept on the next incubation. */
+const TUI_SCRIPT_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Write the throwaway .command script for a terminal TUI incubation.
+ *
+ * Preferred location: `<workspace>/.zcode/tmp/tui-XXXX.command`. Terminal apps
+ * bind the new tab's project root to the script's PARENT directory (Warp's
+ * open_file opens a session in the file's dir before executing it), so a
+ * tmpdir script leaves the tab bound to a throwaway directory — the in-script
+ * `cd` only moves the shell cwd and never re-binds the terminal project, which
+ * blinds diff/git panels. Any failure writing there (read-only workspace,
+ * permissions, …) falls back to the historical mkdtemp(tmpdir()) path.
+ */
+export function writeTuiScript(workspace: string, cliJs: string, env: NodeJS.ProcessEnv): string {
+  const contents = terminalTuiScript(workspace, cliJs, env);
+  const dir = path.join(workspace, ".zcode", "tmp");
+  try {
+    mkdirSync(dir, { recursive: true });
+    // Best-effort sweep of stale scripts (>1h old): an unlinked-but-running
+    // script keeps executing on unix, and a fresh one may back a live
+    // incubation, so only clearly-stale files go.
+    const cutoff = Date.now() - TUI_SCRIPT_MAX_AGE_MS;
+    for (const entry of readdirSync(dir)) {
+      if (!entry.startsWith("tui-") || !entry.endsWith(".command")) continue;
+      const stale = path.join(dir, entry);
+      try {
+        if (statSync(stale).mtimeMs < cutoff) unlinkSync(stale);
+      } catch {
+        // best-effort — a racing removal must not abort the incubation
+      }
+    }
+    const script = path.join(dir, `tui-${randomUUID().slice(0, 8)}.command`);
+    writeFileSync(script, contents, { mode: 0o700 });
+    chmodSync(script, 0o700);
+    return script;
+  } catch (e) {
+    warn(
+      `hub: cannot place the TUI script in ${dir} (${e instanceof Error ? e.message : String(e)}) — using the system tmpdir`,
+    );
+  }
+  const fallback = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "tui.command");
+  writeFileSync(fallback, contents, { mode: 0o700 });
+  chmodSync(fallback, 0o700);
+  return fallback;
+}
+
 /**
  * Spawn session-create as a VISIBLE interactive TUI (ADR-0016): write a
  * throwaway .command script (`cd <project> && exec node cli.js`) and hand it
@@ -359,9 +417,7 @@ async function spawnTerminalTui(opts: {
   // ZCODE_ACP_HUB_TERMINAL=0) to keep remote session-create headless.
   if (!remoteTerminalPrefs(process.env).enabled) return null;
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
-  const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "tui.command");
-  writeFileSync(script, terminalTuiScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
-  chmodSync(script, 0o700);
+  const script = writeTuiScript(opts.cwd, cliJs, opts.env);
   const { launch, warning } = resolveTerminalLaunch(process.env);
   if (warning) warn(`hub: ${warning}`);
   let argv: string[];
@@ -494,6 +550,31 @@ function getQuota(): Promise<UsageStatsResult> {
 export function resetQuotaCacheForTest(): void {
   quotaCache = null;
   quotaInflight = null;
+}
+
+/**
+ * Cached dock string for GET /api/quota/dock (ADR-0021) — the compact one-line
+ * quota format consumed by the Martty TUI refresher. Shorter TTL than
+ * /api/quota (15s): the dock is resident UI, freshness beats upstream load.
+ * `formatted: null` (no data) is cached too, so a credentials-less machine
+ * does not hammer the API on every 60s refresh.
+ */
+const DOCK_TTL_MS = 15_000;
+let dockCache: { formatted: string | null; at: number } | null = null;
+
+function getQuotaDock(): Promise<{ formatted: string | null; fetchedAt: number }> {
+  if (dockCache && Date.now() - dockCache.at < DOCK_TTL_MS) {
+    return Promise.resolve({ formatted: dockCache.formatted, fetchedAt: dockCache.at });
+  }
+  return queryQuota().then((result) => {
+    dockCache = { formatted: formatQuotaDock(result), at: Date.now() };
+    return { formatted: dockCache.formatted, fetchedAt: dockCache.at };
+  });
+}
+
+/** Reset the dock cache (test helper). */
+export function resetDockCacheForTest(): void {
+  dockCache = null;
 }
 
 /**
@@ -1065,6 +1146,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           "Cache-Control": "no-store",
         });
         res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("quota query failed");
+      }
+      return;
+    }
+    // GET /api/quota/dock — the compact quota-dock string for the TUI
+    // refresher (ADR-0021). Account-level like /api/quota; hub-side cache is
+    // the only caching layer, so clients must not store stale copies.
+    if (url.pathname === "/api/quota/dock" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      try {
+        const { formatted, fetchedAt } = await getQuotaDock();
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ formatted, fetchedAt }));
       } catch {
         res.writeHead(502, { "Content-Type": "text/plain" });
         res.end("quota query failed");
