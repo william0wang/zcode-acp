@@ -382,6 +382,31 @@ re-registered from the durable store without a resume (or left behind by a
 failed one) therefore replayed nothing. Fixed by explicit backend-loaded
 tracking; the backend also logs a warning now when `session/messages` errors.
 
+### Start Plan (zcode-plan) providers fail headless — 1113 / signing errors
+
+**Symptom:** every turn fails with HTTP 429 error `1113` ("Insufficient
+balance or no resource package") or `ClientRequestSigningV4Error: Client
+signing credential must contain one separator`, while the same account works
+in the ZCode desktop app.
+
+**Cause:** Start Plan providers (`builtin:zai-start-plan`,
+`builtin:bigmodel-start-plan`, baseURL `zcode.z.ai/api/v1/zcode-plan/...`)
+authenticate with the provider's OAuth JWT **plus an Aliyun captcha session**:
+before each model request the backend asks its host via
+`interaction/requestProviderRuntimeHeaders` to solve an Aliyun captcha and
+inject `X-Aliyun-Captcha-Verify-Param`/`-Region` headers. The desktop app
+solves this in its renderer (browser environment, mostly invisible); a
+headless bridge has neither a browser nor the captcha credential. GLM Coding
+Plan providers are unaffected — they use an `id.secret` API key and sign
+requests themselves.
+
+**Workaround:** switch the session's provider to a GLM Coding Plan one
+(model dropdown, or re-enable it in the desktop app so
+`~/.zcode/v2/config.json` marks it `enabled`). The bridge answers the captcha
+request with `headersApplied:false` and the backend surfaces a clear error;
+full Start Plan support headless would require solving the Aliyun captcha
+outside a browser, which this bridge does not do.
+
 ## Log Debugging
 
 ### Enable verbose logging

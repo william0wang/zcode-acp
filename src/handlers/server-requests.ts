@@ -291,10 +291,15 @@ export async function handleServerRequests(
       for (const req of drained) {
         const sid = (req.params as { sessionId?: string }).sessionId;
         if (sid === undefined || sid === mySid) {
-          sendZcodeReply(backend, req.id, {
-            action: "decline",
-            reason: "turn cancelled",
-          });
+          // The captcha-session request must keep its result shape even when
+          // cancelled, or the backend's response validation rejects it.
+          sendZcodeReply(
+            backend,
+            req.id,
+            isProviderRuntimeHeadersRequest(req.method)
+              ? { headersApplied: false, errorMessage: "turn cancelled" }
+              : { action: "decline", reason: "turn cancelled" },
+          );
           declined = true;
         } else {
           backend.requeueServerRequests([req]); // not ours — leave for owner
@@ -350,6 +355,27 @@ async function handleOne(
   const ask = isAskUserQuestion(method, params);
   const perm = isPermissionRequest(method);
   const epm = isExitPlanMode(params);
+
+  // Start Plan providers (zcode-plan endpoints) ask their host to solve an
+  // Aliyun captcha and inject X-Aliyun-Captcha-Verify-* headers before every
+  // model request; the desktop renderer does this from a browser environment.
+  // The headless bridge has neither a browser nor the captcha credential, so
+  // the only honest answer is headersApplied:false — the backend then fails
+  // with its -32031 error carrying our message. Without this, the request
+  // fell through to the generic unsupported-request error and the backend
+  // fell back to client signing with the provider's OAuth JWT, dying with the
+  // misleading "must contain one separator" invalid-config error (#123).
+  if (isProviderRuntimeHeadersRequest(method)) {
+    warn(
+      "  ⚠ provider runtime headers requested (Start Plan captcha session); " +
+        "the headless bridge cannot provide it — declining",
+    );
+    sendZcodeReply(backend, zcodeReqId, {
+      headersApplied: false,
+      errorMessage: PROVIDER_RUNTIME_HEADERS_UNAVAILABLE,
+    });
+    return;
+  }
 
   if (!perm && !(isUserInputRequestUnchecked(method) && (epm || ask))) {
     warn(`  ⚠ unhandled server→client request: ${method} (id=${zcodeReqId})`);
@@ -923,11 +949,7 @@ function sendInteractionReply(
 }
 
 /** Send a zcode response (result) for a server→client request id. */
-function sendZcodeReply(
-  backend: ZcodeBackend,
-  zcodeId: number | string,
-  result: ZcodeInteractionResponse,
-): void {
+function sendZcodeReply(backend: ZcodeBackend, zcodeId: number | string, result: unknown): void {
   // zcode expects {id, result} — but our backend.notify sends {method, params}. Use a raw write.
   // The backend's notify is for notifications; replies need the id. We route via a private seam.
   (backend as unknown as { sendReply: (id: number | string, result: unknown) => void }).sendReply(
@@ -948,3 +970,17 @@ function sendZcodeError(backend: ZcodeBackend, zcodeId: number | string, message
 function isUserInputRequestUnchecked(method: string): boolean {
   return method === "interaction/requestUserInput";
 }
+
+/** @see handleOne — the Start Plan captcha-session request (issue #123). */
+function isProviderRuntimeHeadersRequest(method: string): boolean {
+  return method === "interaction/requestProviderRuntimeHeaders";
+}
+
+/**
+ * Reason surfaced through the backend's -32031 error when it asks for a
+ * provider runtime headers (Aliyun captcha) refresh we cannot serve.
+ */
+const PROVIDER_RUNTIME_HEADERS_UNAVAILABLE =
+  "Start Plan providers require an Aliyun captcha session that only the " +
+  "ZCode desktop app can provide. Use a GLM Coding Plan provider for " +
+  "headless/editor sessions (see docs/TROUBLESHOOTING.md).";
