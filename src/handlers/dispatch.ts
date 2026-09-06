@@ -29,6 +29,35 @@ import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
 import { sendSessionUpdate } from "./io.js";
 
+/** True once the EPERM hint fired for this process — throttled to one shot. */
+let sandboxEpermHinted = false;
+
+/**
+ * Sandbox observability (#127): a syscall-level Seatbelt denial surfaces in
+ * the child as a bare `Operation not permitted` — no ask path (that flow is
+ * write-path only), no attribution, and tools misreport it as their own bug.
+ * When the backend runs sandboxed, tag the first EPERM-class tool output so
+ * diagnostics have a signal pointing at the sandbox instead.
+ */
+function hintSandboxEperm(server: ZcodeAcpServer, ev: InternalEvent): void {
+  if (sandboxEpermHinted || !server.backendSandboxed || ev.kind !== "ToolCallUpdate") return;
+  // Failed outputs only: successful tools routinely ECHO the phrase (cat-ing
+  // this repo's own docs, grep hits) and would false-positive the hint.
+  if (ev.status !== "failed") return;
+  if (!`${ev.output ?? ""}`.includes("Operation not permitted")) return;
+  sandboxEpermHinted = true;
+  warn(
+    "  ⚠ tool output contained 'Operation not permitted' with the Seatbelt sandbox armed — " +
+      "likely a sandbox denial, not a tool bug (docs/TROUBLESHOOTING.md; path grants go in " +
+      ".zcode/acp/sandbox.json)",
+  );
+}
+
+/** Test hook: re-arm the one-shot EPERM hint. */
+export function resetSandboxEpermHintForTest(): void {
+  sandboxEpermHinted = false;
+}
+
 /** Dispatch one internal event to the ACP client as a session/update. */
 export async function dispatchEvent(
   server: ZcodeAcpServer,
@@ -37,6 +66,7 @@ export async function dispatchEvent(
   ev: InternalEvent,
   chunkMsgId: string,
 ): Promise<void> {
+  hintSandboxEperm(server, ev);
   // One conversation can be attached under several ACP ids (see
   // server.sessionAliases): emit once per alias with that alias as the
   // payload sessionId, or every client but the prompter starves silently.

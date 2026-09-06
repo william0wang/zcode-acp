@@ -83,8 +83,9 @@ resolves as `ZCODE_ACP_HUB_TERMINAL_COMMAND` → `ZCODE_ACP_HUB_TERMINAL_APP`
 Ghostty; other names pass through to `open -a`) → plain Terminal.app. Warp
 cannot execute scripts or commands programmatically (warpdotdev/warp#1917,
 #3959) and is deliberately unsupported — it degrades to the headless bridge.
-A live serve-origin instance for
-the same workspace is reused instead of re-spawned (`reused:true`). A
+Create NEVER reuses a live serve-origin instance (ADR-0016 as amended) —
+every create incubates its own window, and identical concurrent requests
+join the same in-flight spawn. A
 terminal-REPL instance lives while its window lives; the headless fallback
 exits ~10 minutes after the last client detaches and the last turn
 finishes. Session roots are pinned to the project cwd in both surfaces

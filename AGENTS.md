@@ -215,7 +215,18 @@ ZCode protocol types into ACP notifications directly — always translate.
   through it (symlink/hardlink pierces the deny island; a config read as
   armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
   the template would silently disarm). `/dev/null` must stay write-allowed
-  or every `git commit` breaks.
+  or every `git commit` breaks. `openpty` (`/dev/ptmx` + the granted
+  `/dev/ttysNNN`, both `O_RDWR`) needs its two explicit write allows or
+  `script`/`expect`/TUI binaries die with a bare `openpty: Operation not
+  permitted` (#127); the slave allow is extension-gated (`require-all` +
+  `com.apple.sandbox.pty`, Apple `application.sb` form) so only this
+  sandbox's own pty slaves become writable — never widen it to a bare ttys
+  regex. The `pseudo-tty`/read/ioctl operations are already covered by
+  `(allow default)`. When diagnosing ANY bare `Operation not permitted`
+  inside an armed sandbox, suspect the sandbox FIRST — syscall-level denials
+  have no ask popup and tools misreport them as their own bug; the bridge
+  warns once per process on the first failed tool output containing the
+  phrase (`hintSandboxEperm` in dispatch.ts).
 - **A hub born inside the Seatbelt wrap silently breaks session-create**:
   macOS TCC attributes the hub's `open -a Terminal` to the requester identity
   "Sandbox" and Terminal refuses the document — while `open` itself exits 0,

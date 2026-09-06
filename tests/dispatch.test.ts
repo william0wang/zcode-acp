@@ -8,11 +8,17 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { dispatchEvent } from "../src/handlers/dispatch.js";
+import { dispatchEvent, resetSandboxEpermHintForTest } from "../src/handlers/dispatch.js";
+import { warn } from "../src/utils.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import type { InternalEvent } from "../src/translators/types.js";
+
+vi.mock("../src/utils.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/utils.js")>();
+  return { ...actual, warn: vi.fn() };
+});
 
 /** Mock AgentContext that records every notify call. */
 function mockContext(): { cx: acp.AgentContext; sent: acp.SessionUpdate[] } {
@@ -438,5 +444,70 @@ describe("cross-alias fan-out", () => {
     );
     expect(calls).toHaveLength(1);
     expect(calls[0]!.sessionId).toBe("solo");
+  });
+});
+
+describe("sandbox EPERM observability hint (#127)", () => {
+  afterEach(() => {
+    resetSandboxEpermHintForTest();
+    vi.mocked(warn).mockClear();
+  });
+
+  it("warns once for EPERM-class tool output while the backend is sandboxed", async () => {
+    const { cx } = mockContext();
+    const server = makeServer(false);
+    server.backendSandboxed = true;
+    const ev: InternalEvent = {
+      kind: "ToolCallUpdate",
+      callId: "c1",
+      tool: "Bash",
+      status: "failed",
+      output: "script: openpty: Operation not permitted",
+    };
+    await dispatchEvent(server, cx, SID, ev, CHUNK);
+    expect(vi.mocked(warn)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(warn).mock.calls[0]![0]).toContain("sandbox");
+    // One-shot: a second EPERM output must not re-warn.
+    await dispatchEvent(server, cx, SID, { ...ev, callId: "c2" }, CHUNK);
+    expect(vi.mocked(warn)).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent for successful tool output that merely echoes the phrase", async () => {
+    const { cx } = mockContext();
+    const server = makeServer(false);
+    server.backendSandboxed = true;
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      {
+        kind: "ToolCallUpdate",
+        callId: "c1",
+        tool: "Bash",
+        status: "completed",
+        output: "src/handlers/sandbox-allow.ts:41: Operation not permitted",
+      },
+      CHUNK,
+    );
+    expect(vi.mocked(warn)).not.toHaveBeenCalled();
+  });
+
+  it("stays silent when the backend is not sandboxed", async () => {
+    const { cx } = mockContext();
+    const server = makeServer(false); // backendSandboxed stays false
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      {
+        kind: "ToolCallUpdate",
+        callId: "c1",
+        tool: "Bash",
+        status: "failed",
+        output: "openpty: Operation not permitted",
+      },
+      CHUNK,
+    );
+    expect(vi.mocked(warn)).not.toHaveBeenCalled();
   });
 });

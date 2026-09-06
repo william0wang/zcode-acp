@@ -407,6 +407,28 @@ request with `headersApplied:false` and the backend surfaces a clear error;
 full Start Plan support headless would require solving the Aliyun captcha
 outside a browser, which this bridge does not do.
 
+### Interactive TUI / `script` / `expect` fails with `Operation not permitted` under the sandbox
+
+**Symptom:** inside an armed Seatbelt sandbox, pseudo-terminal allocation
+fails (`script: openpty: Operation not permitted`, or a TUI binary dying at
+terminal init with `os error 1`); the same binaries run fine headless.
+
+**Cause:** `openpty` opens `/dev/ptmx` and the granted `/dev/ttysNNN` pair
+`O_RDWR`, and the write half used to collide with the profile's blanket
+`file-write*` deny. Since the fix, the profile allows exactly those two write
+targets — the slave allow is gated on the sandbox pty extension, mirroring
+Apple's own `application.sb`/`com.apple.neagent.sb` profiles, so only slaves
+cloned through the sandbox's own `ptmx` opens are writable. Upgrade the bridge
+if you still see this.
+
+**Diagnosis tip:** a syscall-level sandbox denial has **no ask popup** (the
+dynamic-allow flow only triggers on write-path denials) and surfaces in the
+child as a bare `EPERM`, which tools may misreport as their own bug. When the
+backend runs sandboxed, the bridge logs a one-shot warning the first time a
+tool output contains `Operation not permitted` — that warning is your signal
+to suspect the sandbox. Path grants for legitimate writes go in
+`.zcode/acp/sandbox.json`.
+
 ## Log Debugging
 
 ### Enable verbose logging

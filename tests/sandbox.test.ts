@@ -304,6 +304,23 @@ describe("buildSandboxProfile", () => {
     // /dev/null must be writable — git and `2>/dev/null` idioms break without
     // it ("could not open '/dev/null'", observed in review probes).
     expect(profile).toContain('(allow file-write-data (literal "/dev/null"))');
+    // pty allocation (#127): openpty opens /dev/ptmx + the granted /dev/ttysNNN
+    // pair O_RDWR; the write half needs explicit allows or `script`/TUI
+    // binaries die with a bare `openpty: Operation not permitted`. The slave
+    // allow is extension-gated (Apple application.sb form): only slaves
+    // cloned through this sandbox's own ptmx are writable.
+    expect(profile).toContain('(allow file-write* (literal "/dev/ptmx"))');
+    expect(profile).toContain(
+      '(allow file-write* (require-all (regex #"^/dev/ttys[0-9]+$") ' +
+        '(extension "com.apple.sandbox.pty")))',
+    );
+    // SBPL is LAST-MATCH: these allows only hold while no later deny matches
+    // /dev too (all emitted denies are workspace/island/self subpaths).
+    // A future deny touching /dev would silently re-break openpty with the
+    // allows still present in the text — pin that it can never happen.
+    const denyLines = lines.filter((l) => l.startsWith("(deny"));
+    expect(denyLines.length).toBeGreaterThan(0);
+    for (const l of denyLines) expect(l).not.toContain("/dev");
     // Well-known system temp trees are default-allowed in RESOLVED form:
     // tools hardcode /tmp (symlink → /private/tmp) or /var/tmp, and $TMPDIR
     // names only the per-user /var/folders leaf. An /tmp allow entry resolves
