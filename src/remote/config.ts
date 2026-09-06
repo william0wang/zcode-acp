@@ -92,14 +92,7 @@ function mergeCommon(env: NodeJS.ProcessEnv): {
 
 /** Parse remote config; null = disabled (or misconfigured → warned). */
 export function parseRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteConfig | null {
-  const file = loadUserConfig(env).remote ?? {};
-  // Gate: the file is authoritative when it says anything; env decides only
-  // when the file is silent (an explicit `enabled: false` wins over env =1).
-  const enabled =
-    file.enabled !== undefined
-      ? file.enabled
-      : ["1", "true", "yes", "on"].includes((env.ZCODE_ACP_REMOTE ?? "").trim().toLowerCase());
-  if (!enabled) return null;
+  if (!remoteEnabledLive(env)) return null;
   const { token, hubPort, hubHost, bridgePort } = mergeCommon(env);
   if (!token) {
     warn(
@@ -116,6 +109,19 @@ export function parseRemoteConfig(env: NodeJS.ProcessEnv = process.env): RemoteC
     origin: (env.ZCODE_ACP_REMOTE_ORIGIN ?? "").trim() === "serve" ? "serve" : "editor",
     pinCwd: (env.ZCODE_ACP_REMOTE_PIN_CWD ?? "").trim() === "1",
   };
+}
+
+/**
+ * Live "is remote still enabled?" re-check for the hub's idle decision: same
+ * precedence as birth (file wins, env decides when the file is silent) but
+ * WITHOUT token validation or warnings — the hub only uses it to decide
+ * whether to retire or keep listening for phone-driven create/resume.
+ */
+export function remoteEnabledLive(env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = loadUserConfig(env).remote ?? {};
+  return file.enabled !== undefined
+    ? file.enabled
+    : ["1", "true", "yes", "on"].includes((env.ZCODE_ACP_REMOTE ?? "").trim().toLowerCase());
 }
 
 /** Parse hub-side config for the standalone hub entry (`zcode-acp hub`). */
@@ -143,11 +149,9 @@ export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConf
 export function remoteTerminalPrefs(env: NodeJS.ProcessEnv = process.env): TerminalPrefs {
   const file = loadUserConfig(env).remote?.terminal ?? {};
   const app = file.app ?? ((env.ZCODE_ACP_HUB_TERMINAL_APP ?? "").trim() || undefined);
-  const command =
-    file.command ?? ((env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim() || undefined);
+  const command = file.command ?? ((env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim() || undefined);
   const enabled =
-    file.enabled ?? !["0", "false", "off"].includes(
-      (env.ZCODE_ACP_HUB_TERMINAL ?? "").trim().toLowerCase(),
-    );
+    file.enabled ??
+    !["0", "false", "off"].includes((env.ZCODE_ACP_HUB_TERMINAL ?? "").trim().toLowerCase());
   return { enabled, ...(app ? { app } : {}), ...(command ? { command } : {}) };
 }

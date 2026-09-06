@@ -115,6 +115,24 @@ export async function fetchDockText(env: NodeJS.ProcessEnv = process.env): Promi
 }
 
 /**
+ * Response-time backstop for the first-fetch race: the first refresh can
+ * complete (and emit) BEFORE the boot/resume session is registered in
+ * sessionMap — that emit fans out to zero sessions and the sticky
+ * `text === prev` short-circuit then suppresses every later identical
+ * refresh, so the dock never appears until a turn changes the text. Called
+ * setImmediate-style AFTER newSession/resumeSession/loadSession responses,
+ * this re-emits the already-fetched value to the now-registered sessions.
+ * Full-replace semantics make the duplicate push harmless when the raced
+ * emit did land.
+ */
+export function scheduleQuotaDockBackstop(server: ZcodeAcpServer): void {
+  if (server.quotaDock === null) return;
+  setImmediate(() => {
+    if (server.quotaDock !== null) void emitQuotaOptions(server).catch(() => {});
+  });
+}
+
+/**
  * Push a `config_option_update` carrying the full options array (quota
  * included) to every martty connection, for every live session alias. Other
  * clients are untouched — the quota option is martty-only by contract.

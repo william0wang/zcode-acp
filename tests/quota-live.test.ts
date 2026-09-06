@@ -21,6 +21,7 @@ import {
   forceRefreshQuota,
   QUOTA_REFRESH_INTERVAL_MS,
   resetQuotaRefresherForTest,
+  scheduleQuotaDockBackstop,
   startQuotaRefresher,
 } from "../src/quota/live.js";
 import type { QuotaResult } from "../src/quota/types.js";
@@ -124,6 +125,28 @@ describe("startQuotaRefresher", () => {
     await vi.advanceTimersByTimeAsync(QUOTA_REFRESH_INTERVAL_MS);
     expect(queryQuotaMock).toHaveBeenCalledTimes(2);
     expect(server.quotaDock).toBe("5h 45% · wk 12%");
+  });
+});
+
+describe("scheduleQuotaDockBackstop", () => {
+  it("re-emits the already-fetched value to registered sessions after the response", async () => {
+    const { server, calls } = fakeServer();
+    server.quotaDock = "5h 45% · wk 12%";
+    scheduleQuotaDockBackstop(server);
+    await flushMicrotasks();
+    const acpSids = calls.map((c) => c.params.sessionId).sort();
+    expect(acpSids).toEqual(["acp-1", "acp-pending"]);
+    for (const c of calls) {
+      expect(c.params.update.sessionUpdate).toBe("config_option_update");
+    }
+  });
+
+  it("no-ops while no fetch has ever succeeded", async () => {
+    const { server, calls } = fakeServer();
+    server.quotaDock = null;
+    scheduleQuotaDockBackstop(server);
+    await flushMicrotasks();
+    expect(calls).toEqual([]);
   });
 });
 

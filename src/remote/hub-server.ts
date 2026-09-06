@@ -19,7 +19,9 @@
  * passes ?probe=1 to /api/instances: the hub TCP-probes each registered
  * loopback port and prunes unreachable bridges before answering — no periodic
  * probing, the cost is paid only when someone refreshes. When no instance is
- * registered and no proxy is active for `idleExitMs`, the hub exits — the
+ * registered and no proxy is active for `idleExitMs`, the hub re-reads the
+ * user config LIVE: remote still enabled → stays resident (phone-driven
+ * create/resume must work with zero local bridges); disabled → exits, and the
  * next bridge re-spawns it on demand.
  */
 
@@ -58,7 +60,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
-import { remoteTerminalPrefs } from "./config.js";
+import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
 import { formatQuotaDock } from "../quota/format.js";
@@ -75,6 +77,12 @@ export interface HubOptions {
   idleExitMs?: number;
   /** WebSocket keepalive ping interval (default 30s; tunnels drop idle links). */
   pingIntervalMs?: number;
+  /**
+   * How long a visible-terminal incubation (session-create/-resume) waits for
+   * the spawned bridge's registration (default TUI_REGISTER_TIMEOUT_MS; tests
+   * shrink it).
+   */
+  tuiRegisterTimeoutMs?: number;
   /**
    * Fires when the hub decided it should restart onto newer on-disk code
    * (a newer bridge registered, or POST /api/upgrade found the dist newer).
@@ -94,6 +102,13 @@ export interface HubOptions {
    * tasks-index.sqlite (see listKnownWorkspaces).
    */
   projectsDbPath?: string;
+  /**
+   * Override the idle-exit stay-alive check (tests pin it). Default: live
+   * re-read of the user config (remoteEnabledLive) — remote still enabled
+   * means the hub stays resident so a phone can create/resume at any time;
+   * only an explicit disable retires the daemon.
+   */
+  stayAliveCheck?: () => boolean;
   /**
    * Override how the remote session-create / session-resume endpoints spawn
    * a bridge (tests inject a fake). Default: this node + this package's
@@ -779,10 +794,12 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     heartbeatTimeoutMs = HEARTBEAT_TIMEOUT_MS,
     idleExitMs = IDLE_EXIT_MS,
     pingIntervalMs = PING_INTERVAL_MS,
+    tuiRegisterTimeoutMs = TUI_REGISTER_TIMEOUT_MS,
     onIdleExit,
     onRestart,
     codePaths = defaultCodePaths(),
     projectsDbPath,
+    stayAliveCheck = () => remoteEnabledLive(),
     spawnServe = defaultSpawnServe,
   } = options;
 
@@ -880,6 +897,21 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // Must ride the env verbatim — martty reads it once at process start.
       env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
+    if (kind === "tui") {
+      // Remote session-create binding: pre-generate the ACP session id BOTH
+      // the TUI window and the attaching phone adopt on their first
+      // session/new (ZCODE_ACP_BOOT_CREATE_SESSION tells the bridge to MINT it
+      // lazily rather than load an existing conversation). Without it each
+      // side mints its own placeholder — two sessions that never meet, the
+      // phone's conversation invisible in the window (verified by the
+      // 2026-09-06 diagnosis: martty drops every update addressed to the
+      // phone's session id, and its banner never yields).
+      env.ZCODE_ACP_RESUME_SESSION = randomUUID();
+      env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
+      // Same banner handshake as resume: the auto-submitted trigger drops
+      // martty's welcome banner so the window reveals the shared conversation.
+      env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
+    }
     if (kind !== "serve") {
       // Tab title (both visible-terminal kinds): a resume carries the
       // conversation's title when the hub resolved it; session-create and a
@@ -909,7 +941,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         kind === "resume" ? "resume TUI" : kind === "tui" ? "terminal TUI" : "serve bridge"
       } for ${workspacePath} (pid ${child.pid})`,
     );
-    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : TUI_REGISTER_TIMEOUT_MS;
+    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : tuiRegisterTimeoutMs;
     const deadline = Date.now() + budget;
     // A visible-terminal incubation (create OR resume) runs NEXT TO the serve
     // bridge the listing already incubated, and several incubations can race
@@ -937,6 +969,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         throw new Error("serve bridge exited during startup");
       }
       if (Date.now() > deadline) {
+        // Slow-window fallback (session-create only): the TUI missed its
+        // registration budget (GUI cold start, skill/plugin scans ahead of the
+        // hub registration). A 502 makes the App retry, and every retry
+        // incubates ANOTHER window — the observed placeholder storm. Answer
+        // with the workspace's live headless serve bridge instead: the App
+        // attaches and can talk at once, and the late window registers on its
+        // own and is merely closable (ADR-0014 semantics unchanged — the
+        // headless serve spawn is already the documented no-GUI fallback).
+        if (kind === "tui") {
+          const fallback = findServeInstance(workspacePath);
+          if (fallback) {
+            warn(
+              `hub: TUI for ${workspacePath} slow to register — ` +
+                `falling back to the live serve bridge`,
+            );
+            return { id: fallback.id, reused: true };
+          }
+        }
         warn(`hub: serve bridge for ${workspacePath} never registered`);
         throw new Error("serve bridge did not register in time");
       }
@@ -1623,8 +1673,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   pinger.unref();
   timers.push(pinger);
 
-  // Idle exit: with nothing registered and nobody proxied, the hub exits; the
-  // next bridge re-spawns it on demand (see endpoint.ts).
+  // Idle exit: with nothing registered and nobody proxied for idleExitMs, the
+  // hub checks whether remote access is STILL enabled (live config re-read) —
+  // enabled means stay resident (a phone must be able to create/resume at any
+  // time, even with zero local bridges); disabled means retire, and the next
+  // bridge re-spawns the hub on demand (see endpoint.ts).
   const idleCheck = setInterval(
     () => {
       if (instances.size > 0 || proxyPairs.size > 0) {
@@ -1633,7 +1686,12 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       if (idleSince === null) idleSince = Date.now();
       if (Date.now() - idleSince >= idleExitMs) {
-        log("hub: idle for too long with no instances — exiting");
+        if (stayAliveCheck()) {
+          log("hub: idle with no instances, but remote is still enabled — staying resident");
+          idleSince = Date.now();
+          return;
+        }
+        log("hub: idle for too long with no instances and remote disabled — exiting");
         clearInterval(idleCheck);
         void close().finally(() => onIdleExit?.());
       }

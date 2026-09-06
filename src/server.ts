@@ -208,6 +208,19 @@ export class ZcodeAcpServer {
    */
   bootResumeTriggerConnection: unknown = null;
   /**
+   * Hub session-create binding (remote create, ADR-0016): when the hub
+   * incubates a TUI for a remote session-create it pre-generates the ACP
+   * session id (ZCODE_ACP_BOOT_CREATE_SESSION + ZCODE_ACP_RESUME_SESSION), so
+   * the TUI window at boot AND the attaching phone adopt the SAME session on
+   * their first session/new — without it each mints its own placeholder and
+   * the phone's conversation never reaches the window (two sessions, updates
+   * dropped on the sessionId mismatch). Unlike the one-shot resume env, the
+   * bind persists for the bridge's lifetime; each connection claims it once.
+   */
+  bootCreateBindSession: string | null = null;
+  /** Connection roots that already claimed the create bind (see above). */
+  readonly bootCreateBindClaimed = new Set<unknown>();
+  /**
    * All connected ACP clients (the stdio editor plus any remote WebSocket
    * clients). Handlers push notifications through `clients.broadcast()` so
    * every attached client sees the same stream; the registry replaces the old

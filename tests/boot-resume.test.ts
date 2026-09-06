@@ -138,6 +138,64 @@ describe("session/new boot-resume interception", () => {
   });
 });
 
+describe("session/new create-bind (remote session-create, ADR-0016)", () => {
+  afterEach(() => {
+    delete process.env.ZCODE_ACP_RESUME_SESSION;
+    delete process.env.ZCODE_ACP_BOOT_CREATE_SESSION;
+  });
+
+  function clientWithRoot(id: string): acp.AgentContext {
+    return { notify: async () => {}, connectionContext: { id } } as unknown as acp.AgentContext;
+  }
+
+  it("binds the boot TUI and the attaching phone to the hub's pre-generated session", async () => {
+    const server = new ZcodeAcpServer();
+    server.clientName = "martty";
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
+    process.env.ZCODE_ACP_RESUME_SESSION = "sess_bind";
+    process.env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
+
+    // The booting TUI claims the pre-generated id as its FIRST session.
+    const tui = clientWithRoot("tui-conn");
+    const first = await newSession(server, { cwd: process.cwd() }, tui);
+    expect(first.sessionId).toBe("sess_bind");
+    // Minted as a LAZY placeholder — no backend session until first use, so
+    // an abandoned create window leaves nothing behind.
+    expect(server.pendingSessions.has("sess_bind")).toBe(true);
+    expect(calls).toHaveLength(0);
+    // Banner handshake armed for the booting connection (DSH_TUI_AUTOPROMPT):
+    // the window must reveal the shared conversation, not sit on its banner.
+    expect(server.bootResumeTriggerConnection).toEqual({ id: "tui-conn" });
+
+    // The attaching phone's FIRST session/new claims the SAME session — the
+    // whole point of the bind (previously two placeholders that never met).
+    const phone = clientWithRoot("phone-conn");
+    const second = await newSession(server, { cwd: process.cwd() }, phone);
+    expect(second.sessionId).toBe("sess_bind");
+
+    // A connection's LATER session/new (the TUI's /new) mints a fresh one.
+    const third = await newSession(server, { cwd: process.cwd() }, tui);
+    expect(third.sessionId).not.toBe("sess_bind");
+    expect(server.pendingSessions.has(third.sessionId)).toBe(true);
+  });
+
+  it("never arms the banner handshake when a non-TUI client claims first", async () => {
+    const server = new ZcodeAcpServer();
+    server.clientName = "Zed";
+    const { backend } = fakeBackend();
+    server.backend = backend;
+    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
+    process.env.ZCODE_ACP_RESUME_SESSION = "sess_bind";
+    process.env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
+
+    const res = await newSession(server, { cwd: process.cwd() }, clientWithRoot("zed-conn"));
+    expect(res.sessionId).toBe("sess_bind");
+    expect(server.bootResumeTriggerConnection).toBeNull();
+  });
+});
+
 describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
   afterEach(() => {
     delete process.env.ZCODE_ACP_RESUME_SESSION;
