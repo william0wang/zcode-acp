@@ -65,8 +65,22 @@ echo "PASS: project config enabled:true arms (no env); profile: $PROFILE"
 
 fail=0
 check() { # name, command, expected-exit
-  local name=$1 cmd=$2 want=$3 got
-  if eval "$cmd" >/dev/null 2>&1; then got=0; else got=$?; fi
+  local name=$1 cmd=$2 want=$3 got pid i
+  eval "$cmd" >/dev/null 2>&1 &
+  pid=$!
+  # Watchdog: a wedged child must FAIL loudly after 10s instead of hanging
+  # the whole script (observed once on macOS 15.7: rm-under-denial wedged
+  # with no output — stdin stays the tty, so a silent wait is invisible).
+  for i in $(seq 100); do kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+  if kill -0 $pid 2>/dev/null; then
+    pkill -9 -P $pid 2>/dev/null
+    kill -9 $pid 2>/dev/null
+    wait $pid 2>/dev/null
+    echo "FAIL: $name (timed out after 10s — command hung)"
+    fail=1
+    return
+  fi
+  wait $pid && got=0 || got=$?
   if [ "$got" = "$want" ]; then echo "PASS: $name"; else echo "FAIL: $name (exit=$got want=$want)"; fail=1; fi
 }
 
@@ -81,9 +95,10 @@ check "config allow honored"       "$SANDBOX touch $OUTSIDE/yes.txt" 0
 check "/dev/null writable"         "$SANDBOX sh -c 'echo x > /dev/null'" 0
 # pty allocation (#127): openpty opens /dev/ptmx and the granted /dev/ttysNNN
 # pair O_RDWR — without the explicit allows, `script`/TUI binaries die with
-# `openpty: Operation not permitted`.
-check "pty via script"             "$SANDBOX script -q /dev/null /bin/true" 0
-check "pty pair echo"              "$SANDBOX script -q /dev/null /bin/sh -c 'echo pty-ok'" 0
+# `openpty: Operation not permitted`. stdin is /dev/null so script(1) has no
+# tty input to copy (it exits on child exit either way).
+check "pty via script"             "$SANDBOX script -q /dev/null /bin/true </dev/null" 0
+check "pty pair echo"              "$SANDBOX script -q /dev/null /bin/sh -c 'echo pty-ok' </dev/null" 0
 # Well-known temp trees are default-allowed: tools hardcode /tmp and $TMPDIR
 # is only the per-user /var/folders leaf. Both spellings must work.
 check "/tmp writable"              "$SANDBOX touch /tmp/.sbv-tmp-allowed" 0
