@@ -129,6 +129,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   `_PIN_CWD`, `ZCODE_ACP_RESUME_SESSION`) is deliberately env-only — per-role
   state, never file-configurable. The TUI script's env embedding is still
   load-bearing for file-less setups (the .command shell sources no rc).
+- **Warp CAN be driven programmatically — don't regress it to "unsupported"**:
+  it refuses `.command` files (warpdotdev/warp#1917) and its `warp` CLI is
+  agent-only, but its URI scheme EXECUTES a script: `open -a Warp
+  "warp://action/new_tab?path=<script>"` opens the script as a new tab in
+  Warp's default mode and runs it (source: warp's open-source
+  app/src/uri/mod.rs → open_file; verified on 0.2026.09.02). That is the
+  `warpUri` launcher in hub-server.ts; Preview = `warppreview://` + the
+  "Warp Preview" bundle. #1917/#3959 describe only the missing .command/CLI
+  paths, which made Warp look impossible for a long time.
 - **The interactive CLI is Martty, a dependency — never hand-roll UI here**
   (ADR-0020): bare `zcode-acp` spawns `martty --agent node --agent-arg
   <dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.

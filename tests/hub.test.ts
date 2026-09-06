@@ -1558,11 +1558,18 @@ describe("terminal launch resolution (ADR-0016)", () => {
     });
   });
 
-  it("warns on Warp — it cannot run scripts or commands programmatically", () => {
-    const out = resolveTerminalLaunch({}, { app: "Warp" });
-    expect(out.launch).toEqual({ kind: "openApp", app: "Warp" });
-    expect(out.warning).toContain("warpdotdev/warp#1917");
-    expect(out.warning).toContain("ZCODE_ACP_HUB_TERMINAL_COMMAND");
+  it("maps Warp onto its URI-scheme launcher (new_tab executes the script)", () => {
+    expect(resolveTerminalLaunch({}, { app: "Warp" }).launch).toEqual({
+      kind: "warpUri",
+      app: "Warp",
+      scheme: "warp",
+    });
+    // Preview channel: different app bundle AND scheme.
+    expect(resolveTerminalLaunch({}, { app: "Warp Preview" }).launch).toEqual({
+      kind: "warpUri",
+      app: "Warp Preview",
+      scheme: "warppreview",
+    });
   });
 
   it("passes unknown apps through to open -a and defaults to Terminal.app", () => {

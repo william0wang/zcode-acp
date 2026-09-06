@@ -121,8 +121,11 @@ file (re-read live at every incubation; the `ZCODE_ACP_HUB_TERMINAL_COMMAND`
 → `ZCODE_ACP_HUB_TERMINAL_APP` env vars fill in when the file is silent —
 built-in launch recipes for Terminal, iTerm, WezTerm, kitty, Alacritty,
 Ghostty; other names pass through to `open -a`) → plain Terminal.app. Warp
-cannot execute scripts or commands programmatically (warpdotdev/warp#1917,
-#3959) and is deliberately unsupported — it degrades to the headless bridge.
+refuses `.command` files, so `terminal.app: "warp"` (or `"warp-preview"`)
+instead opens `warp://action/new_tab?path=<script>` — its URI scheme executes
+the script as a new tab in Warp's default mode (app/src/uri/mod.rs →
+open_file). Hyper stays unsupported (no programmatic command execution,
+vercel/hyper#3677).
 Create NEVER reuses a live serve-origin instance (ADR-0016 as amended) —
 every create incubates its own window, and identical concurrent requests
 join the same in-flight spawn. A

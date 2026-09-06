@@ -243,7 +243,13 @@ export type TerminalLaunch =
   | { kind: "openApp"; app: string }
   /** Terminals driven by their own CLI: `open -na <app> --args <args> <sh>
    * <script>` — args come first, the script program is appended. */
-  | { kind: "openAppArgs"; app: string; args: string[] };
+  | { kind: "openAppArgs"; app: string; args: string[] }
+  /** Warp: refuses `.command` files and its CLI is agent-only, but its URI
+   * scheme EXECUTES a script handed to action/new_tab's path param
+   * (app/src/uri/mod.rs → open_file; verified on 0.2026.09.02): the hub opens
+   * `<scheme>://action/new_tab?path=<script>` and Warp runs it as a new tab
+   * in its default mode. Preview uses the warppreview:// scheme. */
+  | { kind: "warpUri"; app: string; scheme: string };
 
 /**
  * Built-in launch recipes for well-known macOS terminals (ADR-0016 §5). Each
@@ -252,11 +258,9 @@ export type TerminalLaunch =
  * WezTerm's `start --` runs an alternative program (wezterm.org/cli/start.html);
  * kitty takes the program as normal positional arguments
  * (sw.kovidgoyal.net/kitty/invocation); Alacritty and Ghostty support the
- * common `-e` flag. The script does its own `cd`, so no per-app cwd flags.
- * Warp is deliberately ABSENT — it cannot execute `.command` files (#1917)
- * and has no programmatic command execution at all (URI scheme opens dirs
- * only; still an open request in #3959/#9083). Hyper is absent for the same
- * reason (#3677).
+ * common `-e` flag; Warp rides its new_tab URI action (see warpUri above).
+ * The script does its own `cd`, so no per-app cwd flags. Hyper is absent — no
+ * programmatic command execution at all (vercel/hyper#3677).
  */
 const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
   terminal: { kind: "openApp", app: "Terminal" },
@@ -267,6 +271,9 @@ const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
   kitty: { kind: "openAppArgs", app: "kitty", args: [] },
   alacritty: { kind: "openAppArgs", app: "Alacritty", args: ["-e"] },
   ghostty: { kind: "openAppArgs", app: "Ghostty", args: ["-e"] },
+  warp: { kind: "warpUri", app: "Warp", scheme: "warp" },
+  "warp-preview": { kind: "warpUri", app: "Warp Preview", scheme: "warppreview" },
+  warp_preview: { kind: "warpUri", app: "Warp Preview", scheme: "warppreview" },
 };
 
 /**
@@ -275,9 +282,8 @@ const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
  * only the app-name normalization lives here. Priority: the explicit command
  * template (the universal escape hatch) → a built-in launcher by app name
  * (aliases are case- and `.app`-suffix-insensitive) → plain Terminal.app
- * (macOS has no default-terminal setting to detect). Warp gets a special
- * warning because it accepts the open but cannot run the script; any other
- * unmatched name passes through to `open -a` unchanged.
+ * (macOS has no default-terminal setting to detect). Any other unmatched
+ * name passes through to `open -a` unchanged.
  */
 export function resolveTerminalLaunch(
   env: NodeJS.ProcessEnv,
@@ -288,19 +294,9 @@ export function resolveTerminalLaunch(
 } {
   if (prefs.command) return { launch: { kind: "shell", command: prefs.command } };
   const raw = prefs.app ?? "";
-  const name = raw.toLowerCase().replace(/\.app$/, "");
+  const name = raw.toLowerCase().replace(/\.app$/, "").replace(/\s+/g, "-");
   const launcher = TERMINAL_APP_LAUNCHERS[name];
   if (launcher) return { launch: launcher };
-  if (name === "warp") {
-    return {
-      launch: { kind: "openApp", app: raw || "Warp" },
-      warning:
-        "Warp cannot execute .command scripts (warpdotdev/warp#1917) and has no " +
-        "programmatic command execution (warpdotdev/warp#3959, #9083) — the window " +
-        "will idle and session-create falls back to a headless bridge after the " +
-        "register timeout; set ZCODE_ACP_HUB_TERMINAL_COMMAND to drive Warp another way",
-    };
-  }
   return { launch: { kind: "openApp", app: raw || "Terminal" } };
 }
 
@@ -363,6 +359,15 @@ async function spawnTerminalTui(opts: {
     argv = ["/bin/sh", "-c", rendered];
   } else if (launch.kind === "openApp") {
     argv = ["open", "-a", launch.app, script];
+  } else if (launch.kind === "warpUri") {
+    // new_tab = Warp's default open mode (like Cmd+T: a tab in the focused
+    // window; Warp opens a window first if none exists).
+    argv = [
+      "open",
+      "-a",
+      launch.app,
+      `${launch.scheme}://action/new_tab?path=${encodeURIComponent(script)}`,
+    ];
   } else {
     argv = ["open", "-na", launch.app, "--args", ...launch.args, "/bin/sh", script];
   }
