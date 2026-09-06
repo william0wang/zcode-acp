@@ -490,6 +490,40 @@ async function resolveResumeTarget(
   return { zcodeSid: acpSid, alreadyLive: false };
 }
 
+/**
+ * Tail size for the TUI resume replay. Bounded so a long store session does
+ * not push thousands of chunk notifications into one window; turn-aligned
+ * by sliceTail (a slice can run slightly past the limit to a turn start).
+ */
+const MARTTY_RESUME_TAIL = 200;
+
+/** True when the connecting client is Martty, the bundled TUI frontend. */
+function isMarttyClient(server: ZcodeAcpServer): boolean {
+  return (server.clientName ?? "").toLowerCase().includes("martty");
+}
+
+/**
+ * Stream a resumed session's history to the TUI as chunk updates — the same
+ * wire form session/load replays (chunks fold in Martty; complete-form
+ * user/agent messages do not). Editors are unaffected: they replay through
+ * session/load and would double-render a resume replay.
+ */
+async function replayResumeHistory(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  const messages = await fetchMessages(server, zcodeSid);
+  if (messages.length === 0) return;
+  const slice = sliceTail(messages, MARTTY_RESUME_TAIL);
+  await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+  log(
+    `session/resume: replayed ${slice.meta.replayedMessages} messages for the TUI` +
+      ` (tail ${MARTTY_RESUME_TAIL} of ${slice.meta.totalMessages} on record)`,
+  );
+}
+
 /** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
@@ -556,6 +590,21 @@ export async function resumeSession(
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
+  // Martty's /resume rides session/resume (no history by ACP design) and only
+  // folds updates addressed to a session id it has already adopted — i.e.
+  // delivered AFTER the resume response (pre-response updates are dropped;
+  // verified against martty 0.2.35). setImmediate lets the response write
+  // first: microtasks (the SDK's response send) drain before immediates.
+  if (isMarttyClient(server)) {
+    setImmediate(() => {
+      replayResumeHistory(server, cx, acpSid, zcodeSid).catch((e) => {
+        warn(
+          `session/resume: TUI history replay failed (non-fatal): ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+    });
+  }
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));

@@ -170,6 +170,11 @@ export class ZcodeAcpServer {
   /** Capabilities advertised by connected clients (Zed, JetBrains, remote). */
   clientCapabilities: ClientCapabilities = {};
   /**
+   * Client name from `initialize` clientInfo ("martty", "Zed", …). Gates
+   * client-specific behavior (the TUI resume history replay).
+   */
+  clientName: string | null = null;
+  /**
    * All connected ACP clients (the stdio editor plus any remote WebSocket
    * clients). Handlers push notifications through `clients.broadcast()` so
    * every attached client sees the same stream; the registry replaces the old
@@ -548,6 +553,7 @@ export class ZcodeAcpServer {
   /** Handle `initialize`: negotiate version + declare agent capabilities. */
   async initialize(params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
     const clientInfo = (params.clientInfo as { name?: string; version?: string } | null) ?? null;
+    this.clientName = clientInfo?.name ?? null;
     this.mergeClientCapabilities((params.clientCapabilities as ClientCapabilities) ?? {});
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +
