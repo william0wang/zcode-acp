@@ -240,6 +240,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   (src/remote/hub-sandbox.ts; plist in a temp mkdtemp, launchd reads the path
   itself). Don't reconnect this through `open` retries or TCC prompts — the
   attribution is the problem, not a missing permission.
+- **Start Plan providers are desktop-only — do NOT "fix" this with an
+  unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
+  session only the desktop renderer can provide; the bridge answers
+  `interaction/requestProviderRuntimeHeaders` with `headersApplied:false` +
+  an actionable error (PR #128). Impersonating the desktop client, bypassing
+  the captcha/signing anti-abuse measures, or copying from the unlicensed
+  third-party proxies that do this are legal no-gos for a distributed tool
+  (ADR-0019) — decline the feature request and point users at GLM Coding
+  Plan or the desktop app.
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast

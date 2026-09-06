@@ -405,7 +405,11 @@ requests themselves.
 `~/.zcode/v2/config.json` marks it `enabled`). The bridge answers the captcha
 request with `headersApplied:false` and the backend surfaces a clear error;
 full Start Plan support headless would require solving the Aliyun captcha
-outside a browser, which this bridge does not do.
+outside a browser, which this bridge does not do. That boundary is
+deliberate: unofficial clients or proxies that impersonate the desktop app or
+bypass the captcha check won't be shipped or supported here — if the provider
+ever offers an official headless credential path, this bridge will adopt it
+(see #123).
 
 ### Interactive TUI / `script` / `expect` fails with `Operation not permitted` under the sandbox
 
