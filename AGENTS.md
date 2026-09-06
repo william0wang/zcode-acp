@@ -254,7 +254,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   `launchctl bootstrap gui/$UID` + kickstart before binding
   (src/remote/hub-sandbox.ts; plist in a temp mkdtemp, launchd reads the path
   itself). Don't reconnect this through `open` retries or TCC prompts — the
-  attribution is the problem, not a missing permission.
+  attribution is the problem, not a missing permission. The launchd escape
+  itself FAILS when the hub was spawned from an agent session's own Seatbelt
+  (launchctl is sandboxed there too — observed 2026-09: a nohup'd hub degraded
+  and its serve bridges 502'd every /api/projects/sessions); the only working
+  restart channel from inside such a session is an `open` one (e.g. Warp's
+  `warp://action/new_tab?path=<restart.command>`), which hands execution to a
+  clean user shell.
 - **Start Plan providers are desktop-only — do NOT "fix" this with an
   unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
   session only the desktop renderer can provide; the bridge answers
