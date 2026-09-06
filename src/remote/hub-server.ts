@@ -82,16 +82,16 @@ export interface HubOptions {
   /**
    * Override how the remote session-create / session-resume endpoints spawn
    * a bridge (tests inject a fake). Default: this node + this package's
-   * dist/cli.js — an interactive REPL in a visible terminal for
-   * session-create and session-resume ("repl"; resume carries the requested
+   * dist/cli.js — an interactive TUI in a visible terminal for
+   * session-create and session-resume ("tui"; resume carries the requested
    * session in ZCODE_ACP_RESUME_SESSION), a detached headless serve bridge
    * for background queries ("serve").
    */
   spawnServe?: (opts: {
     cwd: string;
     env: NodeJS.ProcessEnv;
-    /** "repl" = visible terminal (session-create/-resume); "serve" = detached headless. */
-    kind: "repl" | "serve";
+    /** "tui" = visible terminal (session-create/-resume); "serve" = detached headless. */
+    kind: "tui" | "serve";
   }) => ChildProcess | Promise<ChildProcess>;
 }
 
@@ -219,11 +219,11 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 }
 
 /**
- * The REPL-in-a-terminal incubation budget (ADR-0016): a visible terminal
- * adds a GUI round-trip (Terminal app launch, REPL boot, its bridge child)
+ * The TUI-in-a-terminal incubation budget (ADR-0016): a visible terminal
+ * adds a GUI round-trip (Terminal app launch, TUI boot, its bridge child)
  * ahead of the hub registration — double the headless budget.
  */
-const REPL_REGISTER_TIMEOUT_MS = 20_000;
+const TUI_REGISTER_TIMEOUT_MS = 20_000;
 /** `open -a <terminal>` must answer fast or the incubation falls back. */
 const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
 /** Set ZCODE_ACP_HUB_TERMINAL=0 to keep remote session-create headless. */
@@ -270,7 +270,7 @@ const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
 };
 
 /**
- * Pick how to open the REPL script. The hub is a background daemon — its env
+ * Pick how to open the TUI script. The hub is a background daemon — its env
  * carries no terminal and macOS has no default-terminal setting — so nothing
  * is detected. Priority: the explicit command template (the universal escape
  * hatch) → a built-in launcher by app name (aliases are case- and
@@ -304,18 +304,18 @@ export function resolveTerminalLaunch(env: NodeJS.ProcessEnv): {
 /**
  * The .command script body. The incubation env MUST be embedded as exports:
  * the script runs in a fresh shell spawned by the terminal app, which
- * inherits launchd's environment — NOT the hub's — so without them the REPL
+ * inherits launchd's environment — NOT the hub's — so without them the TUI
  * would boot as a plain local session and never register back (the
  * incubation would stall into its timeout). Everything ZCODE_ACP_* travels;
  * values are single-quoted.
  */
-export function terminalReplScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
+export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
   const exports = Object.keys(env)
     .filter((k) => k.startsWith("ZCODE_ACP_"))
     .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
   return [
     "#!/bin/sh",
-    `# Hub-incubated REPL session (ADR-0016): closing this window ends the bridge.`,
+    `# Hub-incubated TUI session (ADR-0016): closing this window ends the bridge.`,
     `cd ${shQuote(cwd)} || exit 1`,
     ...exports,
     `exec ${shQuote(process.execPath)} ${shQuote(cliJs)}`,
@@ -324,10 +324,10 @@ export function terminalReplScript(cwd: string, cliJs: string, env: NodeJS.Proce
 }
 
 /**
- * Spawn session-create as a VISIBLE interactive REPL (ADR-0016): write a
+ * Spawn session-create as a VISIBLE interactive TUI (ADR-0016): write a
  * throwaway .command script (`cd <project> && exec node cli.js`) and hand it
  * to a terminal (resolveTerminalLaunch) — the user gets a real terminal
- * window running the local CLI instead of an invisible daemon. The REPL's
+ * window running the local CLI instead of an invisible daemon. The TUI's
  * bridge child inherits the remote ENV, so the incubation registers exactly
  * like a serve bridge; closing the window ends the bridge (its lifetime
  * follows the terminal, the ADR-0001 anchor). Returns null when a terminal
@@ -335,7 +335,7 @@ export function terminalReplScript(cwd: string, cliJs: string, env: NodeJS.Proce
  * open failing (headless/SSH) — and the caller falls back to the detached
  * serve spawn.
  */
-async function spawnTerminalRepl(opts: {
+async function spawnTerminalTui(opts: {
   cwd: string;
   env: NodeJS.ProcessEnv;
 }): Promise<ChildProcess | null> {
@@ -343,8 +343,8 @@ async function spawnTerminalRepl(opts: {
   const gate = (process.env[TERMINAL_GATE_ENV] ?? "").trim().toLowerCase();
   if (["0", "false", "off"].includes(gate)) return null;
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
-  const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "repl.command");
-  writeFileSync(script, terminalReplScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
+  const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "tui.command");
+  writeFileSync(script, terminalTuiScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
   chmodSync(script, 0o700);
   const { launch, warning } = resolveTerminalLaunch(process.env);
   if (warning) warn(`hub: ${warning}`);
@@ -389,7 +389,7 @@ async function spawnTerminalRepl(opts: {
     warn(`hub: no terminal window for ${opts.cwd} (${detail}) — falling back to a headless bridge`);
     return null;
   }
-  log(`hub: opened a Terminal REPL for ${opts.cwd}`);
+  log(`hub: opened a Terminal TUI for ${opts.cwd}`);
   // `open` has already exited; incubation only needs a child that reads as
   // alive until the bridge registers. A window that dies early surfaces as
   // the register timeout — the terminal window itself shows the reason.
@@ -406,17 +406,17 @@ async function spawnTerminalRepl(opts: {
 
 /**
  * Default bridge spawner for the remote session-create endpoints: a visible
- * terminal REPL for session-create (ADR-0016, macOS + not gated off), a
+ * terminal TUI for session-create (ADR-0016, macOS + not gated off), a
  * detached headless serve bridge otherwise (the ADR-0014 original — also the
  * fallback whenever the terminal window can't be opened).
  */
 async function defaultSpawnServe(opts: {
   cwd: string;
   env: NodeJS.ProcessEnv;
-  kind: "repl" | "serve";
+  kind: "tui" | "serve";
 }): Promise<ChildProcess> {
-  if (opts.kind === "repl") {
-    const viaTerminal = await spawnTerminalRepl(opts);
+  if (opts.kind === "tui") {
+    const viaTerminal = await spawnTerminalTui(opts);
     if (viaTerminal) return viaTerminal;
   }
   // dist/remote/hub-server.js → dist/cli.js (one level up).
@@ -663,7 +663,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   // Single-flight incubation (see joinIncubation below).
   const serveIncubations = new Map<
     string,
-    { kind: "repl" | "serve" | "resume"; promise: Promise<{ id: string; reused: boolean }> }
+    { kind: "tui" | "serve" | "resume"; promise: Promise<{ id: string; reused: boolean }> }
   >();
 
   /** Live serve instances for a workspace, oldest registration first. */
@@ -687,14 +687,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * Spawn a bridge and poll until it registers (or fails fast on child exit /
    * timeout). Shared by every incubating endpoint for this workspace — all
    * joiners see the same outcome. Kind picks the spawn surface and the
-   * payload: "repl" opens a visible terminal (remote session-create,
+   * payload: "tui" opens a visible terminal (remote session-create,
    * ADR-0016), "resume" a visible terminal that boots straight into the
    * requested session (ADR-0017), "serve" the detached headless bridge
    * (background listing, ADR-0015).
    */
   const incubateServe = async (
     workspacePath: string,
-    kind: "repl" | "serve" | "resume",
+    kind: "tui" | "serve" | "resume",
     sessionId?: string,
   ): Promise<{ id: string; reused: boolean }> => {
     // Async spawn failures (ENOENT — the dir vanished between the whitelist
@@ -705,7 +705,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // Incubation correlation (ADR-0016/0017): the spawned bridge echoes this
     // back on every registration, so the poll pairs THIS spawn with ITS
     // registration even when several incubations race for one workspace.
-    // terminalReplScript exports the var into the terminal's fresh shell; the
+    // terminalTuiScript exports the var into the terminal's fresh shell; the
     // detached serve spawn inherits it directly.
     const nonce = randomUUID();
     const env: NodeJS.ProcessEnv = {
@@ -726,9 +726,9 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       ZCODE_ACP_REMOTE_PIN_CWD: "1",
     };
     if (kind === "resume") {
-      // ADR-0017: the requested session rides the env — terminalReplScript
+      // ADR-0017: the requested session rides the env — terminalTuiScript
       // exports every ZCODE_ACP_* var into the terminal's fresh shell, so the
-      // REPL boots into it. The detached serve fallback ignores it; the
+      // TUI boots into it. The detached serve fallback ignores it; the
       // client attaches to the serve bridge and session/loads there instead.
       env.ZCODE_ACP_RESUME_SESSION = sessionId;
     }
@@ -738,7 +738,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // listing spawns the headless form — it must never pop a window.
       child = await spawnServe({
         cwd: workspacePath,
-        kind: kind === "serve" ? "serve" : "repl",
+        kind: kind === "serve" ? "serve" : "tui",
         env,
       });
       child.once("error", (e: Error) => {
@@ -750,10 +750,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     }
     log(
       `hub: spawned ${
-        kind === "resume" ? "resume REPL" : kind === "repl" ? "terminal REPL" : "serve bridge"
+        kind === "resume" ? "resume TUI" : kind === "tui" ? "terminal TUI" : "serve bridge"
       } for ${workspacePath} (pid ${child.pid})`,
     );
-    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : REPL_REGISTER_TIMEOUT_MS;
+    const budget = kind === "serve" ? SERVE_REGISTER_TIMEOUT_MS : TUI_REGISTER_TIMEOUT_MS;
     const deadline = Date.now() + budget;
     // A visible-terminal incubation (create OR resume) runs NEXT TO the serve
     // bridge the listing already incubated, and several incubations can race
@@ -774,7 +774,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       if (entry) return { id: entry.id, reused: false };
       // The child dying is the honest fast-fail (missing cwd perms, port
       // exhaustion, crash) — without this check the loop burns the full budget.
-      // (A terminal REPL reports through the window itself, so only the
+      // (A terminal TUI reports through the window itself, so only the
       // timeout applies there.)
       if (spawnError || child.exitCode !== null || child.signalCode !== null) {
         warn(`hub: serve bridge for ${workspacePath} exited during startup`);
@@ -791,8 +791,8 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * Single-flight incubation per workspace: concurrent endpoint calls join one
    * spawn instead of racing duplicates. A "serve" caller (the listing) joins
    * ANY in-flight incubation keyed to its workspace — the outcome it waits for
-   * is "a serve bridge is registered", whichever surface spawned it. A "repl"
-   * caller (session-create) joins only another repl: the visible window IS the
+   * is "a serve bridge is registered", whichever surface spawned it. A "tui"
+   * caller (session-create) joins only another tui: the visible window IS the
    * feature (ADR-0016), so it never piggybacks on an invisible listing spawn.
    * A "resume" caller joins only the exact same session (ADR-0017) — its map
    * key carries the session id, so resumes of different sessions each get
@@ -800,7 +800,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    */
   const joinIncubation = (
     workspacePath: string,
-    kind: "repl" | "serve" | "resume",
+    kind: "tui" | "serve" | "resume",
     sessionId?: string,
   ): Promise<{ id: string; reused: boolean }> => {
     const mapKey =
@@ -845,7 +845,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * Reject a WS upgrade with a real HTTP status before destroying. A bare
    * destroy leaves the client's upgrade request hanging on an opaque
    * ECONNRESET — the `ws` client surfaces that as an error on its internal
-   * upgrade request with no clean signal, so machine clients (the REPL's hub
+   * upgrade request with no clean signal, so machine clients (the TUI's hub
    * client included) hang or crash on it instead of reading the reason.
    */
   const rejectUpgrade = (socket: Duplex, status: number, reason: string): void => {
@@ -1110,16 +1110,16 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     }
     // POST /api/instances — create a bridge for one known project, or RESUME
     // one of its closed sessions (optional sessionId, ADR-0017). BOTH paths
-    // incubate a VISIBLE interactive REPL in the user's terminal (ADR-0016 as
+    // incubate a VISIBLE interactive TUI in the user's terminal (ADR-0016 as
     // amended, macOS; ZCODE_ACP_HUB_TERMINAL=0 / headless falls back to the
-    // detached `zcode-acp serve` of ADR-0014). Without a sessionId the REPL
+    // detached `zcode-acp serve` of ADR-0014). Without a sessionId the TUI
     // starts a fresh conversation; with one — the backend store id from the
     // ADR-0015 listing — it boots straight into that session. Neither path
     // reuses a live serve bridge: the App flow always runs the history
     // listing first, which incubates a headless serve instance, and reuse
     // would mean the window can never open (the pre-amendment behaviour).
     // The hub waits for the bridge's heartbeat registration; the bridge lives
-    // its own life afterwards (a terminal REPL until the window closes, a
+    // its own life afterwards (a terminal TUI until the window closes, a
     // serve bridge on its idle timer). Concurrent identical POSTs join one
     // in-flight incubation; a create and a resume, or two different sessions,
     // each get their own window. Accepted bound: a hub restart clears the
@@ -1158,7 +1158,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         // Resume never reuses the live serve bridge: the window IS the
         // feature, and the answer must be the NEW instance so the attaching
         // client and the terminal share one bridge (and one backend process)
-        // for the session. A bogus id still opens the window — the REPL
+        // for the session. A bogus id still opens the window — the TUI
         // shows the load failure and falls back to a fresh session, the same
         // honesty as a window that dies early (ADR-0016 §4).
         const incubation = joinIncubation(workspacePath, "resume", resumeSid);
@@ -1172,7 +1172,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         }
         return;
       }
-      // Session-create ALWAYS incubates a VISIBLE terminal REPL (ADR-0016 as
+      // Session-create ALWAYS incubates a VISIBLE terminal TUI (ADR-0016 as
       // amended): the App flow lists the project's history first, which
       // incubates a headless serve bridge — reusing that instance (the
       // original behaviour) meant a window could NEVER open once the project
@@ -1181,7 +1181,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // one incubation, and the detached headless serve spawn remains the
       // fallback (no GUI / gated off / open failure). Clients that want a
       // headless attach use the listing's instance id instead of this POST.
-      const incubation = joinIncubation(workspacePath, "repl");
+      const incubation = joinIncubation(workspacePath, "tui");
       try {
         const out = await incubation;
         res.writeHead(200, { "Content-Type": "application/json" });

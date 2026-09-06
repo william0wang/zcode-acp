@@ -162,16 +162,64 @@ function toIso(ms: number | undefined): string | undefined {
   return new Date(ms).toISOString();
 }
 
+/** Env carrying the hub's boot-resume target (ADR-0017). */
+const BOOT_RESUME_ENV = "ZCODE_ACP_RESUME_SESSION";
+
+/**
+ * Read and consume the boot-resume session id: the first `session/new` after
+ * process start claims it, the env is deleted so later `session/new` calls
+ * (the TUI's /new) create fresh sessions. Whitespace-only counts as unset.
+ */
+export function consumeBootResumeTarget(): string | null {
+  const target = (process.env[BOOT_RESUME_ENV] ?? "").trim();
+  delete process.env[BOOT_RESUME_ENV];
+  return target || null;
+}
+
 /**
  * `session/new` → local placeholder id. The real zcode `session/create` is
  * deferred to first use (`ensureRealSession`) so an editor startup that never
  * sends a message leaves no empty session in the backend or the App's task
  * index. The created session uses mode yolo (hardcoded).
+ *
+ * Exception — boot-resume interception (ADR-0017, amended by ADR-0020): when
+ * the hub incubated this bridge for a specific conversation
+ * (ZCODE_ACP_RESUME_SESSION), the TUI client's opening `session/new` is
+ * served as a `session/load` of that id instead. The client adopts the
+ * resumed conversation with zero client-side support. A failed load falls
+ * back to a fresh session so the window still lands on a usable prompt
+ * (the retired in-house REPL had the same fallback).
  */
 export async function newSession(
   server: ZcodeAcpServer,
   params: acp.NewSessionRequest,
 ): Promise<acp.NewSessionResponse> {
+  const bootResume = consumeBootResumeTarget();
+  if (bootResume) {
+    try {
+      // replayHistory:false — the TUI does not render agent-replayed history
+      // (its transcript comes from its own local recording; it says so in its
+      // status line) and waits for this response, so a full replay would only
+      // stall the boot.
+      const loaded = await loadSession(
+        server,
+        { sessionId: bootResume } as acp.LoadSessionRequest,
+        server.clients.broadcast(),
+        { replayHistory: false },
+      );
+      log(`session/new: boot-resume → ${bootResume}`);
+      return {
+        sessionId: bootResume,
+        modes: loaded.modes,
+        configOptions: loaded.configOptions,
+      };
+    } catch (e) {
+      warn(
+        `session/new: boot-resume of ${bootResume} failed (` +
+          `${e instanceof Error ? e.message : String(e)}) — starting a fresh session`,
+      );
+    }
+  }
   // Creation is the one moment a client's cwd is trusted (the editor
   // declaring its worktree); "/" is still rejected as a degenerate root.
   // Serve mode (ADR-0014) is the exception: a headless bridge exists for ONE
@@ -442,6 +490,40 @@ async function resolveResumeTarget(
   return { zcodeSid: acpSid, alreadyLive: false };
 }
 
+/**
+ * Tail size for the TUI resume replay. Bounded so a long store session does
+ * not push thousands of chunk notifications into one window; turn-aligned
+ * by sliceTail (a slice can run slightly past the limit to a turn start).
+ */
+const MARTTY_RESUME_TAIL = 200;
+
+/** True when the connecting client is Martty, the bundled TUI frontend. */
+function isMarttyClient(server: ZcodeAcpServer): boolean {
+  return (server.clientName ?? "").toLowerCase().includes("martty");
+}
+
+/**
+ * Stream a resumed session's history to the TUI as chunk updates — the same
+ * wire form session/load replays (chunks fold in Martty; complete-form
+ * user/agent messages do not). Editors are unaffected: they replay through
+ * session/load and would double-render a resume replay.
+ */
+async function replayResumeHistory(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  const messages = await fetchMessages(server, zcodeSid);
+  if (messages.length === 0) return;
+  const slice = sliceTail(messages, MARTTY_RESUME_TAIL);
+  await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+  log(
+    `session/resume: replayed ${slice.meta.replayedMessages} messages for the TUI` +
+      ` (tail ${MARTTY_RESUME_TAIL} of ${slice.meta.totalMessages} on record)`,
+  );
+}
+
 /** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
@@ -508,6 +590,21 @@ export async function resumeSession(
   log(`session/resume -> ${zcodeSid}`);
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
+  // Martty's /resume rides session/resume (no history by ACP design) and only
+  // folds updates addressed to a session id it has already adopted — i.e.
+  // delivered AFTER the resume response (pre-response updates are dropped;
+  // verified against martty 0.2.35). setImmediate lets the response write
+  // first: microtasks (the SDK's response send) drain before immediates.
+  if (isMarttyClient(server)) {
+    setImmediate(() => {
+      replayResumeHistory(server, cx, acpSid, zcodeSid).catch((e) => {
+        warn(
+          `session/resume: TUI history replay failed (non-fatal): ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
+    });
+  }
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
@@ -527,6 +624,7 @@ export async function loadSession(
   server: ZcodeAcpServer,
   params: acp.LoadSessionRequest,
   cx: acp.AgentContext,
+  opts: { replayHistory?: boolean } = {},
 ): Promise<acp.LoadSessionResponse> {
   const acpSid = params.sessionId;
   if (!acpSid) throw new Error("sessionId required");
@@ -581,11 +679,22 @@ export async function loadSession(
   // for editors that send no `_meta` (Zed path unchanged).
   const limit = readTailLimit(params);
   const slice = limit === null ? fullSlice(messages) : sliceTail(messages, limit);
-  await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
-  log(
-    `session/load: replayed ${slice.meta.replayedMessages} messages` +
-      `${limit === null ? "" : ` (tail limit ${limit}, total ${slice.meta.totalMessages})`}`,
-  );
+  if (opts.replayHistory === false) {
+    // Boot-resume interception (session/new): the terminal TUI client does not
+    // render replayed updates (its transcript lives in its own local store)
+    // and blocks on the response until the replay finishes — so skip the
+    // dispatch. The differ baseline below still runs, so the next turn's
+    // completion diff does not re-emit the historical messages.
+    log(
+      `session/load: history replay skipped (boot-resume); ${slice.meta.totalMessages} messages on record`,
+    );
+  } else {
+    await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+    log(
+      `session/load: replayed ${slice.meta.replayedMessages} messages` +
+        `${limit === null ? "" : ` (tail limit ${limit}, total ${slice.meta.totalMessages})`}`,
+    );
+  }
 
   // Replay the existing todo list as an initial plan so a loaded session shows
   // its todos immediately.

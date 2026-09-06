@@ -61,21 +61,11 @@ src/
 │   └── hub-server.ts     Hub daemon: auth, discovery, byte-level proxy (ACP WS + /fs files), ?probe=1 liveness
 ├── quota/                GLM Coding Plan usage API client (/quota command)
 ├── cli.ts                Unified CLI entry (`zcode-acp`): subcommand dispatch
-│                         (bare invocation → REPL) (ADR-0007)
-├── repl/                 Interactive REPL (bare `zcode-acp`): Ink UI + ACP client
-│   ├── model.ts          Pure turn state machine + idle status fold (commands,
-│   │                     model/mode/thought selects, completion candidates,
-│   │                     editor wrap/caret math, local /help & listings)
-│   ├── App.tsx           Ink components — native-scrollback transcript
-│   │                     (<Static>, Claude Code model) + compact dynamic
-│   │                     footer (live-turn tail, queue panel, permission/
-│   │                     question/session pickers, completion menu, wrapped
-│   │                     input box). No alternate screen, no wheel capture.
-│   ├── input-buffer.ts   Pure caret-editing line editor (code-point caret,
-│   │                     Ctrl-B/F/A/E/U chords) — no React, testable
-│   ├── history.ts        Per-project prompt history (JSONL under
-│   │                     ~/.zcode/acp/repl-history), pure + testable
-│   └── run.ts            Orchestration: spawn bridge, pump updates
+│                         (bare invocation → Martty TUI) (ADR-0007, ADR-0020)
+├── tui.ts                Martty launcher: spawn `martty --agent node
+│                         --agent-arg <dist/index.js>` (npm dep `martty`,
+│                         bundled per-platform Rust TUI); `tui --check`
+│                         wraps `martty --check-runtime` for CI smoke
 └── bin/
     ├── hub.ts            Hub daemon entry (`zcode-acp hub`; spawned by absolute path)
     └── quota.ts          Quota cards entry (`zcode-acp quota`)
@@ -126,19 +116,22 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
-- **REPL renders via native scrollback**: completed entries go through ink
-  `<Static>` once and belong to the terminal (scroll/selection/search all
-  native; history survives exit). Only the dynamic footer rerenders. Do NOT
-  reintroduce alt-screen viewports, wheel capture, or in-app scroll offsets —
-  that model was removed for being unfixably fragile.
-- **Height estimates ≠ ink layout**: ink wraps `<Text>` at word boundaries;
-  `estimateLines()` hard-cuts at column width. Never trust the numbers alone —
-  dynamic blocks (live-turn tail, queue panel) are contained by bottom-anchored
-  `overflow:hidden` boxes sized to the estimate so drift crops invisibly
-  inside instead of stretching the footer past the fold.
-- **REPL render state lives in run.ts, not React**: App re-renders from fresh
-  snapshots; anything that must persist across them (prompt-line editor,
-  queue, entries) belongs to run.ts's external store passed via snapshot props.
+- **The interactive CLI is Martty, a dependency — never hand-roll UI here**
+  (ADR-0020): bare `zcode-acp` spawns `martty --agent node --agent-arg
+  <dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.
+  Martty folds chunk-delta replay (`user_message_chunk`/`agent_message_chunk`)
+  only when the updates arrive AFTER the response on a load/resume path it
+  initiated (complete user_message/agent_message updates never fold — verified
+  0.2.35). Boot always sends session/new (fresh-session semantics — replay
+  around it is dropped in both orderings), so the session/new boot-resume
+  interception passes `replayHistory:false` (a full replay would only stall
+  the boot). Its `/resume` prefers session/resume (no replay by ACP design),
+  so `resumeSession` pushes a 200-message turn-aligned chunk tail deferred
+  past the response via `setImmediate`, gated on `clientInfo.name` ≈ martty —
+  editors replay via session/load themselves and would double-render. Martty
+  passes its full env to the spawned agent, which is how
+  ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
+  (= `martty --check-runtime` over the built bridge) is the CI smoke.
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
   raw-backend probe; the backend's own log records `hadActivePrompt: false` —
@@ -230,7 +223,7 @@ ZCode protocol types into ACP notifications directly — always translate.
 - **A hub born inside the Seatbelt wrap silently breaks session-create**:
   macOS TCC attributes the hub's `open -a Terminal` to the requester identity
   "Sandbox" and Terminal refuses the document — while `open` itself exits 0,
-  so `spawnTerminalRepl` reads success, the incubation burns its 20s budget,
+  so `spawnTerminalTui` reads success, the incubation burns its 20s budget,
   and every remote create 502s. Seatbelt cannot be escaped from within, so
   the fix is launchd (it lives outside): every sandboxed backend spawn is
   birth-marked `ZCODE_ACP_SANDBOX_ACTIVE` (server.ts ensureBackend — NOT the

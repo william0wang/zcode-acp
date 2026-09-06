@@ -36,7 +36,7 @@ import {
   resetQuotaCacheForTest,
   resolveTerminalLaunch,
   startHub,
-  terminalReplScript,
+  terminalTuiScript,
   type HubHandle,
 } from "../src/remote/hub-server.js";
 import { AGENT_INFO } from "../src/utils.js";
@@ -881,7 +881,7 @@ describe("hub remote session-create (ADR-0014)", () => {
    * once(); the mutable exitCode/signalCode fields flip the death checks.
    */
   let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
-  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }>;
+  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }>;
   let spawnCount: number;
 
   beforeEach(() => {
@@ -899,7 +899,7 @@ describe("hub remote session-create (ADR-0014)", () => {
   });
 
   function spawnServeSpy() {
-    return (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
+    return (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }) => {
       spawnCount++;
       spawnCalls.push(opts);
       return fakeChild as unknown as import("node:child_process").ChildProcess;
@@ -963,9 +963,9 @@ describe("hub remote session-create (ADR-0014)", () => {
     await new Promise((r) => setTimeout(r, 400));
     expect(spawnCount).toBe(1);
     expect(spawnCalls[0]!.cwd).toBe(PROJECT);
-    // Session-create incubates a VISIBLE terminal REPL (ADR-0016); the stub
+    // Session-create incubates a VISIBLE terminal TUI (ADR-0016); the stub
     // stands in for whichever surface the platform picked.
-    expect(spawnCalls[0]!.kind).toBe("repl");
+    expect(spawnCalls[0]!.kind).toBe("tui");
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE).toBe("1");
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_TOKEN).toBe(TOKEN);
     // ADR-0016 ENV: register as the project's serve bridge + pin session
@@ -978,7 +978,7 @@ describe("hub remote session-create (ADR-0014)", () => {
     expect(await res.json()).toEqual({ id: `serve-${PROJECT}`, reused: false });
   });
 
-  it("create ALWAYS incubates a visible REPL even when a serve bridge is already live", async () => {
+  it("create ALWAYS incubates a visible TUI even when a serve bridge is already live", async () => {
     // Regression (ADR-0016 amendment): the App flow lists project history
     // first, which incubates a headless serve bridge — the old reuse made
     // every subsequent create answer reused:true and run invisibly in the
@@ -993,7 +993,7 @@ describe("hub remote session-create (ADR-0014)", () => {
     });
     await new Promise((r) => setTimeout(r, 400)); // one poll tick
     expect(spawnCount).toBe(1);
-    expect(spawnCalls[0]!.kind).toBe("repl");
+    expect(spawnCalls[0]!.kind).toBe("tui");
     // The window's bridge registers with its incubation nonce: the poll pairs
     // with it, never with the pre-existing headless listing bridge.
     await registerServeBridge(hub, PROJECT, {
@@ -1294,9 +1294,9 @@ describe("hub project session history (ADR-0015)", () => {
 
   it("incubates a serve bridge when none is live, then reuses it", async () => {
     const bridge = await startSessionsBridge();
-    let seenKind: "repl" | "serve" | null = null;
+    let seenKind: "tui" | "serve" | null = null;
     const hub = await startTestHub({
-      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
+      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }) => {
         spawnCount++;
         seenKind = opts.kind;
         // The spawned bridge registers itself moments after boot.
@@ -1335,7 +1335,7 @@ describe("hub project session history (ADR-0015)", () => {
   it("joins one incubation when two listings race (no double spawn)", async () => {
     const bridge = await startSessionsBridge();
     const hub = await startTestHub({
-      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }) => {
+      spawnServe: (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }) => {
         spawnCount++;
         // Register late enough that BOTH listings find no live instance and
         // must join the in-flight incubation instead of spawning their own.
@@ -1383,7 +1383,7 @@ describe("hub project session history (ADR-0015)", () => {
   });
 });
 
-describe("hub terminal-REPL session resume (ADR-0017)", () => {
+describe("hub terminal-TUI session resume (ADR-0017)", () => {
   const PROJECT = "/Users/dev/Develop/demo";
   const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
   const post = (hub: HubHandle, body: Record<string, unknown>): Promise<Response> =>
@@ -1394,7 +1394,7 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
     });
 
   let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
-  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "repl" | "serve" }>;
+  let spawnCalls: Array<{ cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }>;
 
   beforeEach(() => {
     listKnownWorkspacesMock.mockReset();
@@ -1411,7 +1411,7 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
   function spawnServeSpy(): (opts: {
     cwd: string;
     env: NodeJS.ProcessEnv;
-    kind: "repl" | "serve";
+    kind: "tui" | "serve";
   }) => import("node:child_process").ChildProcess {
     return (opts) => {
       spawnCalls.push(opts);
@@ -1437,7 +1437,7 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
     expect(res.ok).toBe(true);
   }
 
-  it("incubates a visible resume REPL even when a serve bridge is already live", async () => {
+  it("incubates a visible resume TUI even when a serve bridge is already live", async () => {
     // The ADR-0015 listing always incubates a headless serve bridge first —
     // reusing it here (the old behaviour) is exactly why a resume never
     // surfaced on the desktop. The POST must spawn a terminal surface with
@@ -1447,7 +1447,7 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
     const pending = post(hub, { workspacePath: PROJECT, sessionId: "sess_closed" });
     await new Promise((r) => setTimeout(r, 400)); // one poll tick
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0]!.kind).toBe("repl");
+    expect(spawnCalls[0]!.kind).toBe("tui");
     expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_closed");
     // The fresh bridge registers with its incubation nonce: the poll pairs
     // with it, never with the pre-existing listing bridge (whose id would
@@ -1459,9 +1459,9 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
   });
 
   it("carries the resume env into the .command script so the terminal shell boots into the session", () => {
-    // terminalReplScript exports every ZCODE_ACP_* var; the resume id rides
+    // terminalTuiScript exports every ZCODE_ACP_* var; the resume id rides
     // the same channel (hub-server adds it to the incubation env).
-    const body = terminalReplScript(PROJECT, "/opt/cli.js", {
+    const body = terminalTuiScript(PROJECT, "/opt/cli.js", {
       ZCODE_ACP_REMOTE: "1",
       ZCODE_ACP_RESUME_SESSION: "sess_closed",
     });
@@ -1499,7 +1499,7 @@ describe("hub terminal-REPL session resume (ADR-0017)", () => {
     expect(unknown.status).toBe(403);
   });
 
-  it("answers 502 when the resume REPL never registers", async () => {
+  it("answers 502 when the resume TUI never registers", async () => {
     // The child-death fast-fail fires on the first poll tick — no need to
     // wait out the full 20s GUI budget.
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
@@ -1581,9 +1581,9 @@ describe("terminal launch resolution (ADR-0016)", () => {
   });
 });
 
-describe("terminal REPL script (ADR-0016)", () => {
+describe("terminal TUI script (ADR-0016)", () => {
   it("embeds the hub's ZCODE_ACP_* env so the fresh terminal shell registers", () => {
-    const body = terminalReplScript("/Users/me/proj", "/opt/cli.js", {
+    const body = terminalTuiScript("/Users/me/proj", "/opt/cli.js", {
       PATH: "/usr/bin",
       ZCODE_ACP_REMOTE: "1",
       ZCODE_ACP_REMOTE_TOKEN: "tok it's",

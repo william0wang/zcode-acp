@@ -32,12 +32,26 @@ describe("resolveInvocation", () => {
     });
   });
 
-  it("treats bare invocation as the interactive REPL and help flags as help", () => {
+  it("treats bare invocation as the interactive TUI and help flags as help", () => {
     // Bare is NOT explicit: without a TTY it falls back to the stdio server
     // (Windows npm shims land there with the bin name lost from argv).
-    expect(resolveInvocation("cli.js", [])).toEqual({ kind: "repl", explicit: false });
-    expect(resolveInvocation("cli.js", ["repl"])).toEqual({ kind: "repl", explicit: true });
-    expect(resolveInvocation("cli.js", ["tui"])).toEqual({ kind: "repl", explicit: true });
+    expect(resolveInvocation("cli.js", [])).toEqual({ kind: "tui", explicit: false, check: false });
+    expect(resolveInvocation("cli.js", ["tui"])).toEqual({
+      kind: "tui",
+      explicit: true,
+      check: false,
+    });
+    // `repl` stays accepted as the old spelling of `tui`.
+    expect(resolveInvocation("cli.js", ["repl"])).toEqual({
+      kind: "tui",
+      explicit: true,
+      check: false,
+    });
+    expect(resolveInvocation("cli.js", ["tui", "--check"])).toEqual({
+      kind: "tui",
+      explicit: true,
+      check: true,
+    });
     expect(resolveInvocation("cli.js", ["-h"])).toEqual({ kind: "help" });
     expect(resolveInvocation("cli.js", ["--help"])).toEqual({ kind: "help" });
     expect(resolveInvocation("cli.js", ["help"])).toEqual({ kind: "help" });

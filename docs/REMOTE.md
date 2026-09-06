@@ -73,7 +73,8 @@ directories filtered out), newest activity first. The list gates the POST —
 paths outside it get 403 (a convenience bound, not a security boundary: a
 token holder can already drive an editor-bridge session in any cwd; the
 trust boundary is the token). On create the hub incubates a VISIBLE
-interactive REPL in the machine's terminal (ADR-0016, macOS; headless/SSH or
+interactive TUI window in the machine's terminal (ADR-0016 as amended by
+ADR-0020, macOS; headless/SSH or
 `ZCODE_ACP_HUB_TERMINAL=0` falls back to the detached headless
 `zcode-acp serve`); its bridge registers back within seconds (budget ~20s)
 and is reachable like any other instance. The hub itself is a background
@@ -86,7 +87,7 @@ cannot execute scripts or commands programmatically (warpdotdev/warp#1917,
 Create NEVER reuses a live serve-origin instance (ADR-0016 as amended) —
 every create incubates its own window, and identical concurrent requests
 join the same in-flight spawn. A
-terminal-REPL instance lives while its window lives; the headless fallback
+terminal-TUI instance lives while its window lives; the headless fallback
 exits ~10 minutes after the last client detaches and the last turn
 finishes. Session roots are pinned to the project cwd in both surfaces
 regardless of what a client sends.
@@ -110,15 +111,11 @@ editor uses — attaching by id joins the conversation's live notification
 stream, and the hub dedupes sessions shared by several bridges of the same
 project.
 
-**The local REPL is a hub client too** (ADR-0018). Bare `zcode-acp` in a
-shell with the hub env (`ZCODE_ACP_REMOTE_TOKEN` + `ZCODE_ACP_HUB_PORT`)
-merges sessions that are live on hub instances into its `/sessions` picker
-(marked `live`, `●` while a turn runs) and attaches to them through the hub's
-WS proxy as a second ACP client — replay on attach, then live updates, so a
-conversation being driven from the phone advances on the desktop in real
-time. Without a hub configured or reachable, the picker and resumes behave
-exactly as before. Attaching never touches the owning bridge: leaving the
-REPL (or `/new`) only detaches this client.
+**The local TUI used to be a hub client too** (ADR-0018, removed with the
+in-house REPL by ADR-0020). The Martty TUI boots its own bridge per window
+and does not merge hub-live sessions into its picker; watching a session
+driven from another client stays a remote-App capability (the hub's WS proxy
+and the `/api` surface are unchanged).
 
 Auth is `Authorization: Bearer <token>` or `?token=` (browsers cannot set WS
 headers); `/api/*` sends `Access-Control-Allow-Origin: *` — the token is the

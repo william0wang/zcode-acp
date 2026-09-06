@@ -58,3 +58,8 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: TUI smoke
+        # Headless wiring check (ADR-0020): martty --check-runtime spawns the
+        # built bridge and runs the ACP initialize handshake.
+        run: pnpm run smoke:tui

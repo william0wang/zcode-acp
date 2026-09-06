@@ -57,7 +57,7 @@ ACP editor ────── stdio ──────────┘
 | `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                          |
 | `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                           |
 | `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                             |
-| `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal REPL (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
+| `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal TUI window (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 
@@ -161,7 +161,7 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   bound, not a security boundary: a token holder can already run any
   editor-bridge session in an arbitrary cwd; the trust boundary is the
   token itself.
-- On create the hub incubates a VISIBLE interactive REPL in the machine's
+- On create the hub incubates a VISIBLE interactive TUI (Martty) in the machine's
   terminal (ADR-0016, macOS): the project's owner gets a real local CLI
   window, and its bridge registers with the hub like any serve instance (it
   appears in `/api/instances` with `origin:"serve"` — allow up to ~20s for
@@ -190,7 +190,7 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   spawn instead of racing a duplicate. A client that wants a HEADLESS attach
   should not POST at all — attach to the instance id the history listing
   already returns.
-- Lifetime depends on the surface: a terminal-REPL instance lives while its
+- Lifetime depends on the surface: a terminal-TUI instance lives while its
   window lives (the owner closing it retires the bridge — re-create on
   demand); the headless fallback exists for remote interest only and exits
   ~10 minutes after the last client detaches AND the last running turn
@@ -249,16 +249,20 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
   replays and the conversation continues with `session/prompt`, entirely in
   the client. A cold project (no listing yet) lists first — the listing IS
   the headless incubator.
-- **Resume on the desktop (ADR-0017)**: `POST /api/instances` with the
-  `sessionId` too — the hub incubates a VISIBLE terminal REPL that boots
-  straight into that conversation (history replays in the window; the same
+- **Resume on the desktop (ADR-0017, amended by ADR-0020)**: `POST
+  /api/instances` with the `sessionId` too — the hub incubates a VISIBLE
+  terminal TUI window that boots straight into that conversation (the same
   terminal/`ZCODE_ACP_HUB_TERMINAL` selection and headless fallback as
-  session-create). This happens EVEN when a serve bridge is already live
+  session-create). The window lands on the right session — later prompts run
+  with the full history in the backend — but the TUI does not render the
+  previous transcript (a fresh boot is a session/new and `/resume` prefers
+  session/resume, which carries no history by protocol design; its status
+  line says `resumed <id> — previous transcript was not replayed`). This happens EVEN when a serve bridge is already live
   (the listing incubated one) — the answer is always the NEW instance, the
   bridge the window runs on; attach to it and `session/load` the same id to
   follow along in the client (both surfaces then share one bridge, one
-  backend process). A bogus id still opens the window: the REPL shows the
-  load failure and falls back to a fresh session. Resuming the same session
+  backend process). A bogus id still opens the window: the bridge logs the
+  load failure and starts a fresh session instead. Resuming the same session
   twice pops two windows; only identical concurrent requests share one
   incubation.
 - `sessionId` here is the backend store id (`sess_…`), which `session/load`
