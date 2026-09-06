@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/william0wang/zcode-acp/compare/v0.21.4...v0.22.0) (2026-09-06)
+
+
+### Features
+
+* **cli:** replace in-house REPL with Martty as the TUI frontend (ADR-0020) ([#133](https://github.com/william0wang/zcode-acp/issues/133)) ([67553be](https://github.com/william0wang/zcode-acp/commit/67553beda9c167326e0927580e4bd5ecb1d113b8))
+
 ## [0.21.4](https://github.com/william0wang/zcode-acp/compare/v0.21.3...v0.21.4) (2026-09-06)
 
 
