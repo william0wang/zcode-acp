@@ -37,7 +37,11 @@ import {
   parseModelValue,
 } from "../config/options.js";
 import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
-import { forceRefreshQuota, startQuotaRefresher } from "../quota/live.js";
+import {
+  forceRefreshQuota,
+  scheduleQuotaDockBackstop,
+  startQuotaRefresher,
+} from "../quota/live.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { buildResumeRuntimeModel } from "../config/runtime-model.js";
 import { messages } from "../i18n.js";
@@ -277,6 +281,7 @@ export async function newSession(
     const modes = await buildModes(server, null);
     server.lastMode.set(bindSid, modes.currentModeId);
     emitBootUsageUpdate(server, bindSid);
+    scheduleQuotaDockBackstop(server);
     return {
       sessionId: bindSid,
       modes,
@@ -320,6 +325,7 @@ export async function newSession(
         }
       }
       emitBootUsageUpdate(server, bootResume);
+      scheduleQuotaDockBackstop(server);
       return {
         sessionId: bootResume,
         modes: loaded.modes,
@@ -359,6 +365,7 @@ export async function newSession(
   const modes = await buildModes(server, null);
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
+  scheduleQuotaDockBackstop(server);
   return {
     sessionId: acpSid,
     modes,
@@ -771,6 +778,7 @@ export async function resumeSession(
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
   const modes = await buildModes(server, zcodeSid);
   server.lastMode.set(acpSid, modes.currentModeId);
+  scheduleQuotaDockBackstop(server);
   return {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
@@ -895,6 +903,7 @@ export async function loadSession(
     // Additive replay metadata — the anchor for load_earlier pagination.
     replayMeta: { ...slice.meta, turnActive },
   };
+  scheduleQuotaDockBackstop(server);
   return result as acp.LoadSessionResponse;
 }
 
