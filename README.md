@@ -13,7 +13,7 @@ The server launches the ZCode headless app-server (`zcode app-server --stdio`) a
 
 - **Native editor experience** — streaming diffs, permission prompts and plan mode in Zed / JetBrains' own agent panel. No side-by-side terminal.
 - **The official harness, not a reimplementation** — drives the real `zcode app-server`: native tools, skills, MCP and slash commands, auto-compaction, session resume/fork.
-- **Beyond the editor** — a full bilingual terminal REPL (`zcode-acp`, English/中文, works over SSH), phone/web access to the same sessions (`zcode-acp-remote`), opt-in writes-only sandbox. Credentials stay in `~/.zcode`.
+- **Beyond the editor** — an interactive terminal chat (`zcode-acp`, a [Martty](https://github.com/openma-ai/Martty)-powered TUI, works over SSH), phone/web access to the same sessions (`zcode-acp-remote`), opt-in writes-only sandbox. Credentials stay in `~/.zcode`.
 
 Because it drives the real ZCode client, your GLM Coding Plan comes along untouched — current perks (the 150% quota bonus, priority routing over raw API) and the plan's flat-rate economics apply exactly as in the official app. No API keys in editor settings.
 
@@ -142,11 +142,10 @@ the primary client. Discovery API, tunnels, auth, and semantics:
 
 ## Unified CLI (`zcode-acp`)
 
-One command for every surface: an interactive terminal chat REPL with native
-scrollback (`zcode-acp`), plan quota cards (`zcode-acp quota`, GLM + Opencode
-Go), the remote hub daemon (`zcode-acp hub`), and the stdio server editors
-invoke (`zcode-acp server`). REPL keys, completion, history, and quota setup:
-[docs/CLI.md](docs/CLI.md).
+One command for every surface: an interactive terminal chat TUI (`zcode-acp`,
+powered by Martty), plan quota cards (`zcode-acp quota`, GLM + Opencode Go),
+the remote hub daemon (`zcode-acp hub`), and the stdio server editors invoke
+(`zcode-acp server`). TUI keys and quota setup: [docs/CLI.md](docs/CLI.md).
 
 ## ACP Registry
 
@@ -204,7 +203,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 - [Protocol](docs/PROTOCOL.md) — ZCode JSON-RPC protocol details
 - [Sandbox](docs/SANDBOX.md) — full sandbox manual (switches, whitelist, popups, verification)
 - [Remote Access](docs/REMOTE.md) — hub, discovery API, tunnels, remote session-create
-- [Unified CLI](docs/CLI.md) — REPL, quota cards, hub/server subcommands
+- [Unified CLI](docs/CLI.md) — interactive TUI, quota cards, hub/server subcommands
 - [Remote Clients](docs/REMOTE-CLIENTS.md) — remote access integration contract (discovery, transport, recovery)
 - [Replay Guide](docs/REPLAY-GUIDE.md) — building a client UI on tail replay
 - [Development](docs/DEVELOPMENT.md) — local development, debugging, adding extension methods

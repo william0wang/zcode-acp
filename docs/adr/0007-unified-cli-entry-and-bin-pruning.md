@@ -1,5 +1,7 @@
 # Unified CLI entry and bin pruning
 
+> Amended by ADR-0020 (`.zcode/docs/adr/`): bare invocation now launches the Martty TUI — the in-house Ink REPL is deleted; the subcommand surface is unchanged.
+
 The package grew three separate bins (`zcode-acp-server`, `zcode-acp-hub`,
 `zcode-quota`) plus a planned terminal chat surface. Installing four sibling
 commands for one tool is noisy, and each new surface would add another. We
