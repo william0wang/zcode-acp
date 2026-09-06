@@ -40,11 +40,25 @@ import {
   sandboxConfigPath,
 } from "../src/backend/sandbox.js";
 
+// The arm tests redirect os.homedir() to a repo-local fixture (sandboxed
+// agent sessions deny writes to the real $HOME); the passthrough mock keeps
+// every other consumer on the real value until explicitly overridden. The
+// `default` re-export matters: sandbox.ts does a default import.
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof os>();
+  const homedir = vi.fn(actual.homedir);
+  return { ...actual, homedir, default: { ...actual, homedir } };
+});
+
 // os.tmpdir() is symlinked on macOS (/var → /private/var) and Seatbelt
 // matches real paths — every fixture must be realpath'd like production.
 let tmpRoot: string;
 
 beforeEach(() => {
+  // A sandboxed agent session exports ZCODE_ACP_SANDBOX itself; clear it up
+  // front so the first test starts from the "no env" state it asserts (the
+  // afterEach delete only helps tests that run after the first one).
+  delete process.env[SANDBOX_ENV];
   tmpRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-test-")));
 });
 
@@ -399,6 +413,24 @@ describe("applySandboxFlip", () => {
 });
 
 describe("armSandboxArgv", () => {
+  // Sandboxed agent sessions deny writes to the real $HOME, which would
+  // EPERM the profile mkdtemp. Redirect the base into the repo — still NOT
+  // $TMPDIR, so the "outside the temp trees" race-proofing assertion below
+  // keeps testing what it always did.
+  let homeBase: string;
+
+  beforeEach(() => {
+    homeBase = mkdtempSync(path.join(realpathSync(process.cwd()), ".sb-home-"));
+    vi.mocked(os.homedir).mockReturnValue(homeBase);
+  });
+
+  afterEach(() => {
+    // Cleanup first: an afterEach that throws halfway (e.g. on a broken
+    // mock) must not leak the fixture dir into the repo.
+    rmSync(homeBase, { recursive: true, force: true });
+    vi.mocked(os.homedir).mockRestore();
+  });
+
   const arm = () =>
     armSandboxArgv(["/usr/local/bin/node", "/glm/zcode.cjs", "app-server", "--stdio"], {
       workspaces: [
