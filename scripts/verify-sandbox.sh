@@ -95,9 +95,11 @@ check "config allow honored"       "$SANDBOX touch $OUTSIDE/yes.txt" 0
 check "/dev/null writable"         "$SANDBOX sh -c 'echo x > /dev/null'" 0
 # pty allocation (#127): openpty opens /dev/ptmx and the granted /dev/ttysNNN
 # pair O_RDWR — without the explicit allows, `script`/TUI binaries die with
-# `openpty: Operation not permitted`. stdin is /dev/null so script(1) has no
-# tty input to copy (it exits on child exit either way).
-check "pty via script"             "$SANDBOX script -q /dev/null /bin/true </dev/null" 0
+# `openpty: Operation not permitted`. One echo-through-the-pair check covers
+# allocation + I/O; a `/bin/true` child is NOT a usable variant — BSD
+# script(1) exits 1 for a zero-output instant child under sandbox-exec
+# (observed on macOS 15.7; the shell form exits 0). stdin is /dev/null so
+# script(1) has no tty input to copy (it exits on child exit either way).
 check "pty pair echo"              "$SANDBOX script -q /dev/null /bin/sh -c 'echo pty-ok' </dev/null" 0
 # Well-known temp trees are default-allowed: tools hardcode /tmp and $TMPDIR
 # is only the per-user /var/folders leaf. Both spellings must work.
