@@ -175,6 +175,23 @@ export class ZcodeAcpServer {
    */
   clientName: string | null = null;
   /**
+   * Sticky: some client named ≈"martty" completed `initialize` this process.
+   * `clientName` alone is last-write-wins across the stdio editor and remote
+   * WS attaches (a phone app initializing between the TUI's initialize and
+   * its session/new would blank it mid-boot), so martty-gated behavior reads
+   * this flag instead.
+   */
+  marttyClientSeen = false;
+  /**
+   * One-shot banner-handshake scope (see BOOT_RESUME_TRIGGER): the
+   * `connectionContext` identity of the client whose boot-resumed session/new
+   * armed the trigger. Only THAT connection's first `session/prompt` can
+   * spend it — prompts from other attached clients (a phone app racing the
+   * boot window) never disarm it. Null once spent or when the auto-submit was
+   * lost (the same connection's first prompt was something else).
+   */
+  bootResumeTriggerConnection: unknown = null;
+  /**
    * All connected ACP clients (the stdio editor plus any remote WebSocket
    * clients). Handlers push notifications through `clients.broadcast()` so
    * every attached client sees the same stream; the registry replaces the old
@@ -554,6 +571,7 @@ export class ZcodeAcpServer {
   async initialize(params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
     const clientInfo = (params.clientInfo as { name?: string; version?: string } | null) ?? null;
     this.clientName = clientInfo?.name ?? null;
+    if ((this.clientName ?? "").toLowerCase().includes("martty")) this.marttyClientSeen = true;
     this.mergeClientCapabilities((params.clientCapabilities as ClientCapabilities) ?? {});
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +

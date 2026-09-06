@@ -153,6 +153,17 @@ export function warn(msg: string): void {
 }
 
 /**
+ * Stable identity of an ACP client connection. Each request wraps the
+ * connection in a fresh AgentContext, so the wrappers never compare equal —
+ * `connectionContext` is the SDK's per-connection root (public at runtime,
+ * @internal in the typings, hence the cast). `ctx.client` from a handler is
+ * one such wrapper; two requests from the same editor/TUI/app share the root.
+ */
+export function clientConnectionRoot(client?: unknown): unknown {
+  return (client as { connectionContext?: unknown } | undefined)?.connectionContext;
+}
+
+/**
  * Compare two semver-like version strings numerically (e.g. "10.0.0" > "2.0.0").
  * Falls back to lexicographic comparison for non-numeric segments. Used by
  * plugin/skill/MCP discovery to find the latest cached version directory.

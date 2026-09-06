@@ -50,6 +50,7 @@ import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
 import { remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
+import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
@@ -294,7 +295,10 @@ export function resolveTerminalLaunch(
 } {
   if (prefs.command) return { launch: { kind: "shell", command: prefs.command } };
   const raw = prefs.app ?? "";
-  const name = raw.toLowerCase().replace(/\.app$/, "").replace(/\s+/g, "-");
+  const name = raw
+    .toLowerCase()
+    .replace(/\.app$/, "")
+    .replace(/\s+/g, "-");
   const launcher = TERMINAL_APP_LAUNCHERS[name];
   if (launcher) return { launch: launcher };
   return { launch: { kind: "openApp", app: raw || "Terminal" } };
@@ -310,7 +314,9 @@ export function resolveTerminalLaunch(
  */
 export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
   const exports = Object.keys(env)
-    .filter((k) => k.startsWith("ZCODE_ACP_"))
+    // DSH_TUI_AUTOPROMPT is the one non-ZCODE_ACP_* passenger: the boot-resume
+    // banner handshake (martty reads it at its own process start).
+    .filter((k) => k.startsWith("ZCODE_ACP_") || k === "DSH_TUI_AUTOPROMPT")
     .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
   return [
     "#!/bin/sh",
@@ -743,6 +749,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // TUI boots into it. The detached serve fallback ignores it; the
       // client attaches to the serve bridge and session/loads there instead.
       env.ZCODE_ACP_RESUME_SESSION = sessionId;
+      // Banner handshake (see BOOT_RESUME_TRIGGER): martty auto-submits this
+      // text at boot, which drops its welcome banner and reveals the
+      // boot-replayed history without waiting for the user's first message.
+      // Must ride the env verbatim — martty reads it once at process start.
+      env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
     try {
       // Resume shares session-create's visible-terminal surface (and its

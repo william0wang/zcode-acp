@@ -39,6 +39,7 @@ import {
   terminalTuiScript,
   type HubHandle,
 } from "../src/remote/hub-server.js";
+import { BOOT_RESUME_TRIGGER } from "../src/handlers/session.js";
 import { AGENT_INFO } from "../src/utils.js";
 
 const TOKEN = "test-hub-token";
@@ -1460,12 +1461,18 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
 
   it("carries the resume env into the .command script so the terminal shell boots into the session", () => {
     // terminalTuiScript exports every ZCODE_ACP_* var; the resume id rides
-    // the same channel (hub-server adds it to the incubation env).
+    // the same channel (hub-server adds it to the incubation env). The
+    // banner-handshake trigger travels as the one non-ZCODE_ACP_* passenger
+    // (martty reads DSH_TUI_AUTOPROMPT at its own process start).
     const body = terminalTuiScript(PROJECT, "/opt/cli.js", {
       ZCODE_ACP_REMOTE: "1",
       ZCODE_ACP_RESUME_SESSION: "sess_closed",
+      DSH_TUI_AUTOPROMPT: BOOT_RESUME_TRIGGER,
+      DSH_IRRELEVANT: "dropped",
     });
     expect(body).toContain("export ZCODE_ACP_RESUME_SESSION='sess_closed'");
+    expect(body).toContain(`export DSH_TUI_AUTOPROMPT='${BOOT_RESUME_TRIGGER}'`);
+    expect(body).not.toContain("DSH_IRRELEVANT");
   });
 
   it("joins one incubation for identical concurrent resumes, but not a different session", async () => {
@@ -1514,10 +1521,7 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
 
 describe("terminal launch resolution (ADR-0016)", () => {
   it("prefers the explicit command template over everything", () => {
-    const out = resolveTerminalLaunch(
-      {},
-      { command: "my-term --run {script}", app: "iTerm" },
-    );
+    const out = resolveTerminalLaunch({}, { command: "my-term --run {script}", app: "iTerm" });
     expect(out.launch).toEqual({ kind: "shell", command: "my-term --run {script}" });
     expect(out.warning).toBeUndefined();
   });

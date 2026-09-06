@@ -155,7 +155,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .agent({ name: AGENT_INFO.name })
       .onRequest("initialize", (ctx) => server.initialize(ctx.params))
       .onRequest("session/new", async (ctx) => {
-        const result = await newSession(server, ctx.params);
+        const result = await newSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(result.sessionId)) {
           sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
         }
@@ -207,6 +207,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
           ctx.params,
           server.clients.broadcast(),
           ctx.requestId as number | string,
+          ctx.client,
         );
       })
       .onRequest("session/set_config_option", (ctx) =>
