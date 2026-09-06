@@ -45,6 +45,7 @@ import { loadSkillCommands } from "./config/skill-discovery.js";
 import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
+import { reexecToBunIfEligible } from "./runtime.js";
 import { messages } from "./i18n.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
@@ -360,8 +361,13 @@ const invokedDirectly = (() => {
 })();
 
 if (invokedDirectly) {
-  main().catch((err) => {
-    warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
-    process.exit(1);
+  // Editors configured with `node dist/index.js` get the same Bun handover as
+  // the Unified CLI entry (see src/runtime.ts) — no re-exec under Bun itself.
+  reexecToBunIfEligible(process.argv[1] ?? "", process.argv.slice(2)).then((handed) => {
+    if (handed) return;
+    main().catch((err) => {
+      warn(`fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+      process.exit(1);
+    });
   });
 }

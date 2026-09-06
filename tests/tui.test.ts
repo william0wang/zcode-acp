@@ -19,9 +19,22 @@ describe("martty launcher", () => {
     // A single --agent + one --agent-arg pair: martty treats each --agent-arg
     // as one argv token, so the agent command is exactly `node <dist/index.js>`
     // — no PATH lookup, no shell, same on Windows.
-    expect(buildTuiArgs("/x/dist/index.js")).toEqual([
+    expect(buildTuiArgs("/x/dist/index.js", { command: "/usr/bin/node", preArgs: [] })).toEqual([
       "--agent",
-      process.execPath,
+      "/usr/bin/node",
+      "--agent-arg",
+      "/x/dist/index.js",
+    ]);
+  });
+
+  it("spreads interpreter flags as their own --agent-arg tokens (bun --smol)", () => {
+    expect(
+      buildTuiArgs("/x/dist/index.js", { command: "/usr/local/bin/bun", preArgs: ["--smol"] }),
+    ).toEqual([
+      "--agent",
+      "/usr/local/bin/bun",
+      "--agent-arg",
+      "--smol",
       "--agent-arg",
       "/x/dist/index.js",
     ]);

@@ -55,6 +55,7 @@ import { fileURLToPath } from "node:url";
 
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
+import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
 import { remoteTerminalPrefs } from "./config.js";
@@ -329,6 +330,10 @@ export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.Proces
     // banner handshake (martty reads it at its own process start).
     .filter((k) => k.startsWith("ZCODE_ACP_") || k === "DSH_TUI_AUTOPROMPT")
     .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
+  // Prefer bun --smol for the long-lived bridge (src/runtime.ts); the tokens
+  // are quoted individually because the interpreter may carry flags.
+  const rt = resolveRuntime();
+  const execLine = [rt.command, ...rt.preArgs, cliJs].map(shQuote).join(" ");
   return [
     "#!/bin/sh",
     `# Hub-incubated TUI session (ADR-0016): closing this window ends the bridge.`,
@@ -341,7 +346,7 @@ export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.Proces
     ...(env.ZCODE_ACP_TAB_TITLE !== undefined
       ? [`printf '\\033]0;%s\\007' "$ZCODE_ACP_TAB_TITLE"`]
       : []),
-    `exec ${shQuote(process.execPath)} ${shQuote(cliJs)}`,
+    `exec ${execLine}`,
     "",
   ].join("\n");
 }
@@ -502,7 +507,7 @@ async function defaultSpawnServe(opts: {
   }
   // dist/remote/hub-server.js → dist/cli.js (one level up).
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
-  const child = spawn(process.execPath, [cliJs, "serve"], {
+  const child = spawn(...runtimeSpawnParts(cliJs, "serve"), {
     cwd: opts.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],

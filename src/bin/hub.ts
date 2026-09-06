@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { parseHubConfig } from "../remote/config.js";
 import { sandboxBorn, selfRelaunchOutsideSandbox } from "../remote/hub-sandbox.js";
 import { startHub } from "../remote/hub-server.js";
+import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { log, warn } from "../utils.js";
 
 /**
@@ -41,7 +42,7 @@ function respawnSelf(): void {
   try {
     // bin/hub.js → ../bin/hub.js is itself (this file's compiled location).
     const hubJs = fileURLToPath(new URL("../bin/hub.js", import.meta.url));
-    const child = spawn(process.execPath, [hubJs], {
+    const child = spawn(...runtimeSpawnParts(hubJs), {
       detached: true,
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -66,7 +67,10 @@ export async function main(): Promise<void> {
   // the visible terminal still works — and say so loudly.
   if (sandboxBorn()) {
     const hubJs = fileURLToPath(new URL("../bin/hub.js", import.meta.url));
-    if (selfRelaunchOutsideSandbox({ nodePath: process.execPath, hubJs })) process.exit(0);
+    const rt = resolveRuntime();
+    if (selfRelaunchOutsideSandbox({ interpreter: [rt.command, ...rt.preArgs], hubJs })) {
+      process.exit(0);
+    }
     warn(
       "hub: running INSIDE a Seatbelt sandbox — macOS will refuse this hub's " +
         "open of the visible session terminal (TCC), so remote session-create " +

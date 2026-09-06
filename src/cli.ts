@@ -19,6 +19,7 @@ import process from "node:process";
 import { main as runHub } from "./bin/hub.js";
 import { main as runQuota } from "./bin/quota.js";
 import { main as runServer, runHeadless } from "./index.js";
+import { reexecToBunIfEligible } from "./runtime.js";
 import { checkTuiRuntime, runTui } from "./tui.js";
 import { AGENT_INFO } from "./utils.js";
 
@@ -98,6 +99,12 @@ async function main(): Promise<void> {
     return;
   }
   const invocation = resolveInvocation(basename(process.argv[1] ?? ""), process.argv.slice(2));
+  // Long-running surfaces hand over to `bun --smol` when available (idle RSS
+  // ~47 MB vs ~81 MB on Node); the instant paths (help/version/unknown) skip
+  // the re-exec hop entirely.
+  if (invocation.kind !== "help" && invocation.kind !== "unknown") {
+    if (await reexecToBunIfEligible(process.argv[1] ?? "", process.argv.slice(2))) return;
+  }
   switch (invocation.kind) {
     case "help":
       process.stdout.write(HELP_TEXT + "\n");
