@@ -416,8 +416,10 @@ terminal init with `os error 1`); the same binaries run fine headless.
 **Cause:** `openpty` opens `/dev/ptmx` and the granted `/dev/ttysNNN` pair
 `O_RDWR`, and the write half used to collide with the profile's blanket
 `file-write*` deny. Since the fix, the profile allows exactly those two write
-targets (mirroring Apple's own `application.sb`/`com.apple.neagent.sb`
-profiles) — upgrade the bridge if you still see this.
+targets — the slave allow is gated on the sandbox pty extension, mirroring
+Apple's own `application.sb`/`com.apple.neagent.sb` profiles, so only slaves
+cloned through the sandbox's own `ptmx` opens are writable. Upgrade the bridge
+if you still see this.
 
 **Diagnosis tip:** a syscall-level sandbox denial has **no ask popup** (the
 dynamic-allow flow only triggers on write-path denials) and surfaces in the

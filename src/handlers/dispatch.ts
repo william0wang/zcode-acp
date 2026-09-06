@@ -41,7 +41,9 @@ let sandboxEpermHinted = false;
  */
 function hintSandboxEperm(server: ZcodeAcpServer, ev: InternalEvent): void {
   if (sandboxEpermHinted || !server.backendSandboxed || ev.kind !== "ToolCallUpdate") return;
-  if (ev.status !== "failed" && ev.status !== "completed") return;
+  // Failed outputs only: successful tools routinely ECHO the phrase (cat-ing
+  // this repo's own docs, grep hits) and would false-positive the hint.
+  if (ev.status !== "failed") return;
   if (!`${ev.output ?? ""}`.includes("Operation not permitted")) return;
   sandboxEpermHinted = true;
   warn(

@@ -391,11 +391,16 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
   // pair O_RDWR, and the write half collides with the blanket write deny —
   // `script`/`expect`/TUI binaries die with a bare `openpty: Operation not
   // permitted` (#127). The pseudo-tty/read/ioctl operations are already
-  // covered by (allow default); Apple's own profiles (application.sb,
-  // com.apple.neagent.sb) allow exactly these two write targets. A pty never
-  // leaves the sandboxed process tree, so this opens no new write surface.
+  // covered by (allow default). The slave allow mirrors Apple's own profiles
+  // (application.sb, com.apple.neagent.sb): the sandbox pty extension gates
+  // it to slaves cloned through THIS sandbox's ptmx opens (the extension
+  // follows fork/exec into tool children), so no other same-user tty
+  // becomes writable.
   allows.push(`(allow file-write* (literal "/dev/ptmx"))`);
-  allows.push(`(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`);
+  allows.push(
+    `(allow file-write* (require-all (regex #"^/dev/ttys[0-9]+$") ` +
+      `(extension "com.apple.sandbox.pty")))`,
+  );
   if (input.profileDir) {
     denies.push(`(deny file-write* (subpath ${sb(input.profileDir)}))`);
   }

@@ -472,6 +472,26 @@ describe("sandbox EPERM observability hint (#127)", () => {
     expect(vi.mocked(warn)).toHaveBeenCalledTimes(1);
   });
 
+  it("stays silent for successful tool output that merely echoes the phrase", async () => {
+    const { cx } = mockContext();
+    const server = makeServer(false);
+    server.backendSandboxed = true;
+    await dispatchEvent(
+      server,
+      cx,
+      SID,
+      {
+        kind: "ToolCallUpdate",
+        callId: "c1",
+        tool: "Bash",
+        status: "completed",
+        output: "src/handlers/sandbox-allow.ts:41: Operation not permitted",
+      },
+      CHUNK,
+    );
+    expect(vi.mocked(warn)).not.toHaveBeenCalled();
+  });
+
   it("stays silent when the backend is not sandboxed", async () => {
     const { cx } = mockContext();
     const server = makeServer(false); // backendSandboxed stays false
