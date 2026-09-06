@@ -323,6 +323,13 @@ export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.Proces
     `# Hub-incubated TUI session (ADR-0016): closing this window ends the bridge.`,
     `cd ${shQuote(cwd)} || exit 1`,
     ...exports,
+    // OSC 0 names the tab after the conversation — without it terminals show
+    // the running process ("node"). printf reads the \033/\007 escapes from
+    // the format string; %s keeps the value itself shell-safe. martty never
+    // sets a terminal title, so this survives until the window closes.
+    ...(env.ZCODE_ACP_TAB_TITLE !== undefined
+      ? [`printf '\\033]0;%s\\007' "$ZCODE_ACP_TAB_TITLE"`]
+      : []),
     `exec ${shQuote(process.execPath)} ${shQuote(cliJs)}`,
     "",
   ].join("\n");
@@ -517,6 +524,37 @@ const MAX_SESSION_LIST_BYTES = 4 * 1024 * 1024;
  * gives its own query 15s).
  */
 const SESSION_LIST_TIMEOUT_MS = 12_000;
+/** Best-effort budget for the resume tab-title lookup — the window must
+ *  never wait on a slow bridge (the 12s list budget is for listings, not
+ *  for cosmetics). */
+const TITLE_LOOKUP_BUDGET_MS = 2_000;
+
+/**
+ * Tab-title sanitizer: the value is printf'd into the terminal as an OSC
+ * payload, so control characters (an ESC inside a model-generated summary
+ * would inject terminal sequences) become spaces, whitespace collapses, and
+ * the length caps at what a tab can usefully show. Empty/non-string →
+ * undefined (the caller falls back to the project name).
+ */
+export function sanitizeTabTitle(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const clean = v
+    .replace(/[\p{Cc}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+  return clean.length > 0 ? clean : undefined;
+}
+
+/** Resolve with undefined after `ms` — for best-effort lookups that must not
+ *  stall their caller; the losing promise settles into the void (its own
+ *  rejection is the caller's `.catch`, never unhandled). */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  const timeout = new Promise<undefined>((resolve) => {
+    setTimeout(() => resolve(undefined), ms).unref?.();
+  });
+  return Promise.race([p, timeout]);
+}
 
 /**
  * Fetch a bridge's GET /sessions payload (ADR-0015), forwarding the
@@ -714,6 +752,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     workspacePath: string,
     kind: "tui" | "serve" | "resume",
     sessionId?: string,
+    tabTitle?: string,
   ): Promise<{ id: string; reused: boolean }> => {
     // Async spawn failures (ENOENT — the dir vanished between the whitelist
     // check and the spawn) arrive as an 'error' event with exitCode still
@@ -754,6 +793,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // boot-replayed history without waiting for the user's first message.
       // Must ride the env verbatim — martty reads it once at process start.
       env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
+    }
+    if (kind !== "serve") {
+      // Tab title (both visible-terminal kinds): a resume carries the
+      // conversation's title when the hub resolved it; session-create and a
+      // failed lookup fall back to the project name. Rides the env —
+      // terminalTuiScript turns it into an OSC 0 before exec'ing the CLI
+      // (terminals otherwise name the tab after the process, "node").
+      env.ZCODE_ACP_TAB_TITLE = tabTitle ?? path.basename(workspacePath);
     }
     try {
       // Resume shares session-create's visible-terminal surface (and its
@@ -825,6 +872,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     workspacePath: string,
     kind: "tui" | "serve" | "resume",
     sessionId?: string,
+    tabTitle?: string,
   ): Promise<{ id: string; reused: boolean }> => {
     const mapKey =
       kind === "resume" ? `${workspacePath}\u0000resume\u0000${sessionId ?? ""}` : workspacePath;
@@ -833,7 +881,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       log(`hub: joining the incubating serve bridge for ${workspacePath}`);
       return inflight.promise;
     }
-    const promise = incubateServe(workspacePath, kind, sessionId);
+    const promise = incubateServe(workspacePath, kind, sessionId, tabTitle);
     serveIncubations.set(mapKey, { kind, promise });
     // Drop the entry once settled (identity-checked — a newer incubation may
     // already have replaced it). The catch keeps the DERIVED promise handled;
@@ -1178,13 +1226,33 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         return;
       }
       if (resumeSid) {
+        // Tab title, best-effort: the App browsed this conversation through
+        // the serve bridge's /sessions history, which is normally still live
+        // and still holds the title. Every miss (no live instance, id beyond
+        // the page, slow fetch) falls back to the project name inside
+        // incubateServe — the window must never wait on this lookup.
+        let tabTitle: string | undefined;
+        const titleSource = findServeInstance(workspacePath);
+        if (titleSource) {
+          const row = await withTimeout(
+            fetchBridgeSessions(titleSource.port, "?limit=200")
+              .then((payload) =>
+                (payload.sessions ?? []).find(
+                  (s) => (s as { sessionId?: unknown }).sessionId === resumeSid,
+                ),
+              )
+              .catch(() => undefined),
+            TITLE_LOOKUP_BUDGET_MS,
+          );
+          tabTitle = sanitizeTabTitle((row as { title?: unknown } | undefined)?.title);
+        }
         // Resume never reuses the live serve bridge: the window IS the
         // feature, and the answer must be the NEW instance so the attaching
         // client and the terminal share one bridge (and one backend process)
         // for the session. A bogus id still opens the window — the TUI
         // shows the load failure and falls back to a fresh session, the same
         // honesty as a window that dies early (ADR-0016 §4).
-        const incubation = joinIncubation(workspacePath, "resume", resumeSid);
+        const incubation = joinIncubation(workspacePath, "resume", resumeSid, tabTitle);
         try {
           const out = await incubation;
           res.writeHead(200, { "Content-Type": "application/json" });
