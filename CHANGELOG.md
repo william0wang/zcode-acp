@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0](https://github.com/william0wang/zcode-acp/compare/v0.26.1...v0.27.0) (2026-09-06)
+
+
+### Features
+
+* **handlers:** /resume slash command adopts a past session into an empty editor thread ([a24084c](https://github.com/william0wang/zcode-acp/commit/a24084c3b125eecdada4f84470fe3df581e8ffcd))
+* **remote:** real session close (backend eviction) and instance shutdown route ([5e457a0](https://github.com/william0wang/zcode-acp/commit/5e457a032185e068f98d70c7b6ff25705c43b4bc))
+
 ## [0.26.1](https://github.com/william0wang/zcode-acp/compare/v0.26.0...v0.26.1) (2026-09-06)
 
 
