@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.4](https://github.com/william0wang/zcode-acp/compare/v0.21.3...v0.21.4) (2026-09-06)
+
+
+### Bug Fixes
+
+* allow pty allocation under the Seatbelt sandbox and surface EPERM denials ([#130](https://github.com/william0wang/zcode-acp/issues/130)) ([aab355b](https://github.com/william0wang/zcode-acp/commit/aab355b14d50e5e473419891ca5c6351aaaec262))
+
 ## [0.21.3](https://github.com/william0wang/zcode-acp/compare/v0.21.2...v0.21.3) (2026-09-06)
 
 
