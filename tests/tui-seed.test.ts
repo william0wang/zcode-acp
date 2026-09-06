@@ -113,6 +113,22 @@ describe("seedMarttyQuotaPlugin", () => {
     expect(mockDirs.has(`${home}/plugins/zcode-acp-quota`)).toBe(true);
   });
 
+  it("reseeds when the on-disk plugin is our own older version", () => {
+    const home = "/tmp/mhome-seed";
+    const target = `${home}/plugins/zcode-acp-quota/plugin.json`;
+    const v2 = JSON.stringify({
+      schemaVersion: 0,
+      id: "zcode-acp-quota",
+      kind: "ui",
+      source: { pluginId: "plugin-zcode-acp-quota", packageId: "pkg-zcode-acp-quota-2" },
+      code: { client: "return {}" },
+    });
+    mockFiles.set(ASSET_PATH, v2);
+    mockFiles.set(target, ours(1));
+    expect(seedMarttyQuotaPlugin({ MARTTY_HOME: home })).toBe(true);
+    expect(mockFiles.get(target)).toBe(v2);
+  });
+
   it("does not rewrite an already-current plugin", () => {
     const home = "/tmp/mhome-seed";
     const target = `${home}/plugins/zcode-acp-quota/plugin.json`;

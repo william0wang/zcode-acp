@@ -80,10 +80,16 @@ async function refresh(entry: RefresherState): Promise<void> {
 
 async function runRefresh(server: ZcodeAcpServer): Promise<void> {
   const text = await fetchDockText();
+  // ADR-0021: sticky last-known on failure/no-data — a null window would
+  // poison every other mid-turn config_option_update (buildConfigOptions
+  // reads server.quotaDock) into dropping the quota pseudo-option, erasing
+  // the dock line mid-stream until the next successful fetch. The dock hides
+  // only when no refresh has ever succeeded (quotaDock stays null, so the
+  // option is never attached). No update is emitted for a failed fetch.
+  if (text === null) return;
   const prev = server.quotaDock;
   server.quotaDock = text;
-  // ADR-0021: on failure/no-data the dock hides — no update is emitted.
-  if (text === null || text === prev) return;
+  if (text === prev) return;
   await emitQuotaOptions(server);
 }
 

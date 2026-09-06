@@ -1,7 +1,8 @@
 /**
  * Quota dock refresher tests (ADR-0021): lazy singleton lifecycle, interval +
  * forceRefresh, hub-first with silent direct-query fallback, martty-only
- * config_option_update targeting, and the null-hides contract.
+ * config_option_update targeting, and the sticky last-known failure contract
+ * (a failed fetch never nulls server.quotaDock).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -195,7 +196,7 @@ describe("hub-first lookup", () => {
     }
   });
 
-  it("treats a hub formatted:null as dock-hidden and does not emit", async () => {
+  it("keeps the last-known dock text when the hub reports formatted:null (sticky)", async () => {
     remoteConfigMock.mockReturnValue({ token: "t", hubHost: "127.0.0.1", hubPort: 8377 });
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -203,12 +204,12 @@ describe("hub-first lookup", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     try {
-      queryQuotaMock.mockResolvedValue(SUCCESS);
       const { server, calls } = fakeServer();
+      server.quotaDock = "stale";
       startQuotaRefresher(server);
       await flushMicrotasks();
       expect(queryQuotaMock).not.toHaveBeenCalled();
-      expect(server.quotaDock).toBeNull();
+      expect(server.quotaDock).toBe("stale");
       expect(calls.length).toBe(0);
     } finally {
       vi.unstubAllGlobals();
@@ -217,13 +218,44 @@ describe("hub-first lookup", () => {
 });
 
 describe("failure contract", () => {
-  it("stores null and emits nothing when the direct query fails", async () => {
+  it("keeps the last-known dock text (sticky) when the direct query fails", async () => {
     queryQuotaMock.mockResolvedValue({ kind: "unavailable" });
     const { server, calls } = fakeServer();
     server.quotaDock = "stale";
     startQuotaRefresher(server);
     await flushMicrotasks();
+    expect(server.quotaDock).toBe("stale");
+    expect(calls.length).toBe(0);
+  });
+
+  it("hides the dock only when no refresh has ever succeeded", async () => {
+    queryQuotaMock.mockResolvedValue({ kind: "unavailable" });
+    const { server, calls } = fakeServer();
+    startQuotaRefresher(server);
+    await flushMicrotasks();
     expect(server.quotaDock).toBeNull();
     expect(calls.length).toBe(0);
+  });
+
+  it("still yields a quota-carrying options array after a failed refresh (no null window)", async () => {
+    queryQuotaMock.mockResolvedValueOnce(SUCCESS).mockResolvedValue({ kind: "unavailable" });
+    const { server } = fakeServer();
+    server.marttyClientSeen = true;
+    startQuotaRefresher(server);
+    await flushMicrotasks();
+    expect(server.quotaDock).toBe("5h 45% · wk 12%");
+    await forceRefreshQuota();
+    await flushMicrotasks();
+    expect(server.quotaDock).toBe("5h 45% · wk 12%"); // sticky
+    // The real buildConfigOptions (mocked elsewhere in this file) must still
+    // attach the quota pseudo-option from the stale string.
+    const { buildConfigOptions: realBuild } = await vi.importActual<
+      typeof import("../src/config/options.js")
+    >("../src/config/options.js");
+    const marttyRoot = server.marttyConnectionRoots.values().next().value;
+    const options = await realBuild(server, null, marttyRoot);
+    const quota = options.find((o) => o.id === "quota");
+    expect(quota).toBeDefined();
+    expect((quota as { currentValue?: unknown }).currentValue).toBe("5h 45% · wk 12%");
   });
 });
