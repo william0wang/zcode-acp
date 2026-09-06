@@ -21,6 +21,11 @@ permissions:
 
 jobs:
   build-and-test:
+    # Release-please PRs are pushed by github-actions[bot] with GITHUB_TOKEN;
+    # GitHub suppresses workflow runs for such events (anti-recursion), leaving
+    # a dead 0-job "failure" record. Skip explicitly so the PR shows a clean
+    # intentional skip instead of a phantom red X.
+    if: "!startsWith(github.head_ref, 'release-please--')"
     name: Build & Test
     runs-on: ubuntu-latest
     strategy:
@@ -68,6 +73,8 @@ jobs:
     # Dual-runtime path (src/runtime.ts): with Bun >=1.4 on PATH the bridge
     # re-execs into `bun --smol` — keep that path covered so Node↔Bun drift
     # is caught in CI, not in a user's editor.
+    # Same release-please skip rationale as build-and-test above.
+    if: "!startsWith(github.head_ref, 'release-please--')"
     name: Bun runtime
     runs-on: ubuntu-latest
     steps:
