@@ -79,6 +79,11 @@ check "deny island write denied"   "$SANDBOX touch $ISLAND/nope.json" 1
 check "config allow honored"       "$SANDBOX touch $OUTSIDE/yes.txt" 0
 # /dev/null: git and shell redirect idioms break without this allow.
 check "/dev/null writable"         "$SANDBOX sh -c 'echo x > /dev/null'" 0
+# pty allocation (#127): openpty opens /dev/ptmx and the granted /dev/ttysNNN
+# pair O_RDWR — without the explicit allows, `script`/TUI binaries die with
+# `openpty: Operation not permitted`.
+check "pty via script"             "$SANDBOX script -q /dev/null /bin/true" 0
+check "pty pair echo"              "$SANDBOX script -q /dev/null /bin/sh -c 'echo pty-ok'" 0
 # Well-known temp trees are default-allowed: tools hardcode /tmp and $TMPDIR
 # is only the per-user /var/folders leaf. Both spellings must work.
 check "/tmp writable"              "$SANDBOX touch /tmp/.sbv-tmp-allowed" 0

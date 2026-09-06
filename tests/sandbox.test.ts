@@ -304,6 +304,17 @@ describe("buildSandboxProfile", () => {
     // /dev/null must be writable — git and `2>/dev/null` idioms break without
     // it ("could not open '/dev/null'", observed in review probes).
     expect(profile).toContain('(allow file-write-data (literal "/dev/null"))');
+    // pty allocation (#127): openpty opens /dev/ptmx + the granted /dev/ttysNNN
+    // pair O_RDWR; the write half needs explicit allows or `script`/TUI
+    // binaries die with a bare `openpty: Operation not permitted`.
+    expect(profile).toContain('(allow file-write* (literal "/dev/ptmx"))');
+    expect(profile).toContain('(allow file-write* (regex #"^/dev/ttys[0-9]+$"))');
+    // SBPL last-match: the pty allows must stay ahead of every deny
+    // (island / strictGit / profile self-deny) or they would never win.
+    const lastDenyIdx = lines.reduce((acc, l, i) => (l.startsWith("(deny") ? i : acc), -1);
+    const ptmxIdx = lines.indexOf('(allow file-write* (literal "/dev/ptmx"))');
+    expect(ptmxIdx).toBeGreaterThan(-1);
+    expect(ptmxIdx).toBeLessThan(lastDenyIdx);
     // Well-known system temp trees are default-allowed in RESOLVED form:
     // tools hardcode /tmp (symlink → /private/tmp) or /var/tmp, and $TMPDIR
     // names only the per-user /var/folders leaf. An /tmp allow entry resolves

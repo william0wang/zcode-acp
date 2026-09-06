@@ -387,6 +387,15 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
   // without this allow, `git commit` and every `2>/dev/null` fail with
   // "could not open '/dev/null'" (observed in review probes).
   allows.push(`(allow file-write-data (literal "/dev/null"))`);
+  // Pseudo-terminals: openpty opens /dev/ptmx and the granted /dev/ttysNNN
+  // pair O_RDWR, and the write half collides with the blanket write deny —
+  // `script`/`expect`/TUI binaries die with a bare `openpty: Operation not
+  // permitted` (#127). The pseudo-tty/read/ioctl operations are already
+  // covered by (allow default); Apple's own profiles (application.sb,
+  // com.apple.neagent.sb) allow exactly these two write targets. A pty never
+  // leaves the sandboxed process tree, so this opens no new write surface.
+  allows.push(`(allow file-write* (literal "/dev/ptmx"))`);
+  allows.push(`(allow file-write* (regex #"^/dev/ttys[0-9]+$"))`);
   if (input.profileDir) {
     denies.push(`(deny file-write* (subpath ${sb(input.profileDir)}))`);
   }
