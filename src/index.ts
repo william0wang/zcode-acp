@@ -153,7 +153,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
   return (
     acp
       .agent({ name: AGENT_INFO.name })
-      .onRequest("initialize", (ctx) => server.initialize(ctx.params))
+      .onRequest("initialize", (ctx) => server.initialize(ctx.params, ctx.client))
       .onRequest("session/new", async (ctx) => {
         const result = await newSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(result.sessionId)) {

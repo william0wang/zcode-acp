@@ -23,6 +23,10 @@ vi.mock("../src/handlers/account.js", () => ({
   accountUsageStats: accountUsageStatsMock,
 }));
 
+// The quota dock endpoint (ADR-0021) queries via queryQuota — mock it too.
+const { queryQuotaMock } = vi.hoisted(() => ({ queryQuotaMock: vi.fn() }));
+vi.mock("../src/quota/index.js", () => ({ queryQuota: queryQuotaMock }));
+
 // The session-create endpoints read the known-project whitelist from
 // tasks-index; mock the module so no real sqlite/App store is touched.
 const { listKnownWorkspacesMock } = vi.hoisted(() => ({
@@ -33,6 +37,7 @@ vi.mock("../src/tasks-index.js", () => ({
 }));
 
 import {
+  resetDockCacheForTest,
   resetQuotaCacheForTest,
   resolveTerminalLaunch,
   sanitizeTabTitle,
@@ -419,6 +424,73 @@ describe("hub quota endpoint", () => {
     });
     expect(res.status).toBe(404);
     expect(accountUsageStatsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("hub quota dock endpoint", () => {
+  const dockUrl = (hub: HubHandle) => `http://127.0.0.1:${hub.port}/api/quota/dock`;
+
+  beforeEach(() => {
+    queryQuotaMock.mockReset();
+    resetDockCacheForTest();
+  });
+
+  it("rejects /api/quota/dock without a token", async () => {
+    const hub = await startTestHub();
+    expect((await fetch(dockUrl(hub))).status).toBe(401);
+    expect(queryQuotaMock).not.toHaveBeenCalled();
+  });
+
+  it("returns {formatted, fetchedAt} from queryQuota", async () => {
+    const hub = await startTestHub();
+    queryQuotaMock.mockResolvedValueOnce({
+      kind: "success",
+      level: "pro",
+      items: [
+        { key: "token_5h", label: "5h", usedPercent: 45, leftPercent: 55 },
+        { key: "token_week", label: "Week", usedPercent: 12, leftPercent: 88 },
+      ],
+    });
+    const res = await fetch(dockUrl(hub), { headers: { Authorization: `Bearer ${TOKEN}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const body = (await res.json()) as { formatted: string | null; fetchedAt: number };
+    expect(body.formatted).toBe("5h 45% · wk 12%");
+    expect(body.fetchedAt).toBeGreaterThan(0);
+  });
+
+  it("serves the cached copy within the TTL", async () => {
+    const hub = await startTestHub();
+    queryQuotaMock.mockResolvedValue({
+      kind: "success",
+      level: "pro",
+      items: [{ key: "token_5h", label: "5h", usedPercent: 1, leftPercent: 99 }],
+    });
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const first = await fetch(dockUrl(hub), { headers });
+    const second = await fetch(dockUrl(hub), { headers });
+    expect(queryQuotaMock).toHaveBeenCalledTimes(1);
+    expect(((await first.json()) as { formatted: string }).formatted).toBe("5h 1%");
+    expect(((await second.json()) as { formatted: string }).formatted).toBe("5h 1%");
+  });
+
+  it("caches a null formatted (dock hidden), and answers 502 on query failure", async () => {
+    const hub = await startTestHub();
+    queryQuotaMock.mockResolvedValueOnce({ kind: "unavailable" });
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const hidden = await fetch(dockUrl(hub), { headers });
+    expect(hidden.status).toBe(200);
+    expect(((await hidden.json()) as { formatted: unknown }).formatted).toBeNull();
+    // The null result is cached: a repeat within the TTL does not re-query.
+    const again = await fetch(dockUrl(hub), { headers });
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { formatted: unknown }).formatted).toBeNull();
+    expect(queryQuotaMock).toHaveBeenCalledTimes(1);
+
+    resetDockCacheForTest();
+    queryQuotaMock.mockRejectedValueOnce(new Error("upstream down"));
+    const failed = await fetch(dockUrl(hub), { headers });
+    expect(failed.status).toBe(502);
   });
 });
 

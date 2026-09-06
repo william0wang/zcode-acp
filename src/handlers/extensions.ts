@@ -19,7 +19,7 @@ import { emitInitialUsage } from "../config/model-cache.js";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { ProjectionDiffer } from "../translators/projection-differ.js";
-import { log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 import { ensureRealSession } from "./session.js";
@@ -235,7 +235,7 @@ export async function setMode(
   log(`session/setMode → ${mode}`);
   // Re-build configOptions (settings.mode.current is now updated) and emit
   // config_option_update + current_mode_update so the editor UI reflects it.
-  const options = await buildConfigOptions(server, zcodeSid);
+  const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "config_option_update",
     configOptions: options,

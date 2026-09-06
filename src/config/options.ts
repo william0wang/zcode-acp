@@ -14,7 +14,13 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
-import { CONFIG_DISPATCH, CONFIG_META, log, ZCODE_CREDS_PATH } from "../utils.js";
+import {
+  clientConnectionRoot,
+  CONFIG_DISPATCH,
+  CONFIG_META,
+  log,
+  ZCODE_CREDS_PATH,
+} from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "../handlers/io.js";
 
@@ -199,7 +205,17 @@ export async function buildModes(
  * (GLM-5.3: low/high/max; GLM-5-Turbo: enabled/off; others may differ).
  * Unknown tokens keep their config order after the known ones.
  */
-const THOUGHT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultra", "enabled", "disabled", "off"];
+const THOUGHT_ORDER = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "enabled",
+  "disabled",
+  "off",
+];
 
 export function orderThoughtVariants(variants: string[]): Array<{ value: string; name: string }> {
   const known = THOUGHT_ORDER.filter((t) => variants.includes(t));
@@ -210,10 +226,14 @@ export function orderThoughtVariants(variants: string[]): Array<{ value: string;
 /** Build the ACP configOptions array (3 items: model/mode/thought).
  *  zcodeSid null = pending session — skip the backend read and use defaults;
  *  mode defaults to "yolo" (the mode session/create hardcodes) so the dropdown
- *  matches the mode indicator for a fresh session. */
+ *  matches the mode indicator for a fresh session.
+ *  `receiverRoot` is the clientConnectionRoot of the client the array is
+ *  delivered to — the quota pseudo-option is appended only for martty
+ *  connections (ADR-0021); other receivers get the spec-clean 3 options. */
 export async function buildConfigOptions(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
+  receiverRoot?: unknown,
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
@@ -243,12 +263,14 @@ export async function buildConfigOptions(
       currentModelId = cur.modelId;
       try {
         const cfg = readConfig() as ConfigShape;
-        const m = (cfg.provider?.[cur.providerId]?.models as
-          | Record<
-              string,
-              { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
-            >
-          | undefined)?.[cur.modelId];
+        const m = (
+          cfg.provider?.[cur.providerId]?.models as
+            | Record<
+                string,
+                { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
+              >
+            | undefined
+        )?.[cur.modelId];
         const reasoning = m?.reasoning;
         const variants = reasoning?.variants;
         if (reasoning?.enabled !== false && variants && variants.length > 0) {
@@ -276,7 +298,8 @@ export async function buildConfigOptions(
       const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
       // `current` is absent right after session/create — fall back to the
       // backend's defaultLevel (the level the session actually runs at).
-      currentThought = (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
+      currentThought =
+        (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
       const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
       if (tlAvail.length > 0) {
         thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
@@ -309,7 +332,7 @@ export async function buildConfigOptions(
   }
   if (!thoughtOptions) thoughtOptions = [...CONFIG_META.thought.options];
 
-  return [
+  const options: acp.SessionConfigOption[] = [
     {
       id: "model",
       name: CONFIG_META.model.name,
@@ -340,6 +363,27 @@ export async function buildConfigOptions(
       options: thoughtOptions,
     },
   ];
+
+  // Read-only quota pseudo-option (ADR-0021): martty-only, no category (never
+  // lands in a settings menu), string type per the probe-verified shape — the
+  // SDK's union stops at select/boolean, so the cast carries the agent-owned
+  // extension through typecheck. `set_config_option` on it is a no-op.
+  // Gated on the RECEIVER's connection identity, not process state — a
+  // non-martty client must never see the spec-external string option.
+  if (
+    server.quotaDock &&
+    receiverRoot !== undefined &&
+    server.marttyConnectionRoots.has(receiverRoot)
+  ) {
+    options.push({
+      id: "quota",
+      name: "GLM Coding Plan quota",
+      title: "GLM Coding Plan quota",
+      type: "string",
+      currentValue: server.quotaDock,
+    } as unknown as acp.SessionConfigOption);
+  }
+  return options;
 }
 
 /**
@@ -387,7 +431,7 @@ export async function emitConfigOptionUpdate(
   zcodeSid: string,
   kind: "model" | "mode" | "thought",
 ): Promise<acp.SessionConfigOption[]> {
-  const options = await buildConfigOptions(server, zcodeSid);
+  const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "config_option_update",
     configOptions: options,

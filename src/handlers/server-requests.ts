@@ -45,7 +45,7 @@ import {
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { messages } from "../i18n.js";
 import type { ClientLike } from "../remote/broadcast.js";
-import { log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
 
@@ -81,7 +81,7 @@ async function emitModeViaConfigOption(
   try {
     const modes = await buildModes(server, zcodeSid);
     server.lastMode.set(acpSid, modes.currentModeId);
-    const options = await buildConfigOptions(server, zcodeSid);
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
     const modeOpt = options.find((o) => o.id === "mode");
     if (modeOpt) modeOpt.currentValue = modes.currentModeId;
     await sendSessionUpdate(cx, acpSid, {

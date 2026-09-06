@@ -26,7 +26,7 @@ import {
 import { messages } from "../i18n.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { warn } from "../utils.js";
+import { clientConnectionRoot, warn } from "../utils.js";
 import { sendSessionUpdate } from "./io.js";
 
 /** True once the EPERM hint fired for this process — throttled to one shot. */
@@ -135,7 +135,7 @@ async function dispatchConfigChanged(
     // Fall back to null (defaults) only if the session mapping isn't live yet —
     // events routed through a registered turn loop always have it.
     const zcodeSid = server.resolveSid(acpSid) ?? null;
-    const options = await buildConfigOptions(server, zcodeSid);
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
     // Find by id — the array order buildConfigOptions returns is not a
     // contract; index-based writes would silently hit the wrong option if
     // that order ever changed (emitModeViaConfigOption already does this).

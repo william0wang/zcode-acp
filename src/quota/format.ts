@@ -282,3 +282,44 @@ export function formatQuotaPlain(result: QuotaResult, opts?: FormatOptions): str
   const card = formatQuota(result, opts);
   return result.kind === "success" ? card.replace(/^```text\n/, "").replace(/\n```$/, "") : card;
 }
+
+// ---------- quota dock (ADR-0021) ----------
+
+/**
+ * Format a compact one-line quota string for the Martty TUI's resident dock
+ * (ADR-0021): `5h 45% · wk 12% · reset 2h13m` — 5h-window used percent, weekly
+ * used percent, and the time left until the 5h window resets. MCP quota is
+ * deliberately omitted (the dock line must stay short).
+ *
+ * Returns `null` when there is nothing to show (non-success result, or a
+ * success with no 5h/weekly windows) so the caller hides the dock instead of
+ * rendering a placeholder.
+ */
+export function formatQuotaDock(result: QuotaResult, now: () => number = Date.now): string | null {
+  if (result.kind !== "success") return null;
+  const byKey = new Map(result.items.map((item) => [item.key, item]));
+  const fiveHour = byKey.get("token_5h");
+  const weekly = byKey.get("token_week");
+  if (!fiveHour) return null;
+
+  const parts: string[] = [`5h ${fiveHour.usedPercent}%`];
+  if (weekly) parts.push(`wk ${weekly.usedPercent}%`);
+  const reset = formatResetRemaining(fiveHour.nextResetTime, now);
+  if (reset) parts.push(`reset ${reset}`);
+  return parts.join(" · ");
+}
+
+/**
+ * Remaining-time rendering for the dock: `2h13m` (minutes zero-padded when
+ * hours are present), `43m` under an hour, `0m` when already due (a negative
+ * remaining reads as due-now rather than confusing the user with "-").
+ */
+function formatResetRemaining(nextResetTime: number | undefined, now: () => number): string | null {
+  if (nextResetTime === undefined || !Number.isFinite(nextResetTime)) return null;
+  const leftMs = nextResetTime - now();
+  if (!Number.isFinite(leftMs)) return null;
+  const leftMin = Math.max(0, Math.floor(leftMs / 60_000));
+  const h = Math.floor(leftMin / 60);
+  const m = leftMin % 60;
+  return h > 0 ? `${h}h${String(m).padStart(2, "0")}m` : `${m}m`;
+}

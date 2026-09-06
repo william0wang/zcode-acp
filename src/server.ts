@@ -20,7 +20,7 @@ import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import { ClientRegistry } from "./remote/broadcast.js";
-import { AGENT_INFO, PROTOCOL_VERSION, log, warn } from "./utils.js";
+import { AGENT_INFO, clientConnectionRoot, PROTOCOL_VERSION, log, warn } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
 export interface ClientCapabilities {
@@ -182,6 +182,22 @@ export class ZcodeAcpServer {
    * this flag instead.
    */
   marttyClientSeen = false;
+  /**
+   * Connection roots (clientConnectionRoot identity) of connections known to
+   * be Martty — recorded at THAT connection's `initialize`, never inherited
+   * from the process-wide sticky flag (a phone app initializing after the TUI
+   * must not become a dock target). The quota dock refresher (ADR-0021)
+   * targets exactly these connections with `config_option_update`s, and
+   * buildConfigOptions appends the pseudo `quota` option only for them;
+   * editors must not see it.
+   */
+  readonly marttyConnectionRoots = new Set<unknown>();
+  /**
+   * Latest formatted quota dock string (ADR-0021), or null when the last
+   * refresh failed / has nothing to show. Maintained by src/quota/live.ts;
+   * read by buildConfigOptions when appending the read-only `quota` option.
+   */
+  quotaDock: string | null = null;
   /**
    * One-shot banner-handshake scope (see BOOT_RESUME_TRIGGER): the
    * `connectionContext` identity of the client whose boot-resumed session/new
@@ -567,11 +583,21 @@ export class ZcodeAcpServer {
     this.clientCapabilities = next;
   }
 
-  /** Handle `initialize`: negotiate version + declare agent capabilities. */
-  async initialize(params: acp.InitializeRequest): Promise<acp.InitializeResponse> {
+  /** Handle `initialize`: negotiate version + declare agent capabilities.
+   *  `client` is the calling connection's AgentContext — martty identity is
+   *  recorded PER CONNECTION here, so later non-martty attaches never inherit
+   *  quota-dock targeting from the sticky process flag. */
+  async initialize(
+    params: acp.InitializeRequest,
+    client?: acp.AgentContext,
+  ): Promise<acp.InitializeResponse> {
     const clientInfo = (params.clientInfo as { name?: string; version?: string } | null) ?? null;
     this.clientName = clientInfo?.name ?? null;
-    if ((this.clientName ?? "").toLowerCase().includes("martty")) this.marttyClientSeen = true;
+    if ((this.clientName ?? "").toLowerCase().includes("martty")) {
+      this.marttyClientSeen = true;
+      const root = clientConnectionRoot(client);
+      if (root !== undefined) this.marttyConnectionRoots.add(root);
+    }
     this.mergeClientCapabilities((params.clientCapabilities as ClientCapabilities) ?? {});
     log(
       `initialize: client protocolVersion=${params.protocolVersion}` +

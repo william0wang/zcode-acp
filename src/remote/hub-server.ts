@@ -51,6 +51,8 @@ import type { TerminalPrefs } from "../config/user-config.js";
 import { remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
+import { formatQuotaDock } from "../quota/format.js";
+import { queryQuota } from "../quota/index.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
@@ -494,6 +496,31 @@ function getQuota(): Promise<UsageStatsResult> {
 export function resetQuotaCacheForTest(): void {
   quotaCache = null;
   quotaInflight = null;
+}
+
+/**
+ * Cached dock string for GET /api/quota/dock (ADR-0021) — the compact one-line
+ * quota format consumed by the Martty TUI refresher. Shorter TTL than
+ * /api/quota (15s): the dock is resident UI, freshness beats upstream load.
+ * `formatted: null` (no data) is cached too, so a credentials-less machine
+ * does not hammer the API on every 60s refresh.
+ */
+const DOCK_TTL_MS = 15_000;
+let dockCache: { formatted: string | null; at: number } | null = null;
+
+function getQuotaDock(): Promise<{ formatted: string | null; fetchedAt: number }> {
+  if (dockCache && Date.now() - dockCache.at < DOCK_TTL_MS) {
+    return Promise.resolve({ formatted: dockCache.formatted, fetchedAt: dockCache.at });
+  }
+  return queryQuota().then((result) => {
+    dockCache = { formatted: formatQuotaDock(result), at: Date.now() };
+    return { formatted: dockCache.formatted, fetchedAt: dockCache.at };
+  });
+}
+
+/** Reset the dock cache (test helper). */
+export function resetDockCacheForTest(): void {
+  dockCache = null;
 }
 
 /**
@@ -1065,6 +1092,25 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           "Cache-Control": "no-store",
         });
         res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("quota query failed");
+      }
+      return;
+    }
+    // GET /api/quota/dock — the compact quota-dock string for the TUI
+    // refresher (ADR-0021). Account-level like /api/quota; hub-side cache is
+    // the only caching layer, so clients must not store stale copies.
+    if (url.pathname === "/api/quota/dock" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      try {
+        const { formatted, fetchedAt } = await getQuotaDock();
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify({ formatted, fetchedAt }));
       } catch {
         res.writeHead(502, { "Content-Type": "text/plain" });
         res.end("quota query failed");
