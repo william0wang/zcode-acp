@@ -121,6 +121,8 @@ export interface Messages {
   askQuestionsTitle: string;
   /** Slash-command feedback lines rendered into the chat. */
   slashCompacted: string;
+  /** Ack for the boot-resume banner handshake (auto-submitted trigger). */
+  bootResumeAck: string;
   slashCompactTimeout: string;
   slashGoalSet: (value: string) => string;
   slashForked: (sessionId: string) => string;
@@ -209,6 +211,7 @@ const zh: Messages = {
   askSkipLabelOption: (lb) => `跳过：${lb}`,
   askQuestionsTitle: "问题",
   slashCompacted: "✓ 已压缩对话上下文",
+  bootResumeAck: "⟲ 已恢复会话 · 历史已回放",
   slashCompactTimeout: "⚠ 压缩超时（300s），后端可能仍在处理——稍等片刻再发送",
   slashGoalSet: (v) => `✓ 目标已设置：${v}`,
   slashForked: (id) => `✓ 已分叉新会话：${id}`,
@@ -301,6 +304,7 @@ const en: Messages = {
   askSkipLabelOption: (lb) => `Skip: ${lb}`,
   askQuestionsTitle: "questions",
   slashCompacted: "✓ compacted conversation context",
+  bootResumeAck: "⟲ session resumed — history replayed",
   slashCompactTimeout:
     "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
   slashGoalSet: (v) => `✓ goal set: ${v}`,

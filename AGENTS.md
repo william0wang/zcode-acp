@@ -47,6 +47,7 @@ src/
 │   ├── mcp-discovery.ts    Discover MCP servers from config + plugins
 │   ├── auto-compact.ts     Threshold-based auto-compaction
 │   ├── options.ts          Config options (model/mode/thought dropdowns)
+│   ├── user-config.ts      Global user config (~/.config/zcode-acp/config.json)
 │   └── runtime-model.ts    Model switching overlay
 ├── translators/          ZCode event → ACP translation
 │   ├── event-translator.ts  Stream event → InternalEvent
@@ -116,21 +117,58 @@ ZCode protocol types into ACP notifications directly — always translate.
   unhandledRejection. See `src/remote/broadcast.ts`.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **User remote prefs live in `~/.config/zcode-acp/config.json`, NOT env**:
+  the hub is a detached daemon that idle-exits (~10 min) and is re-spawned by
+  whichever bridge needs it next, so its birth env rotates between
+  GUI-launched editors (no shell vars) and interactive shells — env-carried
+  preferences (terminal app!) drifted with every hub rebirth. Precedence per
+  field: config file (`remote.*`, XDG aware) → env var → default; env stays a
+  full fallback so existing setups keep working. Terminal prefs are re-read
+  LIVE at every incubation (`remoteTerminalPrefs`); token/ports apply when the
+  hub is next (re)born. Per-process plumbing (`ZCODE_ACP_REMOTE_ORIGIN`,
+  `_PIN_CWD`, `ZCODE_ACP_RESUME_SESSION`) is deliberately env-only — per-role
+  state, never file-configurable. The TUI script's env embedding is still
+  load-bearing for file-less setups (the .command shell sources no rc).
+- **Warp CAN be driven programmatically — don't regress it to "unsupported"**:
+  it refuses `.command` files (warpdotdev/warp#1917) and its `warp` CLI is
+  agent-only, but its URI scheme EXECUTES a script: `open -a Warp
+"warp://action/new_tab?path=<script>"` opens the script as a new tab in
+  Warp's default mode and runs it (source: warp's open-source
+  app/src/uri/mod.rs → open_file; verified on 0.2026.09.02). That is the
+  `warpUri` launcher in hub-server.ts; Preview = `warppreview://` + the
+  "Warp Preview" bundle. #1917/#3959 describe only the missing .command/CLI
+  paths, which made Warp look impossible for a long time.
 - **The interactive CLI is Martty, a dependency — never hand-roll UI here**
   (ADR-0020): bare `zcode-acp` spawns `martty --agent node --agent-arg
-  <dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.
+<dist/index.js>` (src/tui.ts); the in-house Ink REPL was deleted wholesale.
   Martty folds chunk-delta replay (`user_message_chunk`/`agent_message_chunk`)
   only when the updates arrive AFTER the response on a load/resume path it
   initiated (complete user_message/agent_message updates never fold — verified
-  0.2.35). Boot always sends session/new (fresh-session semantics — replay
-  around it is dropped in both orderings), so the session/new boot-resume
-  interception passes `replayHistory:false` (a full replay would only stall
-  the boot). Its `/resume` prefers session/resume (no replay by ACP design),
-  so `resumeSession` pushes a 200-message turn-aligned chunk tail deferred
-  past the response via `setImmediate`, gated on `clientInfo.name` ≈ martty —
-  editors replay via session/load themselves and would double-render. Martty
-  passes its full env to the spawned agent, which is how
-  ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
+  0.2.35; this holds for the boot `session/new` interception too — chunks
+  post-response DO fold). Martty's welcome banner, however, paints INSTEAD of
+  the transcript (`ui.rs draw_chat`) and only dives on submitted text, so a
+  boot-resumed TUI showed its replayed history only after the user's first
+  message. Fix (bridge-side, no upstream dependency): the hub incubates resume
+  TUIs with `DSH_TUI_AUTOPROMPT=BOOT_RESUME_TRIGGER` ("resume session" — plain
+  text on purpose: `/` would hit martty's slash dispatch before agent caps are
+  known, `!` runs a local shell). Martty auto-submits it at boot — banner dives
+  immediately, the text queues until the bind — and `runPrompt` answers it with
+  a one-line ack and `end_turn` (no model turn). The one-shot is scoped to the
+  booting CONNECTION (`connectionContext` identity, like the prompt-echo
+  exclusion): a phone app attached to the same bridge during the boot window
+  and prompting first must not spend or disarm it — a global "first prompt"
+  flag let the app's prompt race ahead and the trigger LEAKED TO THE MODEL as
+  a real prompt (observed live; the backend record showed both "hi" and
+  "resume session" as user messages). Only the same connection submitting
+  something else first disarms (the auto-submit was lost). `marttyClientSeen`
+  (sticky) replaces clientName for martty gating — clientName is
+  last-write-wins across multi-client attaches and an app's initialize can
+  land between the TUI's initialize and its session/new. Its `/resume` prefers
+  session/resume (no replay by ACP design), so `resumeSession` pushes a 200-message turn-aligned chunk tail
+  deferred past the response via `setImmediate`, gated on
+  `clientInfo.name` ≈ martty — editors replay via session/load themselves and
+  would double-render. Martty passes its full env to the spawned agent, which
+  is how ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
   (= `martty --check-runtime` over the built bridge) is the CI smoke.
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
@@ -182,15 +220,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   per-project config in `.zcode/acp/sandbox.json` (deny island — only the
   bridge may write it), dynamic allow = ask → persist → BATCHED backend
   restart (3s window: grants collect, then one cancel-wave + continuation
-  + close — a per-approval restart killed sibling popups still pending on
-  other denied paths; the flush sets a continuation ONLY for sessions with
-  a turn still in flight, orphans would hijack a later cancelled prompt).
-  Ask debounce marks are timestamps: a user decision (or a structural
-  hint) pins forever; a FAILED ask (timeout / killed by another grant's
-  restart / instantly-rejecting client) cools down 60s and may re-ask —
-  the old permanent mute left the model on a bare EPERM with no way out. Well-known system temp trees (/tmp → /private/tmp,
-  /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
-  and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
+  - close — a per-approval restart killed sibling popups still pending on
+    other denied paths; the flush sets a continuation ONLY for sessions with
+    a turn still in flight, orphans would hijack a later cancelled prompt).
+    Ask debounce marks are timestamps: a user decision (or a structural
+    hint) pins forever; a FAILED ask (timeout / killed by another grant's
+    restart / instantly-rejecting client) cools down 60s and may re-ask —
+    the old permanent mute left the model on a bare EPERM with no way out. Well-known system temp trees (/tmp → /private/tmp,
+    /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
+    and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
   them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
   the same reason). Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
   or `enabled: true` in that config per project (auto-created template ships
@@ -204,22 +242,22 @@ ZCode protocol types into ACP notifications directly — always translate.
   HOME + O_EXCL + the profile denies its own dir last; the HOME base is the
   point — every agent-writable path is writable by prior sandboxed
   generations too, so a $TMPDIR profile is raceable across generations), and
-  the config must pass the integrity check before the bridge persists
-  through it (symlink/hardlink pierces the deny island; a config read as
-  armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
-  the template would silently disarm). `/dev/null` must stay write-allowed
-  or every `git commit` breaks. `openpty` (`/dev/ptmx` + the granted
-  `/dev/ttysNNN`, both `O_RDWR`) needs its two explicit write allows or
-  `script`/`expect`/TUI binaries die with a bare `openpty: Operation not
-  permitted` (#127); the slave allow is extension-gated (`require-all` +
-  `com.apple.sandbox.pty`, Apple `application.sb` form) so only this
-  sandbox's own pty slaves become writable — never widen it to a bare ttys
-  regex. The `pseudo-tty`/read/ioctl operations are already covered by
-  `(allow default)`. When diagnosing ANY bare `Operation not permitted`
-  inside an armed sandbox, suspect the sandbox FIRST — syscall-level denials
-  have no ask popup and tools misreport them as their own bug; the bridge
-  warns once per process on the first failed tool output containing the
-  phrase (`hintSandboxEperm` in dispatch.ts).
+    the config must pass the integrity check before the bridge persists
+    through it (symlink/hardlink pierces the deny island; a config read as
+    armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
+    the template would silently disarm). `/dev/null` must stay write-allowed
+    or every `git commit` breaks. `openpty` (`/dev/ptmx` + the granted
+    `/dev/ttysNNN`, both `O_RDWR`) needs its two explicit write allows or
+    `script`/`expect`/TUI binaries die with a bare `openpty: Operation not
+permitted` (#127); the slave allow is extension-gated (`require-all` +
+    `com.apple.sandbox.pty`, Apple `application.sb` form) so only this
+    sandbox's own pty slaves become writable — never widen it to a bare ttys
+    regex. The `pseudo-tty`/read/ioctl operations are already covered by
+    `(allow default)`. When diagnosing ANY bare `Operation not permitted`
+    inside an armed sandbox, suspect the sandbox FIRST — syscall-level denials
+    have no ask popup and tools misreport them as their own bug; the bridge
+    warns once per process on the first failed tool output containing the
+    phrase (`hintSandboxEperm` in dispatch.ts).
 - **A hub born inside the Seatbelt wrap silently breaks session-create**:
   macOS TCC attributes the hub's `open -a Terminal` to the requester identity
   "Sandbox" and Terminal refuses the document — while `open` itself exits 0,
@@ -232,7 +270,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   `launchctl bootstrap gui/$UID` + kickstart before binding
   (src/remote/hub-sandbox.ts; plist in a temp mkdtemp, launchd reads the path
   itself). Don't reconnect this through `open` retries or TCC prompts — the
-  attribution is the problem, not a missing permission.
+  attribution is the problem, not a missing permission. The launchd escape
+  itself FAILS when the hub was spawned from an agent session's own Seatbelt
+  (launchctl is sandboxed there too — observed 2026-09: a nohup'd hub degraded
+  and its serve bridges 502'd every /api/projects/sessions); the only working
+  restart channel from inside such a session is an `open` one (e.g. Warp's
+  `warp://action/new_tab?path=<restart.command>`), which hands execution to a
+  clean user shell.
 - **Start Plan providers are desktop-only — do NOT "fix" this with an
   unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
   session only the desktop renderer can provide; the bridge answers

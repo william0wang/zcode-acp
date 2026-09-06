@@ -46,17 +46,17 @@ ACP editor ────── stdio ──────────┘
 
 ## Discovery API
 
-| Endpoint                                               | Auth     | Purpose                                                                                                                                                     |
-| ------------------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /api/health`                                      | none     | Liveness probe; `200` body `ok`.                                                                                                                            |
-| `GET /api/instances`                                   | required | Registered bridge instances. Add `?probe=1` to verify first.                                                                                                |
-| `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                                                                         |
-| `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                                                                       |
-| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                                                                           |
-| `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                                                                |
-| `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                          |
-| `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                           |
-| `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                             |
+| Endpoint                                               | Auth     | Purpose                                                                                                                                                           |
+| ------------------------------------------------------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/health`                                      | none     | Liveness probe; `200` body `ok`.                                                                                                                                  |
+| `GET /api/instances`                                   | required | Registered bridge instances. Add `?probe=1` to verify first.                                                                                                      |
+| `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                                                                               |
+| `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                                                                             |
+| `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                                                                                 |
+| `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                                                                      |
+| `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                                |
+| `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                                 |
+| `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                                   |
 | `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal TUI window (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
@@ -250,14 +250,16 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj",
   the client. A cold project (no listing yet) lists first — the listing IS
   the headless incubator.
 - **Resume on the desktop (ADR-0017, amended by ADR-0020)**: `POST
-  /api/instances` with the `sessionId` too — the hub incubates a VISIBLE
+/api/instances` with the `sessionId` too — the hub incubates a VISIBLE
   terminal TUI window that boots straight into that conversation (the same
   terminal/`ZCODE_ACP_HUB_TERMINAL` selection and headless fallback as
-  session-create). The window lands on the right session — later prompts run
-  with the full history in the backend — but the TUI does not render the
-  previous transcript (a fresh boot is a session/new and `/resume` prefers
-  session/resume, which carries no history by protocol design; its status
-  line says `resumed <id> — previous transcript was not replayed`). This happens EVEN when a serve bridge is already live
+  session-create). The window lands on the right session AND shows the previous
+  transcript: the bridge serves the boot `session/new` as a load of the target
+  id, replays a chunk-formatted history tail after the response (Martty folds
+  those), and incubates the window with a `DSH_TUI_AUTOPROMPT` trigger that
+  Martty auto-submits at boot — dropping its welcome banner, which would
+  otherwise cover the transcript until the user's first message — and the
+  bridge answers with a one-line ack instead of a model turn. This happens EVEN when a serve bridge is already live
   (the listing incubated one) — the answer is always the NEW instance, the
   bridge the window runs on; attach to it and `session/load` the same id to
   follow along in the client (both surfaces then share one bridge, one

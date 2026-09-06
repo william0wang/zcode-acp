@@ -50,7 +50,7 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
@@ -177,6 +177,21 @@ export function consumeBootResumeTarget(): string | null {
 }
 
 /**
+ * Banner-handshake trigger for a boot-resumed TUI (ADR-0017 follow-up).
+ * Martty's welcome banner paints INSTEAD of the transcript and only dives
+ * when text is submitted — so a boot-resumed TUI showed its replayed history
+ * only after the user's first message. The hub therefore also incubates the
+ * resume TUI with `DSH_TUI_AUTOPROMPT=<this string>`: martty auto-submits it
+ * at boot (banner dives immediately, the text queues until the boot bind),
+ * and the prompt path answers it with a one-line ack instead of a model
+ * turn — scoped to the booting connection (see bootResumeTriggerConnection).
+ * Plain text on purpose: a leading `/` would route through martty's
+ * slash dispatch (whose gates run before agent capabilities are known) and
+ * `!` would run a local shell command.
+ */
+export const BOOT_RESUME_TRIGGER = "resume session";
+
+/**
  * `session/new` → local placeholder id. The real zcode `session/create` is
  * deferred to first use (`ensureRealSession`) so an editor startup that never
  * sends a message leaves no empty session in the backend or the App's task
@@ -193,14 +208,14 @@ export function consumeBootResumeTarget(): string | null {
 export async function newSession(
   server: ZcodeAcpServer,
   params: acp.NewSessionRequest,
+  client?: acp.AgentContext,
 ): Promise<acp.NewSessionResponse> {
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
     try {
-      // replayHistory:false — the TUI does not render agent-replayed history
-      // (its transcript comes from its own local recording; it says so in its
-      // status line) and waits for this response, so a full replay would only
-      // stall the boot.
+      // replayHistory:false — a PRE-response replay would arrive for a session
+      // id the client has not adopted yet and be dropped; the tail replay is
+      // deferred past the response instead (below).
       const loaded = await loadSession(
         server,
         { sessionId: bootResume } as acp.LoadSessionRequest,
@@ -208,6 +223,29 @@ export async function newSession(
         { replayHistory: false },
       );
       log(`session/new: boot-resume → ${bootResume}`);
+      // Deferred tail replay, same as the TUI's /resume (see resumeSession):
+      // once the session/new response is written the booting martty has
+      // adopted the returned session id, so post-response chunks can fold
+      // into its transcript. The chunks sit BEHIND martty's welcome banner
+      // until text is submitted — the DSH_TUI_AUTOPROMPT handshake armed
+      // below drops the banner for the user.
+      if (isMarttyClient(server)) {
+        // Scope the handshake to THIS connection: a phone app attached to the
+        // same bridge may prompt during the boot window and must not disarm it.
+        server.bootResumeTriggerConnection = clientConnectionRoot(client);
+        const cx = server.clients.broadcast();
+        const zcodeSid = server.resolveSid(bootResume);
+        if (zcodeSid) {
+          setImmediate(() => {
+            replayResumeHistory(server, cx, bootResume, zcodeSid).catch((e) => {
+              warn(
+                `session/new boot-resume: TUI history replay failed (non-fatal): ` +
+                  `${e instanceof Error ? e.message : String(e)}`,
+              );
+            });
+          });
+        }
+      }
       return {
         sessionId: bootResume,
         modes: loaded.modes,
@@ -499,7 +537,9 @@ const MARTTY_RESUME_TAIL = 200;
 
 /** True when the connecting client is Martty, the bundled TUI frontend. */
 function isMarttyClient(server: ZcodeAcpServer): boolean {
-  return (server.clientName ?? "").toLowerCase().includes("martty");
+  // Sticky flag first: clientName is last-write-wins and a remote client's
+  // initialize can land between the TUI's initialize and its session/new.
+  return server.marttyClientSeen || (server.clientName ?? "").toLowerCase().includes("martty");
 }
 
 /**
@@ -756,8 +796,9 @@ export async function prompt(
   params: acp.PromptRequest,
   cx: acp.AgentContext,
   requestId: number | string,
+  client?: acp.AgentContext,
 ): Promise<acp.PromptResponse> {
-  let result = await runPrompt(server, params, cx, requestId);
+  let result = await runPrompt(server, params, cx, requestId, false, client);
   // Sandbox-allow continuation chaining, BOUNDED: each batched restart
   // cancels the in-flight round and queues a continuation for prompt() to
   // consume. A LATER batch (the user approving a second popup seconds after
@@ -821,6 +862,7 @@ async function runPrompt(
   cx: acp.AgentContext,
   requestId: number | string,
   continuationRound = false,
+  client?: acp.AgentContext,
 ): Promise<acp.PromptResponse> {
   // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
   // after the backend spawned unsandboxed must arm on THIS prompt, not on the
@@ -836,6 +878,28 @@ async function runPrompt(
   // A prompt is valid if it has text OR at least one image attachment (a user
   // may drag in an image with no accompanying text).
   if (!text && attachments.length === 0) throw new Error("empty prompt");
+
+  // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
+  // auto-submitted trigger until its boot bind, so it arrives as the FIRST
+  // prompt OF THAT CONNECTION — ack with one chunk and end the turn without
+  // touching the backend. Scoped to the arming connection's identity: a
+  // phone app attached to the same bridge may prompt inside the boot window
+  // and must neither spend nor disarm the handshake (observed live: its
+  // prompt raced ahead and the trigger leaked to the model). The same
+  // connection submitting anything else first means the auto-submit was
+  // lost — disarm so the trigger text typed manually later stays a normal
+  // prompt.
+  if (
+    server.bootResumeTriggerConnection !== null &&
+    clientConnectionRoot(client) === server.bootResumeTriggerConnection
+  ) {
+    server.bootResumeTriggerConnection = null;
+    if (text === BOOT_RESUME_TRIGGER) {
+      await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
+      log("session/prompt: boot-resume banner handshake acknowledged");
+      return { stopReason: "end_turn" };
+    }
+  }
 
   // Materialize a lazy session/new placeholder on first use. Placed after the
   // empty-prompt check so an invalid request doesn't create a backend session.

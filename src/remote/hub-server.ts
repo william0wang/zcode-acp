@@ -47,7 +47,10 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
+import type { TerminalPrefs } from "../config/user-config.js";
+import { remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
+import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
@@ -226,8 +229,6 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 const TUI_REGISTER_TIMEOUT_MS = 20_000;
 /** `open -a <terminal>` must answer fast or the incubation falls back. */
 const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
-/** Set ZCODE_ACP_HUB_TERMINAL=0 to keep remote session-create headless. */
-const TERMINAL_GATE_ENV = "ZCODE_ACP_HUB_TERMINAL";
 
 /** Single-quote for sh: ' → '\'' . */
 function shQuote(s: string): string {
@@ -243,7 +244,13 @@ export type TerminalLaunch =
   | { kind: "openApp"; app: string }
   /** Terminals driven by their own CLI: `open -na <app> --args <args> <sh>
    * <script>` — args come first, the script program is appended. */
-  | { kind: "openAppArgs"; app: string; args: string[] };
+  | { kind: "openAppArgs"; app: string; args: string[] }
+  /** Warp: refuses `.command` files and its CLI is agent-only, but its URI
+   * scheme EXECUTES a script handed to action/new_tab's path param
+   * (app/src/uri/mod.rs → open_file; verified on 0.2026.09.02): the hub opens
+   * `<scheme>://action/new_tab?path=<script>` and Warp runs it as a new tab
+   * in its default mode. Preview uses the warppreview:// scheme. */
+  | { kind: "warpUri"; app: string; scheme: string };
 
 /**
  * Built-in launch recipes for well-known macOS terminals (ADR-0016 §5). Each
@@ -252,11 +259,9 @@ export type TerminalLaunch =
  * WezTerm's `start --` runs an alternative program (wezterm.org/cli/start.html);
  * kitty takes the program as normal positional arguments
  * (sw.kovidgoyal.net/kitty/invocation); Alacritty and Ghostty support the
- * common `-e` flag. The script does its own `cd`, so no per-app cwd flags.
- * Warp is deliberately ABSENT — it cannot execute `.command` files (#1917)
- * and has no programmatic command execution at all (URI scheme opens dirs
- * only; still an open request in #3959/#9083). Hyper is absent for the same
- * reason (#3677).
+ * common `-e` flag; Warp rides its new_tab URI action (see warpUri above).
+ * The script does its own `cd`, so no per-app cwd flags. Hyper is absent — no
+ * programmatic command execution at all (vercel/hyper#3677).
  */
 const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
   terminal: { kind: "openApp", app: "Terminal" },
@@ -267,37 +272,35 @@ const TERMINAL_APP_LAUNCHERS: Record<string, TerminalLaunch> = {
   kitty: { kind: "openAppArgs", app: "kitty", args: [] },
   alacritty: { kind: "openAppArgs", app: "Alacritty", args: ["-e"] },
   ghostty: { kind: "openAppArgs", app: "Ghostty", args: ["-e"] },
+  warp: { kind: "warpUri", app: "Warp", scheme: "warp" },
+  "warp-preview": { kind: "warpUri", app: "Warp Preview", scheme: "warppreview" },
+  warp_preview: { kind: "warpUri", app: "Warp Preview", scheme: "warppreview" },
 };
 
 /**
- * Pick how to open the TUI script. The hub is a background daemon — its env
- * carries no terminal and macOS has no default-terminal setting — so nothing
- * is detected. Priority: the explicit command template (the universal escape
- * hatch) → a built-in launcher by app name (aliases are case- and
- * `.app`-suffix-insensitive) → plain Terminal.app. Warp gets a special warning
- * because it accepts the open but cannot run the script; any other unmatched
+ * Pick how to open the TUI script. Preferences arrive pre-merged from
+ * `remoteTerminalPrefs` (config file first, env fallback — see config.ts);
+ * only the app-name normalization lives here. Priority: the explicit command
+ * template (the universal escape hatch) → a built-in launcher by app name
+ * (aliases are case- and `.app`-suffix-insensitive) → plain Terminal.app
+ * (macOS has no default-terminal setting to detect). Any other unmatched
  * name passes through to `open -a` unchanged.
  */
-export function resolveTerminalLaunch(env: NodeJS.ProcessEnv): {
+export function resolveTerminalLaunch(
+  env: NodeJS.ProcessEnv,
+  prefs: TerminalPrefs = remoteTerminalPrefs(env),
+): {
   launch: TerminalLaunch;
   warning?: string;
 } {
-  const command = (env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim();
-  if (command) return { launch: { kind: "shell", command } };
-  const raw = (env.ZCODE_ACP_HUB_TERMINAL_APP ?? "").trim();
-  const name = raw.toLowerCase().replace(/\.app$/, "");
+  if (prefs.command) return { launch: { kind: "shell", command: prefs.command } };
+  const raw = prefs.app ?? "";
+  const name = raw
+    .toLowerCase()
+    .replace(/\.app$/, "")
+    .replace(/\s+/g, "-");
   const launcher = TERMINAL_APP_LAUNCHERS[name];
   if (launcher) return { launch: launcher };
-  if (name === "warp") {
-    return {
-      launch: { kind: "openApp", app: raw || "Warp" },
-      warning:
-        "Warp cannot execute .command scripts (warpdotdev/warp#1917) and has no " +
-        "programmatic command execution (warpdotdev/warp#3959, #9083) — the window " +
-        "will idle and session-create falls back to a headless bridge after the " +
-        "register timeout; set ZCODE_ACP_HUB_TERMINAL_COMMAND to drive Warp another way",
-    };
-  }
   return { launch: { kind: "openApp", app: raw || "Terminal" } };
 }
 
@@ -311,7 +314,9 @@ export function resolveTerminalLaunch(env: NodeJS.ProcessEnv): {
  */
 export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
   const exports = Object.keys(env)
-    .filter((k) => k.startsWith("ZCODE_ACP_"))
+    // DSH_TUI_AUTOPROMPT is the one non-ZCODE_ACP_* passenger: the boot-resume
+    // banner handshake (martty reads it at its own process start).
+    .filter((k) => k.startsWith("ZCODE_ACP_") || k === "DSH_TUI_AUTOPROMPT")
     .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
   return [
     "#!/bin/sh",
@@ -340,8 +345,12 @@ async function spawnTerminalTui(opts: {
   env: NodeJS.ProcessEnv;
 }): Promise<ChildProcess | null> {
   if (process.platform !== "darwin") return null;
-  const gate = (process.env[TERMINAL_GATE_ENV] ?? "").trim().toLowerCase();
-  if (["0", "false", "off"].includes(gate)) return null;
+  // Terminal prefs are read LIVE here (config file first, env fallback): the
+  // hub outlives the shells that configured it, and its birth env rotates
+  // between GUI editors and interactive shells — only the file is stable.
+  // Set remote.terminal.enabled=false in ~/.config/zcode-acp/config.json (or
+  // ZCODE_ACP_HUB_TERMINAL=0) to keep remote session-create headless.
+  if (!remoteTerminalPrefs(process.env).enabled) return null;
   const cliJs = fileURLToPath(new URL("../cli.js", import.meta.url));
   const script = path.join(mkdtempSync(path.join(tmpdir(), "zcode-acp-term-")), "tui.command");
   writeFileSync(script, terminalTuiScript(opts.cwd, cliJs, opts.env), { mode: 0o700 });
@@ -356,6 +365,15 @@ async function spawnTerminalTui(opts: {
     argv = ["/bin/sh", "-c", rendered];
   } else if (launch.kind === "openApp") {
     argv = ["open", "-a", launch.app, script];
+  } else if (launch.kind === "warpUri") {
+    // new_tab = Warp's default open mode (like Cmd+T: a tab in the focused
+    // window; Warp opens a window first if none exists).
+    argv = [
+      "open",
+      "-a",
+      launch.app,
+      `${launch.scheme}://action/new_tab?path=${encodeURIComponent(script)}`,
+    ];
   } else {
     argv = ["open", "-na", launch.app, "--args", ...launch.args, "/bin/sh", script];
   }
@@ -731,6 +749,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // TUI boots into it. The detached serve fallback ignores it; the
       // client attaches to the serve bridge and session/loads there instead.
       env.ZCODE_ACP_RESUME_SESSION = sessionId;
+      // Banner handshake (see BOOT_RESUME_TRIGGER): martty auto-submits this
+      // text at boot, which drops its welcome banner and reveals the
+      // boot-replayed history without waiting for the user's first message.
+      // Must ride the env verbatim — martty reads it once at process start.
+      env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
     try {
       // Resume shares session-create's visible-terminal surface (and its

@@ -1,10 +1,10 @@
 # Remote Access
 
-With `ZCODE_ACP_REMOTE=1` the bridge additionally accepts ACP connections over
-WebSocket, so a phone or browser can watch and drive the **same sessions** as
-your editor. Zed (or any ACP editor over stdio) remains the primary client and
-owns the process: when the editor disconnects, the bridge — and every remote
-attachment — exits with it.
+With remote access enabled the bridge additionally accepts ACP connections
+over WebSocket, so a phone or browser can watch and drive the **same
+sessions** as your editor. Zed (or any ACP editor over stdio) remains the
+primary client and owns the process: when the editor disconnects, the bridge —
+and every remote attachment — exits with it.
 
 A ready-made client — Android APK plus a self-hostable web build — lives at
 [william0wang/zcode-acp-remote](https://github.com/william0wang/zcode-acp-remote).
@@ -18,8 +18,45 @@ phone / browser ──WS── tunnel ── hub (127.0.0.1:8377, single entry)
 Zed ──────── stdio ────────────────┘
 ```
 
-Enable it per-agent in Zed's settings (Zed merges these into the agent's
-environment):
+## Configuration
+
+Remote access is opt-in and requires a token (the endpoint is expected to sit
+behind a public tunnel, so "loopback-only" is never a safe assumption). The
+authoritative source is the global user config file — every bridge, the hub
+daemon and hub-spawned terminal windows read the same file, so behaviour does
+not depend on which process happened to spawn what:
+
+`~/.config/zcode-acp/config.json` (`$XDG_CONFIG_HOME` aware):
+
+```json
+{
+  "remote": {
+    "enabled": true,
+    "token": "<a-long-random-secret>",
+    "hubPort": 8377,
+    "hubHost": "127.0.0.1",
+    "bridgePort": 8378,
+    "terminal": { "app": "iTerm" }
+  }
+}
+```
+
+All fields are optional. Precedence per field: **config file → environment
+variable → built-in default.** The env vars (`ZCODE_ACP_REMOTE`,
+`ZCODE_ACP_REMOTE_TOKEN`, `ZCODE_ACP_HUB_PORT`, `ZCODE_ACP_HUB_HOST`,
+`ZCODE_ACP_REMOTE_PORT`, `ZCODE_ACP_HUB_TERMINAL*`) keep their semantics and
+fill any gap the file leaves, so existing env-only setups keep working.
+
+Why a file: the hub is a detached daemon that idle-exits (~10 min) and is
+re-spawned by whichever bridge needs it next — its birth env rotates between
+GUI-launched editors (no shell vars) and interactive shells, so env-carried
+preferences drifted with every rebirth. Terminal preferences are re-read
+live at every remote incubation: edit the file, the next session-create uses
+it, no hub restart. Token/port changes apply when the hub is next (re)born —
+rotate while no hub is running, or kill it and let the next bridge re-spawn.
+
+Alternatively, enable it per-agent in Zed's settings (Zed merges these into
+the agent's environment — no config file needed):
 
 ```json
 "agents": {
@@ -74,16 +111,21 @@ paths outside it get 403 (a convenience bound, not a security boundary: a
 token holder can already drive an editor-bridge session in any cwd; the
 trust boundary is the token). On create the hub incubates a VISIBLE
 interactive TUI window in the machine's terminal (ADR-0016 as amended by
-ADR-0020, macOS; headless/SSH or
-`ZCODE_ACP_HUB_TERMINAL=0` falls back to the detached headless
+ADR-0020, macOS; headless/SSH, `remote.terminal.enabled: false` in the config
+file, or `ZCODE_ACP_HUB_TERMINAL=0` falls back to the detached headless
 `zcode-acp serve`); its bridge registers back within seconds (budget ~20s)
 and is reachable like any other instance. The hub itself is a background
 process with no terminal, so nothing is auto-detected: the target terminal
-resolves as `ZCODE_ACP_HUB_TERMINAL_COMMAND` → `ZCODE_ACP_HUB_TERMINAL_APP`
-(built-in launch recipes for Terminal, iTerm, WezTerm, kitty, Alacritty,
+resolves as `remote.terminal.command` → `remote.terminal.app` from the config
+file (re-read live at every incubation; the `ZCODE_ACP_HUB_TERMINAL_COMMAND`
+→ `ZCODE_ACP_HUB_TERMINAL_APP` env vars fill in when the file is silent —
+built-in launch recipes for Terminal, iTerm, WezTerm, kitty, Alacritty,
 Ghostty; other names pass through to `open -a`) → plain Terminal.app. Warp
-cannot execute scripts or commands programmatically (warpdotdev/warp#1917,
-#3959) and is deliberately unsupported — it degrades to the headless bridge.
+refuses `.command` files, so `terminal.app: "warp"` (or `"warp-preview"`)
+instead opens `warp://action/new_tab?path=<script>` — its URI scheme executes
+the script as a new tab in Warp's default mode (app/src/uri/mod.rs →
+open_file). Hyper stays unsupported (no programmatic command execution,
+vercel/hyper#3677).
 Create NEVER reuses a live serve-origin instance (ADR-0016 as amended) —
 every create incubates its own window, and identical concurrent requests
 join the same in-flight spawn. A
