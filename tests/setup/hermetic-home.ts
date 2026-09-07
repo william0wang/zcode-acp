@@ -5,15 +5,25 @@
  * LIVE bridge processes on the dev machine — a test run writing the real
  * store once raced a live bridge and wiped a user's placeholder records
  * (observed 2026-09: an idle editor thread then failed with the backend's
- * "Session ID 不存在" because its alias was gone). Pointing HOME at a temp
- * dir by default keeps every fixture, credential lookup, and store write
- * inside the sandbox; a test that needs a different HOME can still
- * vi.stubEnv("HOME", …) — the later stub wins for that test.
+ * "Session ID 不存在" because its alias was gone).
+ *
+ * HOME is set by DIRECT assignment, not vi.stubEnv: vi.unstubAllEnvs() only
+ * restores values recorded through stubEnv, so a test file calling it
+ * mid-run cannot drop the suite back onto the real HOME. A per-test
+ * vi.stubEnv("HOME", …) still overrides this default for that test.
  */
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { vi } from "vitest";
+import { afterAll } from "vitest";
 
-vi.stubEnv("HOME", mkdtempSync(path.join(tmpdir(), "zacp-test-home-")));
+const home = mkdtempSync(path.join(tmpdir(), "zacp-test-home-"));
+process.env.HOME = home;
+
+afterAll(() => {
+  // The dir is only used synchronously by store/config reads; by afterAll the
+  // file's tests are done. Crashed workers leak a dir — the OS tmp cleaner
+  // handles those.
+  rmSync(home, { recursive: true, force: true });
+});
