@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import { loadSession, resumeSession } from "../src/handlers/session.js";
+import { recordMaterializedSession, rememberLazySession } from "../src/lazy-sessions.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 vi.mock("../src/tasks-index.js", () => ({
@@ -106,5 +107,25 @@ describe("raw id with a transient backend failure", () => {
     // id must NOT be reported as an unrecoverable placeholder alias.
     expect(String((err as Error).message)).toContain("session locked by another process");
     expect(String((err as Error).message)).not.toContain(LOST_SID);
+  });
+});
+
+describe("alias whose backend session was deleted", () => {
+  it("reports the evicted-session error, not the lost-alias one", async () => {
+    // Realistic eviction shape: bridge restarted, the alias (with zcodeSid)
+    // survived in the store, but the backend deleted the session itself.
+    rememberLazySession("acp_alias", "/tmp/ws");
+    recordMaterializedSession("acp_alias", "sess_deleted_long_ago", "/tmp/ws");
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend(); // "Session ID 不存在"
+    server.backend = backend;
+
+    const err = await loadSession(server, { sessionId: "acp_alias" }, cx).catch((e: Error) => e);
+    const text = String((err as Error).message);
+    // The alias is fine — the backend session itself is gone. The message must
+    // say so (and must not confuse it with the lost-alias case).
+    expect(text).toContain("acp_alias");
+    expect(text).not.toContain("zcode resume failed");
+    expect(text).not.toContain("占位别名");
   });
 });

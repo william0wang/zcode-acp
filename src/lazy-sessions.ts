@@ -15,9 +15,11 @@
  *     placeholder from a previous bridge lifetime.
  *
  * Best-effort side-channel like tasks-index: failures are logged and swallowed
- * so a store problem never breaks session/new or first use. Records older than
- * 30 days are pruned on load — the real session stays reachable via
- * session/list after that, only the placeholder alias expires.
+ * so a store problem never breaks session/new or first use. NEVER-USED
+ * placeholders older than 30 days are pruned on load — the real session stays
+ * reachable via session/list after that, only the unused alias expires.
+ * Materialized records never expire: their alias is the only link from the
+ * editor's thread id to the backend session.
  */
 
 import {
@@ -46,7 +48,7 @@ export interface LazySessionRecord {
 /** Store file lives next to config.json / tasks-index.sqlite under ~/.zcode/v2/. */
 const STORE_FILENAME = "acp-lazy-sessions.json";
 
-/** Placeholder aliases expire after 30 days; the real session remains listable. */
+/** NEVER-USED placeholders expire after 30 days; materialized records never do. */
 const TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Resolved at call time so tests can stub HOME without re-importing. */
@@ -66,7 +68,13 @@ function readTable(): { kept: Record<string, LazySessionRecord>; pruned: boolean
     let pruned = false;
     const kept: Record<string, LazySessionRecord> = {};
     for (const [acpSid, rec] of Object.entries(raw)) {
-      if (typeof rec?.createdAt !== "number" || now - rec.createdAt > TTL_MS) {
+      // TTL applies to NEVER-USED placeholders only. A materialized record
+      // (zcodeSid set) is the sole durable link between the editor's thread
+      // id and the backend session — pruning it orphans a session the
+      // backend still happily resumes, and the prune-on-read persist below
+      // makes that loss permanent on first touch (observed: every thread
+      // older than the 30-day TTL failed with "alias lost" in Zed).
+      if (!rec.zcodeSid && (typeof rec?.createdAt !== "number" || now - rec.createdAt > TTL_MS)) {
         pruned = true;
         continue;
       }

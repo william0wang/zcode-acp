@@ -702,12 +702,14 @@ async function replayResumeHistory(
 }
 
 /**
- * Surface a raw-origin resume failure honestly. A backend id unknown to the
- * bridge AND the alias store, which the backend itself rejects as missing, is
- * a dead/expired session — swap the cryptic backend message for the
- * actionable alias-lost text. Any OTHER failure on a raw id (transient
- * timeout, lock, network) keeps its original error: blaming a lost alias for
- * it would misreport the cause. Always throws.
+ * Surface a resume failure honestly, keyed on WHY the id is known. Always
+ * throws. Two not-found shapes get an actionable message:
+ * - raw (id unknown to bridge AND alias store): a placeholder whose durable
+ *   alias was lost/expired — or a deleted imported session.
+ * - mapped/placeholder (alias points at a zcodeSid): the backend session
+ *   itself was deleted/evicted — the link is fine, the target is gone.
+ * Any OTHER failure (transient timeout, lock, network) keeps the backend's
+ * own error: guessing a cause for it would misreport it.
  */
 function translateResumeFailure(
   methodLabel: "session/resume" | "session/load",
@@ -716,11 +718,13 @@ function translateResumeFailure(
   e: unknown,
 ): never {
   const raw = e instanceof Error ? e.message : String(e);
-  if (origin === "raw" && /不存在|not\s*found/i.test(raw)) {
+  if (!/不存在|not\s*found/i.test(raw)) throw e;
+  if (origin === "raw") {
     warn(`${methodLabel}: ${acpSid} unknown to bridge and alias store (backend said: ${raw})`);
     throw new Error(messages().loadUnknownAlias(acpSid));
   }
-  throw e;
+  warn(`${methodLabel}: ${acpSid} → backend session no longer exists (backend said: ${raw})`);
+  throw new Error(messages().sessionEvicted(acpSid));
 }
 
 /** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */

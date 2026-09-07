@@ -139,6 +139,8 @@ export interface Messages {
   slashErrResumeArg: (arg: string) => string;
   /** Placeholder alias lost/expired — the thread id is unresolvable. */
   loadUnknownAlias: (sid: string) => string;
+  /** Alias resolves but the backend session itself was deleted/evicted. */
+  sessionEvicted: (sid: string) => string;
   /** Collapsed tool-call titles during session/load replay. */
   replayCompactSummary: string;
   replayContextHandoff: string;
@@ -238,6 +240,7 @@ const zh: Messages = {
   slashErrResumeArg: (a) => `⚠ 找不到会话 ${a}——用 /resume 查看可选列表`,
   loadUnknownAlias: (s) =>
     `⚠ 会话 ${s} 的占位别名已丢失或过期，无法恢复该线程——请新建会话；如需继续历史对话，可用 /resume 接续`,
+  sessionEvicted: (s) => `⚠ 会话 ${s} 已被后端清理，该线程无法恢复——请新建会话`,
   replayCompactSummary: "压缩摘要",
   replayContextHandoff: "上下文交接",
   replayToolFallback: (tool) => `${tool} 工具`,
@@ -344,6 +347,8 @@ const en: Messages = {
   slashErrResumeArg: (a) => `⚠ session ${a} not found — run /resume to list candidates`,
   loadUnknownAlias: (s) =>
     `⚠ placeholder alias for ${s} was lost or expired — start a new thread, or /resume a listed session`,
+  sessionEvicted: (s) =>
+    `⚠ session ${s} no longer exists in the backend — this thread cannot be recovered; start a new thread`,
   replayCompactSummary: "Compact summary",
   replayContextHandoff: "Context handoff",
   replayToolFallback: (tool) => `${tool} tool`,

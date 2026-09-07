@@ -81,12 +81,27 @@ describe("lazy session alias store", () => {
     expect(rec?.createdAt).toBeTypeOf("number");
   });
 
-  it("drops expired records on load and rewrites the file", () => {
+  it("drops expired NEVER-USED placeholders on load and rewrites the file", () => {
     const old = Date.now() - 31 * 24 * 60 * 60 * 1000; // older than the 30-day TTL
     mockFiles.set(STORE, JSON.stringify({ stale: { cwd: "/tmp/ws", createdAt: old } }));
 
     expect(lookupLazySession("stale")).toBeUndefined();
     expect(JSON.parse(mockFiles.get(STORE)!)).toEqual({});
+  });
+
+  it("keeps an expired record that MATERIALIZED — the alias is the thread's only link", () => {
+    const old = Date.now() - 31 * 24 * 60 * 60 * 1000; // older than the 30-day TTL
+    mockFiles.set(
+      STORE,
+      JSON.stringify({
+        used_old: { cwd: "/tmp/ws", createdAt: old, zcodeSid: "sess_live" },
+        unused_old: { cwd: "/tmp/ws", createdAt: old },
+      }),
+    );
+
+    expect(lookupLazySession("used_old")?.zcodeSid).toBe("sess_live");
+    const table = JSON.parse(mockFiles.get(STORE)!) as Record<string, unknown>;
+    expect(Object.keys(table)).toEqual(["used_old"]); // the placeholder was pruned
   });
 
   it("tolerates a corrupt store file", () => {
