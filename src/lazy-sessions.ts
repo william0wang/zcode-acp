@@ -33,7 +33,7 @@ import {
 import path from "node:path";
 import process from "node:process";
 
-import { log, warn } from "./utils.js";
+import { warn } from "./utils.js";
 
 /** Placeholder alias record persisted in the store. */
 export interface LazySessionRecord {
@@ -100,7 +100,9 @@ function persist(table: Record<string, LazySessionRecord>): void {
     renameSync(tmp, p);
     sweepStaleTmp(dir, p);
   } catch (e) {
-    log(`lazy-sessions: store write failed (${e instanceof Error ? e.message : String(e)})`);
+    // warn, not gated log: this store is an idle thread's only recovery path,
+    // so a silent write failure must be visible in stderr.
+    warn(`lazy-sessions: store write failed (${e instanceof Error ? e.message : String(e)})`);
   }
 }
 

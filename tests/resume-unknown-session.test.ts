@@ -3,16 +3,17 @@
  * (no mapping, no pending placeholder, no durable alias) must fail with an
  * actionable bridge-side error. The raw-id passthrough exists for REAL
  * backend session ids (imported threads) — but when the backend rejects a
- * raw id, the cryptic "Session ID 不存在" left users stuck (observed after
- * the shared alias store lost records to concurrent writers).
+ * raw id as MISSING, the cryptic "Session ID 不存在" left users stuck
+ * (observed after the shared alias store lost records to concurrent
+ * writers). Any other raw-id failure keeps the backend's own error: only a
+ * not-found rejection means a dead session.
+ *
+ * The suite-wide hermetic HOME (tests/setup/hermetic-home.ts) keeps the
+ * alias store lookups off the real one.
  */
 
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-
 import type * as acp from "@agentclientprotocol/sdk";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import { loadSession, resumeSession } from "../src/handlers/session.js";
@@ -25,8 +26,8 @@ vi.mock("../src/tasks-index.js", () => ({
   listKnownWorkspaces: async () => [],
 }));
 
-/** Backend whose session/resume rejects unknown ids like the real one. */
-function fakeBackend(): {
+/** Backend whose session/resume fails with the given error message. */
+function fakeBackend(resumeError = "Session ID 不存在"): {
   backend: ZcodeBackend;
   sent: Array<{ method: string; params: unknown }>;
 } {
@@ -36,7 +37,7 @@ function fakeBackend(): {
     request: async (_id: number, method: string, params: Record<string, unknown>) => {
       sent.push({ method, params });
       if (method === "session/resume") {
-        return { error: { message: "Session ID 不存在" } };
+        return { error: { message: resumeError } };
       }
       return { result: {} };
     },
@@ -50,13 +51,6 @@ function fakeBackend(): {
 
 const cx = { notify: async () => {}, request: async () => ({}) } as unknown as acp.AgentContext;
 const LOST_SID = "996b7c79-219b-4b89-8df1-b1313a2c2007";
-
-beforeEach(() => {
-  vi.stubEnv("HOME", mkdtempSync(path.join(tmpdir(), "zacp-unknown-sid-")));
-});
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
 
 describe("unknown thread id (alias lost)", () => {
   it("session/load fails with the actionable alias-lost error", async () => {
@@ -96,5 +90,21 @@ describe("unknown thread id (alias lost)", () => {
       method: "session/resume",
       params: expect.objectContaining({ sessionId: "sess_real_backend_id" }),
     });
+  });
+});
+
+describe("raw id with a transient backend failure", () => {
+  it("keeps the backend's own error instead of blaming a lost alias", async () => {
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend("session locked by another process");
+    server.backend = backend;
+
+    const err = await loadSession(server, { sessionId: "sess_real_backend_id" }, cx).catch(
+      (e: Error) => e,
+    );
+    // The original error flows through untouched — a transient lock on a real
+    // id must NOT be reported as an unrecoverable placeholder alias.
+    expect(String((err as Error).message)).toContain("session locked by another process");
+    expect(String((err as Error).message)).not.toContain(LOST_SID);
   });
 });

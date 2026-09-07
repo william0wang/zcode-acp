@@ -701,6 +701,28 @@ async function replayResumeHistory(
   );
 }
 
+/**
+ * Surface a raw-origin resume failure honestly. A backend id unknown to the
+ * bridge AND the alias store, which the backend itself rejects as missing, is
+ * a dead/expired session — swap the cryptic backend message for the
+ * actionable alias-lost text. Any OTHER failure on a raw id (transient
+ * timeout, lock, network) keeps its original error: blaming a lost alias for
+ * it would misreport the cause. Always throws.
+ */
+function translateResumeFailure(
+  methodLabel: "session/resume" | "session/load",
+  acpSid: string,
+  origin: "mapped" | "placeholder" | "raw",
+  e: unknown,
+): never {
+  const raw = e instanceof Error ? e.message : String(e);
+  if (origin === "raw" && /不存在|not\s*found/i.test(raw)) {
+    warn(`${methodLabel}: ${acpSid} unknown to bridge and alias store (backend said: ${raw})`);
+    throw new Error(messages().loadUnknownAlias(acpSid));
+  }
+  throw e;
+}
+
 /** `session/resume` → zcode `session/resume` (with runtimeModel overlay). */
 export async function resumeSession(
   server: ZcodeAcpServer,
@@ -746,14 +768,7 @@ export async function resumeSession(
     try {
       resumeResult = await resumePreservingModel(server, zcParams);
     } catch (e) {
-      if (origin === "raw") {
-        warn(
-          `session/resume: ${acpSid} unknown to bridge and alias store ` +
-            `(backend said: ${e instanceof Error ? e.message : String(e)})`,
-        );
-        throw new Error(messages().loadUnknownAlias(acpSid));
-      }
-      throw e;
+      translateResumeFailure("session/resume", acpSid, origin, e);
     }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
@@ -950,14 +965,7 @@ export async function loadSession(
     try {
       resumeResult = await resumePreservingModel(server, zcParams);
     } catch (e) {
-      if (origin === "raw") {
-        warn(
-          `session/load: ${acpSid} unknown to bridge and alias store ` +
-            `(backend said: ${e instanceof Error ? e.message : String(e)})`,
-        );
-        throw new Error(messages().loadUnknownAlias(acpSid));
-      }
-      throw e;
+      translateResumeFailure("session/load", acpSid, origin, e);
     }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
