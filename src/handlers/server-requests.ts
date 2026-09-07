@@ -717,6 +717,10 @@ export async function askSessionPick(
       "elicitation/create",
       {
         mode: "form",
+        // Session scope is mandatory: schema-strict clients (Zed 1.18+) fail
+        // the whole request with -32602 when neither sessionId nor requestId
+        // is present, which surfaced as a silent "resume cancelled".
+        sessionId: acpSid,
         message: messages().slashResumePickTitle,
         requestedSchema: {
           type: "object",
