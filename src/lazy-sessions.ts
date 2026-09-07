@@ -20,7 +20,16 @@
  * session/list after that, only the placeholder alias expires.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -84,12 +93,40 @@ function readTable(): { kept: Record<string, LazySessionRecord>; pruned: boolean
 function persist(table: Record<string, LazySessionRecord>): void {
   try {
     const p = storePath();
-    mkdirSync(path.dirname(p), { recursive: true });
+    const dir = path.dirname(p);
+    mkdirSync(dir, { recursive: true });
     const tmp = `${p}.tmp-${process.pid}`;
     writeFileSync(tmp, JSON.stringify(table, null, 2));
     renameSync(tmp, p);
+    sweepStaleTmp(dir, p);
   } catch (e) {
     log(`lazy-sessions: store write failed (${e instanceof Error ? e.message : String(e)})`);
+  }
+}
+
+/** Stale atomic-write leftovers older than this are swept on the next persist. */
+const TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * Remove leftover `.tmp-*` siblings a crashed writer never renamed away. The
+ * 1h age guard keeps a concurrently-writing process's microsecond-lived tmp
+ * untouched; the sweep runs only from persist, so readers pay nothing.
+ */
+function sweepStaleTmp(dir: string, storeFile: string): void {
+  try {
+    const prefix = `${path.basename(storeFile)}.tmp-`;
+    const cutoff = Date.now() - TMP_MAX_AGE_MS;
+    for (const entry of readdirSync(dir)) {
+      if (!entry.startsWith(prefix)) continue;
+      const full = path.join(dir, entry);
+      try {
+        if (statSync(full).mtimeMs < cutoff) unlinkSync(full);
+      } catch {
+        // a racing removal or vanished file is fine — best-effort
+      }
+    }
+  } catch {
+    // best-effort — the sweep must never fail a persist
   }
 }
 

@@ -106,6 +106,19 @@ ZCode protocol types into ACP notifications directly — always translate.
   — short turns can complete before a late subscribe catches them.
 - **Preempt lock**: concurrent prompts for the same session are serialized via
   `withPreemptLock`. Don't bypass it — two simultaneous turns corrupt the listener.
+- **The lazy-alias store (`~/.zcode/v2/acp-lazy-sessions.json`) is shared by
+  EVERY bridge process and must never be written non-atomically**: it maps lazy
+  placeholder ids → cwd/backend id and is the only recovery for an idle editor
+  thread after a bridge restart. A torn/interleaved whole-file write corrupts
+  it, the next reader treats corruption as `{}` and the overwrite wipes all
+  aliases — the thread then fails with the backend's cryptic "Session ID
+  不存在" (observed 2026-09; a vitest run racing a live Zed bridge did exactly
+  this). Writes go through `persist()` (temp file + rename + stale-tmp sweep +
+  merge-at-write) — never `writeFileSync` the store path directly. Tests run
+  under a hermetic temp HOME (`tests/setup/hermetic-home.ts`, set by direct
+  `process.env.HOME` assignment so `vi.unstubAllEnvs()` cannot leak back to
+  the real HOME); keep new tests store-safe by default and don't bypass the
+  setup file.
 - **AGENTS.md is workspace-scoped**: the global `~/.zcode/AGENTS.md` also exists;
   this file takes precedence for this repo.
 - **WS proxy frame type**: the SDK's WS server drops non-text frames, and
