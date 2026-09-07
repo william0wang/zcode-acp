@@ -252,9 +252,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on
   the next respawn). Hardening invariants from adversarial review — do not
   regress: profiles go through `armSandboxArgv()` (fresh mkdtemp dir under
-  HOME + O_EXCL + the profile denies its own dir last; the HOME base is the
-  point — every agent-writable path is writable by prior sandboxed
-  generations too, so a $TMPDIR profile is raceable across generations), and
+  the managed root `~/.zcode-acp/sandbox/`, pid-encoded `p-<pid>-*`, + O_EXCL
+  + the profile denies its own dir AND the whole root last; the root must
+  stay off every write-allow list — every agent-writable path is writable by
+  prior sandboxed generations too, so a $TMPDIR profile is raceable across
+  generations; each arm sweeps dead-pid dirs and legacy `~/.zcode-acp-sbx-*`
+  HOME siblings, which the per-bridge chain-cleanup used to leak one per
+  restart), and
     the config must pass the integrity check before the bridge persists
     through it (symlink/hardlink pierces the deny island; a config read as
     armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to

@@ -40,8 +40,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -348,6 +350,13 @@ export interface SandboxArmInput {
    * profile path would be attacker-reachable.
    */
   profileDir?: string;
+  /**
+   * Managed root under which every profile dir lives (`~/.zcode-acp/sandbox/`).
+   * Denied in full: no sandboxed generation may touch ANY profile, its own or
+   * another bridge's — same placement invariant the profileDir deny provides,
+   * covering the whole centralized tree.
+   */
+  profilesRoot?: string;
 }
 
 /**
@@ -403,6 +412,9 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
   );
   if (input.profileDir) {
     denies.push(`(deny file-write* (subpath ${sb(input.profileDir)}))`);
+  }
+  if (input.profilesRoot) {
+    denies.push(`(deny file-write* (subpath ${sb(resolveReal(input.profilesRoot))}))`);
   }
   return (
     ["(version 1)", "(allow default)", "(deny file-write*)", ...allows, ...denies].join("\n") + "\n"
@@ -496,27 +508,114 @@ export function resetSandboxDecisionForTest(): void {
 /** Previous respawn's profile dir — removed once superseded (its backend is dead). */
 let lastProfileDir: string | null = null;
 
+/** Managed root for all sandbox profile dirs — centralized, sweepable. */
+export function sandboxProfilesRoot(): string {
+  return path.join(os.homedir(), ".zcode-acp", "sandbox");
+}
+
+/** Age at which a profile dir is sweepable even if its pid looks alive. */
+const SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Old-name `~/.zcode-acp-sbx-*` sibling from a pre-centralization bridge. */
+const LEGACY_SBX_PREFIX = ".zcode-acp-sbx-";
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    // EPERM = the process exists but belongs to another user — still alive.
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
- * Arm a backend argv: build the profile into a FRESH unpredictable dir and
- * wrap with sandbox-exec. The dir sits DIRECTLY under $HOME with a
- * `.zcode-acp-sbx-` prefix — OUTSIDE every whitelisted path (it is a SIBLING
- * of `~/.zcode`, not inside it). That location is the load-bearing defense:
- * $TMPDIR and the cache dirs are agent-writable, and a PRIOR sandboxed
- * generation (a setsid survivor of the old process group) keeps its own
- * profile's allows — so a profile placed there could be raced, symlinked,
+ * Remove profile dirs of DEAD bridges. Each dir is pid-encoded (`p-<pid>-*`):
+ * a live pid (another running bridge) keeps its dir, a dead pid is a crash
+ * leak. The 7-day age guard also reaps dirs held "alive" by a recycled or
+ * zombie pid. Runs only from armSandboxArgv, best-effort throughout.
+ */
+function sweepProfileDirs(root: string): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return; // no root yet or unreadable — nothing to sweep
+  }
+  const now = Date.now();
+  for (const entry of entries) {
+    const full = path.join(root, entry);
+    if (full === lastProfileDir) continue;
+    const m = /^p-(\d+)-/.exec(entry);
+    try {
+      const stale = now - statSync(full).mtimeMs > SWEEP_MAX_AGE_MS;
+      // Own pid + not lastProfileDir = a chain-cleanup leftover of THIS
+      // process — dead by construction. Unparsable name: age-expire only.
+      const dead = m ? Number(m[1]) === process.pid || !pidAlive(Number(m[1])) : stale;
+      if (stale || dead) rmSync(full, { recursive: true, force: true });
+    } catch {
+      // best-effort — a vanished/racing dir is fine
+    }
+  }
+}
+
+/**
+ * Migration sweep: remove the per-arm `~/.zcode-acp-sbx-*` HOME siblings
+ * this bridge's ancestors leaked (each bridge cleaned only its own previous
+ * dir; crashes and restarts accumulated — 121 observed on one machine). Runs
+ * on every arm (idempotent): old bridges may still be alive and leaking. The
+ * 1h mtime guard leaves alone anything a still-running OLD bridge may be
+ * reading mid-exec; a profile is only ever read at exec time, and every arm
+ * creates a fresh dir, so older siblings are dead by construction.
+ */
+function sweepLegacySbxDirs(): void {
+  const home = os.homedir();
+  let entries: string[];
+  try {
+    entries = readdirSync(home);
+  } catch {
+    return;
+  }
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const entry of entries) {
+    if (!entry.startsWith(LEGACY_SBX_PREFIX)) continue;
+    const full = path.join(home, entry);
+    try {
+      if (statSync(full).mtimeMs < cutoff) rmSync(full, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
+/**
+ * Arm a backend argv: build the profile into a FRESH unpredictable dir under
+ * `~/.zcode-acp/sandbox/` and wrap with sandbox-exec. The managed root is
+ * OUTSIDE every whitelisted path (the profile allows ~/.zcode* state dirs,
+ * caches, and temp trees — never ~/.zcode-acp), which is the load-bearing
+ * defense: $TMPDIR and the cache dirs are agent-writable, and a PRIOR
+ * sandboxed generation (a setsid survivor of the old process group) keeps its
+ * own profile's allows — so a profile placed there could be raced, symlinked,
  * FIFO'd, or occupied no matter how fresh its name (reproduced across
  * generations even with mkdtemp + O_EXCL + a self-deny, which each generation
  * only applies to its own dir). The agent can also kill the backend at will
  * (signals are not file-writes) to control respawn timing; with the profile
  * unreachable from ANY generation, that primitive buys nothing. O_EXCL ("wx")
- * additionally refuses pre-placed symlinks from a pre-arming process, and
- * the profile still self-denies its own dir last (defense in depth for the
- * workspace-root-is-$HOME edge, where home itself is writable).
+ * additionally refuses pre-placed symlinks from a pre-arming process, the
+ * profile denies the whole profiles root last, and the self-deny of its own
+ * dir remains as defense in depth for the workspace-root-is-$HOME edge (where
+ * home itself is writable).
  */
 export function armSandboxArgv(argv: string[], input: SandboxArmInput): string[] {
-  const dir = mkdtempSync(path.join(os.homedir(), ".zcode-acp-sbx-"));
+  const root = sandboxProfilesRoot();
+  mkdirSync(root, { recursive: true });
+  // pid-encoded name: the arm-time sweep can tell a live bridge's profile
+  // from a crashed bridge's leak and remove only the latter.
+  const dir = mkdtempSync(path.join(root, `p-${process.pid}-`));
   const file = path.join(dir, "profile.sb");
-  writeFileSync(file, buildSandboxProfile({ ...input, profileDir: dir }), { flag: "wx" });
+  writeFileSync(file, buildSandboxProfile({ ...input, profileDir: dir, profilesRoot: root }), {
+    flag: "wx",
+  });
   if (lastProfileDir && lastProfileDir !== dir) {
     try {
       rmSync(lastProfileDir, { recursive: true, force: true });
@@ -525,6 +624,8 @@ export function armSandboxArgv(argv: string[], input: SandboxArmInput): string[]
     }
   }
   lastProfileDir = dir;
+  sweepProfileDirs(root);
+  sweepLegacySbxDirs();
   log(`sandbox: backend wrapped with sandbox-exec (profile: ${file})`);
   return ["sandbox-exec", "-f", file, ...argv];
 }

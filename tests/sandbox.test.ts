@@ -9,6 +9,7 @@
  * assertion runs under a stubbed darwin platform.
  */
 
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -19,6 +20,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -38,6 +40,7 @@ import {
   resetSandboxDecisionForTest,
   sandboxActive,
   sandboxConfigPath,
+  sandboxProfilesRoot,
 } from "../src/backend/sandbox.js";
 
 // The arm tests redirect os.homedir() to a repo-local fixture (sandboxed
@@ -467,12 +470,15 @@ describe("armSandboxArgv", () => {
     ]);
     const file = argv[2]!;
     const dir = path.dirname(file);
-    // Home base, NOT $TMPDIR/caches: a prior sandboxed generation keeps the
-    // old allows, so only a path no generation can write is race-proof.
-    expect(dir.startsWith(path.join(os.homedir(), ".zcode-acp-sbx-"))).toBe(true);
+    // Managed root under HOME, NOT $TMPDIR/caches: a prior sandboxed
+    // generation keeps the old allows, so only a path no generation can
+    // write is race-proof. The dir name carries the owning pid for sweeping.
+    const root = path.join(os.homedir(), ".zcode-acp", "sandbox");
+    expect(dir.startsWith(path.join(root, `p-${process.pid}-`))).toBe(true);
     expect(dir.startsWith(realpathSync(os.tmpdir()))).toBe(false);
     const profile = readFileSync(file, "utf8");
     expect(profile).toContain(`(deny file-write* (subpath "${dir}"))`);
+    expect(profile).toContain(`(deny file-write* (subpath "${realpathSync(root)}"))`);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -485,5 +491,68 @@ describe("armSandboxArgv", () => {
     expect(dir2).not.toBe(dir1);
     expect(existsSync(dir1)).toBe(false); // cleaned up once superseded
     rmSync(dir2, { recursive: true, force: true });
+  });
+
+  it("sweeps a DEAD bridge's pid-encoded dir on the next arm", () => {
+    const root = sandboxProfilesRoot();
+    const dead = spawnSync("sleep", ["0.01"]); // completes → its pid is gone
+    const leftover = path.join(root, `p-${dead.pid}-leak`);
+    mkdirSync(leftover, { recursive: true });
+    writeFileSync(path.join(leftover, "profile.sb"), "(version 1)");
+
+    const file = arm()[2]!;
+    expect(existsSync(leftover)).toBe(false); // dead pid → swept
+    rmSync(path.dirname(file), { recursive: true, force: true });
+  });
+
+  it("keeps another LIVE bridge's profile dir", () => {
+    const root = sandboxProfilesRoot();
+    const peer = spawn("sleep", ["10"]);
+    try {
+      const liveDir = path.join(root, `p-${peer.pid}-live`);
+      mkdirSync(liveDir, { recursive: true });
+      writeFileSync(path.join(liveDir, "profile.sb"), "(version 1)");
+
+      const file = arm()[2]!;
+      expect(existsSync(liveDir)).toBe(true); // live pid → untouched
+      rmSync(liveDir, { recursive: true, force: true });
+      rmSync(path.dirname(file), { recursive: true, force: true });
+    } finally {
+      peer.kill();
+    }
+  });
+
+  it("reaps stale dirs past the age guard even if the pid looks alive", () => {
+    const root = sandboxProfilesRoot();
+    const peer = spawn("sleep", ["10"]);
+    try {
+      const old = path.join(root, `p-${peer.pid}-ancient`);
+      mkdirSync(old, { recursive: true });
+      writeFileSync(path.join(old, "profile.sb"), "(version 1)");
+      const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+      utimesSync(old, weekAgo, weekAgo);
+
+      const file = arm()[2]!;
+      expect(existsSync(old)).toBe(false); // >7d → swept despite live pid
+      rmSync(path.dirname(file), { recursive: true, force: true });
+    } finally {
+      peer.kill();
+    }
+  });
+
+  it("migrates legacy ~/.zcode-acp-sbx-* HOME siblings (old swept, fresh kept)", () => {
+    const home = os.homedir();
+    const oldLegacy = path.join(home, ".zcode-acp-sbx-oldleak");
+    const freshLegacy = path.join(home, ".zcode-acp-sbx-fresh");
+    mkdirSync(oldLegacy, { recursive: true });
+    mkdirSync(freshLegacy, { recursive: true });
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(oldLegacy, twoHoursAgo, twoHoursAgo);
+
+    const file = arm()[2]!;
+    expect(existsSync(oldLegacy)).toBe(false); // stale legacy → swept
+    expect(existsSync(freshLegacy)).toBe(true); // fresh → may be mid-exec
+    rmSync(freshLegacy, { recursive: true, force: true });
+    rmSync(path.dirname(file), { recursive: true, force: true });
   });
 });
