@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.3](https://github.com/william0wang/zcode-acp/compare/v0.27.2...v0.27.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **sandbox:** centralize profile dirs under ~/.zcode-acp/sandbox with pid-aware sweeping ([#152](https://github.com/william0wang/zcode-acp/issues/152)) ([6830c4d](https://github.com/william0wang/zcode-acp/commit/6830c4d930a697f9c76922ff08af32bfab498a48))
+
 ## [0.27.2](https://github.com/william0wang/zcode-acp/compare/v0.27.1...v0.27.2) (2026-09-07)
 
 
