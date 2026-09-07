@@ -33,6 +33,10 @@ vi.mock("node:fs", async () => {
       mockDirs.add(path.dirname(p));
       mockFiles.set(p, String(data));
     },
+    renameSync: (from: string, to: string) => {
+      mockFiles.set(to, mockFiles.get(from) ?? "");
+      mockFiles.delete(from);
+    },
     mkdirSync: (p: string) => {
       mockDirs.add(String(p));
     },
@@ -79,5 +83,28 @@ describe("lazy session alias store", () => {
     mockFiles.set(STORE, "{not json");
 
     expect(lookupLazySession("acp_1")).toBeUndefined();
+  });
+
+  it("writes atomically — no .tmp leftovers at the store path", () => {
+    rememberLazySession("acp_1", "/tmp/ws");
+    recordMaterializedSession("acp_1", "sess_1", "/tmp/ws");
+
+    const paths = [...mockFiles.keys()];
+    expect(paths).toEqual([STORE]);
+    // The final content is complete, parseable JSON.
+    expect(() => JSON.parse(mockFiles.get(STORE)!)).not.toThrow();
+  });
+
+  it("merges over the on-disk table, preserving a concurrent writer's record", () => {
+    // Process A's placeholder…
+    rememberLazySession("acp_a", "/tmp/ws");
+    // …then process B replaces the file wholesale (its own snapshot). Process
+    // A's next write must re-read and keep B's record, not clobber it.
+    mockFiles.set(STORE, JSON.stringify({ acp_b: { cwd: "/tmp/other", createdAt: Date.now() } }));
+
+    rememberLazySession("acp_c", "/tmp/third");
+
+    const table = JSON.parse(mockFiles.get(STORE)!) as Record<string, { cwd: string }>;
+    expect(Object.keys(table).sort()).toEqual(["acp_b", "acp_c"]);
   });
 });

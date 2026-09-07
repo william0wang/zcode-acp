@@ -636,13 +636,17 @@ async function adoptStoredTitle(
 async function resolveResumeTarget(
   server: ZcodeAcpServer,
   acpSid: string,
-): Promise<{ zcodeSid: string; alreadyLive: boolean }> {
+): Promise<{ zcodeSid: string; alreadyLive: boolean; origin: "mapped" | "placeholder" | "raw" }> {
   const mapped = server.resolveSid(acpSid);
   if (mapped) {
-    return { zcodeSid: mapped, alreadyLive: server.isBackendSessionLive(acpSid) };
+    return { zcodeSid: mapped, alreadyLive: server.isBackendSessionLive(acpSid), origin: "mapped" };
   }
   if (server.pendingSessions.has(acpSid)) {
-    return { zcodeSid: await ensureRealSession(server, acpSid), alreadyLive: true };
+    return {
+      zcodeSid: await ensureRealSession(server, acpSid),
+      alreadyLive: true,
+      origin: "placeholder",
+    };
   }
   const record = lookupLazySession(acpSid);
   if (record) {
@@ -651,9 +655,14 @@ async function resolveResumeTarget(
     return {
       zcodeSid: await ensureRealSession(server, acpSid),
       alreadyLive: !record.zcodeSid,
+      origin: "placeholder",
     };
   }
-  return { zcodeSid: acpSid, alreadyLive: false };
+  // Raw passthrough: the id may be a real backend session id (imported
+  // threads). It may equally be a placeholder whose durable alias was lost —
+  // callers wrap raw-origin resume failures with an actionable message
+  // instead of the backend's cryptic "session not found".
+  return { zcodeSid: acpSid, alreadyLive: false, origin: "raw" };
 }
 
 /**
@@ -711,7 +720,7 @@ export async function resumeSession(
   // Lazy placeholders (session/new) resolve to their real backend session
   // here; alreadyLive targets skip the resume RPC because the session is live
   // in this backend subprocess.
-  const { zcodeSid, alreadyLive } = await resolveResumeTarget(server, acpSid);
+  const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
 
   if (!alreadyLive) {
     // No runtimeModel pinning here: the session keeps its own persisted
@@ -733,7 +742,19 @@ export async function resumeSession(
     // third-party model in its history, and the backend needs the provider
     // registered to even process the resume turn.
     await syncProviderRegistry(server, cwd);
-    const resumeResult = await resumePreservingModel(server, zcParams);
+    let resumeResult: unknown;
+    try {
+      resumeResult = await resumePreservingModel(server, zcParams);
+    } catch (e) {
+      if (origin === "raw") {
+        warn(
+          `session/resume: ${acpSid} unknown to bridge and alias store ` +
+            `(backend said: ${e instanceof Error ? e.message : String(e)})`,
+        );
+        throw new Error(messages().loadUnknownAlias(acpSid));
+      }
+      throw e;
+    }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
     // The session kept its own model — repair it only if it's no longer enabled.
@@ -914,7 +935,7 @@ export async function loadSession(
 
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
-  const { zcodeSid, alreadyLive } = await resolveResumeTarget(server, acpSid);
+  const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
 
   if (!alreadyLive) {
     const zcParams: Record<string, unknown> = {
@@ -925,7 +946,19 @@ export async function loadSession(
     // third-party model in its history, and the backend needs the provider
     // registered to process it.
     await syncProviderRegistry(server, cwd);
-    const resumeResult = await resumePreservingModel(server, zcParams);
+    let resumeResult: unknown;
+    try {
+      resumeResult = await resumePreservingModel(server, zcParams);
+    } catch (e) {
+      if (origin === "raw") {
+        warn(
+          `session/load: ${acpSid} unknown to bridge and alias store ` +
+            `(backend said: ${e instanceof Error ? e.message : String(e)})`,
+        );
+        throw new Error(messages().loadUnknownAlias(acpSid));
+      }
+      throw e;
+    }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
     // The session kept its own model — repair it only if it's no longer enabled.
@@ -947,15 +980,17 @@ export async function loadSession(
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
-  const messages = await fetchMessages(server, zcodeSid);
+  // Named `history` — a local `messages` would shadow the i18n `messages()`
+  // helper used in the error paths above (TDZ crash from the catch block).
+  const history = await fetchMessages(server, zcodeSid);
   // History on disk = real interaction (covers untitled sessions resumed from
   // a previous bridge lifetime) — make the session discoverable remotely.
-  if (messages.length > 0) server.markSessionActive(acpSid);
+  if (history.length > 0) server.markSessionActive(acpSid);
   // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
   // N messages aligned to turn boundaries — the full replay stays the default
   // for editors that send no `_meta` (Zed path unchanged).
   const limit = readTailLimit(params);
-  const slice = limit === null ? fullSlice(messages) : sliceTail(messages, limit);
+  const slice = limit === null ? fullSlice(history) : sliceTail(history, limit);
   if (opts.replayHistory === false) {
     // Boot-resume interception (session/new): the terminal TUI client does not
     // render replayed updates (its transcript lives in its own local store)

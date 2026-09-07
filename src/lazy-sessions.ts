@@ -20,7 +20,7 @@
  * session/list after that, only the placeholder alias expires.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -46,63 +46,81 @@ function storePath(): string {
   return path.join(home, ".zcode", "v2", STORE_FILENAME);
 }
 
-/** Read the store, pruning expired/corrupt records. Returns {} on any failure. */
-function loadRecords(): Record<string, LazySessionRecord> {
+/** Parse and validate the table. No side effects — never rewrites the file. */
+function readTable(): { kept: Record<string, LazySessionRecord>; pruned: boolean } {
   try {
     const p = storePath();
-    if (!existsSync(p)) return {};
+    if (!existsSync(p)) return { kept: {}, pruned: false };
     const raw = JSON.parse(readFileSync(p, "utf8")) as Record<string, LazySessionRecord>;
-    if (typeof raw !== "object" || raw === null) return {};
+    if (typeof raw !== "object" || raw === null) return { kept: {}, pruned: false };
     const now = Date.now();
     let pruned = false;
-    const out: Record<string, LazySessionRecord> = {};
+    const kept: Record<string, LazySessionRecord> = {};
     for (const [acpSid, rec] of Object.entries(raw)) {
       if (typeof rec?.createdAt !== "number" || now - rec.createdAt > TTL_MS) {
         pruned = true;
         continue;
       }
-      out[acpSid] = rec;
+      kept[acpSid] = rec;
     }
-    if (pruned) writeRecords(out);
-    return out;
+    return { kept, pruned };
   } catch (e) {
     warn(
       `lazy-sessions: store read failed ` +
         `(${e instanceof Error ? e.message : String(e)}) — placeholder aliases unavailable`,
     );
-    return {};
+    return { kept: {}, pruned: false };
   }
 }
 
-/** Overwrite the store file. Failures are logged, never thrown. */
-function writeRecords(records: Record<string, LazySessionRecord>): void {
+/**
+ * Overwrite the store file atomically. Failures are logged, never thrown.
+ *
+ * Several bridge processes (editor + serve/TUI + tests) share this file with
+ * no lock; a torn direct write corrupts the JSON, and the next reader treats
+ * corruption as an empty table — permanently wiping every alias. The
+ * write-then-rename leaves readers with either the old or the new file.
+ */
+function persist(table: Record<string, LazySessionRecord>): void {
   try {
     const p = storePath();
     mkdirSync(path.dirname(p), { recursive: true });
-    writeFileSync(p, JSON.stringify(records, null, 2));
+    const tmp = `${p}.tmp-${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(table, null, 2));
+    renameSync(tmp, p);
   } catch (e) {
     log(`lazy-sessions: store write failed (${e instanceof Error ? e.message : String(e)})`);
   }
 }
 
+/** Read the store, pruning expired records (persisting the survivors). */
+function loadRecords(): Record<string, LazySessionRecord> {
+  const { kept, pruned } = readTable();
+  if (pruned) persist(kept);
+  return kept;
+}
+
 /** Record a new placeholder at session/new (no backend session yet). */
 export function rememberLazySession(acpSid: string, cwd: string): void {
-  const records = loadRecords();
-  records[acpSid] = { cwd, createdAt: Date.now() };
-  writeRecords(records);
+  // Merge over a FRESH disk read at write time: persisting a stale snapshot
+  // silently drops records a concurrent bridge process just added.
+  const { kept } = readTable();
+  persist({ ...kept, [acpSid]: { cwd, createdAt: Date.now() } });
 }
 
 /** Attach the backend session id once the placeholder materializes. */
 export function recordMaterializedSession(acpSid: string, zcodeSid: string, cwd: string): void {
-  const records = loadRecords();
-  const existing = records[acpSid];
+  const { kept } = readTable();
+  const existing = kept[acpSid];
   if (existing?.zcodeSid === zcodeSid) return;
-  records[acpSid] = {
-    cwd: existing?.cwd ?? cwd,
-    zcodeSid,
-    createdAt: existing?.createdAt ?? Date.now(),
-  };
-  writeRecords(records);
+  persist({
+    ...kept,
+    [acpSid]: {
+      cwd: existing?.cwd ?? cwd,
+      zcodeSid,
+      createdAt: existing?.createdAt ?? Date.now(),
+    },
+  });
 }
 
 /** Look up a placeholder alias (undefined = unknown to this bridge and store). */
