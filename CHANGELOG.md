@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0](https://github.com/william0wang/zcode-acp/compare/v0.28.1...v0.29.0) (2026-09-08)
+
+
+### Features
+
+* **remote:** hub staleness detection via dist content fingerprint with automatic upgrade pokes ([#157](https://github.com/william0wang/zcode-acp/issues/157)) ([7e592d5](https://github.com/william0wang/zcode-acp/commit/7e592d55ee5ca5ad25bfcd3849956ee09a715b23))
+
 ## [0.28.1](https://github.com/william0wang/zcode-acp/compare/v0.28.0...v0.28.1) (2026-09-07)
 
 
