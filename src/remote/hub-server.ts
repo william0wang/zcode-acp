@@ -256,6 +256,13 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 const TUI_REGISTER_TIMEOUT_MS = 20_000;
 /** `open -a <terminal>` must answer fast or the incubation falls back. */
 const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
+/**
+ * The osascript path (Ghostty AppleScript) needs more room: on a locked
+ * screen with display sleep, the AppleEvent round-trip to the app can take
+ * well over 3s while still succeeding — killing it there produced a spurious
+ * timeout (and a duplicate tab once the app processed the event anyway).
+ */
+const TERMINAL_SCRIPT_TIMEOUT_MS = 10_000;
 
 /** Single-quote for sh: ' → '\'' . */
 function shQuote(s: string): string {
@@ -510,6 +517,8 @@ async function spawnTerminalTui(opts: {
   // Async spawn — spawnSync would freeze the hub's event loop (WS proxying,
   // heartbeats for every live bridge) for up to the full timeout while a GUI
   // app cold-starts.
+  const openTimeoutMs =
+    launch.kind === "ghosttyScript" ? TERMINAL_SCRIPT_TIMEOUT_MS : TERMINAL_OPEN_TIMEOUT_MS;
   const errChunks: Buffer[] = [];
   const opened = await new Promise<{ error?: Error; timedOut?: boolean; code?: number | null }>(
     (resolve) => {
@@ -518,7 +527,7 @@ async function spawnTerminalTui(opts: {
       const timer = setTimeout(() => {
         child.kill();
         resolve({ timedOut: true });
-      }, TERMINAL_OPEN_TIMEOUT_MS);
+      }, openTimeoutMs);
       child.once("error", (e: Error) => {
         clearTimeout(timer);
         resolve({ error: e });
@@ -531,7 +540,7 @@ async function spawnTerminalTui(opts: {
   );
   if (opened.error || opened.timedOut || opened.code !== 0) {
     const detail = opened.timedOut
-      ? `timed out after ${TERMINAL_OPEN_TIMEOUT_MS}ms`
+      ? `timed out after ${openTimeoutMs}ms`
       : (opened.error?.message ?? Buffer.concat(errChunks).toString("utf8").trim()) ||
         `exit ${opened.code ?? "?"}`;
     warn(`hub: no terminal window for ${opts.cwd} (${detail}) — falling back to a headless bridge`);
