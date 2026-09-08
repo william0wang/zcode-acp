@@ -117,8 +117,12 @@ ZCode protocol types into ACP notifications directly — always translate.
   merge-at-write) — never `writeFileSync` the store path directly. Tests run
   under a hermetic temp HOME (`tests/setup/hermetic-home.ts`, set by direct
   `process.env.HOME` assignment so `vi.unstubAllEnvs()` cannot leak back to
-  the real HOME); keep new tests store-safe by default and don't bypass the
-  setup file.
+  the real HOME); the same setup DELETES `ZCODE_ACP_REMOTE_ORIGIN` /
+  `ZCODE_ACP_TUI_CLI_PID`, because a vitest run started from inside an
+  incubated TUI inherits them and the session-close endpoint would signal the
+  REAL window's process tree from a test (observed live 2026-09-08 — the run
+  killed its own host window). Keep new tests store-safe by default and don't
+  bypass the setup file.
 - **AGENTS.md is workspace-scoped**: the global `~/.zcode/AGENTS.md` also exists;
   this file takes precedence for this repo.
 - **WS proxy frame type**: the SDK's WS server drops non-text frames, and
@@ -242,23 +246,23 @@ ZCode protocol types into ACP notifications directly — always translate.
     the old permanent mute left the model on a bare EPERM with no way out. Well-known system temp trees (/tmp → /private/tmp,
     /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
     and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
-  them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
-  the same reason). Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
-  or `enabled: true` in that config per project (auto-created template ships
-  `false`; a malformed or non-object config reads as enabled — fail closed,
-  never rewrite the user's bytes). `server.backendSandboxed` is the process
-  fact the EPERM flow gates on — not `sandboxActive()`, which is the config
-  wish re-checked per call (a mid-run flip to `true` is applied by
-  `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on
-  the next respawn). Hardening invariants from adversarial review — do not
-  regress: profiles go through `armSandboxArgv()` (fresh mkdtemp dir under
-  the managed root `~/.zcode-acp/sandbox/`, pid-encoded `p-<pid>-*`, + O_EXCL
-  + the profile denies its own dir AND the whole root last; the root must
-  stay off every write-allow list — every agent-writable path is writable by
-  prior sandboxed generations too, so a $TMPDIR profile is raceable across
-  generations; each arm sweeps dead-pid dirs and legacy `~/.zcode-acp-sbx-*`
-  HOME siblings, which the per-bridge chain-cleanup used to leak one per
-  restart), and
+    them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
+    the same reason). Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
+    or `enabled: true` in that config per project (auto-created template ships
+    `false`; a malformed or non-object config reads as enabled — fail closed,
+    never rewrite the user's bytes). `server.backendSandboxed` is the process
+    fact the EPERM flow gates on — not `sandboxActive()`, which is the config
+    wish re-checked per call (a mid-run flip to `true` is applied by
+    `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on
+    the next respawn). Hardening invariants from adversarial review — do not
+    regress: profiles go through `armSandboxArgv()` (fresh mkdtemp dir under
+    the managed root `~/.zcode-acp/sandbox/`, pid-encoded `p-<pid>-*`, + O_EXCL
+  * the profile denies its own dir AND the whole root last; the root must
+    stay off every write-allow list — every agent-writable path is writable by
+    prior sandboxed generations too, so a $TMPDIR profile is raceable across
+    generations; each arm sweeps dead-pid dirs and legacy `~/.zcode-acp-sbx-*`
+    HOME siblings, which the per-bridge chain-cleanup used to leak one per
+    restart), and
     the config must pass the integrity check before the bridge persists
     through it (symlink/hardlink pierces the deny island; a config read as
     armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to

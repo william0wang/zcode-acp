@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createSessionCloseHandler,
   serveTerminateDecision,
+  tuiTeardownPids,
 } from "../src/remote/session-close-endpoint.js";
 import { collectStatus } from "../src/remote/status-endpoint.js";
 import { collectSessions } from "../src/remote/endpoint.js";
@@ -207,6 +208,19 @@ describe("serve-origin termination decision (remote close ends the CLI)", () => 
         ZCODE_ACP_TUI_CLI_PID: "not-a-pid",
       }),
     ).toEqual({ terminate: true });
+  });
+
+  it("teardown targets the CLI pid and the bridge's parent, deduped", () => {
+    // Ghostty's AppleScript tab and Warp's URI tab run the script WITHOUT a
+    // new session: the process group never exists and the direct pids are
+    // the only signal that lands (verified live 2026-09-08).
+    expect(tuiTeardownPids(100, 200)).toEqual([100, 200]);
+    // Same process hosting both roles (bridge spawned by the CLI itself).
+    expect(tuiTeardownPids(100, 100)).toEqual([100]);
+    // launchd (1) never gets signalled; malformed values drop out.
+    expect(tuiTeardownPids(1, 200)).toEqual([200]);
+    expect(tuiTeardownPids(100, 1)).toEqual([100]);
+    expect(tuiTeardownPids(Number.NaN, 200)).toEqual([200]);
   });
 
   it("remote-created empty placeholders count as advertised — close keeps the CLI alive", async () => {

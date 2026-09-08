@@ -85,13 +85,32 @@ function advertisedSessionCount(server: ZcodeAcpServer): number {
 }
 
 /**
+ * Pids to SIGTERM directly when tearing down an incubated TUI tree: the
+ * incubated CLI (ZCODE_ACP_TUI_CLI_PID — tui.ts forwards its SIGTERM to the
+ * martty child and exits clean) and this bridge's parent (the TUI host
+ * driving this bridge's stdio). Deduped; pid 1 excluded. Pure — for tests.
+ */
+export function tuiTeardownPids(tuiPgid: number, ppid: number): number[] {
+  const out: number[] = [];
+  for (const pid of [tuiPgid, ppid]) {
+    if (Number.isInteger(pid) && pid > 1 && !out.includes(pid)) out.push(pid);
+  }
+  return out;
+}
+
+/**
  * Tear the incubated CLI down AFTER the close response flushed (the phone
- * must get its 200 before the bridge dies). The group SIGTERM covers the
- * martty Rust host too — a bare kill of one pid orphans it; martty's client
- * converts the signal to an orderly exit and restores the TTY, the tree ends
- * with exit code 0, and each terminal's own close-on-exit pref takes the
- * window. The self-exit timer is the fallback for the headless serve bridge
- * and for a terminal whose launch path broke process-group membership.
+ * must get its 200 before the bridge dies). The group SIGTERM covers every
+ * descendant at once — but ONLY when the terminal made the script a session
+ * leader (Terminal.app, -e-style terminals). Ghostty's AppleScript tab and
+ * Warp's URI tab run the script inside the terminal app's own session: the
+ * group ESRCHs (verified live 2026-09-08 — kill(-pid) failed while the pid
+ * was alive), and without the direct pid signals only this bridge died,
+ * leaving the window on a dead-agent error page. martty converts SIGTERM to
+ * an orderly exit, restores the TTY, the tree ends with exit code 0, and each
+ * terminal's own close-on-exit pref takes the window. The self-exit timer is
+ * the fallback for the headless serve bridge and for launch paths where both
+ * signal forms miss.
  */
 function terminateAfterFlush(decision: ServeTerminateDecision, res: ServerResponse): void {
   const run = () => {
@@ -102,8 +121,18 @@ function terminateAfterFlush(decision: ServeTerminateDecision, res: ServerRespon
       } catch (e) {
         log(
           `remote: TUI group signal failed ` +
-            `(${e instanceof Error ? e.message : String(e)}) — exiting this bridge instead`,
+            `(${e instanceof Error ? e.message : String(e)}) — signalling the tree pids directly`,
         );
+      }
+      // Direct signals for terminals that run the script without a new
+      // session (see above); harmless duplicates when the group signal landed.
+      for (const pid of tuiTeardownPids(decision.tuiPgid, process.ppid)) {
+        try {
+          process.kill(pid, "SIGTERM");
+          log(`remote: last session closed — SIGTERM to TUI pid ${pid}`);
+        } catch {
+          // already gone — the self-exit below still ends this bridge
+        }
       }
     }
     setTimeout(() => process.exit(0), SELF_EXIT_MS);

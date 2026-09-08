@@ -11,6 +11,12 @@
  * restores values recorded through stubEnv, so a test file calling it
  * mid-run cannot drop the suite back onto the real HOME. A per-test
  * vi.stubEnv("HOME", …) still overrides this default for that test.
+ *
+ * The serve-origin markers are DELETED the same way: a vitest run started
+ * from inside an incubated TUI inherits them, and the session-close handler
+ * reading them would treat the test worker as that TUI's bridge — signalling
+ * the REAL window's process tree (observed live 2026-09-08: the run killed
+ * its own host window). Tests that need them re-stub explicitly.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +26,8 @@ import { afterAll } from "vitest";
 
 const home = mkdtempSync(path.join(tmpdir(), "zacp-test-home-"));
 process.env.HOME = home;
+delete process.env.ZCODE_ACP_REMOTE_ORIGIN;
+delete process.env.ZCODE_ACP_TUI_CLI_PID;
 
 afterAll(() => {
   // The dir is only used synchronously by store/config reads; by afterAll the
