@@ -27,6 +27,12 @@ import { warn } from "../utils.js";
 export interface TerminalPrefs {
   /** false → remote session-create stays headless (no visible window). */
   enabled?: boolean;
+  /**
+   * Ordered terminal preference list — the hub tries them in order (a launch
+   * failure or a window that never registers moves down the list) and only
+   * goes headless once every entry failed. Names resolve like `app`.
+   */
+  terminals?: string[];
   /** Terminal app name (Terminal, iTerm, wezterm, kitty, alacritty, ghostty, …). */
   app?: string;
   /** Shell command template; `{script}` is replaced with the quoted script path. */
@@ -74,7 +80,9 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    warn(`config: ${file} is not valid JSON — ignoring (${e instanceof Error ? e.message : String(e)})`);
+    warn(
+      `config: ${file} is not valid JSON — ignoring (${e instanceof Error ? e.message : String(e)})`,
+    );
     return {};
   }
   if (!isPlainObject(parsed)) {
@@ -89,7 +97,8 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   }
   const out: RemoteUserConfig = {};
   if (typeof remote["enabled"] === "boolean") out.enabled = remote["enabled"];
-  if (typeof remote["token"] === "string" && remote["token"].trim()) out.token = remote["token"].trim();
+  if (typeof remote["token"] === "string" && remote["token"].trim())
+    out.token = remote["token"].trim();
   for (const key of ["hubPort", "bridgePort"] as const) {
     const v = remote[key];
     if (v === undefined) continue;
@@ -106,7 +115,16 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
   if (isPlainObject(terminal)) {
     const t: TerminalPrefs = {};
     if (typeof terminal["enabled"] === "boolean") t.enabled = terminal["enabled"];
-    if (typeof terminal["app"] === "string" && terminal["app"].trim()) t.app = terminal["app"].trim();
+    if (Array.isArray(terminal["terminals"])) {
+      const list = terminal["terminals"]
+        .filter((v): v is string => typeof v === "string" && !!v.trim())
+        .map((v) => v.trim());
+      if (list.length > 0) t.terminals = list;
+    } else if (terminal["terminals"] !== undefined) {
+      warn(`config: remote.terminal.terminals in ${file} is not an array of names — ignoring`);
+    }
+    if (typeof terminal["app"] === "string" && terminal["app"].trim())
+      t.app = terminal["app"].trim();
     if (typeof terminal["command"] === "string" && terminal["command"].trim()) {
       t.command = terminal["command"].trim();
     }

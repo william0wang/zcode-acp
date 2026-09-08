@@ -23,6 +23,9 @@
  *                                   when taken; loopback only)
  *     ZCODE_ACP_HUB_TERMINAL=0      disable the visible-terminal incubation
  *     ZCODE_ACP_HUB_TERMINAL_APP=<name>   terminal app for the TUI window
+ *     ZCODE_ACP_HUB_TERMINAL_APPS=<a,b,…>  ordered terminal fallback list
+ *                                   (file `remote.terminal.terminals` wins;
+ *                                   tried in order before going headless)
  *     ZCODE_ACP_HUB_TERMINAL_COMMAND=<sh> shell command template ({script})
  *   3. Built-in defaults.
  *
@@ -148,10 +151,27 @@ export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConf
  */
 export function remoteTerminalPrefs(env: NodeJS.ProcessEnv = process.env): TerminalPrefs {
   const file = loadUserConfig(env).remote?.terminal ?? {};
+  const fileTerminals = Array.isArray(file.terminals)
+    ? file.terminals.filter((v) => typeof v === "string" && v.trim())
+    : undefined;
+  const envTerminals = (env.ZCODE_ACP_HUB_TERMINAL_APPS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const terminals = fileTerminals?.length
+    ? fileTerminals
+    : envTerminals.length
+      ? envTerminals
+      : undefined;
   const app = file.app ?? ((env.ZCODE_ACP_HUB_TERMINAL_APP ?? "").trim() || undefined);
   const command = file.command ?? ((env.ZCODE_ACP_HUB_TERMINAL_COMMAND ?? "").trim() || undefined);
   const enabled =
     file.enabled ??
     !["0", "false", "off"].includes((env.ZCODE_ACP_HUB_TERMINAL ?? "").trim().toLowerCase());
-  return { enabled, ...(app ? { app } : {}), ...(command ? { command } : {}) };
+  return {
+    enabled,
+    ...(terminals ? { terminals } : {}),
+    ...(app ? { app } : {}),
+    ...(command ? { command } : {}),
+  };
 }
