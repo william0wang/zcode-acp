@@ -442,6 +442,26 @@ Cross-instance note: if the same conversation is also registered by another
 bridge of the project, the hub's dedupe re-attaches it under that instance —
 close it there too.
 
+### Serve-origin instances: closing ends the CLI
+
+Everything above describes **editor-origin** bridges (retire-only). For
+`origin: "serve"` instances — the ones the hub incubated for remote
+session-create/resume — closing the LAST advertised conversation also
+TERMINATES the CLI that hosts it:
+
+- A **terminal TUI** bridge is taken down with one group signal to its whole
+  process tree (cli → martty → bridge); martty restores the TTY and exits
+  cleanly, and each terminal's own close-on-exit preference then takes the
+  window (default: closes in Terminal, iTerm2, Ghostty, Warp).
+- A **headless serve** bridge exits immediately (its idle timeout pulled
+  forward to zero).
+
+The instance disappears from `/api/instances` within one heartbeat. The
+conversation itself is still resumable later via
+`POST /api/instances` / `GET /api/projects/sessions` — closing ends the
+process, not the history. If other advertised conversations (or remote-created
+empty sessions) remain on the instance, it stays up.
+
 ## Renaming a session
 
 ```text
@@ -535,10 +555,16 @@ size, mtime}], truncated }`. Dotfiles are included — filter client-side.
 ## Slash-command handling
 
 Only the commands the bridge advertises via `available_commands_update` (plus
-`skill`/`init` and `$`-skills) are treated as commands. Any other `/`-leading
+`skill`/`init` and skills) are treated as commands. Any other `/`-leading
 prompt — e.g. a pasted directory path — is delivered to the model as plain
 text with an invisible zero-width-space prefix; clients see the text verbatim
 in replay and echoes. Clients should not special-case this.
+
+Skill names are PER-CLIENT in the advertised list: editors that group
+visually (Zed) receive `$name` (e.g. `$tdd`), while martty and clients that
+send no `clientInfo` receive the bare `name` so their `/` completion menu
+surfaces skills at all. Both spellings route identically — `/tdd` and `/$tdd`
+are the same command.
 
 ## Tail replay and history pagination
 

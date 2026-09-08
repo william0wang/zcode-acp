@@ -239,3 +239,54 @@ describe("echoUserPromptToOthers", () => {
     expect(phone.notifies).toHaveLength(0);
   });
 });
+
+describe("per-client naming and notifyEach", () => {
+  it("builds a distinct payload per recorded client name (null payload skips)", async () => {
+    const registry = new ClientRegistry();
+    const zed = fakeClient();
+    const app = fakeClient();
+    const martty = fakeClient();
+    registry.add(zed.cx);
+    registry.add(app.cx);
+    registry.add(martty.cx);
+    registry.nameConnection(zed.cx, "Zed");
+    registry.nameConnection(app.cx, ""); // remote App: initialize with no clientInfo
+    registry.nameConnection(martty.cx, "martty");
+
+    await registry.notifyEach("session/update", (name) => ({
+      sessionId: "s1",
+      update: { grouped: name !== null && !name.toLowerCase().includes("martty") },
+    }));
+
+    expect((zed.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(true);
+    expect((app.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(false);
+    expect((martty.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(false);
+  });
+
+  it("nameOf reads null for unnamed or unseen connections", () => {
+    const registry = new ClientRegistry();
+    const named = fakeClient();
+    const unnamed = fakeClient();
+    const unseen = fakeClient();
+    registry.add(named.cx);
+    registry.add(unnamed.cx);
+    registry.add(unseen.cx);
+    registry.nameConnection(named.cx, "Zed");
+    registry.nameConnection(unnamed.cx, "");
+
+    expect(registry.nameOf(named.cx)).toBe("Zed");
+    expect(registry.nameOf(unnamed.cx)).toBeNull();
+    expect(registry.nameOf(unseen.cx)).toBeNull();
+  });
+});
+
+describe("skillPrefixForClient", () => {
+  it("keeps $ grouping for editors, strips it for martty and unnamed clients", async () => {
+    const { skillPrefixForClient } = await import("../src/handlers/io.js");
+    expect(skillPrefixForClient("Zed")).toBe("$");
+    expect(skillPrefixForClient("JetBrains")).toBe("$");
+    expect(skillPrefixForClient("martty")).toBe("");
+    expect(skillPrefixForClient("Martty TUI")).toBe("");
+    expect(skillPrefixForClient(null)).toBe("");
+  });
+});

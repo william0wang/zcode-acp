@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
+import type { ClientRegistry } from "../remote/broadcast.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
 
@@ -180,6 +181,48 @@ export function sendAvailableCommands(
 }
 
 /**
+ * Does this client see the `$` skill-name grouping? The prefix is a DISPLAY
+ * convention for editors (Zed groups skills visually under `$`); martty and
+ * unnamed clients (the remote App sends no clientInfo) surface commands by
+ * typing `/` — a `$`-prefixed name never matches there, hiding every skill.
+ * Both spellings route identically (slash.ts accepts bare and `$`-prefixed
+ * skill names), so per-client display is safe.
+ */
+export function skillPrefixForClient(name: string | null): string {
+  if (name === null || name.toLowerCase().includes("martty")) return "";
+  return "$";
+}
+
+/**
+ * Send `available_commands_update` with a PER-CLIENT command list: skill names
+ * keep their `$` prefix for grouping-capable editors and lose it for martty /
+ * unnamed clients (see `skillPrefixForClient`).
+ */
+export function sendAvailableCommandsPerClient(
+  registry: ClientRegistry,
+  sessionId: string,
+  commands: ReadonlyArray<SlashCommandEntry>,
+): Promise<void> {
+  return registry.notifyEach("session/update", (name) => {
+    const prefix = skillPrefixForClient(name);
+    return {
+      sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: commands.map((c) => {
+          const out: { name: string; description: string; input?: { hint: string } } = {
+            name: prefix === "" && c.name.startsWith("$") ? c.name.slice(1) : c.name,
+            description: c.description,
+          };
+          if (c.input) out.input = c.input;
+          return out;
+        }),
+      },
+    };
+  });
+}
+
+/**
  * Per-session pending deferred-notification timeouts. Tracks the timers from
  * repeated `sendAvailableCommandsDeferred` calls so a newer call can cancel
  * the older call's still-pending timers. Without this, a slow timer (e.g.
@@ -205,7 +248,7 @@ const activeDeferredTimeouts = new Map<string, Set<ReturnType<typeof setTimeout>
  * timer overwrite the newest command list.
  */
 export function sendAvailableCommandsDeferred(
-  cx: acp.AgentContext,
+  registry: ClientRegistry,
   sessionId: string,
   commands: ReadonlyArray<SlashCommandEntry>,
 ): void {
@@ -221,7 +264,7 @@ export function sendAvailableCommandsDeferred(
 
   for (const delay of [50, 300, 1000]) {
     const t = setTimeout(() => {
-      sendAvailableCommands(cx, sessionId, commands)
+      sendAvailableCommandsPerClient(registry, sessionId, commands)
         .catch((e) => {
           warn(
             `available_commands_update failed (sid=${sessionId}, delay=${delay}): ` +

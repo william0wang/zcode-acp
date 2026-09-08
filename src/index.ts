@@ -158,7 +158,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/new", async (ctx) => {
         const result = await newSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(result.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
         }
         return result;
       })
@@ -166,7 +166,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/resume", async (ctx) => {
         const result = await resumeSession(server, ctx.params, server.clients.broadcast());
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
         }
         // A client that (re)connects catches up via resume/load; any interaction
         // request still waiting for an answer is re-sent to it so a question
@@ -177,7 +177,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/load", async (ctx) => {
         const result = await loadSession(server, ctx.params, server.clients.broadcast());
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients.broadcast(), sid, allCommands);
+          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
         }
         resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
         return result;

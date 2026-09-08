@@ -39,6 +39,7 @@ import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
 import { formatMcpServers, loadMcpServers } from "../config/mcp-discovery.js";
 import { loadPluginCommands } from "../config/plugin-commands.js";
+import { loadSkillCommands } from "../config/skill-discovery.js";
 import { messages } from "../i18n.js";
 import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
@@ -102,12 +103,19 @@ const PASSTHROUGH_COMMANDS = new Set([
 let knownCommands: Set<string> | null = null;
 function knownCommandSet(): Set<string> {
   if (!knownCommands) {
-    knownCommands = new Set<string>([
+    const names = [
       ...SLASH_COMMANDS.map((c) => c.name),
       ...PASSTHROUGH_COMMANDS,
       ...UNSUPPORTED_TUI_COMMANDS,
       ...loadPluginCommands().map((c) => c.name),
-    ]);
+      // Skills travel BOTH spellings: `$name` for grouping-capable editors
+      // (Zed) and bare `name` for martty / the remote App (whose `/` menus
+      // cannot match a `$`-prefixed name). Both are passthrough to the model.
+      ...loadSkillCommands().flatMap((c) =>
+        c.name.startsWith("$") ? [c.name, c.name.slice(1)] : [c.name],
+      ),
+    ];
+    knownCommands = new Set<string>(names);
   }
   return knownCommands;
 }

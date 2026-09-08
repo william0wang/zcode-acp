@@ -1169,7 +1169,11 @@ describe("hub remote session-create (ADR-0014)", () => {
   });
 
   it("spawns a serve bridge in the project cwd and returns its instance once registered", async () => {
+    // Simulate a hub born inside a TUI tree: the foreign CLI pid rides
+    // process.env and the incubation must strip it (see assertion below).
+    process.env.ZCODE_ACP_TUI_CLI_PID = "999999";
     const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    delete process.env.ZCODE_ACP_TUI_CLI_PID;
     const pending = fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
       method: "POST",
       headers: { ...auth, "Content-Type": "application/json" },
@@ -1190,6 +1194,10 @@ describe("hub remote session-create (ADR-0014)", () => {
     expect(spawnCalls[0]!.env.ZCODE_ACP_REMOTE_PIN_CWD).toBe("1");
     // Tab title default: no conversation to name, so the project names it.
     expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("demo");
+    // The TUI CLI pid is process-tree-local: a hub born inside one TUI tree
+    // must not pass a foreign pid to bridges it incubates (a headless serve
+    // bridge would SIGTERM that unrelated tree on its last session close).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TUI_CLI_PID).toBeUndefined();
     await registerServeBridge(hub, PROJECT);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1710,6 +1718,15 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(withTitle).toContain("export ZCODE_ACP_TAB_TITLE='Fix the login bug'");
     expect(withTitle).toContain(`printf '\\033]0;%s\\007' "$ZCODE_ACP_TAB_TITLE"`);
     expect(terminalTuiScript(PROJECT, "/opt/cli.js", {})).not.toContain("033]0");
+  });
+
+  it("embeds the shell's pid as the TUI CLI pid for remote-close termination", () => {
+    // $$ survives exec as the cli's pid — the terminal's foreground process-
+    // group leader. Remote session-close SIGTERMs that group to end the whole
+    // TUI tree (cli → martty → bridge) when the last conversation closes.
+    const body = terminalTuiScript(PROJECT, "/opt/cli.js", {});
+    expect(body).toContain("export ZCODE_ACP_TUI_CLI_PID=$$");
+    expect(body.indexOf("ZCODE_ACP_TUI_CLI_PID")).toBeLessThan(body.indexOf("exec "));
   });
 
   it("titles the resume tab with the conversation title from the live serve bridge", async () => {

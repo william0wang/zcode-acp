@@ -20,7 +20,7 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 
-import { warn } from "../utils.js";
+import { clientConnectionRoot, warn } from "../utils.js";
 
 /** The AgentContext surface the bridge actually calls. */
 export interface ClientLike {
@@ -54,6 +54,8 @@ interface RaceWinner {
 export class ClientRegistry {
   private readonly clients = new Set<ClientLike>();
   private proxy: acp.AgentContext | null = null;
+  /** clientInfo name per connection root (see `nameConnection`). */
+  private readonly names = new WeakMap<object, string>();
 
   add(cx: ClientLike): void {
     this.clients.add(cx);
@@ -65,6 +67,52 @@ export class ClientRegistry {
 
   get size(): number {
     return this.clients.size;
+  }
+
+  /**
+   * Record a connection's `initialize` clientInfo name, keyed by the SDK's
+   * per-connection root (same identity `notifyOthers` filters on) so payloads
+   * can be tailored per client (`notifyEach`). Unnamed clients (the remote
+   * App sends no clientInfo) read as null — distinct from "" only in that an
+   * initialize was never seen for the connection.
+   */
+  nameConnection(cx: ClientLike, name: string): void {
+    const root = clientConnectionRoot(cx);
+    if (typeof root === "object" && root !== null) this.names.set(root, name);
+  }
+
+  /** Name recorded at initialize for this connection, null when none. */
+  nameOf(cx: ClientLike): string | null {
+    const root = clientConnectionRoot(cx);
+    if (typeof root !== "object" || root === null) return null;
+    // "" (initialize seen, no clientInfo — the remote App) reads as null too.
+    return this.names.get(root) || null;
+  }
+
+  /**
+   * Fan out a notification whose payload is built PER CLIENT from its recorded
+   * name (null payload = skip that client). Used for `available_commands_update`:
+   * editors keep the `$` skill grouping, martty and unnamed clients get the
+   * bare names so their `/` completion menu shows skills at all.
+   */
+  async notifyEach(
+    method: string,
+    build: (name: string | null) => Record<string, unknown> | null,
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      this.snapshot().map((cx) => {
+        const params = build(this.nameOf(cx));
+        return params ? cx.notify(method, params) : Promise.resolve();
+      }),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        warn(
+          `broadcast: notifyEach ${method} failed on one client: ` +
+            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
   }
 
   /** Stable broadcast proxy satisfying the `AgentContext` call surface. */

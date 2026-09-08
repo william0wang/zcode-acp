@@ -190,13 +190,20 @@ export function seedMarttyQuotaPlugin(env: NodeJS.ProcessEnv = process.env): boo
 /** Resolve on child exit; forward terminal signals while it runs. */
 function settle(child: ChildProcess): Promise<number | null> {
   return new Promise((resolve) => {
-    const forward = (sig: NodeJS.Signals) => child.kill(sig);
+    let forwardedTerminate = false;
+    const forward = (sig: NodeJS.Signals) => {
+      if (sig === "SIGTERM") forwardedTerminate = true;
+      child.kill(sig);
+    };
     process.on("SIGINT", forward);
     process.on("SIGTERM", forward);
-    child.once("exit", (code) => {
+    child.once("exit", (code, signal) => {
       process.off("SIGINT", forward);
       process.off("SIGTERM", forward);
-      resolve(code);
+      // A SIGTERM we forwarded (remote session-close hits the whole process
+      // group) is an intentional shutdown: resolve clean so the exec'd shell
+      // exits 0 and terminals with "close on clean exit" take the window.
+      resolve(code ?? (forwardedTerminate && signal === "SIGTERM" ? 0 : 1));
     });
     child.once("error", (err) => {
       process.off("SIGINT", forward);

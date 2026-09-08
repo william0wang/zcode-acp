@@ -120,6 +120,21 @@ describe("neutralizeSlashText", () => {
     expect(f("/$tdd args")).toBe("/$tdd args");
   });
 
+  it("leaves bare skill names unchanged (martty / remote App spelling)", async () => {
+    // Seed one skill in the mocked fs so its bare name enters the known set
+    // (loadSkillCommands reads the same mock as loadPluginCommands).
+    mockDirs.add(path.join(homedir(), ".zcode", "skills"));
+    mockDirs.add(path.join(homedir(), ".zcode", "skills", "tdd"));
+    mockFiles.set(
+      path.join(homedir(), ".zcode", "skills", "tdd", "SKILL.md"),
+      "---\nname: tdd\ndescription: Test-driven development\n---\nbody",
+    );
+    const f = await load();
+    expect(f("/tdd fix the bug")).toBe("/tdd fix the bug");
+    // And the $-spelling still routes identically.
+    expect(f("/$tdd fix the bug")).toBe("/$tdd fix the bug");
+  });
+
   it("leaves discovered plugin commands unchanged", async () => {
     const f = await load();
     expect(f("/demo-cmd x")).toBe("/demo-cmd x");

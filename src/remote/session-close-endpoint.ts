@@ -20,6 +20,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import process from "node:process";
 
 import type { ZcodeAcpServer } from "../server.js";
 import { log } from "../utils.js";
@@ -39,6 +40,79 @@ function sendJson(res: ServerResponse, code: number, body: Record<string, unknow
   res.end(payload);
 }
 
+/** Grace before the bridge exits itself when the TUI group signal missed. */
+const SELF_EXIT_MS = 1_500;
+
+export interface ServeTerminateDecision {
+  /** Terminate this bridge once the close response has flushed. */
+  terminate: boolean;
+  /** Foreground process-group id of the incubated TUI tree; absent = headless. */
+  tuiPgid?: number;
+}
+
+/**
+ * Should closing a session TERMINATE this bridge? Only for remote-incubated
+ * instances (ZCODE_ACP_REMOTE_ORIGIN=serve, ADR-0016): their CLI was spawned
+ * for exactly this conversation, so the last close ends it — the TUI window's
+ * whole process tree (cli → martty → bridge) via one group signal, or a plain
+ * self-exit for the headless serve bridge (pulling its idle exit forward).
+ * Editor-origin bridges return null and keep the retire-only semantics.
+ * Pure — exported for unit tests.
+ */
+export function serveTerminateDecision(
+  advertisedCount: number,
+  env: { ZCODE_ACP_REMOTE_ORIGIN?: string; ZCODE_ACP_TUI_CLI_PID?: string } = process.env,
+): ServeTerminateDecision | null {
+  if ((env.ZCODE_ACP_REMOTE_ORIGIN ?? "").trim() !== "serve") return null;
+  if (advertisedCount > 0) return { terminate: false };
+  const pid = Number.parseInt((env.ZCODE_ACP_TUI_CLI_PID ?? "").trim(), 10);
+  return {
+    terminate: true,
+    ...(Number.isInteger(pid) && pid > 0 ? { tuiPgid: pid } : {}),
+  };
+}
+
+/**
+ * Advertised-session count after a close: summaries with activity plus
+ * REMOTE-created empty placeholders (mirrors the /status membership rule).
+ */
+function advertisedSessionCount(server: ZcodeAcpServer): number {
+  let count = server.remoteCreatedSessions.size;
+  for (const [sid, summary] of server.sessionSummaries) {
+    if (summary.hasActivity && !server.remoteCreatedSessions.has(sid)) count++;
+  }
+  return count;
+}
+
+/**
+ * Tear the incubated CLI down AFTER the close response flushed (the phone
+ * must get its 200 before the bridge dies). The group SIGTERM covers the
+ * martty Rust host too — a bare kill of one pid orphans it; martty's client
+ * converts the signal to an orderly exit and restores the TTY, the tree ends
+ * with exit code 0, and each terminal's own close-on-exit pref takes the
+ * window. The self-exit timer is the fallback for the headless serve bridge
+ * and for a terminal whose launch path broke process-group membership.
+ */
+function terminateAfterFlush(decision: ServeTerminateDecision, res: ServerResponse): void {
+  const run = () => {
+    if (decision.tuiPgid !== undefined) {
+      try {
+        process.kill(-decision.tuiPgid, "SIGTERM");
+        log(`remote: last session closed — SIGTERM to TUI process group ${decision.tuiPgid}`);
+      } catch (e) {
+        log(
+          `remote: TUI group signal failed ` +
+            `(${e instanceof Error ? e.message : String(e)}) — exiting this bridge instead`,
+        );
+      }
+    }
+    setTimeout(() => process.exit(0), SELF_EXIT_MS);
+  };
+  // 'finish' fires asynchronously after end(), so attaching here never misses.
+  if (res.writableEnded) res.once("finish", run);
+  else run();
+}
+
 async function handleClose(
   server: ZcodeAcpServer,
   req: IncomingMessage,
@@ -48,7 +122,10 @@ async function handleClose(
   // Consume any request body so the client's connection drains cleanly.
   req.resume();
 
-  if (!server.sessionSummaries.has(sessionId)) {
+  // An empty REMOTE-created placeholder (no turn yet) has no summary but IS
+  // advertised by discovery — it must be closable too, or it blocks the
+  // last-close CLI termination forever (advertisedSessionCount never drops).
+  if (!server.sessionSummaries.has(sessionId) && !server.remoteCreatedSessions.has(sessionId)) {
     sendText(res, 404, "unknown session");
     return;
   }
@@ -58,6 +135,7 @@ async function handleClose(
     return;
   }
   server.sessionSummaries.delete(sessionId);
+  server.remoteCreatedSessions.delete(sessionId);
   // Evict the backend's resident runtime so the conversation truly stops (no
   // background turn keeps it alive); the session file stays on disk and
   // session/list / a later resume still work. Best-effort — a bridge with no
@@ -77,7 +155,9 @@ async function handleClose(
     }
   }
   log(`remote: session ${sessionId.slice(0, 8)} closed from remote (discovery retired)`);
+  const terminate = serveTerminateDecision(advertisedSessionCount(server));
   sendJson(res, 200, { ok: true });
+  if (terminate?.terminate) terminateAfterFlush(terminate, res);
 }
 
 /**

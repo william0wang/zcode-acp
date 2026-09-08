@@ -384,6 +384,11 @@ export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.Proces
     ...(env.ZCODE_ACP_TAB_TITLE !== undefined
       ? [`printf '\\033]0;%s\\007' "$ZCODE_ACP_TAB_TITLE"`]
       : []),
+    // $$ survives exec as the cli's pid — and as the terminal's foreground
+    // process-group leader it names the whole TUI tree (cli → martty → bridge).
+    // Remote session-close SIGTERMs this GROUP to tear the window's CLI down
+    // (see session-close-endpoint.ts); a bare pid would orphan the Rust host.
+    `export ZCODE_ACP_TUI_CLI_PID=$$`,
     `exec ${execLine}`,
     "",
   ].join("\n");
@@ -967,6 +972,12 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       ZCODE_ACP_REMOTE_ORIGIN: "serve",
       ZCODE_ACP_REMOTE_PIN_CWD: "1",
     };
+    // The TUI CLI pid names ONE process tree and must never leak across
+    // trees: a hub born inside a TUI (or re-spawned by one of its bridges)
+    // carries it in process.env, and a bridge it later incubates headless
+    // would SIGTERM that UNRELATED tree's process group on its last close.
+    // The terminal script re-exports its own live $$ for real TUI spawns.
+    delete env.ZCODE_ACP_TUI_CLI_PID;
     if (kind === "resume") {
       // ADR-0017: the requested session rides the env — terminalTuiScript
       // exports every ZCODE_ACP_* var into the terminal's fresh shell, so the

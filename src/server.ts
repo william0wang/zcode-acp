@@ -614,6 +614,7 @@ export class ZcodeAcpServer {
   ): Promise<acp.InitializeResponse> {
     const clientInfo = (params.clientInfo as { name?: string; version?: string } | null) ?? null;
     this.clientName = clientInfo?.name ?? null;
+    if (client) this.clients.nameConnection(client, this.clientName ?? "");
     if ((this.clientName ?? "").toLowerCase().includes("martty")) {
       this.marttyClientSeen = true;
       const root = clientConnectionRoot(client);
