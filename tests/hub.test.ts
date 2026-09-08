@@ -774,6 +774,7 @@ describe("hub version self-upgrade", () => {
   it("restarts when a newer bridge registers", async () => {
     let exited = false;
     const hub = await startTestHub({
+      staleVoteCooldownMs: 0,
       onIdleExit: () => {
         exited = true;
       },
@@ -838,15 +839,39 @@ describe("hub fingerprint self-upgrade", () => {
     });
   }
 
-  it("restarts when a bridge with a different (lexically higher) fingerprint registers", async () => {
+  it("NEVER restarts on a differing fingerprint (votes are version-only)", async () => {
+    // Regression (live incident 2026-09-08): a coexisting dist's fingerprint
+    // voted every respawned hub stale — a non-converging ~5s restart churn
+    // that wiped all instances ("sessions flash then disappear"). A hash has
+    // no ordering; it can never prove "newer". Fingerprint comparison lives
+    // in /api/upgrade only (hub vs DISK, self-negating by construction).
     let restarted = false;
     const hub = await startTestHub({
-      hubFingerprint: "aaaa",
+      hubFingerprint: "7d05",
+      staleVoteCooldownMs: 0,
       onRestart: () => {
         restarted = true;
       },
     });
-    const res = await register(hub, { codeFingerprint: "bbbb" });
+    for (const fp of ["bbbb", "aaaa", "fcf69ae4e10f"]) {
+      const res = await register(hub, { codeFingerprint: fp });
+      expect(await res.json()).toEqual({ ok: true });
+    }
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
+  });
+
+  it("restarts for a strictly newer VERSION even when both sides have fingerprints", async () => {
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      staleVoteCooldownMs: 0,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await register(hub, { version: "9999.0.0", codeFingerprint: "bbbb" });
     expect(await res.json()).toEqual({ ok: true, restarting: true });
     await withTimeout(
       new Promise<void>((resolve) => {
@@ -858,45 +883,16 @@ describe("hub fingerprint self-upgrade", () => {
         }, 50);
       }),
       5000,
-      "hub restart onto higher fingerprint",
+      "hub restart onto newer version",
     );
   });
 
-  it("does not ping-pong for a lexically LOWER fingerprint (stable winner)", async () => {
+  it("suppresses newer-bridge votes during the restart cooldown", async () => {
+    // Loop breaker: a hub that just (re)started ignores stale votes for the
+    // cooldown window — a same-age respawn can never be voted into a churn.
     let restarted = false;
     const hub = await startTestHub({
-      hubFingerprint: "bbbb",
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await register(hub, { codeFingerprint: "aaaa" });
-    expect(await res.json()).toEqual({ ok: true });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
-  });
-
-  it("does not restart for an identical fingerprint", async () => {
-    let restarted = false;
-    const hub = await startTestHub({
-      hubFingerprint: "aaaa",
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await register(hub, { codeFingerprint: "aaaa" });
-    expect(await res.json()).toEqual({ ok: true });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
-  });
-
-  it("ignores the version signal once this hub knows its fingerprint", async () => {
-    // A fingerprint-less bridge claiming a huge version must not restart a
-    // fingerprinted hub: the transition case (old bridge vs new hub) is the
-    // /api/upgrade postinstall poke's job, never the register path's.
-    let restarted = false;
-    const hub = await startTestHub({
-      hubFingerprint: "aaaa",
+      staleVoteCooldownMs: 60_000,
       onRestart: () => {
         restarted = true;
       },
@@ -905,6 +901,7 @@ describe("hub fingerprint self-upgrade", () => {
     expect(await res.json()).toEqual({ ok: true });
     await new Promise((r) => setTimeout(r, 800));
     expect(restarted).toBe(false);
+    expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
   });
 });
 
@@ -2206,7 +2203,7 @@ describe("hub instance shutdown", () => {
       5000,
       "dummy bridge exit",
     );
-  });
+  }, 15_000);
 
   it("refuses an editor-origin bridge without a nonce (403)", async () => {
     const hub = await startTestHub();

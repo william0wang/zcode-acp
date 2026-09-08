@@ -141,6 +141,12 @@ export interface HubOptions {
    * the file takes effect without a hub restart.
    */
   terminalLaunches?: TerminalLaunch[];
+  /**
+   * How long after startup the hub ignores newer-bridge stale votes (tests
+   * shrink to 0). Default STALE_VOTE_COOLDOWN_MS — the loop breaker so a
+   * same-age respawn can never be voted into a restart churn.
+   */
+  staleVoteCooldownMs?: number;
 }
 
 export interface HubHandle {
@@ -260,6 +266,13 @@ function validSessions(raw: unknown): SessionSummary[] | null {
 /** How long POST /api/instances waits for the spawned bridge to register. */
 const SERVE_REGISTER_TIMEOUT_MS = 10_000;
 const SERVE_REGISTER_POLL_MS = 300;
+/**
+ * A freshly started hub ignores newer-bridge stale votes for this long —
+ * the loop breaker for a restart that re-spawned a hub of the same age
+ * (the vote would otherwise fire again immediately; at most one restart
+ * per cooldown window).
+ */
+const STALE_VOTE_COOLDOWN_MS = 60_000;
 
 /** Register-origin parser: only "serve" is special; anything else is "editor". */
 function parseOrigin(raw: unknown): "editor" | "serve" {
@@ -909,6 +922,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     stayAliveCheck = () => remoteEnabledLive(),
     spawnServe = defaultSpawnServe,
     terminalLaunches,
+    staleVoteCooldownMs = STALE_VOTE_COOLDOWN_MS,
   } = options;
 
   /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
@@ -1881,39 +1895,35 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         instances.delete(id);
         idleSince = null; // re-arm the idle clock on membership change
       }
-      // Self-upgrade: a bridge running DIFFERENT code than this hub just
-      // registered, so this process is stale. Reply first (the bridge
-      // re-spawns the hub from its own dist when it sees `restarting`), then
-      // exit. Fingerprints are compared when both sides have one — content
-      // cannot lie the way a version frozen from package.json can (a hub
-      // born between a release merge and the dist rebuild). The lexical
-      // tie-break (bridge fp must sort HIGHER) gives coexisting dists on one
-      // machine a stable winner, so two differently-built bridges can never
-      // ping-pong the hub. Bridges without a fingerprint fall back to the
-      // legacy strictly-newer version check.
-      const bridgeFingerprint =
-        typeof body.codeFingerprint === "string" && body.codeFingerprint
-          ? body.codeFingerprint
-          : null;
-      const fingerprintStale =
-        bridgeFingerprint !== null &&
-        hubFingerprint !== null &&
-        bridgeFingerprint !== hubFingerprint &&
-        bridgeFingerprint > hubFingerprint;
-      const versionStale =
-        bridgeFingerprint === null &&
-        hubFingerprint === null &&
-        typeof body.version === "string" &&
-        compareVersions(body.version, AGENT_INFO.version) > 0;
-      const stale = url.pathname === "/api/register" && (fingerprintStale || versionStale);
+      // Self-upgrade: a bridge with a strictly NEWER VERSION just registered,
+      // so this process is stale. Reply first (the bridge re-spawns the hub
+      // from its own dist when it sees `restarting`), then exit.
+      //
+      // Content fingerprints are deliberately NOT a vote signal: a hash has
+      // no ordering (a lexically-higher fingerprint can be OLDER code), and
+      // the hub's respawn source is not guaranteed to be the voting bridge's
+      // dist — differing fingerprints could only ever produce a
+      // non-converging restart loop (observed live: a coexisting dist voted
+      // every respawned hub stale, ~5s churn, all instances wiped).
+      // Fingerprint comparison belongs to /api/upgrade ONLY, where the
+      // comparison target is the DISK a respawn would load — self-negating
+      // by construction.
+      //
+      // Cooldown: a fresh hub ignores stale votes for the first minute. If
+      // the respawn race ever produces another same-age hub, this breaks the
+      // loop — at most one restart per STALE_VOTE_COOLDOWN_MS.
+      const newerVersion =
+        typeof body.version === "string" && compareVersions(body.version, AGENT_INFO.version) > 0;
+      const cooledDown = Date.now() - startedAt > staleVoteCooldownMs;
+      const stale = url.pathname === "/api/register" && newerVersion && cooledDown;
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(stale ? { ok: true, restarting: true } : { ok: true }));
       if (stale) {
         restartSoon(
-          fingerprintStale
-            ? `hub: bridge fingerprint ${bridgeFingerprint!.slice(0, 12)} differs from hub ${hubFingerprint!.slice(0, 12)} — restarting to upgrade`
-            : `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
+          `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
         );
+      } else if (url.pathname === "/api/register" && newerVersion && !cooledDown) {
+        log("hub: newer-bridge vote ignored (restart cooldown after a recent restart)");
       }
       return;
     }
