@@ -53,6 +53,17 @@ export class EventTranslator {
    */
   private skippingBackgroundTurn = false;
   /**
+   * turnId of the user turn this translator owns (from its `turn.started`).
+   * Backend-internal turns (`session/goal` set, `session/compact`) emit their
+   * own turn.started/turn.completed on the SAME session mid-turn: without
+   * attribution, their turn.completed flipped turnDone and the bridge ended
+   * the user's turn while the backend kept generating (the "ghost completed"
+   * remote-status bug). turnId-less backends keep the old behavior (both ids
+   * must be present for a mismatch to drop an event).
+   */
+  private activeTurnId: string | null = null;
+  private skippingForeignTurn = false;
+  /**
    * Backend message ids (`assistantMessageId`) whose content reached this
    * translator via the live event stream. Used by the turn loop to dedup the
    * turn-completion fallback replay: a message already streamed live must not
@@ -100,6 +111,18 @@ export class EventTranslator {
         return results;
       }
       this.skippingBackgroundTurn = false;
+      const turnId = (payload["turnId"] as string) ?? null;
+      if (!this.turnStarted) {
+        this.activeTurnId = turnId;
+        this.skippingForeignTurn = false;
+      } else if (turnId && this.activeTurnId && turnId !== this.activeTurnId) {
+        // A second, different turn started mid-turn: a backend-internal turn
+        // (goal set / compact). Its events belong to that turn — drop them
+        // until it completes and our own turn's events resume.
+        this.skippingForeignTurn = true;
+        log(`  [event] turn.started (foreign turn ${turnId.slice(-8)}) → skipping its events`);
+        return results;
+      }
       this.turnStarted = true;
       log("  [event] turn.started");
     } else if (this.skippingBackgroundTurn) {
@@ -107,15 +130,43 @@ export class EventTranslator {
       // listener handles it). turn.completed/turn.failed for the bg turn also
       // land here and are intentionally NOT used to set turnDone.
       return results;
+    } else if (etype === "turn.completed" || etype === "turn.failed") {
+      const evTurnId = (payload["turnId"] as string) ?? null;
+      if (this.skippingForeignTurn) {
+        // A turn ended while a foreign (internal) turn was in flight. When it
+        // provably belongs to the foreign turn, drop it and resume normal
+        // processing. When it names OUR turn (the user turn can complete
+        // before the internal one), fall through — swallowing it here would
+        // leave turnDone unset and the turn loop waiting out STALE_FREEZE_MS.
+        this.skippingForeignTurn = false;
+        if (!(evTurnId && this.activeTurnId && evTurnId === this.activeTurnId)) {
+          log(`  [event] ${etype} (foreign turn) → ignored`);
+          return results;
+        }
+      }
+      if (evTurnId && this.activeTurnId && evTurnId !== this.activeTurnId) {
+        log(`  [event] ${etype} (turnId mismatch) → ignored`);
+        return results;
+      }
+      if (etype === "turn.completed") {
+        this.turnDone = true;
+        this.turnResultType = (payload["resultType"] as string) ?? "success";
+        results.push(...this.translateTurnDone(payload));
+        log(`  [event] turn.completed (resultType=${this.turnResultType})`);
+      } else {
+        this.turnDone = true;
+        this.turnFailed = true;
+        this.turnError = (payload["error"] as Record<string, unknown>) ?? {};
+        this.turnResultType = (payload["resultType"] as string) ?? "error";
+        const err = this.turnError;
+        warn(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
+      }
+    } else if (this.skippingForeignTurn) {
+      return results;
     } else if (etype === "model.streaming") {
       results.push(...this.translateStreaming(payload));
     } else if (etype === "tool.updated") {
       results.push(...this.translateTool(payload));
-    } else if (etype === "turn.completed") {
-      this.turnDone = true;
-      this.turnResultType = (payload["resultType"] as string) ?? "success";
-      results.push(...this.translateTurnDone(payload));
-      log(`  [event] turn.completed (resultType=${this.turnResultType})`);
     } else if (etype === "session.updated") {
       const usage = (payload["usage"] as Record<string, unknown>) ?? {};
       const used = usage["inputTokens"];
@@ -129,13 +180,6 @@ export class EventTranslator {
       // settings patch — forward the new values so the editor UI follows the
       // switch immediately instead of at the next turn's completion.
       results.push(...this.translateStateUpdated(payload));
-    } else if (etype === "turn.failed") {
-      this.turnDone = true;
-      this.turnFailed = true;
-      this.turnError = (payload["error"] as Record<string, unknown>) ?? {};
-      this.turnResultType = (payload["resultType"] as string) ?? "error";
-      const err = this.turnError;
-      warn(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
     }
     return results;
   }
@@ -154,8 +198,7 @@ export class EventTranslator {
     const mode = (patch["mode"] as Record<string, unknown> | undefined)?.current;
     if (typeof mode === "string") ev.mode = mode;
     const model = (patch["model"] as Record<string, unknown> | undefined)?.current as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
     if (model && typeof model["providerId"] === "string" && typeof model["modelId"] === "string") {
       ev.model = { providerId: model["providerId"], modelId: model["modelId"] };
     }

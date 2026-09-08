@@ -38,7 +38,7 @@ interface ProviderEntry {
   name?: string;
   kind?: string;
   enabled?: boolean;
-  options?: { baseURL?: string; apiKey?: string };
+  options?: { baseURL?: string; apiKey?: string; apiKeyRequired?: boolean };
   models?: ProviderModelsJson;
 }
 
@@ -63,33 +63,57 @@ export interface ModelRef {
 }
 
 /**
- * Collect models from config.json for the dropdown.
+ * Whether a provider entry is selectable in the dropdown — i.e. the desktop
+ * app itself would run it. The desktop marks a provider "未启用" when it has
+ * no usable credentials, and the IDE dropdown must not offer those models
+ * (issue #156): a keyless builtin (API-key mode picked but no key entered) or
+ * a keyless remote custom provider can never authenticate.
  *
- * Builtin providers (id prefix `builtin:`) must be `enabled: true` — they
- * reflect the plans the user activated in the ZCode desktop app. Custom
- * (third-party) providers are included UNLESS explicitly `enabled: false`:
- * the newer CLI leaves the flag unset on active third-party providers, so
- * treating "absent" as enabled keeps them in the dropdown while still
- * honoring an explicit disable.
+ *   - builtin: requires `enabled: true` AND a credential (plan token / key).
+ *   - custom: excluded on explicit `enabled: false`; otherwise must be
+ *     usable — has an apiKey, declares keys not required, or points at a
+ *     local baseURL (llama.cpp/ollama-style providers work keyless).
+ */
+function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
+  if (!p) return false;
+  if (isBuiltinProvider(pid)) return p.enabled === true && Boolean(p.options?.apiKey);
+  if (p.enabled === false) return false;
+  if (p.options?.apiKey) return true;
+  if (p.options?.apiKeyRequired === false) return true;
+  return isLocalBaseURL(p.options?.baseURL);
+}
+
+/** localhost-style baseURL (llama.cpp / Ollama / LM Studio run keyless). */
+function isLocalBaseURL(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Collect models from config.json for the dropdown.
  */
 export function loadAllModels(): ModelRef[] {
   try {
     const cfg = readConfig() as ConfigShape;
     const out: ModelRef[] = [];
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
-      if (isBuiltinProvider(pid)) {
-        if (p?.enabled !== true) continue;
-      } else if (p?.enabled === false) {
-        continue;
-      }
+      if (!providerSelectable(pid, p)) continue;
       const providerName = p.name ?? pid;
       for (const modelId of Object.keys(p.models ?? {})) {
         out.push({ providerId: pid, providerName, modelId });
       }
     }
-    if (out.length === 0) {
-      // Fallback: config unreadable or no enabled provider — keep the legacy
-      // default so a freshly-installed editor still shows something.
+    // The default-provider fallback applies only to a MISSING/empty provider
+    // map (fresh install). When providers ARE configured but none is usable
+    // (all keyless/未启用, #156), returning [] is correct: the fallback would
+    // re-advertise exactly the unusable provider — or one absent from the
+    // user's config — and switching to it fails in applyModelSwitch.
+    if (out.length === 0 && Object.keys(cfg.provider ?? {}).length === 0) {
       return [
         {
           providerId: DEFAULT_PROVIDER_ID,

@@ -282,9 +282,17 @@ function parseOrigin(raw: unknown): "editor" | "serve" {
 /**
  * The TUI-in-a-terminal incubation budget (ADR-0016): a visible terminal
  * adds a GUI round-trip (Terminal app launch, TUI boot, its bridge child)
- * ahead of the hub registration — double the headless budget.
+ * ahead of the hub registration. Terminals normally register in a couple of
+ * seconds; a cold GUI start still fits inside 10s.
  */
-const TUI_REGISTER_TIMEOUT_MS = 20_000;
+const TUI_REGISTER_TIMEOUT_MS = 10_000;
+/**
+ * Budget for fallback attempts AFTER the first terminal preference (next
+ * preference, headless rescue): half the first budget. A terminal that has
+ * already failed once is a fallback — making the user wait the full budget
+ * again per preference turned a broken first choice into a 3×20s stall.
+ */
+const TUI_RETRY_BUDGET_MS = TUI_REGISTER_TIMEOUT_MS / 2;
 /** `open -a <terminal>` must answer fast or the incubation falls back. */
 const TERMINAL_OPEN_TIMEOUT_MS = 3_000;
 /**
@@ -1195,7 +1203,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           );
           const next = await openNextTerminal();
           if (next) {
-            deadline = Date.now() + budget;
+            deadline = Date.now() + Math.max(1_000, Math.min(budget, TUI_RETRY_BUDGET_MS));
             continue;
           }
         }
@@ -1224,7 +1232,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
             );
             throw new Error("serve bridge did not register in time");
           }
-          deadline = Date.now() + budget;
+          deadline = Date.now() + Math.max(1_000, Math.min(budget, TUI_RETRY_BUDGET_MS));
           continue;
         }
         warn(`hub: serve bridge for ${workspacePath} never registered`);

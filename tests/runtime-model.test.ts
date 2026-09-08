@@ -3,10 +3,11 @@
  *
  * History: loadProviderModels() hardcoded a single builtin provider id, so
  * custom providers configured in the ZCode desktop app never appeared in the
- * dropdown. These tests lock the new behaviour: loadAllModels() aggregates ALL
- * enabled builtin providers PLUS every custom provider (the newer CLI no
- * longer sets `enabled` on third-party providers, so filtering on it would
- * drop them), buildRuntimeModel() inlines apiKey as {source:"inline",value}
+ * dropdown. These tests lock the new behaviour: loadAllModels() aggregates
+ * enabled builtin providers (which must carry a credential — a keyless one is
+ * "未启用" in the desktop, #156) PLUS custom providers that are usable (not
+ * explicitly disabled, and either credentialed or local/keyless-optional),
+ * buildRuntimeModel() inlines apiKey as {source:"inline",value}
  * for third-party providers (the backend resolves model-call auth from the
  * overlay itself; omitting it yields HTTP 401) but omits it for builtins.
  * Builtin models encode as bare modelIds, and third-party models carry their
@@ -17,14 +18,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ZCODE_CREDS_PATH } from "../src/utils.js";
 
-/** Fake config.json with one builtin (OAuth, no apiKey) + one custom (apiKey). */
+/**
+ * Fake config.json. Enabled builtins carry their plan token in options.apiKey
+ * (the desktop's own storage shape — a keyless builtin is "未启用" there and
+ * must not reach the IDE dropdown, issue #156).
+ */
 const FAKE_CONFIG = {
   provider: {
     "builtin:primary": {
       name: "Primary",
       kind: "anthropic",
       enabled: true,
-      options: { baseURL: "https://example.test/api" },
+      options: { baseURL: "https://example.test/api", apiKey: "plan-token" },
       models: {
         "model-a": { limit: { context: 1000000 } },
         "model-b": { limit: { context: 200000 } },
@@ -36,6 +41,13 @@ const FAKE_CONFIG = {
       enabled: false,
       options: { baseURL: "https://example.test/api2" },
       models: { "model-a": { limit: { context: 1000000 } } },
+    },
+    "builtin:bigmodel": {
+      name: "BigModel",
+      kind: "anthropic",
+      enabled: true,
+      options: { baseURL: "https://open.bigmodel.cn/api/anthropic" },
+      models: { "bg-1": { limit: { context: 128000 } } },
     },
     "custom-provider-alpha": {
       name: "Alpha",
@@ -65,15 +77,39 @@ const FAKE_CONFIG = {
       options: { apiKey: "test-key-gamma", baseURL: "http://127.0.0.1:8001/v1" },
       models: { "gamma-1": { limit: { context: 200000 } } },
     },
+    "custom-provider-remote-keyless": {
+      name: "RemoteKeyless",
+      kind: "anthropic",
+      source: "custom",
+      options: { baseURL: "https://api.example.test/v1" },
+      models: { "rk-1": { limit: { context: 200000 } } },
+    },
+    "custom-provider-required-keyless": {
+      name: "RequiredKeyless",
+      kind: "anthropic",
+      source: "custom",
+      options: { apiKeyRequired: true, baseURL: "https://api2.example.test/v1" },
+      models: { "req-1": { limit: { context: 200000 } } },
+    },
+    "custom-provider-local": {
+      name: "LocalLlama",
+      kind: "openai-compatible",
+      source: "custom",
+      options: { baseURL: "http://127.0.0.1:8080/v1" },
+      models: { "llama-x": { limit: { context: 32000 } } },
+    },
   },
 };
+
+/** Swapped by tests that need a different config.json (see #156 fallback). */
+let fakeConfig: unknown = FAKE_CONFIG;
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
     ...actual,
     readFileSync: (p: string) => {
-      if (p === ZCODE_CREDS_PATH) return JSON.stringify(FAKE_CONFIG);
+      if (p === ZCODE_CREDS_PATH) return JSON.stringify(fakeConfig);
       return actual.readFileSync(p);
     },
   };
@@ -102,6 +138,44 @@ describe("loadAllModels", () => {
     expect(ids).toContain("beta-1");
     // gamma-1 (custom with an EXPLICIT enabled:false) is excluded.
     expect(ids).not.toContain("gamma-1");
+  });
+
+  it("excludes providers the desktop marks 未启用 for missing credentials (#156)", () => {
+    const ids = loadAllModels().map((m) => m.modelId);
+    // Keyless builtin (API-key mode picked, no key entered) — excluded even
+    // though enabled:true; it can never authenticate.
+    expect(ids).not.toContain("bg-1");
+    // Keyless REMOTE custom provider — no credentials, remote baseURL.
+    expect(ids).not.toContain("rk-1");
+    // apiKeyRequired:true without a key — explicitly unusable.
+    expect(ids).not.toContain("req-1");
+    // Keyless LOCAL provider (llama.cpp/ollama style) stays selectable.
+    expect(ids).toContain("llama-x");
+    // The credentialed builtin is still there.
+    expect(ids).toContain("model-a");
+  });
+
+  it("returns [] when every configured provider is unusable (no default leak, #156)", () => {
+    // Review finding: the old empty-list fallback re-advertised the very
+    // unusable provider (or one absent from the user's config). With
+    // providers configured, [] is the honest answer; the default fallback
+    // applies only to a fresh install with NO provider map.
+    fakeConfig = {
+      provider: {
+        "builtin:zai-coding-plan": {
+          name: "ZAI",
+          kind: "anthropic",
+          enabled: true,
+          options: { apiKeyRequired: true, baseURL: "https://api.z.ai/api" },
+          models: { "GLM-5.3": {} },
+        },
+      },
+    };
+    try {
+      expect(loadAllModels()).toEqual([]);
+    } finally {
+      fakeConfig = FAKE_CONFIG;
+    }
   });
 
   it("tracks provider identity for every custom provider", () => {

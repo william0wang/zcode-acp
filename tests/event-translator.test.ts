@@ -370,3 +370,66 @@ describe("EventTranslator run_in_background flag threading", () => {
     expect(u.background).toBeUndefined();
   });
 });
+
+describe("EventTranslator foreign internal-turn attribution", () => {
+  it("ignores a goal/compact internal turn started mid-turn (ghost-completed bug)", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    // session/goal(set) starts a backend-internal turn on the same session.
+    expect(t.translate(ev("turn.started", { turnId: "turn_goal" }))).toEqual([]);
+    // Its output and terminal event MUST NOT touch this translator's state.
+    expect(t.translate(ev("model.streaming", { kind: "text_delta", delta: "goal ack" }))).toEqual(
+      [],
+    );
+    expect(
+      t.translate(ev("turn.completed", { turnId: "turn_goal", resultType: "success" })),
+    ).toEqual([]);
+    expect(t.turnDone).toBe(false);
+    // The user's own turn completes normally afterwards.
+    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+  });
+
+  it("drops a mismatched turn.completed even without a foreign turn.started", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    t.translate(ev("turn.completed", { turnId: "turn_other", resultType: "success" }));
+    expect(t.turnDone).toBe(false);
+    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+  });
+
+  it("drops a mismatched turn.failed too", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    t.translate(ev("turn.failed", { turnId: "turn_goal", error: { code: "x" } }));
+    expect(t.turnFailed).toBe(false);
+    expect(t.turnDone).toBe(false);
+  });
+
+  it("keeps legacy behavior when turnId is absent (old backends)", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}));
+    t.translate(ev("turn.completed", { resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+  });
+
+  it("accepts a turn.completed matching the active turnId", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    const out = t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+    expect(out).toEqual([{ kind: "UsageDelta", used: 0, size: 0 }]);
+  });
+
+  it("processes OUR turn.completed even while a foreign turn is still in flight", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    t.translate(ev("turn.started", { turnId: "turn_goal" })); // foreign, skipping
+    // The user turn completes FIRST (goal turn still running) — its terminal
+    // event must NOT be swallowed as foreign, else the turn loop hangs until
+    // the STALE_FREEZE_MS backstop.
+    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+  });
+});

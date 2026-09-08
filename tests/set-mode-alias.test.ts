@@ -23,7 +23,7 @@ const FAKE_CONFIG = {
       name: "GLM Coding Plan",
       kind: "anthropic",
       enabled: true,
-      options: { baseURL: "https://example.test/api" },
+      options: { baseURL: "https://example.test/api", apiKey: "plan-token" },
       models: {
         "GLM-5.3": { limit: { context: 1000000 }, reasoning: { variants: ["low", "high", "max"] } },
       },
@@ -114,7 +114,10 @@ describe("setMode param normalization", () => {
     const { cx, sent } = mockContext();
     await setMode(server, { sessionId: "sess_acp", modeId: "build" }, cx);
     const modeUpdate = sent.find((u) => u.sessionUpdate === "current_mode_update");
-    expect(modeUpdate).toMatchObject({ sessionUpdate: "current_mode_update", currentModeId: "build" });
+    expect(modeUpdate).toMatchObject({
+      sessionUpdate: "current_mode_update",
+      currentModeId: "build",
+    });
   });
 
   it("missing both mode and modeId is rejected", async () => {
