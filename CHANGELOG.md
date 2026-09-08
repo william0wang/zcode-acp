@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0](https://github.com/william0wang/zcode-acp/compare/v0.29.0...v0.30.0) (2026-09-08)
+
+
+### Features
+
+* **remote:** terminate serve-origin CLI on last close and list skill commands per client ([#159](https://github.com/william0wang/zcode-acp/issues/159)) ([a728a5c](https://github.com/william0wang/zcode-acp/commit/a728a5c7eb0b1f30db681416e39f3fb4cf2207e3))
+
 ## [0.29.0](https://github.com/william0wang/zcode-acp/compare/v0.28.1...v0.29.0) (2026-09-08)
 
 
