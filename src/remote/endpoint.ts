@@ -34,6 +34,7 @@ import { createSessionCloseHandler } from "./session-close-endpoint.js";
 import { createSessionListHandler } from "./session-list-endpoint.js";
 import { createSessionRenameHandler } from "./session-rename-endpoint.js";
 import { createStatusHandler, runningZcodeSids, type SessionRunStatus } from "./status-endpoint.js";
+import { readCodeFingerprint } from "./code-fingerprint.js";
 import type { RemoteConfig } from "./config.js";
 
 /** One heartbeat/discovery session entry (ADR-0005 adds `status`). */
@@ -282,6 +283,8 @@ export async function startRemoteEndpoint(
   // Last non-2xx/non-401 register status we warned about (once per stretch).
   let unexpectedStatus: number | null = null;
   let spawnThrottledUntil = 0;
+  // Frozen at bridge start: what this process actually runs (see payload).
+  const bridgeFingerprint = readCodeFingerprint();
 
   const payload = (sessions: AdvertisedSession[]) => ({
     token: config.token,
@@ -301,6 +304,10 @@ export async function startRemoteEndpoint(
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,
+    // Content fingerprint of the dist this bridge runs from — the honest
+    // staleness signal (versions can lie across a release-merge/rebuild
+    // window). Absent when running from src or a pre-fingerprint build.
+    ...(bridgeFingerprint ? { codeFingerprint: bridgeFingerprint } : {}),
   });
 
   const spawnHub = (): void => {

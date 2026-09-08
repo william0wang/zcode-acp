@@ -17,6 +17,17 @@ export default [
   },
   js.configs.recommended,
   {
+    // Node build scripts (plain .mjs, not compiled): node globals only.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        process: "readonly",
+        URL: "readonly",
+      },
+    },
+  },
+  {
     files: ["src/**/*.ts", "tests/**/*.ts"],
     languageOptions: {
       parser: tsparser,

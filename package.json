@@ -36,7 +36,7 @@
     "docs"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/write-code-fingerprint.mjs && node dist/remote/hub-upgrade-notify.js",
     "dev": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -45,7 +45,8 @@
     "lint": "eslint .",
     "smoke": "node dist/index.js < /dev/null",
     "smoke:tui": "node dist/cli.js tui --check",
-    "prepublishOnly": "pnpm run build && pnpm run test"
+    "prepublishOnly": "pnpm run build && pnpm run test",
+    "postinstall": "node dist/remote/hub-upgrade-notify.js 2>/dev/null || true"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",

@@ -829,6 +829,85 @@ describe("hub version self-upgrade", () => {
   });
 });
 
+describe("hub fingerprint self-upgrade", () => {
+  async function register(hub: HubHandle, body: Record<string, unknown>): Promise<Response> {
+    return fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody(body)),
+    });
+  }
+
+  it("restarts when a bridge with a different (lexically higher) fingerprint registers", async () => {
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await register(hub, { codeFingerprint: "bbbb" });
+    expect(await res.json()).toEqual({ ok: true, restarting: true });
+    await withTimeout(
+      new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (restarted) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 50);
+      }),
+      5000,
+      "hub restart onto higher fingerprint",
+    );
+  });
+
+  it("does not ping-pong for a lexically LOWER fingerprint (stable winner)", async () => {
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "bbbb",
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await register(hub, { codeFingerprint: "aaaa" });
+    expect(await res.json()).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+  });
+
+  it("does not restart for an identical fingerprint", async () => {
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await register(hub, { codeFingerprint: "aaaa" });
+    expect(await res.json()).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+  });
+
+  it("ignores the version signal once this hub knows its fingerprint", async () => {
+    // A fingerprint-less bridge claiming a huge version must not restart a
+    // fingerprinted hub: the transition case (old bridge vs new hub) is the
+    // /api/upgrade postinstall poke's job, never the register path's.
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await register(hub, { version: "9999.0.0" });
+    expect(await res.json()).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
+  });
+});
+
 describe("hub /api/upgrade (self-decided restart)", () => {
   const upgradeUrl = (hub: HubHandle) => `http://127.0.0.1:${hub.port}/api/upgrade`;
   const auth = { Authorization: `Bearer ${TOKEN}` };
@@ -932,6 +1011,46 @@ describe("hub /api/upgrade (self-decided restart)", () => {
       diskVersion: "9999.0.0",
     });
     await until(() => restarted, "hub restart onto newer version");
+  });
+
+  it("restarts onto a different on-disk fingerprint (same version, no mtime change)", async () => {
+    const paths = await writeCodeFixture(AGENT_INFO.version);
+    await writeFile(
+      path.join(paths.distDir, "code-fingerprint.json"),
+      JSON.stringify({ fingerprint: "cccc", fileCount: 1 }),
+    );
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ restarting: true, reason: "fingerprint" });
+    await until(() => restarted, "hub restart onto different fingerprint");
+  });
+
+  it("stays put when the on-disk fingerprint matches (mtime skew irrelevant)", async () => {
+    const paths = await writeCodeFixture(AGENT_INFO.version);
+    await writeFile(
+      path.join(paths.distDir, "code-fingerprint.json"),
+      JSON.stringify({ fingerprint: "aaaa", fileCount: 1 }),
+    );
+    let restarted = false;
+    const hub = await startTestHub({
+      hubFingerprint: "aaaa",
+      codePaths: paths,
+      onRestart: () => {
+        restarted = true;
+      },
+    });
+    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
+    expect(await res.json()).toMatchObject({ restarting: false, reason: "up-to-date" });
+    await new Promise((r) => setTimeout(r, 800));
+    expect(restarted).toBe(false);
   });
 
   it("restarts when dist was rebuilt without a version bump", async () => {

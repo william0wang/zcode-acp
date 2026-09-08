@@ -60,6 +60,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
+import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
@@ -96,6 +97,12 @@ export interface HubOptions {
    * directory this module runs from.
    */
   codePaths?: { packageJson: string; distDir: string };
+  /**
+   * Override the frozen content fingerprint this hub compares bridges and
+   * /api/upgrade against (tests inject fixtures). Default: read from the
+   * code-fingerprint.json next to this module's dist root; null in dev/src.
+   */
+  hubFingerprint?: string | null;
   /**
    * Override where the remote session-create endpoints read the known-project
    * whitelist from (tests point this at a fixture sqlite). Default: the App's
@@ -807,20 +814,31 @@ async function newestJsMtime(dir: string): Promise<number | null> {
 
 /**
  * /api/upgrade staleness check: is the code on DISK newer than this running
- * process? Either signal suffices — the on-disk package.json version beats
- * the version frozen into this process at start (a release upgrade), or any
- * .js under dist was written after process start (a rebuild, even without a
- * version bump). A respawned process starts after the newest dist mtime, so
- * the condition self-negates: no restart loops.
+ * process? The content fingerprint is checked FIRST — a hub that knows its
+ * own fingerprint restarts onto any differently-fingerprinted disk build
+ * (deterministic; version numbers can lie across a release-merge/rebuild
+ * window and mtimes can be preserved or skewed). Legacy signals follow for
+ * fingerprint-less processes: the on-disk package.json version beats the
+ * version frozen into this process at start (a release upgrade), or any .js
+ * under dist was written after process start (a rebuild, even without a
+ * version bump). A respawned process re-reads the same disk, so every
+ * condition self-negates: no restart loops.
  */
 async function diskCodeIsNewer(
   paths: { packageJson: string; distDir: string },
   startedAt: number,
+  runningFingerprint: string | null,
 ): Promise<{
   newer: boolean;
-  reason: "version" | "mtime" | "up-to-date";
+  reason: "fingerprint" | "version" | "mtime" | "up-to-date";
   diskVersion: string | null;
 }> {
+  if (runningFingerprint) {
+    const diskFingerprint = readCodeFingerprint(paths.distDir);
+    if (diskFingerprint && diskFingerprint !== runningFingerprint) {
+      return { newer: true, reason: "fingerprint", diskVersion: null };
+    }
+  }
   let diskVersion: string | null = null;
   try {
     const pkg = JSON.parse(await readFile(paths.packageJson, "utf8")) as { version?: unknown };
@@ -861,6 +879,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
 
   /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
   const startedAt = Date.now();
+  /**
+   * Frozen at hub start — the CONTENT anchor both staleness checks compare
+   * against (/api/upgrade vs disk, /api/register vs each bridge). Null when
+   * this process runs from src or a pre-fingerprint build; callers then fall
+   * back to version/mtime signals.
+   */
+  const hubFingerprint =
+    options.hubFingerprint !== undefined ? options.hubFingerprint : readCodeFingerprint();
 
   const instances = new Map<string, InstanceEntry>();
   const proxyPairs = new Set<{ client: WebSocket; bridge: WebSocket }>();
@@ -1504,7 +1530,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.end("unauthorized");
         return;
       }
-      const check = await diskCodeIsNewer(codePaths, startedAt);
+      const check = await diskCodeIsNewer(codePaths, startedAt, hubFingerprint);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(
         JSON.stringify({
@@ -1711,19 +1737,38 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         instances.delete(id);
         idleSince = null; // re-arm the idle clock on membership change
       }
-      // Version self-upgrade: a bridge NEWER than this hub just registered,
-      // so this process is running stale code. Reply first (the bridge
-      // re-spawns the hub from its own, newer dist when it sees `restarting`),
-      // then exit. Equal/older/absent versions never trigger a restart.
-      const stale =
-        url.pathname === "/api/register" &&
+      // Self-upgrade: a bridge running DIFFERENT code than this hub just
+      // registered, so this process is stale. Reply first (the bridge
+      // re-spawns the hub from its own dist when it sees `restarting`), then
+      // exit. Fingerprints are compared when both sides have one — content
+      // cannot lie the way a version frozen from package.json can (a hub
+      // born between a release merge and the dist rebuild). The lexical
+      // tie-break (bridge fp must sort HIGHER) gives coexisting dists on one
+      // machine a stable winner, so two differently-built bridges can never
+      // ping-pong the hub. Bridges without a fingerprint fall back to the
+      // legacy strictly-newer version check.
+      const bridgeFingerprint =
+        typeof body.codeFingerprint === "string" && body.codeFingerprint
+          ? body.codeFingerprint
+          : null;
+      const fingerprintStale =
+        bridgeFingerprint !== null &&
+        hubFingerprint !== null &&
+        bridgeFingerprint !== hubFingerprint &&
+        bridgeFingerprint > hubFingerprint;
+      const versionStale =
+        bridgeFingerprint === null &&
+        hubFingerprint === null &&
         typeof body.version === "string" &&
         compareVersions(body.version, AGENT_INFO.version) > 0;
+      const stale = url.pathname === "/api/register" && (fingerprintStale || versionStale);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(stale ? { ok: true, restarting: true } : { ok: true }));
       if (stale) {
         restartSoon(
-          `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
+          fingerprintStale
+            ? `hub: bridge fingerprint ${bridgeFingerprint!.slice(0, 12)} differs from hub ${hubFingerprint!.slice(0, 12)} — restarting to upgrade`
+            : `hub: bridge ${body.version} is newer than hub ${AGENT_INFO.version} — restarting to upgrade`,
         );
       }
       return;
