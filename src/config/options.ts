@@ -22,7 +22,7 @@ import {
   ZCODE_CREDS_PATH,
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { sendSessionUpdate } from "../handlers/io.js";
+import { sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -421,6 +421,10 @@ export async function setConfigOption(
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.
  *  Returns the rebuilt options so the caller can include them in the response.
  *
+ *  Every payload is ALSO broadcast to the other attached clients (the CLI
+ *  window when the switch came from the phone, and vice versa) — a settings
+ *  change is per-session state, not per-connection.
+ *
  *  For model switches, also emit a usage_update with the NEW model's context
  *  window (from config.json) so the editor's context bar refreshes immediately
  *  instead of waiting for the next turn's UsageDelta. */
@@ -432,16 +436,20 @@ export async function emitConfigOptionUpdate(
   kind: "model" | "mode" | "thought",
 ): Promise<acp.SessionConfigOption[]> {
   const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-  await sendSessionUpdate(cx, acpSid, {
+  const configUpdate: acp.SessionUpdate = {
     sessionUpdate: "config_option_update",
     configOptions: options,
-  });
+  };
+  await sendSessionUpdate(cx, acpSid, configUpdate);
+  sendSessionUpdateToOthers(server, cx, acpSid, configUpdate);
   if (kind === "mode") {
     const modes = await buildModes(server, zcodeSid);
-    await sendSessionUpdate(cx, acpSid, {
+    const modeUpdate: acp.SessionUpdate = {
       sessionUpdate: "current_mode_update",
       currentModeId: modes.currentModeId,
-    });
+    };
+    await sendSessionUpdate(cx, acpSid, modeUpdate);
+    sendSessionUpdateToOthers(server, cx, acpSid, modeUpdate);
   }
   if (kind === "model") {
     // Refresh the context bar: the backend's projection.contextWindow lags
@@ -457,11 +465,13 @@ export async function emitConfigOptionUpdate(
       const modelOpt = options.find((o) => o.id === "model");
       const { providerId, modelId } = parseModelValue(String(modelOpt?.currentValue ?? ""));
       const size = modelContextWindow(providerId, modelId);
-      await sendSessionUpdate(cx, acpSid, {
+      const usageUpdate: acp.SessionUpdate = {
         sessionUpdate: "usage_update",
         used,
         size,
-      });
+      };
+      await sendSessionUpdate(cx, acpSid, usageUpdate);
+      sendSessionUpdateToOthers(server, cx, acpSid, usageUpdate);
     } catch (e) {
       log(
         `options: usage_update after model switch failed (${e instanceof Error ? e.message : String(e)})`,

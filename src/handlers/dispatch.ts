@@ -27,7 +27,7 @@ import { messages } from "../i18n.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { clientConnectionRoot, warn } from "../utils.js";
-import { sendSessionUpdate } from "./io.js";
+import { sendSessionUpdate, sendSessionUpdateToOthers } from "./io.js";
 
 /** True once the EPERM hint fired for this process — throttled to one shot. */
 let sandboxEpermHinted = false;
@@ -148,18 +148,24 @@ async function dispatchConfigChanged(
     }
     if (ev.mode !== undefined) setById("mode", ev.mode);
     if (ev.thought !== undefined) setById("thought", ev.thought);
-    await sendSessionUpdate(cx, acpSid, {
+    const configUpdate: acp.SessionUpdate = {
       sessionUpdate: "config_option_update",
       configOptions: options,
-    });
+    };
+    await sendSessionUpdate(cx, acpSid, configUpdate);
+    // Settings are per-session: the CLI's /model or the phone's dropdown must
+    // reach every OTHER attached client too.
+    sendSessionUpdateToOthers(server, cx, acpSid, configUpdate);
     if (ev.mode !== undefined) {
       // Mirror the advertised mode so turn-completion reconciliation
       // (emitModeIfChanged) doesn't re-emit the same value.
       server.lastMode.set(acpSid, ev.mode);
-      await sendSessionUpdate(cx, acpSid, {
+      const modeUpdate: acp.SessionUpdate = {
         sessionUpdate: "current_mode_update",
         currentModeId: ev.mode,
-      });
+      };
+      await sendSessionUpdate(cx, acpSid, modeUpdate);
+      sendSessionUpdateToOthers(server, cx, acpSid, modeUpdate);
     }
   } catch (e) {
     warn(`dispatch: ConfigChanged failed (${e instanceof Error ? e.message : String(e)})`);

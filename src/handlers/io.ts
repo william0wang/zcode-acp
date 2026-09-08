@@ -154,6 +154,39 @@ export function echoUserPromptToOthers(
   });
 }
 
+/**
+ * Push a `session/update` to every OTHER attached client (the prompter's
+ * connection excluded). Session settings are per-SESSION, not per-connection:
+ * a model/mode switch made from the phone must reach the CLI window and vice
+ * versa — a cx-addressed send alone leaves every other view stale. Same
+ * alias fan-out as the prompt echo (clients may hold the conversation under
+ * different ids). Fire-and-forget; failures warn, never throw.
+ */
+export function sendSessionUpdateToOthers(
+  server: ZcodeAcpServer,
+  source: acp.AgentContext,
+  sessionId: string,
+  update: acp.SessionUpdate,
+): void {
+  void enqueueSessionSend(sessionId, async () => {
+    const results = await Promise.allSettled(
+      server
+        .sessionAliases(sessionId)
+        .map((sid) =>
+          server.clients.notifyOthers(source, "session/update", { sessionId: sid, update }),
+        ),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        warn(
+          `update broadcast failed (sid=${sessionId}): ` +
+            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
+  });
+}
+
 /** Shape of a slash command entry (matches ACP's AvailableCommand). */
 interface SlashCommandEntry {
   name: string;
