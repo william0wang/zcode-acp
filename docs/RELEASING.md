@@ -11,7 +11,8 @@ version bumps, no npm token.
    patch, `feat!:` or `BREAKING CHANGE:` footer → major). Squash-merge PRs
    with a conventional title, or the change is invisible to release-please.
 2. release-please opens or updates a `chore(main): release X.Y.Z` PR
-   (version bump in `package.json` + `CHANGELOG.md` entry). It rewrites
+   (version bump in `package.json` + `CHANGELOG.md` entry; it also re-stamps
+   the `&v=X.Y.Z` cache-buster on the README contributors image). It rewrites
    itself as more commits land.
 3. Merge that PR. The `Release` workflow (`.github/workflows/release.yml`)
    tags `vX.Y.Z`, creates the GitHub Release, then builds, runs the test
