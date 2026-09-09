@@ -582,3 +582,28 @@ describe("verification verdict via file (regression: verbose replies looped fore
     expect(runOneTurn).toHaveBeenCalledTimes(4);
   });
 });
+
+describe("verify prose-fallback guards (review: negation + stale dispatch text)", () => {
+  it("parseVerifyReply rejects negated pass statements", () => {
+    expect(parseVerifyReply("2 of 5 checks did not pass")).toBeNull();
+    expect(parseVerifyReply("I couldn't make the lint pass")).toBeNull();
+    expect(parseVerifyReply("tests fail to pass on node 22")).toBeNull();
+    expect(parseVerifyReply("All checks pass.")).toEqual({ pass: true });
+    expect(parseVerifyReply("re-ran everything; it passed")).toEqual({ pass: true });
+  });
+
+  it("never verifies from the dispatch reply's own pass wording", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    // Dispatch reply contains an affirmative "made the tests pass" — the
+    // verify turn replies bare DONE and writes NO file: the stale text must
+    // not count, so the loop goes strict-retry → pause, not done.
+    scriptRound("made the tests pass\nVERDICT: met");
+    scriptRound("DONE");
+    scriptRound("still nothing useful");
+    const driver = await startLoop(server);
+    await vi.waitFor(() => expect(driver.state.status).toBe("paused"));
+    expect(driver.state.endedReason).toBe("verification unreadable");
+    expect(driver.state.tickets[0]!.status).toBe("pending");
+  });
+});

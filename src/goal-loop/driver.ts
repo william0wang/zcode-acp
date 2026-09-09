@@ -316,11 +316,11 @@ export class GoalLoopDriver {
     preemptInFlightTurn(this.server, this.zcodeSid, "");
   }
 
-  /** Text of the last assistant reply (verdict parsing input). */
-  private async lastAssistantText(): Promise<string> {
+  /** Text of the last assistant reply at or after `since` (verdict parsing input). */
+  private async lastAssistantText(since = 0): Promise<string> {
     const { fetchMessages } = await import("../handlers/replay.js");
     const msgs = await fetchMessages(this.server, this.zcodeSid);
-    for (let i = msgs.length - 1; i >= 0; i--) {
+    for (let i = msgs.length - 1; i >= Math.min(since, msgs.length); i--) {
       const m = msgs[i]!;
       if (m.info.role !== "assistant") continue;
       const text = m.parts
@@ -530,6 +530,10 @@ export class GoalLoopDriver {
         } catch {
           /* absent — fine */
         }
+        // Prose fallback reads ONLY messages appended by the verify turn: a
+        // walk-back into the dispatch reply would let the worker's own "made
+        // the tests pass" verify its own work.
+        const vBefore = await this.messageCount();
         const vRes = await this.runGoalTurn(verifyPrompt(ticket, vPath));
         if (this.runId !== myRun) return;
         if (vRes.stopReason === "cancelled") {
@@ -540,7 +544,7 @@ export class GoalLoopDriver {
           }
           return void (await this.endLoop("paused", "cancelled"));
         }
-        let v = readVerify() ?? parseVerifyReply(await this.lastAssistantText());
+        let v = readVerify() ?? parseVerifyReply(await this.lastAssistantText(vBefore));
         if (!v) {
           const rRes = await this.runGoalTurn(strictVerifyPrompt(ticket, vPath));
           if (this.runId !== myRun) return;
@@ -552,7 +556,7 @@ export class GoalLoopDriver {
             }
             return void (await this.endLoop("paused", "cancelled"));
           }
-          v = readVerify() ?? parseVerifyReply(await this.lastAssistantText());
+          v = readVerify() ?? parseVerifyReply(await this.lastAssistantText(vBefore));
         }
         if (!v) {
           // Still unreadable: pause for the user instead of looping or

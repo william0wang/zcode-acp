@@ -155,13 +155,19 @@ export function parseVerifyFile(content: string): { pass: boolean; reason?: stri
 
 /**
  * Parse the verification reply (fallback when no verdict file was written).
- * Explicit "FAIL:" wins; otherwise any pass/passed mention counts.
+ * Explicit "FAIL:" wins; otherwise any affirmative pass/passed mention counts.
+ * Negated statements ("2 of 5 checks did not pass", "couldn't make lint pass")
+ * read as null — the safe path (strict retry → pause), never a silent PASS.
  */
 export function parseVerifyReply(reply: string): { pass: boolean; reason?: string } | null {
   const text = reply.trim();
   const m = /fail\s*:\s*(.+)/is.exec(text);
   if (m) return { pass: false, reason: m[1]!.trim().slice(0, 400) };
-  if (/\bpass(ed)?\b/i.test(text)) return { pass: true };
+  const negated =
+    /\b(not|never|cannot|can't|couldn't|didn't|doesn't|won't|fails?|failed|failing|unable)\b[^\n.]*?\bpass(ed)?\b/i
+      .test(text) ||
+    /\bpass(ed)?\b[^\n.]*?\b(not|never|cannot)\b/i.test(text);
+  if (!negated && /\bpass(ed)?\b/i.test(text)) return { pass: true };
   return null;
 }
 
