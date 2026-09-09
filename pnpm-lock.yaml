@@ -12,8 +12,8 @@ importers:
         specifier: ^1.3.0
         version: 1.3.0(zod@3.25.76)
       martty:
-        specifier: ^0.2.34
-        version: 0.2.35
+        specifier: ^0.2.36
+        version: 0.2.36
       ws:
         specifier: ^8.21.3
         version: 8.21.3
@@ -797,8 +797,8 @@ packages:
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
-  martty@0.2.35:
-    resolution: {integrity: sha512-dfgAb4CPZX9SqKuJ6eGlXbNTqDf4kqqMNC1qZ/4Rn78vofeJvYaCsItOGXaIXrQ8zzWXnZXqLirBvWrnlAXG5Q==}
+  martty@0.2.36:
+    resolution: {integrity: sha512-zacAs7tghbnkkSUxX7t0zMP6unh34DNHu/ixqczVuLm//EIWeyzfFWLe7M+r2Rd2Ae+YETaqbAG72XsfNI5Pbg==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -1727,7 +1727,7 @@ snapshots:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  martty@0.2.35:
+  martty@0.2.36:
     dependencies:
       '@deepseek-ai/cordis': 4.0.2
       '@openma/deepseek-harness-acp': 0.4.29
