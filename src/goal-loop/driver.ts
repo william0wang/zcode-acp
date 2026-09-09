@@ -16,6 +16,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
+import { readFileSync, unlinkSync } from "node:fs";
 
 import { compact } from "../handlers/extensions.js";
 import { preemptInFlightTurn, runOneTurn, withPreemptLock } from "../handlers/session.js";
@@ -28,6 +29,7 @@ import {
   type GoalLoopState,
   handoffPath,
   readGoalState,
+  verifyPath,
   writeGoalState,
 } from "./state.js";
 import {
@@ -35,8 +37,10 @@ import {
   dispatchPrompt,
   handoffPrompt,
   parseTickets,
+  parseVerifyFile,
   parseVerifyReply,
   parseVerdict,
+  strictVerifyPrompt,
   verifyPrompt,
 } from "./templates.js";
 
@@ -508,8 +512,25 @@ export class GoalLoopDriver {
       }
 
       if (verdict?.kind === "met") {
-        // Verification turn (uncounted): re-run the acceptance criteria.
-        const vRes = await this.runGoalTurn(verifyPrompt(ticket));
+        // Verification turn (uncounted): re-run the acceptance criteria. The
+        // verdict arrives as a model-WRITTEN file in a fixed format; the prose
+        // reply is only a fallback (parsing prose looped forever on real
+        // backends — observed 2026-09, 11 rounds of re-doing finished work).
+        const vPath = verifyPath(this.server.projectCwd(), this.zcodeSid);
+        const readVerify = (): { pass: boolean; reason?: string } | null => {
+          try {
+            return parseVerifyFile(readFileSync(vPath, "utf8"));
+          } catch {
+            return null;
+          }
+        };
+        // Stale verdict from an earlier round must not be read as this one's.
+        try {
+          unlinkSync(vPath);
+        } catch {
+          /* absent — fine */
+        }
+        const vRes = await this.runGoalTurn(verifyPrompt(ticket, vPath));
         if (this.runId !== myRun) return;
         if (vRes.stopReason === "cancelled") {
           if (this.consumeSandboxRestart()) {
@@ -519,12 +540,36 @@ export class GoalLoopDriver {
           }
           return void (await this.endLoop("paused", "cancelled"));
         }
-        const v = parseVerifyReply(await this.lastAssistantText());
-        if (v?.pass) {
+        let v = readVerify() ?? parseVerifyReply(await this.lastAssistantText());
+        if (!v) {
+          const rRes = await this.runGoalTurn(strictVerifyPrompt(ticket, vPath));
+          if (this.runId !== myRun) return;
+          if (rRes.stopReason === "cancelled") {
+            if (this.consumeSandboxRestart()) {
+              await this.announce(messages().sandboxResumedStatus);
+              this.persist();
+              continue;
+            }
+            return void (await this.endLoop("paused", "cancelled"));
+          }
+          v = readVerify() ?? parseVerifyReply(await this.lastAssistantText());
+        }
+        if (!v) {
+          // Still unreadable: pause for the user instead of looping or
+          // blindly trusting the worker's claim.
+          ticket.status = "pending";
+          this.persist();
+          return void (await this.endLoop(
+            "paused",
+            "verification unreadable",
+            messages().goalVerifyUnreadable(ticket.title),
+          ));
+        }
+        if (v.pass) {
           ticket.status = "done";
           ticket.feedback = undefined;
         } else {
-          ticket.feedback = v?.reason ?? messages().goalVerifyUnparsed;
+          ticket.feedback = v.reason ?? messages().goalVerifyUnparsed;
           await this.announce(messages().goalVerifyFailed(ticket.title, ticket.feedback));
         }
       }

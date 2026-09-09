@@ -5,7 +5,7 @@
  * fetchMessages. Pure bridge logic — no subprocess, no network.
  */
 
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -84,10 +84,11 @@ function makeServer(root: string): never {
 }
 
 import { GoalLoopDriver, goalCompactThreshold, goalMaxTurns } from "../src/goal-loop/driver.js";
-import { readGoalState } from "../src/goal-loop/state.js";
+import { readGoalState, verifyPath } from "../src/goal-loop/state.js";
 import {
   decomposePrompt,
   parseTickets,
+  parseVerifyFile,
   parseVerifyReply,
   parseVerdict,
 } from "../src/goal-loop/templates.js";
@@ -98,12 +99,20 @@ let root: string;
 /** Script one round: the reply lands when runOneTurn fires for it. */
 function scriptRound(
   reply: string,
-  opts: { tools?: boolean; verdict?: "end_turn" | "cancelled" } = {},
+  opts: {
+    tools?: boolean;
+    verdict?: "end_turn" | "cancelled";
+    /** Simulates the model writing the verification verdict file this turn. */
+    verifyFile?: string;
+  } = {},
 ) {
   pendingReplies.push({ role: "assistant", text: reply, tools: opts.tools ?? true });
   runOneTurn.mockImplementationOnce(async () => {
     const next = pendingReplies.shift();
     if (next) fetchMessagesState.push(next);
+    if (opts.verifyFile !== undefined) {
+      writeFileSync(verifyPath(root, "zsid-1"), opts.verifyFile);
+    }
     return { stopReason: opts.verdict ?? "end_turn" };
   });
 }
@@ -517,5 +526,59 @@ describe("goal-loop driver", () => {
     expect(goalMaxTurns()).toBe(100);
     process.env.ZCODE_ACP_GOAL_MAX_TURNS = "7";
     expect(goalMaxTurns()).toBe(7);
+  });
+});
+
+describe("verification verdict via file (regression: verbose replies looped forever)", () => {
+  it("parseVerifyFile accepts exactly PASS / FAIL: line, rejects prose", () => {
+    expect(parseVerifyFile("PASS")).toEqual({ pass: true });
+    expect(parseVerifyFile("PASS\n")).toEqual({ pass: true });
+    expect(parseVerifyFile("FAIL: tests still red")).toEqual({
+      pass: false,
+      reason: "tests still red",
+    });
+    expect(parseVerifyFile("pass")).toBeNull();
+    expect(parseVerifyFile("I checked everything and it all works.")).toBeNull();
+  });
+
+  it("parseVerifyReply (fallback) tolerates prose containing pass", () => {
+    expect(parseVerifyReply("I re-ran the checks.\nAll tests pass.")).toEqual({ pass: true });
+    expect(parseVerifyReply("everything looks good")).toBeNull();
+  });
+
+  it("completes the ticket from the model-written verdict file", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("DONE", { verifyFile: "PASS" });
+    const driver = await startLoop(server);
+    await vi.waitFor(() => expect(driver.state.status).toBe("complete"));
+    expect(driver.state.tickets[0]!.status).toBe("done");
+    // decompose + dispatch + verify only — no feedback round.
+    expect(runOneTurn).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries once with the strict prompt, then pauses on unreadable verdicts", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("我重新跑了检查，一切正常。"); // verbose, no file
+    scriptRound("看起来都没问题。"); // still no file
+    const driver = await startLoop(server);
+    await vi.waitFor(() => expect(driver.state.status).toBe("paused"));
+    expect(driver.state.endedReason).toBe("verification unreadable");
+    // decompose + dispatch + verify + strict retry — never a re-work round.
+    expect(runOneTurn).toHaveBeenCalledTimes(4);
+  });
+
+  it("strict retry verdict file is honored", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("verbose, no file");
+    scriptRound("DONE", { verifyFile: "PASS" }); // strict retry writes it
+    const driver = await startLoop(server);
+    await vi.waitFor(() => expect(driver.state.status).toBe("complete"));
+    expect(runOneTurn).toHaveBeenCalledTimes(4);
   });
 });

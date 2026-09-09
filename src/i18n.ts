@@ -144,6 +144,7 @@ export interface Messages {
   goalImpossible: (why: string) => string;
   goalVerifyFailed: (title: string, reason: string) => string;
   goalVerifyUnparsed: string;
+  goalVerifyUnreadable: (title: string) => string;
   goalStallPaused: string;
   goalReport: (rounds: number, maxRounds: number, ticketTitle: string, done: boolean) => string;
   /** Goal-loop recovery hints on session/load (ADR-0022 §6). */
@@ -264,6 +265,8 @@ const zh: Messages = {
   goalImpossible: (why) => `⛔ goal loop 判定目标无法完成：${why}`,
   goalVerifyFailed: (t, reason) => `⚠ 验证未通过（${t}）：${reason}——反馈已注入下一轮`,
   goalVerifyUnparsed: "验证回复无法解析",
+  goalVerifyUnreadable: (t) =>
+    `⏸ 验证回复两次无法解析（${t}）——循环已暂停，请人工确认后 /auto resume`,
   goalStallPaused: "⏸ goal loop 已暂停（连续多轮无工具活动）",
   goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ 已完成" : "进行中"}：${t}`,
   goalHintInterrupted: (o) => `⏸ goal loop（${o}）上次因桥接进程重启而中断 —— /auto resume 可继续`,
@@ -389,6 +392,8 @@ const en: Messages = {
   goalVerifyFailed: (t, reason) =>
     `⚠ verification failed (${t}): ${reason} — feedback queued for the next round`,
   goalVerifyUnparsed: "verification reply unparseable",
+  goalVerifyUnreadable: (t) =>
+    `⏸ verification reply unreadable twice (${t}) — loop paused; confirm manually then /auto resume`,
   goalStallPaused: "⏸ goal loop paused (no tool activity for several rounds)",
   goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ done" : "in progress"}: ${t}`,
   goalHintInterrupted: (o) =>

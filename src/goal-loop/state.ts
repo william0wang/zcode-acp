@@ -69,6 +69,11 @@ export function statePath(projectRoot: string, zcodeSid: string): string {
   return path.join(goalDir(projectRoot, zcodeSid), "state.json");
 }
 
+/** Verification result file (model-written, read by the driver — see ADR-0022). */
+export function verifyPath(projectRoot: string, zcodeSid: string): string {
+  return path.join(goalDir(projectRoot, zcodeSid), "verify.txt");
+}
+
 /** Read a session's goal state; null when none exists or it is unreadable. */
 export function readGoalState(projectRoot: string, zcodeSid: string): GoalLoopState | null {
   try {

@@ -100,8 +100,13 @@ export function dispatchPrompt(opts: {
   return lines.join("\n");
 }
 
-/** Verification turn: re-run acceptance criteria, never trust the report. */
-export function verifyPrompt(ticket: GoalTicket): string {
+/**
+ * Verification turn: re-run acceptance criteria, never trust the report. The
+ * verdict is WRITTEN TO A FILE in a fixed format (far more reliable than
+ * parsing a prose reply — observed 2026-09: verbose replies never matched the
+ * bare-keyword contract and looped forever); the reply text is only a fallback.
+ */
+export function verifyPrompt(ticket: GoalTicket, verifyFile: string): string {
   return [
     `# Goal loop verification`,
     `The worker claims this ticket is complete:`,
@@ -111,18 +116,52 @@ export function verifyPrompt(ticket: GoalTicket): string {
     `Re-run the acceptance criteria YOURSELF (execute the checks, read the files`,
     `or diffs — do not trust the worker's summary or any transcript claims).`,
     ``,
-    `Reply with ONLY one of:`,
+    `Then write your verdict with the Write tool to EXACTLY this path:`,
+    verifyFile,
+    ``,
+    `The file content must be EXACTLY one line, nothing else:`,
     `PASS`,
+    `or`,
     `FAIL: <what specifically did not hold>`,
+    ``,
+    `Reply with only: DONE`,
   ].join("\n");
 }
 
-/** Parse the verification reply: "pass" | { fail reason } | null (unparseable). */
+/**
+ * Strict retry for an unreadable verification result: the verdict file was
+ * missing or unparseable. One retry with this sharper contract; a still-
+ * unreadable result pauses the loop instead of feeding a phantom FAIL back
+ * (which loops forever).
+ */
+export function strictVerifyPrompt(ticket: GoalTicket, verifyFile: string): string {
+  return [
+    verifyPrompt(ticket, verifyFile),
+    ``,
+    `IMPORTANT: your previous verification produced no readable verdict file at`,
+    `${verifyFile}. Write that file — one line, PASS or FAIL: <reason> — using the`,
+    `Write tool. Do not reply with prose instead of writing the file.`,
+  ].join("\n");
+}
+
+/** Parse the verification FILE (strict: single PASS / FAIL: line). */
+export function parseVerifyFile(content: string): { pass: boolean; reason?: string } | null {
+  const text = content.trim();
+  if (text === "PASS" || text.startsWith("PASS\n")) return { pass: true };
+  const m = /^FAIL:\s*(.+)/s.exec(text);
+  if (m) return { pass: false, reason: m[1]!.trim().slice(0, 400) };
+  return null;
+}
+
+/**
+ * Parse the verification reply (fallback when no verdict file was written).
+ * Explicit "FAIL:" wins; otherwise any pass/passed mention counts.
+ */
 export function parseVerifyReply(reply: string): { pass: boolean; reason?: string } | null {
   const text = reply.trim();
-  if (/^\s*pass\b/i.test(text)) return { pass: true };
   const m = /fail\s*:\s*(.+)/is.exec(text);
   if (m) return { pass: false, reason: m[1]!.trim().slice(0, 400) };
+  if (/\bpass(ed)?\b/i.test(text)) return { pass: true };
   return null;
 }
 
