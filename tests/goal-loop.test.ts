@@ -14,16 +14,26 @@ const runOneTurn = vi.fn();
 const compactMock = vi.fn();
 const sendTextChunk = vi.fn();
 
-vi.mock("../src/handlers/session.js", () => ({
-  runOneTurn: (...args: unknown[]) => runOneTurn(...(args as [])),
-  withPreemptLock: (_server: unknown, _sid: unknown, body: () => Promise<void>) => body(),
-}));
+vi.mock("../src/handlers/session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/handlers/session.js")>();
+  // Keep cancel() and preemptInFlightTurn REAL (exercised by the pre-empt and
+  // ESC-during-compact tests); only the turn machinery is scripted.
+  return {
+    ...actual,
+    runOneTurn: (...args: unknown[]) => runOneTurn(...(args as [])),
+    withPreemptLock: (_server: unknown, _sid: unknown, body: () => Promise<void>) => body(),
+  };
+});
 vi.mock("../src/handlers/extensions.js", () => ({
   compact: (...args: unknown[]) => compactMock(...(args as [])),
 }));
-vi.mock("../src/handlers/io.js", () => ({
-  sendTextChunk: (...args: unknown[]) => sendTextChunk(...(args as [])),
-}));
+vi.mock("../src/handlers/io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/handlers/io.js")>();
+  return {
+    ...actual,
+    sendTextChunk: (...args: unknown[]) => sendTextChunk(...(args as [])),
+  };
+});
 
 /**
  * Scripted history: each scriptRound() queues the assistant reply that lands
@@ -35,16 +45,20 @@ vi.mock("../src/handlers/io.js", () => ({
 const fetchMessagesState: Array<{ role: "assistant" | "user"; text: string; tools?: boolean }> = [];
 const pendingReplies: Array<{ role: "assistant" | "user"; text: string; tools?: boolean }> = [];
 
-vi.mock("../src/handlers/replay.js", () => ({
-  fetchMessages: async () =>
-    fetchMessagesState.map((m) => ({
-      info: { role: m.role },
-      parts: [
-        ...(m.tools ? [{ type: "tool", callId: "c" }] : []),
-        ...(m.text ? [{ type: "text", text: m.text }] : []),
-      ],
-    })),
-}));
+vi.mock("../src/handlers/replay.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/handlers/replay.js")>();
+  return {
+    ...actual,
+    fetchMessages: async () =>
+      fetchMessagesState.map((m) => ({
+        info: { role: m.role },
+        parts: [
+          ...(m.tools ? [{ type: "tool", callId: "c" }] : []),
+          ...(m.text ? [{ type: "text", text: m.text }] : []),
+        ],
+      })),
+  };
+});
 
 /** session/read answers (contextUsed / contextWindow). */
 let readProjection: { contextUsed?: number; contextWindow?: number } = {};
@@ -56,6 +70,7 @@ function makeServer(root: string): never {
   });
   return {
     projectCwd: () => root,
+    resolveSid: (sid: string) => (sid === "acp-1" ? "zsid-1" : sid),
     pendingTurns: new Map(),
     preemptLocks: new Map(),
     goalLoops: new Map(),
@@ -69,12 +84,14 @@ function makeServer(root: string): never {
 }
 
 import { GoalLoopDriver, goalCompactThreshold, goalMaxTurns } from "../src/goal-loop/driver.js";
+import { readGoalState } from "../src/goal-loop/state.js";
 import {
   decomposePrompt,
   parseTickets,
   parseVerifyReply,
   parseVerdict,
 } from "../src/goal-loop/templates.js";
+import { cancel } from "../src/handlers/session.js";
 
 let root: string;
 
@@ -178,18 +195,21 @@ describe("goal-loop driver", () => {
   });
 
   it("feeds verification failure back as ticket feedback", async () => {
+    // Budget 1: the FAIL feedback lands at the boundary, then the loop pauses
+    // (previously this test let the NEXT round run unscripted and crash).
+    process.env.ZCODE_ACP_GOAL_MAX_TURNS = "1";
     const server = makeServer(root);
     scriptRound("```\n- only ticket | check X\n```");
     scriptRound("done\nVERDICT: met");
     scriptRound("FAIL: check X did not hold");
 
     const driver = await startLoop(server);
-    // FAIL → the loop CONTINUES with the failure as ticket feedback.
+    // FAIL → the feedback is on record for the next dispatch round.
     await vi.waitFor(() => {
       expect(driver["state"].tickets[0]!.feedback).toContain("check X did not hold");
     });
-    expect(driver["state"].status).toBe("running");
-    driver.stop();
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused-budget");
   });
 
   it("ends as impossible when the worker reports it", async () => {
@@ -259,6 +279,238 @@ describe("goal-loop driver", () => {
     // complete (single ticket) — compaction fires before the final report.
     await waitSettled(driver);
     expect(compactMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pauses when ESC cancels the compaction handoff turn (compaction skipped)", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+    // handoff turn cancelled by ESC
+    scriptRound("DONE", { verdict: "cancelled" });
+
+    readProjection = { contextUsed: 90_000, contextWindow: 100_000 };
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused");
+    expect(driver["state"].endedReason).toBe("cancelled");
+    expect(compactMock).not.toHaveBeenCalled();
+  });
+
+  it("settles parked prompts, disarms the keepalive, and persists paused-crash when a round throws", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    let rejectRound!: (e: Error) => void;
+    runOneTurn.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectRound = reject;
+        }),
+    );
+
+    const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
+    await vi.waitFor(() => {
+      if (!rejectRound) throw new Error("dispatch round not started");
+    });
+    // Parked BEFORE the crash: the editor's session/prompt request must not
+    // hang forever when the round machinery throws.
+    const parked = driver.parkPrompt("mid steer");
+    expect(driver["keepalive"]).not.toBeNull();
+    rejectRound(new Error("zcode send failed: quota exhausted"));
+
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused-crash");
+    expect(driver["state"].endedReason).toContain("quota exhausted");
+    expect(await parked).toEqual({ stopReason: "cancelled" });
+    // Keepalive interval cleared — no phantom turnState running:true every 60s.
+    expect(driver["keepalive"]).toBeNull();
+    const persisted = readGoalState(root, "zsid-1");
+    expect(persisted?.status).toBe("paused-crash");
+    expect(persisted?.parkedText).toBe("mid steer");
+  });
+
+  it("keeps prompts parked DURING a round for the NEXT round's merge (not dropped)", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    let driverRef: GoalLoopDriver | undefined;
+    let midParked: Promise<{ stopReason: string }> | undefined;
+    // Round 1: the prompt parks MID-round (after the dispatch-time snapshot).
+    // The round lands its own not-yet reply (scriptRound queues replies at
+    // SETUP time — shifting here would steal round 2's scripted reply).
+    runOneTurn.mockImplementationOnce(async () => {
+      midParked = driverRef!.parkPrompt("mid steer");
+      fetchMessagesState.push({ role: "assistant", text: "wip\nVERDICT: not-yet", tools: true });
+      return { stopReason: "end_turn" };
+    });
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
+    driverRef = driver;
+    await waitSettled(driver);
+
+    // The mid-round text merged into round 2's dispatch prompt...
+    const round2 = runOneTurn.mock.calls[2]![1] as { sendText: string };
+    expect(round2.sendText).toContain("mid steer");
+    // ...and settled with THAT round (not resolved-and-dropped by round 1).
+    expect(await midParked).toEqual({ stopReason: "end_turn" });
+    expect(driver["state"].status).toBe("complete");
+  });
+
+  it("re-dispatches the ticket when a sandbox allow-restart cancels the round", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- fix login | tests stay green\n```");
+    // Round 1 cancelled by flushSandboxGrants (sandboxRestart-marked turn).
+    runOneTurn.mockImplementationOnce(
+      async (_srv: unknown, opts: { turn: { sandboxRestart?: boolean; cancelled?: boolean } }) => {
+        opts.turn.sandboxRestart = true;
+        opts.turn.cancelled = true;
+        return { stopReason: "cancelled" };
+      },
+    );
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    // The loop CONTINUED (re-dispatched the same ticket) instead of pausing.
+    expect(driver["state"].status).toBe("complete");
+    expect(driver["state"].rounds).toBe(1);
+    const redispatch = runOneTurn.mock.calls[2]![1] as { sendText: string };
+    expect(redispatch.sendText).toContain("fix login");
+    expect(redispatch.sendText).toContain("tests stay green");
+  });
+
+  it("pre-empts a still-running editor turn when the 10s wait times out", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = makeServer(root);
+      const editorTurn = { zcodeSid: "zsid-1", cancelled: false };
+      server.pendingTurns.set("editor-1", editorTurn as never);
+      // The decompose send must land only AFTER the editor turn was cancelled
+      // (pre-empt semantics — a send into the live turn would be steer input,
+      // its tickets parsed from the foreign reply).
+      runOneTurn.mockImplementationOnce(async () => {
+        expect(editorTurn.cancelled).toBe(true);
+        fetchMessagesState.push({ role: "assistant", text: "```\n- t | x\n```", tools: true });
+        return { stopReason: "end_turn" };
+      });
+      // Dispatch round: cancelled → the loop pauses cleanly.
+      runOneTurn.mockImplementationOnce(async () => ({ stopReason: "cancelled" }));
+
+      const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(editorTurn.cancelled).toBe(true);
+      await waitSettled(driver);
+      expect(driver["state"].status).toBe("paused");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ESC (real cancel) during the compact() window pauses at the next boundary", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+    scriptRound("DONE");
+    readProjection = { contextUsed: 90_000, contextWindow: 100_000 };
+    let releaseCompact!: () => void;
+    compactMock.mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          releaseCompact = r;
+        }),
+    );
+
+    const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
+    await vi.waitFor(() => {
+      if (!releaseCompact) throw new Error("compact window not reached");
+    });
+    // Real cancel(): no pendingTurns entry exists in this window (the mocked
+    // runOneTurn never deregisters its rounds — the real one does it in its
+    // finally), so clear them to model the window, then the pause must be
+    // parked on the driver (requestPause).
+    server.pendingTurns.clear();
+    await cancel(server as never, { sessionId: "acp-1" } as never);
+    releaseCompact();
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused");
+  });
+
+  it("resume() before the boundary clears the pending pause (loop completes)", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    let releaseRound!: (v: { stopReason: string }) => void;
+    runOneTurn.mockImplementationOnce(
+      () =>
+        new Promise<{ stopReason: string }>((res) => {
+          releaseRound = res;
+        }),
+    );
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await vi.waitFor(() => {
+      if (!releaseRound) throw new Error("round not in flight");
+    });
+    driver.pause();
+    driver.resume(); // /auto resume before the boundary — must not be swallowed
+    // Round 1 lands its own met verdict (scriptRound queues at SETUP time —
+    // pushing here avoids stealing the verify round's scripted reply).
+    fetchMessagesState.push({ role: "assistant", text: "done\nVERDICT: met", tools: true });
+    releaseRound({ stopReason: "end_turn" });
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("complete");
+  });
+
+  it("a dying driver's cleanup does not unregister a NEWER driver", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+    let releaseEnd!: () => void;
+    let chunks = 0;
+    // Call #3 is d1's endLoop note (goalStarted → goalReport → end note):
+    // hold it so d1's .finally stays pending through d2's registration.
+    sendTextChunk.mockImplementation(async () => {
+      chunks++;
+      if (chunks === 3) {
+        return new Promise<void>((r) => {
+          releaseEnd = r;
+        });
+      }
+    });
+
+    GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "first");
+    await vi.waitFor(() => {
+      if (!releaseEnd) throw new Error("endLoop announce not reached");
+    });
+
+    // Pause → immediately start a new objective (exactly what a user does):
+    // d2 registers and reaches its (held) decompose round.
+    sendTextChunk.mockImplementation(async () => undefined);
+    let releaseD2!: (v: { stopReason: string }) => void;
+    runOneTurn.mockImplementationOnce(
+      () =>
+        new Promise<{ stopReason: string }>((res) => {
+          releaseD2 = res;
+        }),
+    );
+    const d2 = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "second");
+    await vi.waitFor(() => {
+      if (!releaseD2) throw new Error("d2 decompose not reached");
+    });
+
+    releaseEnd(); // d1's .finally runs — identity check must spare d2's entry
+    await new Promise((r) => setImmediate(r));
+    expect(server.goalLoops.get("zsid-1")).toBe(d2);
+
+    releaseD2({ stopReason: "cancelled" });
+    await waitSettled(d2);
   });
 
   it("goalMaxTurns defaults to 100 and honors the env override", async () => {

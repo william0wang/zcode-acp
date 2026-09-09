@@ -1015,19 +1015,27 @@ export async function loadSession(
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
-  // Goal-loop restart recovery (ADR-0022 §6): persisted loop state without a
-  // live driver means a bridge restart ended the run — surface the hint once
-  // (never auto-resume a spend-incurring loop the user may have meant to stop).
+  // Goal-loop restart recovery (ADR-0022 §6): surface a recovery hint at most
+  // once per bridge process per session — never auto-resume a spend-incurring
+  // loop the user may have meant to stop. A LIVE driver means a second client
+  // attached mid-loop: no hint at all. Only a persisted "running" status
+  // (running without a driver = the bridge died mid-loop) gets the
+  // interrupted wording; user-visible paused states get a neutral line.
   {
+    const { GoalLoopDriver } = await import("../goal-loop/driver.js");
     const { readGoalState } = await import("../goal-loop/state.js");
-    const prior = readGoalState(cwd, zcodeSid);
-    if (prior && prior.status !== "complete" && prior.status !== "stopped") {
-      await sendTextChunk(
-        cx,
-        acpSid,
-        messages().goalPaused(`${prior.objective} — interrupted by a bridge restart`),
-        `goalhint_${randomUUID().slice(0, 8)}`,
-      ).catch(() => undefined);
+    if (!GoalLoopDriver.live(server, zcodeSid) && !server.goalLoopLoadHints.has(zcodeSid)) {
+      const prior = readGoalState(cwd, zcodeSid);
+      const interrupted = prior?.status === "running";
+      if (prior && (interrupted || prior.status.startsWith("paused"))) {
+        server.goalLoopLoadHints.add(zcodeSid);
+        await sendTextChunk(
+          cx,
+          acpSid,
+          interrupted ? messages().goalHintInterrupted(prior.objective) : messages().goalHintPaused,
+          `goalhint_${randomUUID().slice(0, 8)}`,
+        ).catch(() => undefined);
+      }
     }
   }
 
@@ -1568,15 +1576,6 @@ async function runPrompt(
   // unchanged. The title/auto-compact paths below keep using the raw `text`.
   const sendText = neutralizeSlashText(text);
 
-  // Goal-loop parking (ADR-0022 §3): a live loop owns this session's turn
-  // cadence. Park the prompt on the driver — its text merges into the next
-  // round, and the parked request resolves when that round completes —
-  // instead of preempting and cancelling the in-flight goal turn. Slash
-  // commands (/goal pause|resume|stop|status) were intercepted above, so
-  // anything reaching here is conversational input.
-  const goalLoop = server.goalLoops?.get(zcodeSid);
-  if (goalLoop) return goalLoop.parkPrompt(sendText);
-
   // Register self + preempt others under a per-session lock. The lock
   // serializes the critical section so that two concurrent prompts (B, C) for
   // the same session can't both miss each other and register at once: C waits
@@ -1593,10 +1592,26 @@ async function runPrompt(
   // events before this turn's turn.started belong to a backend-owned turn
   // (e.g. auto-resumed after compaction) that this send was steered into.
   let preempted = false;
+  // Goal-loop parking (ADR-0022 §3): a live loop owns this session's turn
+  // cadence. Park the prompt on the driver — its text merges into the next
+  // round, and the parked request resolves when that round completes —
+  // instead of preempting and cancelling the in-flight goal turn. Checked
+  // INSIDE the preempt lock: the check and the registration are one critical
+  // section, so an /auto start racing this prompt can't register its round
+  // after the check yet before the park (the driver registers through the
+  // same lock). Slash commands /auto pause|resume|stop|status were
+  // intercepted above, so anything reaching here is conversational input.
+  let parked: Promise<acp.PromptResponse> | undefined;
   await withPreemptLock(server, zcodeSid, async () => {
+    const goalLoop = server.goalLoops?.get(zcodeSid);
+    if (goalLoop) {
+      parked = goalLoop.parkPrompt(sendText);
+      return;
+    }
     server.pendingTurns.set(requestId, turn);
     preempted = preemptInFlightTurn(server, zcodeSid, requestId);
   });
+  if (parked) return parked;
   // Discovery: the session is live the moment its turn STARTS — mark it active
   // here instead of only at turn end, so a freshly created conversation shows
   // up in remote lists within one heartbeat even while its first (possibly
@@ -1748,8 +1763,10 @@ export async function cancel(
   // could leave the live one running. Each turn guards its own stopSent, so
   // multiple matching turns may each fire the stop pair once — the backend
   // treats both as idempotent, so the duplicate is harmless.
+  let matched = false;
   for (const [, turn] of server.pendingTurns) {
     if (turn.zcodeSid === zcodeSid) {
+      matched = true;
       turn.cancelled = true;
       if (!turn.stopSent) {
         stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
@@ -1758,6 +1775,17 @@ export async function cancel(
       // Record cancel time so a prompt arriving in the backend's ~20s
       // model-connection recovery window can fast-fail instead of hanging.
       server.lastCancelledAt.set(zcodeSid, Date.now());
+    }
+  }
+  // ESC during a goal loop's quiet windows (compact()'s internal wait, the
+  // judge/announce awaits) has no pendingTurns entry to flag — park the pause
+  // on the driver instead; it takes effect at the next round boundary.
+  // Best-effort: never break cancel for non-goal sessions.
+  if (!matched) {
+    try {
+      server.goalLoops?.get(zcodeSid)?.requestPause();
+    } catch (e) {
+      log(`goal-loop pause request failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
   log(`session/cancel → ${zcodeSid}`);

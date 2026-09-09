@@ -31,6 +31,7 @@ import {
   cancelBackgroundTask,
   compact,
   fork,
+  goal,
   setMode,
   setModel,
   setThoughtLevel,
@@ -219,6 +220,7 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       // zcode app-server 0.16+ (steer/rewind moved to the v4 conversation API);
       // the bridge dropped its passthroughs accordingly.
       .onRequest("session/fork", extParams, (ctx) => fork(server, ctx.params))
+      .onRequest("session/goal", extParams, (ctx) => goal(server, ctx.params))
       .onRequest("session/compact", extParams, (ctx) =>
         compact(server, ctx.params, server.clients.broadcast()),
       )

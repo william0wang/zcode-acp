@@ -30,7 +30,14 @@ export interface GoalTicket {
 }
 
 export type GoalLoopStatus =
-  "running" | "paused" | "paused-budget" | "paused-stall" | "complete" | "impossible" | "stopped";
+  | "running"
+  | "paused"
+  | "paused-budget"
+  | "paused-stall"
+  | "paused-crash"
+  | "complete"
+  | "impossible"
+  | "stopped";
 
 export interface GoalLoopState {
   objective: string;
@@ -66,7 +73,16 @@ export function statePath(projectRoot: string, zcodeSid: string): string {
 export function readGoalState(projectRoot: string, zcodeSid: string): GoalLoopState | null {
   try {
     const raw = JSON.parse(readFileSync(statePath(projectRoot, zcodeSid), "utf8"));
-    if (typeof raw !== "object" || raw === null || typeof raw.objective !== "string") return null;
+    if (
+      typeof raw !== "object" ||
+      raw === null ||
+      typeof raw.objective !== "string" ||
+      !Array.isArray(raw.tickets)
+    ) {
+      // Corrupt/hand-edited state reads as absent — a malformed tickets list
+      // would otherwise throw inside the driver's round loop.
+      return null;
+    }
     return raw as GoalLoopState;
   } catch {
     return null;
@@ -95,7 +111,7 @@ export function writeGoalState(projectRoot: string, zcodeSid: string, state: Goa
   }
 }
 
-/** Best-effort removal on /goal stop (terminal states keep the record). */
+/** Best-effort removal on /auto stop (terminal states keep the record). */
 export function clearGoalState(projectRoot: string, zcodeSid: string): void {
   try {
     unlinkSync(statePath(projectRoot, zcodeSid));
