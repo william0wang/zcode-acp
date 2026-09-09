@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0](https://github.com/william0wang/zcode-acp/compare/v0.32.0...v0.33.0) (2026-09-09)
+
+
+### Features
+
+* **acp:** forward per-turn token usage on the session/prompt result ([#165](https://github.com/william0wang/zcode-acp/issues/165)) ([cc8124a](https://github.com/william0wang/zcode-acp/commit/cc8124a3e1e8abb386d138a185a2767b39feb9ca))
+
+
+### Bug Fixes
+
+* **acp:** per-kind replay dedup so GLM thinking reaches the client ([#167](https://github.com/william0wang/zcode-acp/issues/167)) ([b145029](https://github.com/william0wang/zcode-acp/commit/b145029f046f57579ce8aca2c8944052b309867c))
+
 ## [0.32.0](https://github.com/william0wang/zcode-acp/compare/v0.31.1...v0.32.0) (2026-09-09)
 
 
