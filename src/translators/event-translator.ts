@@ -64,14 +64,26 @@ export class EventTranslator {
   private activeTurnId: string | null = null;
   private skippingForeignTurn = false;
   /**
-   * Backend message ids (`assistantMessageId`) whose content reached this
+   * Backend message ids (`assistantMessageId`) whose TEXT reached this
    * translator via the live event stream. Used by the turn loop to dedup the
    * turn-completion fallback replay: a message already streamed live must not
    * be re-emitted by `ProjectionDiffer.diff()`, while messages produced while
    * no listener was attached (e.g. a backend turn resumed after compaction)
    * have no live deltas and must be replayed.
+   *
+   * TEXT-only by contract. Text and reasoning share one assistant message id
+   * (the differ tags both replays with `m.info.id`), and GLM-style backends
+   * stream the text live while the CoT reaches us only via the completion
+   * snapshot — a shared set would let the streamed text suppress the reasoning
+   * replay entirely.
    */
   readonly deliveredMessageIds = new Set<string>();
+  /**
+   * Same contract as `deliveredMessageIds`, for REASONING content. Kept
+   * separate so live-streamed reasoning never suppresses the differ's
+   * reasoning replay (and vice versa: streamed text must not).
+   */
+  readonly deliveredReasoningMessageIds = new Set<string>();
 
   /** Tool call ids we've already emitted a ToolCallNew for. */
   readonly seenToolIds = new Set<string>();
@@ -213,9 +225,15 @@ export class EventTranslator {
     const delta = (payload["delta"] as string) ?? "";
     // Record the owning assistant message so the turn loop can distinguish
     // "already streamed live" from "produced while no listener was attached"
-    // when replaying missing content at turn completion.
+    // when replaying missing content at turn completion. Per-content-kind:
+    // text and reasoning share one assistantMessageId, and the completion
+    // replay must stay able to deliver the kind that did NOT stream live
+    // (GLM: text streams, reasoning arrives only via the snapshot).
     const msgId = payload["assistantMessageId"];
-    if (typeof msgId === "string" && msgId) this.deliveredMessageIds.add(msgId);
+    if (typeof msgId === "string" && msgId) {
+      if (kind === "reasoning_delta") this.deliveredReasoningMessageIds.add(msgId);
+      else if (kind === "text_delta") this.deliveredMessageIds.add(msgId);
+    }
 
     if (kind === "text_delta") {
       if (delta) results.push({ kind: "TextDelta", text: delta });

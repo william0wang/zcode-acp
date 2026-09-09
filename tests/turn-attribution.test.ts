@@ -128,6 +128,16 @@ describe("turn-completion replay: re-emit text never streamed live, dedup by mes
     expect(t.deliveredMessageIds.has("msg_live_1")).toBe(true);
   });
 
+  it("translator records live reasoning per-kind, not into the text set", () => {
+    const t = new EventTranslator();
+    t.translate({
+      type: "model.streaming",
+      payload: { kind: "reasoning_delta", delta: "live reasoning", assistantMessageId: "msg_live_1" },
+    });
+    expect(t.deliveredReasoningMessageIds.has("msg_live_1")).toBe(true);
+    expect(t.deliveredMessageIds.has("msg_live_1")).toBe(false);
+  });
+
   it("streamed-then-replayed messages are skipped, missing ones are kept", () => {
     // Baseline: a message the differ has seen is never re-emitted.
     const differ = new ProjectionDiffer();
@@ -142,20 +152,48 @@ describe("turn-completion replay: re-emit text never streamed live, dedup by mes
     });
 
     // Turn-loop side of the dedup (mirrors runEventTurn): skip deltas whose
-    // message id was already delivered via the event stream.
+    // message id was already delivered via the event stream, per content kind.
     const translator = new EventTranslator();
     translator.deliveredMessageIds.add("msg_live_1");
-    const replayed = events.filter(
-      (e) =>
-        !(
-          (e.kind === "TextDelta" || e.kind === "ReasoningDelta") &&
-          e.messageId &&
-          translator.deliveredMessageIds.has(e.messageId)
-        ),
-    );
+    const replayed = events.filter((e) => {
+      if (e.kind !== "TextDelta" && e.kind !== "ReasoningDelta") return true;
+      const delivered =
+        e.kind === "TextDelta" ? translator.deliveredMessageIds : translator.deliveredReasoningMessageIds;
+      return !(e.messageId && delivered.has(e.messageId));
+    });
     const texts = replayed.filter((e) => e.kind === "TextDelta");
     expect(texts).toHaveLength(1);
     expect(texts[0]).toMatchObject({ kind: "TextDelta", messageId: "msg_missing_2" });
+  });
+
+  it("live-streamed text must not suppress the reasoning replay of the same message (GLM CoT)", () => {
+    // GLM-style backends stream the answer's text_delta live (assistantMessageId
+    // X) but deliver the CoT only via the completion snapshot as a reasoning
+    // part of the SAME message X. The old shared deliveredMessageIds dedup
+    // dropped that reasoning replay — thinking never reached the client.
+    const differ = new ProjectionDiffer();
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_x", "the answer", "the chain of thought")],
+    });
+
+    const translator = new EventTranslator();
+    translator.translate({
+      type: "model.streaming",
+      payload: { kind: "text_delta", delta: "the an", assistantMessageId: "msg_x" },
+    });
+
+    const replayed = events.filter((e) => {
+      if (e.kind !== "TextDelta" && e.kind !== "ReasoningDelta") return true;
+      const delivered =
+        e.kind === "TextDelta" ? translator.deliveredMessageIds : translator.deliveredReasoningMessageIds;
+      return !(e.messageId && delivered.has(e.messageId));
+    });
+
+    const reasoning = replayed.find((e) => e.kind === "ReasoningDelta");
+    expect(reasoning).toMatchObject({ kind: "ReasoningDelta", text: "the chain of thought", messageId: "msg_x" });
+    // And the already-streamed text must still be deduped.
+    expect(replayed.find((e) => e.kind === "TextDelta")).toBeUndefined();
   });
 });
 

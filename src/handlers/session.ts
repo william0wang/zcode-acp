@@ -2951,12 +2951,16 @@ export async function runEventTurn(
       const snapshot = await buildSnapshot(server, turn.zcodeSid);
       const completionEvents = differ.diff(snapshot);
       for (const iev of completionEvents) {
-        if (
-          (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") &&
-          iev.messageId &&
-          translator.deliveredMessageIds.has(iev.messageId)
-        ) {
-          continue;
+        // Per-kind dedup (see deliveredReasoningMessageIds): text and reasoning
+        // share one assistant message id, so the kind that streamed live must
+        // be suppressed while the other kind — typically GLM reasoning that
+        // only exists in the completion snapshot — must still go through.
+        if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") {
+          const delivered =
+            iev.kind === "TextDelta"
+              ? translator.deliveredMessageIds
+              : translator.deliveredReasoningMessageIds;
+          if (iev.messageId && delivered.has(iev.messageId)) continue;
         }
         await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
