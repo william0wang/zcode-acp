@@ -2427,6 +2427,55 @@ function getOrCreateDiffer(server: ZcodeAcpServer, zcodeSid: string): Projection
 }
 
 /**
+ * Map the backend's merged per-turn usage (`EventTranslator.turnUsage`) onto
+ * the ACP `PromptResponse.usage` shape (UNSTABLE in agent-client-protocol;
+ * per-turn semantics per its "Token usage for this turn" description). The
+ * three required counters are always present in the backend object (its
+ * reducer 0-fills them); the optional ones pass through as null when
+ * unreported. Field renames: reasoningTokens→thoughtTokens,
+ * cacheRead/cacheWriteTokens→cachedRead/cachedWriteTokens.
+ */
+export function toAcpTurnUsage(u: Record<string, unknown> | null): acp.Usage | undefined {
+  if (!u) return undefined;
+  const num = (k: string): number => (typeof u[k] === "number" ? (u[k] as number) : 0);
+  const numOrNull = (k: string): number | null =>
+    typeof u[k] === "number" ? (u[k] as number) : null;
+  return {
+    totalTokens: num("totalTokens"),
+    inputTokens: num("inputTokens"),
+    outputTokens: num("outputTokens"),
+    thoughtTokens: numOrNull("reasoningTokens"),
+    cachedReadTokens: numOrNull("cacheReadTokens"),
+    cachedWriteTokens: numOrNull("cacheWriteTokens"),
+  };
+}
+
+/**
+ * Build the ACP `session/prompt` result for a concluded turn, attaching the
+ * turn's usage when the backend reported one (absent otherwise — no synthetic
+ * zeros). Spec fields carry the standard counters; backend extras (source,
+ * modelRequestCount, web request counts) ride in `_meta.zcode.usage` per the
+ * bridge's extension policy.
+ */
+export function turnResult(
+  translator: EventTranslator,
+  stopReason: acp.StopReason,
+): acp.PromptResponse {
+  const raw = translator.turnUsage;
+  const usage = toAcpTurnUsage(raw);
+  if (!usage || !raw) return { stopReason };
+  const extras: Record<string, unknown> = {};
+  for (const k of ["source", "modelRequestCount", "webFetchRequests", "webSearchRequests"]) {
+    if (raw[k] !== undefined) extras[k] = raw[k];
+  }
+  return {
+    stopReason,
+    usage,
+    _meta: { zcode: { usage: extras } },
+  };
+}
+
+/**
  * Event-driven turn loop: translate zcode events via EventTranslator and
  * dispatch each internal event to the ACP client. No-progress timeout is 120s
  * (refreshed by any event). Cancel is honoured on each iteration.
@@ -2562,7 +2611,7 @@ export async function runEventTurn(
         // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
         // lock after stop must not keep a user-cancelled turn alive forever.
         stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
-        return { stopReason: "max_turn_requests" };
+        return turnResult(translator, "max_turn_requests");
       } else {
         const frozenMs = Date.now() - lastWatermarkAdvanceAt;
         const activeTools = [...translator.seenToolIds].filter(
@@ -2595,7 +2644,7 @@ export async function runEventTurn(
           log(
             `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; ending turn after delivered output`,
           );
-          return { stopReason: "end_turn" };
+          return turnResult(translator, "end_turn");
         } else {
           const reply = await fetchLastReply(server, turn.zcodeSid, differ);
           if (reply) {
@@ -2605,13 +2654,13 @@ export async function runEventTurn(
             log(
               `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; recovered reply via session/messages`,
             );
-            return { stopReason: "end_turn" };
+            return turnResult(translator, "end_turn");
           }
           log(
             `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with no output; stopping backend turn`,
           );
           stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
-          return { stopReason: "max_turn_requests" };
+          return turnResult(translator, "max_turn_requests");
         }
       }
     }
@@ -2647,7 +2696,7 @@ export async function runEventTurn(
         stopBackendTurn(server, turn.zcodeSid, turn.foregroundExecutionId);
         turn.stopSent = true;
       }
-      return { stopReason: "cancelled" };
+      return turnResult(translator, "cancelled");
     }
 
     const ev = await listener.pollEvent(500);
@@ -2719,7 +2768,7 @@ export async function runEventTurn(
             // turn — the completion was inferred, and compressing an
             // in-flight task's context would destroy the work.
             turn.stallRecovered = true;
-            return { stopReason: "end_turn" };
+            return turnResult(translator, "end_turn");
           }
           // Second probe says the backend is still working (or events arrived
           // mid-probe) — keep waiting; queued events are consumed by the next
@@ -2750,7 +2799,7 @@ export async function runEventTurn(
     // swallow: report it at once so the user can resend immediately.
     if (ev.type === "turn.steerQueued" && !translator.turnStarted && gateArmed) {
       await sendTextChunk(cx, acpSid, messages().messageSwallowedByTurn, chunkMsgId);
-      return { stopReason: "max_turn_requests" };
+      return turnResult(translator, "max_turn_requests");
     }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still
@@ -2821,7 +2870,7 @@ export async function runEventTurn(
         const denial = extractSandboxDenial(outputText);
         if (denial) {
           await handleSandboxDenial(server, cx, acpSid, denial, toolCallId);
-          if (turn.cancelled) return { stopReason: "cancelled" };
+          if (turn.cancelled) return turnResult(translator, "cancelled");
         } else {
           // No path parsed — one generic hint per session, not one per retry.
           let asked = server.sandboxAskedPaths.get(acpSid);
@@ -2913,7 +2962,7 @@ export async function runEventTurn(
       // terminal resultType (cancelled / success / failed), honour the user's
       // intent and report cancelled.
       if (turn.cancelled || translator.turnResultType === "cancelled") {
-        return { stopReason: "cancelled" };
+        return turnResult(translator, "cancelled");
       }
       if (translator.turnFailed) {
         // Best-effort stop in case the failed turn left a residual lock.
@@ -2970,7 +3019,7 @@ export async function runEventTurn(
       // push current_mode_update + config_option_update when it changed since
       // the last value advertised to the client.
       await emitModeIfChanged(server, cx, acpSid, turn.zcodeSid);
-      return { stopReason: "end_turn" };
+      return turnResult(translator, "end_turn");
     }
   }
 }

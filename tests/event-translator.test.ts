@@ -247,6 +247,39 @@ describe("EventTranslator", () => {
     expect(t.turnFailed).toBe(false);
     expect(t.turnResultType).toBe("cancelled");
   });
+
+  it("captures turn.completed usage payload verbatim (and still emits UsageDelta)", () => {
+    const t = new EventTranslator();
+    const usage = {
+      source: "provider",
+      modelRequestCount: 2,
+      inputTokens: 100,
+      outputTokens: 40,
+      totalTokens: 140,
+      cacheReadTokens: 60,
+      cacheWriteTokens: 5,
+      reasoningTokens: 12,
+      webFetchRequests: 0,
+      webSearchRequests: 1,
+    };
+    const out = t.translate(
+      ev("turn.completed", { resultType: "success", tokenCount: 140, usage }),
+    );
+    expect(t.turnUsage).toEqual(usage);
+    expect(out).toEqual([{ kind: "UsageDelta", used: 140, size: 0 }]);
+  });
+
+  it("leaves turnUsage null when turn.completed carries no usage", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.completed", { resultType: "cancelled", tokenCount: 7 }));
+    expect(t.turnUsage).toBeNull();
+  });
+
+  it("does not set turnUsage on turn.failed", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.failed", { error: { code: "1308" }, usage: { totalTokens: 9 } }));
+    expect(t.turnUsage).toBeNull();
+  });
 });
 
 describe("EventTranslator background-task turn deferral", () => {

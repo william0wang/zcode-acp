@@ -370,6 +370,13 @@ Tool status update.
 
 The turn completed.
 
+`usage` carries the turn's billing-grade usage: the backend merges every model
+call's usage into one object (per-turn scope, not session-cumulative). It is
+omitted when no model call reported usage. The bridge forwards this object as
+the ACP `session/prompt` result's `usage` field (UNSTABLE in
+agent-client-protocol), with `source`/`modelRequestCount`/web request counts
+riding in the result's `_meta.zcode.usage`.
+
 ```json
 {
   "method": "session/event",
@@ -380,7 +387,16 @@ The turn completed.
     "payload": {
       "resultType": "success",
       "usage": {
-        "totalTokens": 1234
+        "source": "provider",
+        "modelRequestCount": 2,
+        "inputTokens": 1100,
+        "outputTokens": 134,
+        "totalTokens": 1234,
+        "cacheReadTokens": 800,
+        "cacheWriteTokens": 90,
+        "reasoningTokens": 45,
+        "webFetchRequests": 0,
+        "webSearchRequests": 0
       }
     }
   }

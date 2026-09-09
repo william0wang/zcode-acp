@@ -46,6 +46,16 @@ export class EventTranslator {
   turnResultType: string | null = null;
   turnError: Record<string, unknown> | null = null;
   /**
+   * Usage object from this turn's `turn.completed` payload, verbatim from the
+   * backend. The backend merges every model call's usage into one billing-
+   * grade object ({source, modelRequestCount, inputTokens, outputTokens,
+   * totalTokens, cacheReadTokens, cacheWriteTokens, reasoningTokens,
+   * webFetchRequests, webSearchRequests}); it is omitted when no model call
+   * reported usage. Per-turn scope, not session-cumulative. Consumed by the
+   * prompt loop to fill the ACP `PromptResponse.usage` field.
+   */
+  turnUsage: Record<string, unknown> | null = null;
+  /**
    * True while inside a background-task notification turn
    * (`turn.started {inputSource:"background_task"}`). Set on its turn.started,
    * cleared on the next user-initiated turn.started. While true, `translate`
@@ -163,6 +173,7 @@ export class EventTranslator {
       if (etype === "turn.completed") {
         this.turnDone = true;
         this.turnResultType = (payload["resultType"] as string) ?? "success";
+        this.turnUsage = (payload["usage"] as Record<string, unknown>) ?? null;
         results.push(...this.translateTurnDone(payload));
         log(`  [event] turn.completed (resultType=${this.turnResultType})`);
       } else {
