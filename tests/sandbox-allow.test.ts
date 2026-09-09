@@ -653,7 +653,10 @@ describe("flushSandboxGrants", () => {
       cancelAllPendingTurns: vi.fn(),
       sandboxContinuations: new Map<string, string>(),
       sessionMap: new Map<string, string>(),
-      pendingTurns: new Map<number | string, { zcodeSid: string }>(),
+      pendingTurns: new Map<
+        number | string,
+        { zcodeSid: string; cancelled?: boolean; goalLoop?: boolean; sandboxRestart?: boolean }
+      >(),
       backend: backend === null ? null : { close: closed, isDead: backend.isDead },
     };
     return { target, closed };
@@ -703,5 +706,44 @@ describe("flushSandboxGrants", () => {
     expect(target.sandboxContinuations.get("acp_a")).toContain("/a");
     expect(target.backend).not.toBeNull();
     expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("marks goalLoop turns for driver re-dispatch and never queues their continuation", () => {
+    const { target } = makeTarget({ close: async () => undefined, isDead: false });
+    target.sessionMap.set("acp_a", "z1");
+    const goalTurn = { zcodeSid: "z1", goalLoop: true };
+    target.pendingTurns.set(1, goalTurn); // goal round is acp_a's ONLY turn
+    target.sessionMap.set("acp_b", "z2");
+    target.pendingTurns.set(2, { zcodeSid: "z2" }); // editor prompt turn
+
+    flushSandboxGrants(
+      target,
+      new Map([
+        ["acp_a", ["/a"]],
+        ["acp_b", ["/b"]],
+      ]),
+    );
+
+    // The goal turn is still cancelled (the backend restart kills its
+    // generation) but marked so the DRIVER re-dispatches the ticket — prompt()
+    // never drives goal turns, so a continuation for acp_a would be orphaned
+    // and later hijack an unrelated cancelled prompt.
+    expect(goalTurn.sandboxRestart).toBe(true);
+    expect(target.sandboxContinuations.has("acp_a")).toBe(false);
+    expect(target.sandboxContinuations.get("acp_b")).toContain("/b");
+  });
+
+  it("does not mark an already-ESC'd goalLoop turn as a sandbox restart", () => {
+    const { target } = makeTarget({ close: async () => undefined, isDead: false });
+    target.sessionMap.set("acp_a", "z1");
+    // The user hit ESC just before the flush landed: the turn is already
+    // cancelled (the turn loop unwinds it on its ~100ms cadence). The flush
+    // must not reinterpret that stop as a restart — the driver pauses.
+    const escTurn = { zcodeSid: "z1", goalLoop: true, cancelled: true };
+    target.pendingTurns.set(1, escTurn);
+
+    flushSandboxGrants(target, new Map([["acp_a", ["/a"]]]));
+
+    expect(escTurn.sandboxRestart).toBeUndefined();
   });
 });

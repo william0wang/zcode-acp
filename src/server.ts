@@ -50,6 +50,19 @@ export interface PendingTurn {
    * and compressing an in-flight task's context would destroy the work.
    */
   stallRecovered?: boolean;
+  /**
+   * True when this turn belongs to a goal-loop round (ADR-0022) instead of a
+   * client prompt. preemptInFlightTurn must SKIP these turns (park the
+   * incoming prompt instead of cancelling) — user text merges at the round
+   * boundary. ESC/cancel() still cancels them like any pending turn.
+   */
+  goalLoop?: boolean;
+  /**
+   * Set by flushSandboxGrants on a goalLoop turn it is about to cancel for a
+   * backend restart: the driver then treats the cancel as "re-dispatch the
+   * current ticket on the respawned backend" instead of a user ESC pause.
+   */
+  sandboxRestart?: boolean;
 }
 
 /**
@@ -488,6 +501,20 @@ export class ZcodeAcpServer {
   workspaceLabel(): string {
     return this.projectCwd();
   }
+
+  /**
+   * Live goal-loop drivers by backend session id (ADR-0022). Membership = a
+   * loop is RUNNING for that session (terminal drivers deregister in the
+   * run() finally). The prompt path consults this to park user prompts on
+   * the driver instead of preempting its turns.
+   */
+  readonly goalLoops = new Map<string, import("./goal-loop/driver.js").GoalLoopDriver>();
+
+  /**
+   * zcodeSids that already got the goal-loop recovery hint on session/load
+   * this bridge process (each editor (re)attach would otherwise replay it).
+   */
+  readonly goalLoopLoadHints = new Set<string>();
 
   /**
    * Ensure a background-task listener is registered for the session. Idempotent

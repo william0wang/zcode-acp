@@ -161,7 +161,10 @@ export interface SandboxFlushTarget {
   /** acpSid → live zcode session id. */
   readonly sessionMap: Map<string, string>;
   /** In-flight turns; entries are deleted when the turn's prompt returns. */
-  readonly pendingTurns: Map<number | string, { zcodeSid: string }>;
+  readonly pendingTurns: Map<
+    number | string,
+    { zcodeSid: string; cancelled?: boolean; goalLoop?: boolean; sandboxRestart?: boolean }
+  >;
   /** The backend to close; the flush nulls it (respawn stays lazy). */
   backend: { close(): Promise<void>; readonly isDead: boolean } | null;
 }
@@ -180,15 +183,29 @@ export function flushSandboxGrants(
 ): void {
   const m = messages();
   const count = [...grants.values()].reduce((n, ps) => n + ps.length, 0);
+  // Goal-loop rounds (ADR-0022) are still cancelled — the backend restart
+  // kills their generation too — but MARKED so the driver re-dispatches the
+  // ticket instead of pausing like a user ESC, and never fed a continuation:
+  // prompt() is not driving those turns, so an entry would be orphaned and
+  // later hijack an unrelated cancelled prompt.
+  for (const t of target.pendingTurns.values()) {
+    // An already-cancelled turn was stopped by someone else first (user ESC —
+    // the turn loop polls the flag on a ~100ms cadence); reinterpreting that
+    // as a restart would make the driver re-dispatch instead of pausing.
+    if (t.goalLoop && !t.cancelled) t.sandboxRestart = true;
+  }
   target.cancelAllPendingTurns();
-  // Continuations ONLY for sessions with a turn still in flight: those turn
+  // Continuations ONLY for sessions with an in-flight EDITOR turn: those turn
   // loops unwind on the cancelled flag and prompt() consumes the
   // continuation as it returns. A session whose turn already finished
-  // naturally during the batch window has nobody to consume the entry — an
-  // orphan would later hijack an UNRELATED cancelled prompt (ESC, preempt,
-  // drain gate) into an automatic "continue" round.
+  // naturally during the batch window (or whose only turn was a goal round)
+  // has nobody to consume the entry — an orphan would later hijack an
+  // UNRELATED cancelled prompt (ESC, preempt, drain gate) into an automatic
+  // "continue" round.
   const liveZcode = new Set<string>();
-  for (const t of target.pendingTurns.values()) liveZcode.add(t.zcodeSid);
+  for (const t of target.pendingTurns.values()) {
+    if (!t.goalLoop) liveZcode.add(t.zcodeSid);
+  }
   for (const [sid, paths] of grants) {
     const z = target.sessionMap.get(sid);
     if (z !== undefined && liveZcode.has(z)) {

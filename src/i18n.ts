@@ -125,6 +125,31 @@ export interface Messages {
   bootResumeAck: string;
   slashCompactTimeout: string;
   slashGoalSet: (value: string) => string;
+  slashAutoSet: (value: string) => string;
+  slashErrAutoArg: string;
+  /** Goal loop (ADR-0022) feedback lines. */
+  goalStarted: (objective: string) => string;
+  goalResumed: (rounds: number) => string;
+  goalStatus: (
+    status: string,
+    rounds: number,
+    maxRounds: number,
+    done: number,
+    total: number,
+    currentTitle?: string,
+  ) => string;
+  goalPaused: (reason: string) => string;
+  goalStopped: string;
+  goalComplete: (rounds: number) => string;
+  goalImpossible: (why: string) => string;
+  goalVerifyFailed: (title: string, reason: string) => string;
+  goalVerifyUnparsed: string;
+  goalVerifyUnreadable: (title: string) => string;
+  goalStallPaused: string;
+  goalReport: (rounds: number, maxRounds: number, ticketTitle: string, done: boolean) => string;
+  /** Goal-loop recovery hints on session/load (ADR-0022 §6). */
+  goalHintInterrupted: (objective: string) => string;
+  goalHintPaused: string;
   slashForked: (sessionId: string) => string;
   slashModelSet: (value: string) => string;
   slashTuiOnly: (cmd: string) => string;
@@ -227,6 +252,25 @@ const zh: Messages = {
   bootResumeAck: "⟲ 已恢复会话 · 历史已回放",
   slashCompactTimeout: "⚠ 压缩超时（300s），后端可能仍在处理——稍等片刻再发送",
   slashGoalSet: (v) => `✓ 目标已设置：${v}`,
+  slashAutoSet: (v) => `✓ auto loop：${v}`,
+  slashErrAutoArg: "/auto 需要目标描述（或 status | pause | resume | stop）",
+  goalStarted: (o) =>
+    `🎯 goal loop 启动：${o}\n逐票推进，每轮结束汇报；发消息可插话，ESC 暂停，/auto status 查看进度。`,
+  goalResumed: (r) => `🎯 goal loop 已恢复（已完成 ${r} 轮）`,
+  goalStatus: (st, r, max, done, total, cur) =>
+    `goal loop：${st} · ${r}/${max} 轮 · 票 ${done}/${total} 完成${cur ? ` · 当前：${cur}` : ""}`,
+  goalPaused: (reason) => `⏸ goal loop 已暂停（${reason}）—— /auto resume 继续`,
+  goalStopped: "⏹ goal loop 已停止并清除状态",
+  goalComplete: (r) => `✅ goal loop 完成，共 ${r} 轮`,
+  goalImpossible: (why) => `⛔ goal loop 判定目标无法完成：${why}`,
+  goalVerifyFailed: (t, reason) => `⚠ 验证未通过（${t}）：${reason}——反馈已注入下一轮`,
+  goalVerifyUnparsed: "验证回复无法解析",
+  goalVerifyUnreadable: (t) =>
+    `⏸ 验证回复两次无法解析（${t}）——循环已暂停，请人工确认后 /auto resume`,
+  goalStallPaused: "⏸ goal loop 已暂停（连续多轮无工具活动）",
+  goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ 已完成" : "进行中"}：${t}`,
+  goalHintInterrupted: (o) => `⏸ goal loop（${o}）上次因桥接进程重启而中断 —— /auto resume 可继续`,
+  goalHintPaused: "⏸ goal loop 处于暂停状态 —— /auto resume 可继续",
   slashForked: (id) => `✓ 已分叉新会话：${id}`,
   slashModelSet: (v) => `✓ 模型 = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} 在 ACP 模式下不可用（需要 ZCode TUI）`,
@@ -252,6 +296,7 @@ const zh: Messages = {
   mcpFromPlugins: "来自插件:",
   mcpFooter: "MCP 工具会在需要时由模型自动调用。",
   slashCommandDescriptions: {
+    auto: "自治目标循环：开始、查看、暂停、恢复、停止",
     compact: "压缩对话上下文（释放 token）",
     goal: "设置或查看会话目标",
     fork: "在最新检查点分叉会话",
@@ -333,6 +378,27 @@ const en: Messages = {
   slashCompactTimeout:
     "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
   slashGoalSet: (v) => `✓ goal set: ${v}`,
+  slashAutoSet: (v) => `✓ auto loop: ${v}`,
+  slashErrAutoArg: "/auto requires an objective (or status | pause | resume | stop)",
+  goalStarted: (o) =>
+    `🎯 goal loop started: ${o}\nOne ticket per round, a report after each; send a message to steer, ESC to pause, /auto status for progress.`,
+  goalResumed: (r) => `🎯 goal loop resumed (${r} rounds done)`,
+  goalStatus: (st, r, max, done, total, cur) =>
+    `goal loop: ${st} · ${r}/${max} rounds · tickets ${done}/${total} done${cur ? ` · current: ${cur}` : ""}`,
+  goalPaused: (reason) => `⏸ goal loop paused (${reason}) — /auto resume to continue`,
+  goalStopped: "⏹ goal loop stopped and state cleared",
+  goalComplete: (r) => `✅ goal loop complete after ${r} rounds`,
+  goalImpossible: (why) => `⛔ goal loop judged the objective impossible: ${why}`,
+  goalVerifyFailed: (t, reason) =>
+    `⚠ verification failed (${t}): ${reason} — feedback queued for the next round`,
+  goalVerifyUnparsed: "verification reply unparseable",
+  goalVerifyUnreadable: (t) =>
+    `⏸ verification reply unreadable twice (${t}) — loop paused; confirm manually then /auto resume`,
+  goalStallPaused: "⏸ goal loop paused (no tool activity for several rounds)",
+  goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ done" : "in progress"}: ${t}`,
+  goalHintInterrupted: (o) =>
+    `⏸ goal loop (${o}) was interrupted by a bridge restart — /auto resume to continue`,
+  goalHintPaused: "⏸ goal loop is paused — /auto resume to continue",
   slashForked: (id) => `✓ forked new session: ${id}`,
   slashModelSet: (v) => `✓ model = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`,
@@ -360,6 +426,7 @@ const en: Messages = {
   mcpFromPlugins: "From plugins:",
   mcpFooter: "MCP tools are auto-invoked by the model when needed.",
   slashCommandDescriptions: {
+    auto: "Autonomous goal loop: start, status, pause, resume, stop",
     compact: "Compress conversation context (free up tokens)",
     goal: "Set or show the session goal",
     fork: "Fork the session at the latest checkpoint",

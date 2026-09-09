@@ -57,6 +57,11 @@ export const ZCODE_CREDS_PATH = path.join(
  * and the model resolves them via its `Skill` tool.
  */
 export const SLASH_COMMANDS = [
+  {
+    name: "auto",
+    description: "Autonomous loop: start, status, pause, resume, stop",
+    input: { hint: "<objective> | status | pause | resume | stop" },
+  },
   { name: "compact", description: "Compress conversation context (free up tokens)" },
   {
     name: "goal",
