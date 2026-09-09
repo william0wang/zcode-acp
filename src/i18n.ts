@@ -125,6 +125,25 @@ export interface Messages {
   bootResumeAck: string;
   slashCompactTimeout: string;
   slashGoalSet: (value: string) => string;
+  /** Goal loop (ADR-0022) feedback lines. */
+  goalStarted: (objective: string) => string;
+  goalResumed: (rounds: number) => string;
+  goalStatus: (
+    status: string,
+    rounds: number,
+    maxRounds: number,
+    done: number,
+    total: number,
+    currentTitle?: string,
+  ) => string;
+  goalPaused: (reason: string) => string;
+  goalStopped: string;
+  goalComplete: (rounds: number) => string;
+  goalImpossible: (why: string) => string;
+  goalVerifyFailed: (title: string, reason: string) => string;
+  goalVerifyUnparsed: string;
+  goalStallPaused: string;
+  goalReport: (rounds: number, maxRounds: number, ticketTitle: string, done: boolean) => string;
   slashForked: (sessionId: string) => string;
   slashModelSet: (value: string) => string;
   slashTuiOnly: (cmd: string) => string;
@@ -227,6 +246,19 @@ const zh: Messages = {
   bootResumeAck: "⟲ 已恢复会话 · 历史已回放",
   slashCompactTimeout: "⚠ 压缩超时（300s），后端可能仍在处理——稍等片刻再发送",
   slashGoalSet: (v) => `✓ 目标已设置：${v}`,
+  goalStarted: (o) =>
+    `🎯 goal loop 启动：${o}\n逐票推进，每轮结束汇报；发消息可插话，ESC 暂停，/goal status 查看进度。`,
+  goalResumed: (r) => `🎯 goal loop 已恢复（已完成 ${r} 轮）`,
+  goalStatus: (st, r, max, done, total, cur) =>
+    `goal loop：${st} · ${r}/${max} 轮 · 票 ${done}/${total} 完成${cur ? ` · 当前：${cur}` : ""}`,
+  goalPaused: (reason) => `⏸ goal loop 已暂停（${reason}）—— /goal resume 继续`,
+  goalStopped: "⏹ goal loop 已停止并清除状态",
+  goalComplete: (r) => `✅ goal loop 完成，共 ${r} 轮`,
+  goalImpossible: (why) => `⛔ goal loop 判定目标无法完成：${why}`,
+  goalVerifyFailed: (t, reason) => `⚠ 验证未通过（${t}）：${reason}——反馈已注入下一轮`,
+  goalVerifyUnparsed: "验证回复无法解析",
+  goalStallPaused: "⏸ goal loop 已暂停（连续多轮无工具活动）",
+  goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ 已完成" : "进行中"}：${t}`,
   slashForked: (id) => `✓ 已分叉新会话：${id}`,
   slashModelSet: (v) => `✓ 模型 = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} 在 ACP 模式下不可用（需要 ZCode TUI）`,
@@ -333,6 +365,20 @@ const en: Messages = {
   slashCompactTimeout:
     "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
   slashGoalSet: (v) => `✓ goal set: ${v}`,
+  goalStarted: (o) =>
+    `🎯 goal loop started: ${o}\nOne ticket per round, a report after each; send a message to steer, ESC to pause, /goal status for progress.`,
+  goalResumed: (r) => `🎯 goal loop resumed (${r} rounds done)`,
+  goalStatus: (st, r, max, done, total, cur) =>
+    `goal loop: ${st} · ${r}/${max} rounds · tickets ${done}/${total} done${cur ? ` · current: ${cur}` : ""}`,
+  goalPaused: (reason) => `⏸ goal loop paused (${reason}) — /goal resume to continue`,
+  goalStopped: "⏹ goal loop stopped and state cleared",
+  goalComplete: (r) => `✅ goal loop complete after ${r} rounds`,
+  goalImpossible: (why) => `⛔ goal loop judged the objective impossible: ${why}`,
+  goalVerifyFailed: (t, reason) =>
+    `⚠ verification failed (${t}): ${reason} — feedback queued for the next round`,
+  goalVerifyUnparsed: "verification reply unparseable",
+  goalStallPaused: "⏸ goal loop paused (no tool activity for several rounds)",
+  goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ done" : "in progress"}: ${t}`,
   slashForked: (id) => `✓ forked new session: ${id}`,
   slashModelSet: (v) => `✓ model = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`,

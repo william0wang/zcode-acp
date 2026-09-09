@@ -60,8 +60,8 @@ export const SLASH_COMMANDS = [
   { name: "compact", description: "Compress conversation context (free up tokens)" },
   {
     name: "goal",
-    description: "Set or show the session goal",
-    input: { hint: "goal description" },
+    description: "Autonomous goal loop: start, status, pause, resume, stop",
+    input: { hint: "<objective> | status | pause | resume | stop" },
   },
   { name: "fork", description: "Fork the session at the latest checkpoint" },
   {

@@ -45,7 +45,7 @@ import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
-import { compact, fork, goal } from "./extensions.js";
+import { compact, fork } from "./extensions.js";
 import { listSessions, resumeIntoSession } from "./session.js";
 import { askSessionPick, type SessionPickItem } from "./server-requests.js";
 
@@ -199,9 +199,50 @@ export async function handleSlashCommand(
         return ok(messages().slashCompacted);
       }
       case "goal": {
-        if (!arg) throw new RequestError(-32602, messages().slashErrGoalArg);
-        await goal(server, { sessionId: acpSid, action: "set", objective: arg });
-        return ok(messages().slashGoalSet(arg));
+        // Goal loop (ADR-0022): the bridge's own turn chain — the backend
+        // goal mode is no longer exposed (user input was locked out of its
+        // chain and it never compacts; see the ADR).
+        const { GoalLoopDriver } = await import("../goal-loop/driver.js");
+        const { readGoalState } = await import("../goal-loop/state.js");
+        const sub = arg.split(/\s+/)[0]?.toLowerCase() ?? "";
+        const rest = arg.slice(sub.length).trim();
+        if (sub === "pause") {
+          const live = GoalLoopDriver.live(server, zcodeSid);
+          if (!live) return ok(messages().goalPaused("not running"));
+          live.pause();
+          return ok(
+            messages().goalPaused("/goal pause requested — takes effect at the round boundary"),
+          );
+        }
+        if (sub === "stop") {
+          const live = GoalLoopDriver.live(server, zcodeSid);
+          if (!live) return ok(messages().goalStopped);
+          live.stop();
+          return ok(messages().goalStopped);
+        }
+        if (sub === "resume") {
+          const live = GoalLoopDriver.live(server, zcodeSid);
+          if (!live) {
+            const prior = readGoalState(server.projectCwd(), zcodeSid);
+            if (!prior) throw new RequestError(-32602, messages().slashErrGoalArg);
+            GoalLoopDriver.start(server, acpSid, zcodeSid, prior.objective, { resume: true });
+          }
+          return ok(messages().slashGoalSet("resuming"));
+        }
+        // No subcommand (or /goal status) = status; free text = start a loop.
+        if (!sub || sub === "status" || !rest) {
+          const live = GoalLoopDriver.live(server, zcodeSid);
+          if (live) return ok(live.statusText());
+          const prior = readGoalState(server.projectCwd(), zcodeSid);
+          if (prior) {
+            return ok(
+              messages().goalPaused(`saved state: ${prior.objective} — /goal resume to continue`),
+            );
+          }
+          throw new RequestError(-32602, messages().slashErrGoalArg);
+        }
+        GoalLoopDriver.start(server, acpSid, zcodeSid, rest);
+        return ok(messages().slashGoalSet(rest));
       }
       case "fork": {
         const result = (await fork(server, { sessionId: acpSid })) as {

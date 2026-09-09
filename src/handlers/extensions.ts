@@ -71,34 +71,6 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
   return result;
 }
 
-/** session/goal → zcode session/goal: read/set/replace/clear/pause/resume the goal. */
-export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
-  const zcodeSid = await resolveSidOrThrow(server, params);
-  const action = (params.action as string) ?? "show";
-  const zcParams: Record<string, unknown> = { sessionId: zcodeSid, action };
-  if ((action === "set" || action === "replace") && params.objective !== undefined) {
-    zcParams.objective = params.objective;
-  }
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/goal", zcParams, 15000);
-  if (resp.error) throw new Error(`goal failed: ${resp.error.message}`);
-  // set/replace start an internal AI turn → wait for the prompt lock to release.
-  if (action === "set" || action === "replace") {
-    // timeout is in MILLISECONDS here (Date.now()-based), not seconds — Python's
-    // timeout=60 becomes 60000. A bare 60 would expire on the first probe.
-    const released = await waitForTurnIdle(server, zcodeSid, 60_000, "session/goal", false);
-    if (released) {
-      log(`session/goal action=${action} → ok (lock released)`);
-    } else {
-      warn(`session/goal action=${action} → ⚠ lock wait timeout`);
-    }
-  } else {
-    log(`session/goal action=${action} → ok`);
-  }
-  return (resp.result ?? {}) as Result;
-}
-
 /** session/compact → zcode session/compact + wait for the internal AI turn. */
 export async function compact(
   server: ZcodeAcpServer,

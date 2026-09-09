@@ -18,6 +18,7 @@ import { realpathSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
+import type { ZcodeBackend } from "../backend/client.js";
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
 import { resolveReal } from "../backend/sandbox.js";
 import type {
@@ -1014,6 +1015,22 @@ export async function loadSession(
   server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
+  // Goal-loop restart recovery (ADR-0022 §6): persisted loop state without a
+  // live driver means a bridge restart ended the run — surface the hint once
+  // (never auto-resume a spend-incurring loop the user may have meant to stop).
+  {
+    const { readGoalState } = await import("../goal-loop/state.js");
+    const prior = readGoalState(cwd, zcodeSid);
+    if (prior && prior.status !== "complete" && prior.status !== "stopped") {
+      await sendTextChunk(
+        cx,
+        acpSid,
+        messages().goalPaused(`${prior.objective} — interrupted by a bridge restart`),
+        `goalhint_${randomUUID().slice(0, 8)}`,
+      ).catch(() => undefined);
+    }
+  }
+
   // Named `history` — a local `messages` would shadow the i18n `messages()`
   // helper used in the error paths above (TDZ crash from the catch block).
   const history = await fetchMessages(server, zcodeSid);
@@ -1162,137 +1179,53 @@ export async function prompt(
   return result;
 }
 
-/** One prompt round: subscribe-before-send, run the event-driven turn loop. */
-async function runPrompt(
+/**
+ * Options for {@link runOneTurn}: everything the round machinery needs that
+ * is not derivable from the server/session pair. `turn` MUST already be
+ * registered in `server.pendingTurns` under `requestId` by the caller (the
+ * prompt path does it inside withPreemptLock; the goal-loop driver likewise).
+ */
+export interface RunOneTurnOptions {
+  backend: ZcodeBackend;
+  cx: acp.AgentContext;
+  acpSid: string;
+  zcodeSid: string;
+  requestId: number | string;
+  turn: PendingTurn;
+  /** True when this send cancelled another in-flight prompt (gates attribution). */
+  preempted: boolean;
+  /** Wire text for the backend send (slash-neutralized on the prompt path). */
+  sendText: string;
+  attachments?: unknown[];
+  /** Sandbox allow-restart continuation round (emits the resumed status line). */
+  continuationRound?: boolean;
+  /** Run the env-gated maybeAutoCompact after an end_turn. Default true. */
+  autoCompact?: boolean;
+}
+
+/**
+ * One backend round, shared by the prompt path and the goal-loop driver
+ * (ADR-0022): listener + differ baseline, subscribe with -32004 eviction
+ * recovery, send-busy retry, drain gate after a recent cancel, the
+ * event-driven turn loop with transient-failure retry, and the finally
+ * cleanup (pendingTurns deregistration, discovery/quota refresh, turnState).
+ * Every line here encodes an observed production failure — never reimplement
+ * a second send/subscribe/retry path.
+ */
+export async function runOneTurn(
   server: ZcodeAcpServer,
-  params: acp.PromptRequest,
-  cx: acp.AgentContext,
-  requestId: number | string,
-  continuationRound = false,
-  client?: acp.AgentContext,
+  opts: RunOneTurnOptions,
 ): Promise<acp.PromptResponse> {
-  // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
-  // after the backend spawned unsandboxed must arm on THIS prompt, not on the
-  // next bridge restart — kill the old process; the ensureBackend() below
-  // respawns under the profile and the subscribe-recovery path reloads the
-  // session. No-op unless the config appeared mid-run.
-  await server.applySandboxFlip();
-  const backend = server.ensureBackend();
-
-  // Extract prompt text + image attachments from ACP ContentBlock[].
-  const text = extractPromptText(params.prompt);
-  const attachments = extractAttachments(params.prompt);
-  // A prompt is valid if it has text OR at least one image attachment (a user
-  // may drag in an image with no accompanying text).
-  if (!text && attachments.length === 0) throw new Error("empty prompt");
-
-  // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
-  // auto-submitted trigger until its boot bind, so it arrives as the FIRST
-  // prompt OF THAT CONNECTION — ack with one chunk and end the turn without
-  // touching the backend. Scoped to the arming connection's identity: a
-  // phone app attached to the same bridge may prompt inside the boot window
-  // and must neither spend nor disarm the handshake (observed live: its
-  // prompt raced ahead and the trigger leaked to the model). The same
-  // connection submitting anything else first means the auto-submit was
-  // lost — disarm so the trigger text typed manually later stays a normal
-  // prompt.
-  if (
-    server.bootResumeTriggerConnection !== null &&
-    clientConnectionRoot(client) === server.bootResumeTriggerConnection
-  ) {
-    server.bootResumeTriggerConnection = null;
-    if (text === BOOT_RESUME_TRIGGER) {
-      await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
-      log("session/prompt: boot-resume banner handshake acknowledged");
-      return { stopReason: "end_turn" };
-    }
-  }
-
-  // Materialize a lazy session/new placeholder on first use. Placed after the
-  // empty-prompt check so an invalid request doesn't create a backend session.
-  const zcodeSid = await ensureRealSession(server, params.sessionId);
-
-  // Slash-command interception: dispatches directly to ZCode methods and
-  // returns end_turn without entering the turn loop. Known passthrough
-  // commands and unknown /x both return null for the normal turn loop.
-  const { handleSlashCommand, neutralizeSlashText } = await import("./slash.js");
-  const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
-  if (intercepted) return intercepted;
-
-  // Wire text for the backend: unknown `/x` prompts (not advertised commands)
-  // are neutralized so the backend's command resolver never sees them — an
-  // unresolvable name can hard-fail the turn. Known commands pass through
-  // unchanged. The title/auto-compact paths below keep using the raw `text`.
-  const sendText = neutralizeSlashText(text);
-
-  // Register self + preempt others under a per-session lock. The lock
-  // serializes the critical section so that two concurrent prompts (B, C) for
-  // the same session can't both miss each other and register at once: C waits
-  // for B's section, by which point B is in pendingTurns, so C's preempt finds
-  // and cancels B. Registering INSIDE the lock is what makes the new turn
-  // visible to the next prompt's preempt scan.
-  const turn: PendingTurn = {
-    zcodeSid,
-    cancelled: false,
-  };
-  // True when this send cancelled another in-flight prompt (preempt/stop).
-  // Drives the turn-attribution gate: only a preempted prompt can see leftover
-  // events from a prior turn in its listener queue; without preemption any
-  // events before this turn's turn.started belong to a backend-owned turn
-  // (e.g. auto-resumed after compaction) that this send was steered into.
-  let preempted = false;
-  await withPreemptLock(server, zcodeSid, async () => {
-    server.pendingTurns.set(requestId, turn);
-    preempted = preemptInFlightTurn(server, zcodeSid, requestId);
-  });
-  // Discovery: the session is live the moment its turn STARTS — mark it active
-  // here instead of only at turn end, so a freshly created conversation shows
-  // up in remote lists within one heartbeat even while its first (possibly
-  // minutes-long) turn is still running. Until the backend's auto-title lands
-  // at end_turn, seed a provisional title from the prompt text (auto-title
-  // stays authoritative — its set-once gate is the separate sessionTitles).
-  server.markSessionActive(params.sessionId);
-  // Session title: set EXACTLY ONCE, here, from the first prompt of a
-  // freshly created session — immediately, not at end_turn (a preempted
-  // first turn ends "cancelled" and would never be titled; and the
-  // completing prompt must not steal the title). After this, no automatic
-  // path may change the title again: sessionTitles is set-once and a manual
-  // rename is the only later modifier. Resumed/loaded sessions are not
-  // title-eligible — their stored title was adopted on load, or left unset.
-  if (
-    server.titleEligibleSessions.has(params.sessionId) &&
-    text &&
-    !server.sessionTitles.has(params.sessionId)
-  ) {
-    // Title = first non-empty line of the prompt, truncated to 80 chars.
-    // Multi-line prompts must not leak newlines into the session title.
-    // Split on any line break (\r\n, \n, \r) so all platforms are covered.
-    const title =
-      text
-        .split(/\r\n|\r|\n/)
-        .map((l) => l.trim())
-        .find((l) => l.length > 0)
-        ?.slice(0, 80) ?? text.slice(0, 80);
-    server.sessionTitles.set(params.sessionId, title);
-    server.touchSessionSummary(params.sessionId, title);
-    const { updateSessionTitle } = await import("../tasks-index.js");
-    void updateSessionTitle(zcodeSid, title, text);
-    void sendSessionUpdate(cx, params.sessionId, {
-      sessionUpdate: "session_info_update",
-      title,
-      updatedAt: new Date().toISOString(),
-    });
-  }
-  // Out-of-band running indicator: clients that did not send this prompt
-  // (re-attached mobile, second editor) learn the turn started here — the
-  // session/load replayMeta only snapshots attach time. Emitted per attached
-  // alias (see server.sessionAliases) so a client holding this conversation
-  // under a different ACP id opens its live turn too. Best-effort: a dead
-  // client must not fail the turn.
+  const { backend, cx, acpSid, zcodeSid, requestId, turn, preempted, sendText } = opts;
+  const attachments = opts.attachments ?? [];
+  // Out-of-band running indicator: emitted per attached alias (see
+  // server.sessionAliases) so a client holding this conversation under a
+  // different ACP id opens its live turn too. Best-effort: a dead client must
+  // not fail the turn.
   const emitTurnState = async (running: boolean): Promise<void> => {
     const results = await Promise.allSettled(
       server
-        .sessionAliases(params.sessionId)
+        .sessionAliases(acpSid)
         .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
     );
     for (const r of results) {
@@ -1303,7 +1236,6 @@ async function runPrompt(
       }
     }
   };
-  await emitTurnState(true);
 
   const listener = new EventStreamListener(backend, zcodeSid);
   const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -1317,8 +1249,7 @@ async function runPrompt(
   // Subscribe BEFORE send so we don't lose early turn.completed on short turns.
   // subscribe() throws on failure, surfacing the backend's real error (reader
   // dead, timeout, pipe broken, method-not-found on old CLI, session error) so
-  // the cause is distinguishable. Clean up the pending turn before propagating
-  // — this call site is outside the try/finally below.
+  // the cause is distinguishable. Clean up the pending turn before propagating.
   let snapshot: ZcodeSnapshot;
   try {
     try {
@@ -1332,8 +1263,8 @@ async function runPrompt(
       // a second failure, propagates to the editor.
       const msg = e instanceof Error ? e.message : String(e);
       if (!/session is not active/i.test(msg)) throw e;
-      log(`prompt: session ${zcodeSid} no longer active in backend — reloading via session/resume`);
-      await reloadBackendSession(server, params.sessionId, zcodeSid);
+      log(`turn: session ${zcodeSid} no longer active in backend — reloading via session/resume`);
+      await reloadBackendSession(server, acpSid, zcodeSid);
       // The pre-subscribe fetchMessages ran against the evicted session and
       // came back empty — re-baseline the differ so turn completion doesn't
       // diff-replay the whole history as new output.
@@ -1342,7 +1273,7 @@ async function runPrompt(
     }
     // A successful subscribe proves the resident runtime is live — refresh
     // the verification so concurrent/later entry points skip a reload.
-    server.markBackendLoaded(params.sessionId);
+    server.markBackendLoaded(acpSid);
   } catch (e) {
     server.pendingTurns.delete(requestId);
     await emitTurnState(false);
@@ -1383,7 +1314,7 @@ async function runPrompt(
         differ.markSeen(await fetchMessages(server, zcodeSid));
         await sendTextChunk(
           cx,
-          params.sessionId,
+          acpSid,
           messages().networkRetry(attempt - 1, MAX_TURN_ATTEMPTS - 1),
           randomUUID(),
         );
@@ -1402,7 +1333,7 @@ async function runPrompt(
         Date.now() - server.lastCancelledAt.get(zcodeSid)! < DRAIN_WINDOW_MS;
       if (cancelledRecently) {
         const drained = await drainBackendAfterCancel(server, {
-          acpSid: params.sessionId,
+          acpSid,
           zcodeSid,
           turn,
           listener,
@@ -1489,8 +1420,8 @@ async function runPrompt(
       // bare thinking block with no context. Announce the resumed turn at
       // send-accept so every phase of the allow→restart→continue flow is
       // visibly accounted for (the allow-time hint covers the restart start).
-      if (continuationRound) {
-        await sendTextChunk(cx, params.sessionId, messages().sandboxResumedStatus, randomUUID());
+      if (opts.continuationRound) {
+        await sendTextChunk(cx, acpSid, messages().sandboxResumedStatus, randomUUID());
       }
 
       try {
@@ -1508,14 +1439,11 @@ async function runPrompt(
           monitor,
           differ,
           cx,
-          params.sessionId,
+          acpSid,
           chunkMsgId,
           turn,
           gateArmed,
         );
-
-        // (Session title: already set once at the FIRST prompt, before the
-        // turn loop — nothing here may change it again.)
 
         // Auto-compact: if context usage exceeds the threshold, compact before
         // returning so the next prompt has room. Configured via
@@ -1523,16 +1451,16 @@ async function runPrompt(
         // disabled). Only on end_turn — cancelled/max_turn_requests skips
         // compaction, as does a stall-recovered end_turn (the completion was
         // inferred by the stall heuristic, not confirmed by turn.completed —
-        // compressing an in-flight task's context would destroy the work).
+        // compressing an in-flight task's would destroy the work).
         // Best-effort: failures are logged inside maybeAutoCompact, never thrown.
-        if (result.stopReason === "end_turn" && !turn.stallRecovered) {
+        if (
+          opts.autoCompact !== false &&
+          result.stopReason === "end_turn" &&
+          !turn.stallRecovered
+        ) {
           const { maybeAutoCompact } = await import("../config/auto-compact.js");
-          await maybeAutoCompact(server, cx, params.sessionId, zcodeSid);
+          await maybeAutoCompact(server, cx, acpSid, zcodeSid);
         }
-
-        // (Sandbox allow-restart continuation: handled by the prompt() wrapper
-        // — the chained round keeps the editor's original request pending so
-        // the restart window stays visibly "running".)
 
         return result;
       } catch (e) {
@@ -1556,7 +1484,7 @@ async function runPrompt(
     // surfacing a hard error and stopping. Skip auto-compact here: compaction
     // after a failed turn is more likely to confuse state than help.
     const errMsg = formatTurnError(lastTurnError) || "turn failed after retries";
-    await sendTextChunk(cx, params.sessionId, messages().requestFailed(errMsg), randomUUID());
+    await sendTextChunk(cx, acpSid, messages().requestFailed(errMsg), randomUUID());
     return { stopReason: "end_turn" };
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
@@ -1565,8 +1493,8 @@ async function runPrompt(
     // session discoverable regardless of outcome (end_turn, cancelled, retries
     // exhausted). Also refresh the backend-loaded verification: the resident
     // runtime was demonstrably live through this turn.
-    server.markSessionActive(params.sessionId);
-    server.markBackendLoaded(params.sessionId);
+    server.markSessionActive(acpSid);
+    server.markBackendLoaded(acpSid);
     // Turn end = quota refresh point (ADR-0021): usage moved, the dock should
     // catch up immediately instead of waiting for the 60s interval.
     void forceRefreshQuota();
@@ -1575,6 +1503,172 @@ async function runPrompt(
     const stillBusy = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
     await emitTurnState(stillBusy);
   }
+}
+
+/** One prompt round: subscribe-before-send, run the event-driven turn loop. */
+async function runPrompt(
+  server: ZcodeAcpServer,
+  params: acp.PromptRequest,
+  cx: acp.AgentContext,
+  requestId: number | string,
+  continuationRound = false,
+  client?: acp.AgentContext,
+): Promise<acp.PromptResponse> {
+  // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
+  // after the backend spawned unsandboxed must arm on THIS prompt, not on the
+  // next bridge restart — kill the old process; the ensureBackend() below
+  // respawns under the profile and the subscribe-recovery path reloads the
+  // session. No-op unless the config appeared mid-run.
+  await server.applySandboxFlip();
+  const backend = server.ensureBackend();
+
+  // Extract prompt text + image attachments from ACP ContentBlock[].
+  const text = extractPromptText(params.prompt);
+  const attachments = extractAttachments(params.prompt);
+  // A prompt is valid if it has text OR at least one image attachment (a user
+  // may drag in an image with no accompanying text).
+  if (!text && attachments.length === 0) throw new Error("empty prompt");
+
+  // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
+  // auto-submitted trigger until its boot bind, so it arrives as the FIRST
+  // prompt OF THAT CONNECTION — ack with one chunk and end the turn without
+  // touching the backend. Scoped to the arming connection's identity: a
+  // phone app attached to the same bridge may prompt inside the boot window
+  // and must neither spend nor disarm the handshake (observed live: its
+  // prompt raced ahead and the trigger leaked to the model). The same
+  // connection submitting anything else first means the auto-submit was
+  // lost — disarm so the trigger text typed manually later stays a normal
+  // prompt.
+  if (
+    server.bootResumeTriggerConnection !== null &&
+    clientConnectionRoot(client) === server.bootResumeTriggerConnection
+  ) {
+    server.bootResumeTriggerConnection = null;
+    if (text === BOOT_RESUME_TRIGGER) {
+      await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
+      log("session/prompt: boot-resume banner handshake acknowledged");
+      return { stopReason: "end_turn" };
+    }
+  }
+
+  // Materialize a lazy session/new placeholder on first use. Placed after the
+  // empty-prompt check so an invalid request doesn't create a backend session.
+  const zcodeSid = await ensureRealSession(server, params.sessionId);
+
+  // Slash-command interception: dispatches directly to ZCode methods and
+  // returns end_turn without entering the turn loop. Known passthrough
+  // commands and unknown /x both return null for the normal turn loop.
+  const { handleSlashCommand, neutralizeSlashText } = await import("./slash.js");
+  const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
+  if (intercepted) return intercepted;
+
+  // Wire text for the backend: unknown `/x` prompts (not advertised commands)
+  // are neutralized so the backend's command resolver never sees them — an
+  // unresolvable name can hard-fail the turn. Known commands pass through
+  // unchanged. The title/auto-compact paths below keep using the raw `text`.
+  const sendText = neutralizeSlashText(text);
+
+  // Goal-loop parking (ADR-0022 §3): a live loop owns this session's turn
+  // cadence. Park the prompt on the driver — its text merges into the next
+  // round, and the parked request resolves when that round completes —
+  // instead of preempting and cancelling the in-flight goal turn. Slash
+  // commands (/goal pause|resume|stop|status) were intercepted above, so
+  // anything reaching here is conversational input.
+  const goalLoop = server.goalLoops?.get(zcodeSid);
+  if (goalLoop) return goalLoop.parkPrompt(sendText);
+
+  // Register self + preempt others under a per-session lock. The lock
+  // serializes the critical section so that two concurrent prompts (B, C) for
+  // the same session can't both miss each other and register at once: C waits
+  // for B's section, by which point B is in pendingTurns, so C's preempt finds
+  // and cancels B. Registering INSIDE the lock is what makes the new turn
+  // visible to the next prompt's preempt scan.
+  const turn: PendingTurn = {
+    zcodeSid,
+    cancelled: false,
+  };
+  // True when this send cancelled another in-flight prompt (preempt/stop).
+  // Drives the turn-attribution gate: only a preempted prompt can see leftover
+  // events from a prior turn in its listener queue; without preemption any
+  // events before this turn's turn.started belong to a backend-owned turn
+  // (e.g. auto-resumed after compaction) that this send was steered into.
+  let preempted = false;
+  await withPreemptLock(server, zcodeSid, async () => {
+    server.pendingTurns.set(requestId, turn);
+    preempted = preemptInFlightTurn(server, zcodeSid, requestId);
+  });
+  // Discovery: the session is live the moment its turn STARTS — mark it active
+  // here instead of only at turn end, so a freshly created conversation shows
+  // up in remote lists within one heartbeat even while its first (possibly
+  // minutes-long) turn is still running. Until the backend's auto-title lands
+  // at end_turn, seed a provisional title from the prompt text (auto-title
+  // stays authoritative — its set-once gate is the separate sessionTitles).
+  server.markSessionActive(params.sessionId);
+  // Session title: set EXACTLY ONCE, here, from the first prompt of a
+  // freshly created session — immediately, not at end_turn (a preempted
+  // first turn ends "cancelled" and would never be titled; and the
+  // completing prompt must not steal the title). After this, no automatic
+  // path may change the title again: sessionTitles is set-once and a manual
+  // rename is the only later modifier. Resumed/loaded sessions are not
+  // title-eligible — their stored title was adopted on load, or left unset.
+  if (
+    server.titleEligibleSessions.has(params.sessionId) &&
+    text &&
+    !server.sessionTitles.has(params.sessionId)
+  ) {
+    // Title = first non-empty line of the prompt, truncated to 80 chars.
+    // Multi-line prompts must not leak newlines into the session title.
+    // Split on any line break (\r\n, \n, \r) so all platforms are covered.
+    const title =
+      text
+        .split(/\r\n|\r|\n/)
+        .map((l) => l.trim())
+        .find((l) => l.length > 0)
+        ?.slice(0, 80) ?? text.slice(0, 80);
+    server.sessionTitles.set(params.sessionId, title);
+    server.touchSessionSummary(params.sessionId, title);
+    const { updateSessionTitle } = await import("../tasks-index.js");
+    void updateSessionTitle(zcodeSid, title, text);
+    void sendSessionUpdate(cx, params.sessionId, {
+      sessionUpdate: "session_info_update",
+      title,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  // Out-of-band running indicator: clients that did not send this prompt
+  // (re-attached mobile, second editor) learn the turn started here — the
+  // session/load replayMeta only snapshots attach time. Emitted per attached
+  // alias (see server.sessionAliases) so a client holding this conversation
+  // under a different ACP id opens its live turn too. Best-effort: a dead
+  // client must not fail the turn.
+  const emitTurnState = async (running: boolean): Promise<void> => {
+    const results = await Promise.allSettled(
+      server
+        .sessionAliases(params.sessionId)
+        .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
+    );
+    for (const r of results) {
+      if (r.status === "rejected") {
+        log(
+          `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+        );
+      }
+    }
+  };
+  await emitTurnState(true);
+
+  return runOneTurn(server, {
+    backend,
+    cx,
+    acpSid: params.sessionId,
+    zcodeSid,
+    requestId,
+    turn,
+    preempted,
+    sendText,
+    attachments,
+    continuationRound,
+  });
 }
 
 /** How long after a cancel a new prompt's attribution gate stays armed (the
@@ -1921,7 +2015,7 @@ export async function drainBackendAfterCancel(
  * synchronous; preempt no longer waits). The turn loop itself runs OUTSIDE
  * this lock — only registration + preempt are serialized.
  */
-function withPreemptLock(
+export function withPreemptLock(
   server: ZcodeAcpServer,
   zcodeSid: string,
   body: () => Promise<void>,
@@ -1981,6 +2075,11 @@ export function preemptInFlightTurn(
   let found = false;
   for (const [reqId, turn] of server.pendingTurns) {
     if (turn.zcodeSid !== zcodeSid || reqId === selfRequestId) continue;
+    // Goal-loop rounds (ADR-0022): user prompts PARK on the driver (see the
+    // parking hook in runPrompt) instead of preempting — a goalLoop turn in
+    // this scan means a path that bypassed the hook (defensive); never
+    // cancel it here. ESC/cancel() still cancels it like any pending turn.
+    if (turn.goalLoop) continue;
     turn.cancelled = true; // signal the old turn to stop its retry loops
     if (!turn.stopSent) {
       stopBackendTurn(server, zcodeSid, turn.foregroundExecutionId);
