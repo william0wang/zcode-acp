@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0](https://github.com/william0wang/zcode-acp/compare/v0.33.0...v0.34.0) (2026-09-09)
+
+
+### Features
+
+* show tool input details in permission popups and route plan approval through elicitation forms ([c7cb6c3](https://github.com/william0wang/zcode-acp/commit/c7cb6c3c7375debb1d751963bfb70b2bd11c4193))
+
 ## [0.33.0](https://github.com/william0wang/zcode-acp/compare/v0.32.0...v0.33.0) (2026-09-09)
 
 
