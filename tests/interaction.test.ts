@@ -11,6 +11,8 @@ import {
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
   buildAskUserElicitationForm,
+  buildPlanApprovalElicitationForm,
+  describeToolInput,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
@@ -18,6 +20,7 @@ import {
   isUserInputRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
+  parsePlanApprovalElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../src/interaction/adapter.js";
@@ -122,6 +125,58 @@ describe("zcode permission → ACP", () => {
     // allow→allow_always; reject/unknown→reject_once (fail-safe, never auto-allow)
     expect(acp!.options.map((o) => o.kind)).toEqual(["allow_always", "reject_once", "reject_once"]);
   });
+
+  // The approval popup must show WHAT is being approved. martty renders only
+  // toolCall.title in its overlay (untitled → a bare "tool" prompt), so the
+  // title carries "Tool: command/path" and content carries the full input.
+  it("popup toolCall carries a human title + full-input content + locations", () => {
+    const params = {
+      requestId: "r1",
+      toolCallId: "tc_1",
+      toolName: "Bash",
+      input: { command: "echo ok\nrm -rf /tmp/x" },
+      options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
+    };
+    const acp = zcodePermissionToAcp(params, "acp_1")!;
+    expect(acp.toolCall.title).toBe("Bash: echo ok");
+    expect(acp.toolCall.content?.[0]).toEqual({
+      type: "content",
+      content: { type: "text", text: "echo ok\nrm -rf /tmp/x" },
+    });
+  });
+
+  it("file tools expose the path in title and locations", () => {
+    const params = {
+      requestId: "r1",
+      toolCallId: "tc_2",
+      toolName: "Write",
+      input: { file_path: "/etc/hosts", content: "x" },
+      options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
+    };
+    const acp = zcodePermissionToAcp(params, "acp_1")!;
+    expect(acp.toolCall.title).toBe("Write: /etc/hosts");
+    expect(acp.toolCall.locations).toEqual([{ path: "/etc/hosts" }]);
+  });
+
+  it("input without recognizable fields still yields a JSON summary title", () => {
+    const acp = zcodePermissionToAcp(
+      {
+        requestId: "r1",
+        toolCallId: "tc_3",
+        toolName: "WebSearch",
+        input: { query: "rust regex crate" },
+        options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
+      },
+      "acp_1",
+    )!;
+    expect(acp.toolCall.title).toBe("WebSearch: rust regex crate");
+  });
+
+  it("describeToolInput caps long commands and prefers command over path", () => {
+    expect(describeToolInput({ command: "a".repeat(300) })?.length).toBeLessThanOrEqual(160);
+    expect(describeToolInput({ command: "bun test", file_path: "/x" })).toBe("bun test");
+    expect(describeToolInput(undefined)).toBeUndefined();
+  });
 });
 
 describe("ACP response → zcode permission", () => {
@@ -177,11 +232,69 @@ describe("ExitPlanMode", () => {
     expect(r.action).toBe("accept");
     expect((r as { content: { answer_0: string } }).content.answer_0).toBe("approve");
   });
+  it("popup toolCall content carries the plan text", () => {
+    const acp = exitPlanModeToAcpPermission(
+      { toolCallId: "tc_2", input: { plan: "# The Plan\n1. do it" } } as never,
+      "acp_1",
+    );
+    expect(acp.toolCall.content?.[0]).toEqual({
+      type: "content",
+      content: { type: "text", text: "# The Plan\n1. do it" },
+    });
+  });
+  it("no plan in input → no content block", () => {
+    const acp = exitPlanModeToAcpPermission({ toolCallId: "tc_2" } as never, "acp_1");
+    expect(acp.toolCall.content).toBeUndefined();
+  });
   it("reject → decline", () => {
     expect(
       acpPermissionResponseToExitPlanMode({ outcome: { outcome: "selected", optionId: "reject" } })
         .action,
     ).toBe("decline");
+  });
+});
+
+describe("plan approval elicitation form", () => {
+  it("carries the plan markdown in the field description", () => {
+    const form = buildPlanApprovalElicitationForm(
+      { toolCallId: "tc_9", input: { plan: "# The Plan\n1. do it" } } as never,
+      "acp_1",
+      "tc_9",
+    );
+    expect(form.mode).toBe("form");
+    expect(form.sessionId).toBe("acp_1");
+    expect(form.toolCallId).toBe("tc_9");
+    const field = form.requestedSchema.properties.approval as Record<string, unknown>;
+    expect(field.description).toBe("# The Plan\n1. do it");
+    expect(form.requestedSchema.required).toEqual(["approval"]);
+    expect(field.oneOf).toEqual([
+      { const: "approve", title: "Approve — exit plan mode" },
+      { const: "reject", title: "Reject — keep planning" },
+    ]);
+  });
+
+  it("no plan in input → field without description", () => {
+    const form = buildPlanApprovalElicitationForm({ toolCallId: "tc_9" } as never, "acp_1");
+    const field = form.requestedSchema.properties.approval as Record<string, unknown>;
+    expect(field.description).toBeUndefined();
+  });
+
+  it("approve → accept with content.answer_0", () => {
+    const r = parsePlanApprovalElicitationResponse({
+      action: "accept",
+      content: { approval: "approve" },
+    });
+    expect(r.action).toBe("accept");
+    expect((r as { content: { answer_0: string } }).content.answer_0).toBe("approve");
+  });
+
+  it("reject choice / cancel / garbage → decline", () => {
+    expect(
+      parsePlanApprovalElicitationResponse({ action: "accept", content: { approval: "reject" } })
+        .action,
+    ).toBe("decline");
+    expect(parsePlanApprovalElicitationResponse({ action: "cancel" }).action).toBe("decline");
+    expect(parsePlanApprovalElicitationResponse(null).action).toBe("decline");
   });
 });
 
@@ -247,6 +360,15 @@ describe("buildAskUserAcpParams", () => {
     expect(params.sessionId).toBe("acp_1");
     expect(params.options).toHaveLength(1);
     expect(params.toolCall.toolCallId).toBe("tc");
+  });
+  it("popup title carries the question text", () => {
+    const params = buildAskUserAcpParams(
+      { toolCallId: "tc", input: {} } as never,
+      "acp_1",
+      [{ optionId: "A", kind: "allow_once", name: "A" }],
+      "Which database?",
+    );
+    expect(params.toolCall.title).toBe("Which database?");
   });
 });
 
@@ -472,8 +594,6 @@ describe("elicitation form: AskUserQuestion", () => {
   });
 });
 
-// ExitPlanMode is exercised via session/request_permission (see the
-// "ExitPlanMode" describe block above): `exitPlanModeToAcpPermission` +
-// `acpPermissionResponseToExitPlanMode`. There is no elicitation-form path for
-// it — routing plan approval through elicitation surfaces a generic "input
-// request" shell that reads wrong; AskUserQuestion is the elicitation use case.
+// ExitPlanMode has two client paths, both covered above: form-capable clients
+// get the elicitation form (plan markdown in the field description); everyone
+// else gets session/request_permission with the plan in toolCall.content.

@@ -638,12 +638,14 @@ that question without cancelling the form.
 }
 ```
 
-**ExitPlanMode elicitation form** — single `feedback` text field; no
-approve/reject dropdown. The client's own submit button is the approve action;
-typing into the field is the reject action. Submitting with the field empty
-approves the plan; submitting with text rejects it and returns the text to
-zcode as the decline `reason` (so the agent sees the redirection when it
-re-plans). The cancel/decline button is a plain reject with no reason.
+**ExitPlanMode elicitation form** — sent only to clients that advertised
+elicitation form support; everyone else gets `session/request_permission` with
+the plan in `toolCall.content`. The form carries the COMPLETE plan markdown as
+the `approval` field's `description` (markdown-capable clients render it in a
+scrollable detail pane); the decision itself is a required approve/reject enum.
+An `accept` whose `content.approval` is `"approve"` maps to the zcode accept
+(`answer_0: "approve"`); a `reject`/`cancel` action, or `"reject"` in the
+field, maps to a plain decline.
 
 ```json
 {
@@ -651,21 +653,31 @@ re-plans). The cancel/decline button is a plain reject with no reason.
   "params": {
     "mode": "form",
     "sessionId": "sess_abc123",
-    "message": "Ready to code?\n\n1. Implement login\n2. Implement signup\n\nLeave the box empty and submit to approve; type feedback to reject and redirect.",
+    "message": "Exit plan mode",
     "requestedSchema": {
       "type": "object",
       "properties": {
-        "feedback": {
+        "approval": {
           "type": "string",
-          "title": "Feedback",
-          "description": "Empty = approve the plan. Anything typed = reject and use this text as the redirection."
+          "title": "Review the plan, then choose an action",
+          "description": "1. Implement login\n2. Implement signup",
+          "oneOf": [
+            { "const": "approve", "title": "Approve — exit plan mode" },
+            { "const": "reject", "title": "Reject — keep planning" }
+          ]
         }
       },
-      "required": []
+      "required": ["approval"]
     }
   }
 }
 ```
+
+If the form request fails outright (no form-capable client attached any more —
+capability flags are merged across clients at initialize — or a timeout), the
+bridge falls back once to `session/request_permission` so the plan can still
+be approved by a plain permission popup; only when that also fails does the
+plan decline.
 
 ## Extension Methods (0.14.8+)
 

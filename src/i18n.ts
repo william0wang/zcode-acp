@@ -112,6 +112,8 @@ export interface Messages {
   planApproveOption: string;
   planRejectOption: string;
   planPopupTitle: string;
+  /** ExitPlanMode elicitation form (form-capable clients): field label. */
+  planFieldTitle: string;
   /** AskUserQuestion: skip choices in both popup and elicitation forms. */
   askSkipOption: string;
   askSkipQuestionTitle: string;
@@ -243,6 +245,7 @@ const zh: Messages = {
   planApproveOption: "同意——退出计划模式",
   planRejectOption: "拒绝——继续规划",
   planPopupTitle: "退出计划模式",
+  planFieldTitle: "请审阅计划，然后选择操作",
   askSkipOption: "跳过",
   askSkipQuestionTitle: "跳过此问题",
   askIncludeOption: (lb) => `包含：${lb}`,
@@ -368,6 +371,7 @@ const en: Messages = {
   planApproveOption: "Approve — exit plan mode",
   planRejectOption: "Reject — keep planning",
   planPopupTitle: "Exit plan mode",
+  planFieldTitle: "Review the plan, then choose an action",
   askSkipOption: "Skip",
   askSkipQuestionTitle: "Skip this question",
   askIncludeOption: (lb) => `Include: ${lb}`,

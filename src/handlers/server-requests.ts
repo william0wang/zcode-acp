@@ -33,12 +33,14 @@ import {
   acpPermissionResponseToZcode,
   buildAskUserAcpParams,
   buildAskUserElicitationForm,
+  buildPlanApprovalElicitationForm,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
+  parsePlanApprovalElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
@@ -488,13 +490,27 @@ async function handleSinglePermission(
   }
   await sendSessionUpdate(cx, acpSid, tcUpdate);
 
-  // ExitPlanMode and tool auth both go through session/request_permission.
-  // ExitPlanMode intentionally does NOT use elicitation/create even when the
-  // client supports forms — matching claude-agent-acp's reference behaviour:
-  // plan approval is a permission decision (approve/reject), not a structured
-  // input, and rendering it through the elicitation channel surfaces a generic
-  // "input request" shell that reads wrong for this flow. AskUserQuestion is
-  // the right place for elicitation; plan approval is not.
+  // ExitPlanMode routing splits by client capability:
+  //   - Form-capable clients (martty) get an elicitation FORM: the complete
+  //     plan renders as markdown in a scrollable detail pane and approve/reject
+  //     are enum choices — a one-line permission popup can never show a plan.
+  //   - Clients without forms (Zed) keep session/request_permission, whose
+  //     toolCall carries the plan in `content` for the same reason.
+  // Both converge on the same zcode accept/decline response shape.
+  if (epm && server.supportsElicitationForm()) {
+    const elicited = await handlePlanApprovalViaElicitation(
+      server,
+      cx,
+      acpSid,
+      p as ZcodeInteractionUserInputParams,
+      turn,
+    );
+    // null = the form channel failed (capability flags are OR-merged across
+    // clients at initialize and survive detach, so the flag can outlive the
+    // form-capable client). Fall through to request_permission below — every
+    // client can answer that popup — instead of silently declining the plan.
+    if (elicited !== null) return elicited;
+  }
   const acpParams = perm
     ? zcodePermissionToAcp(p as ZcodeInteractionPermissionParams, acpSid)!
     : exitPlanModeToAcpPermission(p as ZcodeInteractionUserInputParams, acpSid);
@@ -557,7 +573,7 @@ export async function handleAskUserQuestion(
     if (!q.multiSelect) {
       // Single-select: one popup.
       await emitAskToolCall(cx, acpSid, toolCallId, idx, q.question, rawInput);
-      const acpParams = buildAskUserAcpParams(params, acpSid, q.options);
+      const acpParams = buildAskUserAcpParams(params, acpSid, q.options, q.question);
       acpParams.toolCall.toolCallId = `${toolCallId}_${idx}`;
       const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, q.question, turn);
       if (turn?.cancelled) {
@@ -585,7 +601,7 @@ export async function handleAskUserQuestion(
         const { label, pair } = pairs[sub]!;
         const promptText = `${q.question}\n— include "${label}"?`;
         await emitAskToolCall(cx, acpSid, toolCallId, `${idx}_${sub}`, promptText, rawInput);
-        const acpParams = buildAskUserAcpParams(params, acpSid, pair);
+        const acpParams = buildAskUserAcpParams(params, acpSid, pair, promptText);
         acpParams.toolCall.toolCallId = `${toolCallId}_${idx}_${sub}`;
         const resp = await askOnce(server, cx, acpParams, idx + 1, qs.length, label, turn);
         // Abort the whole multi-select if the turn was cancelled (user sent a
@@ -663,6 +679,46 @@ async function handleAskUserViaElicitation(
   }
   log(`  ✓ AskUserQuestion elicitation answered (${Object.keys(answers).length})`);
   return { action: "accept", content: { answers } };
+}
+
+/**
+ * ExitPlanMode via elicitation form — the plan-review surface for
+ * form-capable clients. The form's field description carries the complete
+ * plan markdown (martty renders it scrollable in a detail pane); the decision
+ * is a required approve/reject enum. Cancelled/declined forms map to decline.
+ * Returns null when the form channel itself failed (timeout, or no client that
+ * can answer elicitation any more) so the caller can fall back to
+ * request_permission.
+ */
+async function handlePlanApprovalViaElicitation(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  params: ZcodeInteractionUserInputParams,
+  turn?: PendingTurn,
+): Promise<ZcodeInteractionResponse | null> {
+  const toolCallId = params.toolCallId ?? "";
+  const formParams = buildPlanApprovalElicitationForm(params, acpSid, toolCallId || undefined);
+  log("  ⟳ ExitPlanMode forwarding elicitation/create (form, plan review)");
+  const acpResp = await requestWithTimeout(
+    server,
+    cx,
+    "elicitation/create",
+    formParams,
+    "plan approval (elicitation)",
+    undefined,
+    turn,
+  );
+  if (acpResp === INTERRUPTED) {
+    return onInteractionInterrupted(cx, acpSid, toolCallId, turn);
+  }
+  if (acpResp === null) {
+    warn("plan approval elicitation got no form response; falling back to request_permission");
+    return null;
+  }
+  const resp = parsePlanApprovalElicitationResponse(acpResp);
+  log(`  ✓ plan approval: ${resp.action}`);
+  return resp;
 }
 
 /** Emit the prerequisite tool_call for an AskUserQuestion popup. */

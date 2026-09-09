@@ -80,13 +80,100 @@ function normalizeKind(kind: string | undefined): PermissionOption["kind"] {
 }
 
 /** Convert a zcode tool-permission request into ACP requestPermission params. */
+
+/**
+ * Cap for the popup title built from tool input. Clients render the title in
+ * a single popup line (martty draws it in the overlay border), so keep it
+ * bounded — the full input still rides in `content` for detail-capable clients.
+ */
+const POPUP_TITLE_MAX = 160;
+
+/** First line of a string, whitespace-trimmed and length-capped. */
+function firstLine(value: string, max = POPUP_TITLE_MAX): string {
+  const line = value.split("\n", 1)[0]!.trim();
+  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+}
+
+/**
+ * Human one-line summary of a tool's input for a permission popup title.
+ *
+ * The command / file path IS the decision the user is making, and some clients
+ * (martty) render only `toolCall.title` in their approval overlay — without
+ * this summary the popup reads as a bare "tool" and the path is invisible.
+ * Spec-complete clients also render `content`, which carries the full input
+ * (see `inputPopupContent`) — multi-line commands included.
+ */
+export function describeToolInput(input: unknown): string | undefined {
+  if (input === null || input === undefined) return undefined;
+  if (typeof input !== "object") return firstLine(String(input));
+  const rec = input as Record<string, unknown>;
+  const command = rec["command"];
+  if (typeof command === "string" && command.trim()) return firstLine(command.trim());
+  for (const key of ["file_path", "path", "notebook_path", "url", "pattern", "query"]) {
+    const v = rec[key];
+    if (typeof v === "string" && v.trim()) return firstLine(v.trim());
+  }
+  try {
+    return firstLine(JSON.stringify(input) ?? "");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Full-input text block for the permission popup: the complete command (every
+ * line — the title only shows the first) or a pretty-printed input object, so
+ * detail-capable clients never hide what is being approved.
+ */
+function inputPopupContent(
+  input: unknown,
+): Array<{ type: "content"; content: { type: "text"; text: string } }> | undefined {
+  if (input === null || input === undefined) return undefined;
+  let text: string | undefined;
+  if (typeof input === "object") {
+    const command = (input as Record<string, unknown>)["command"];
+    if (typeof command === "string" && command.trim()) text = command.trim();
+  }
+  if (text === undefined) {
+    try {
+      text = JSON.stringify(input, null, 2) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  if (!text) return undefined;
+  if (text.length > 8000) text = text.slice(0, 8000 - 1) + "…";
+  return [{ type: "content", content: { type: "text", text } }];
+}
+
+/** File paths in a tool input, as ToolCallUpdate.locations for editors that link them. */
+function inputLocations(input: unknown): Array<{ path: string }> | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const rec = input as Record<string, unknown>;
+  const paths: Array<{ path: string }> = [];
+  for (const key of ["file_path", "path", "notebook_path"]) {
+    const v = rec[key];
+    if (typeof v === "string" && v.trim()) paths.push({ path: v.trim() });
+  }
+  return paths.length > 0 ? paths : undefined;
+}
+
+/** Permission-request details shared by every toolCall builder below. */
+interface PermissionToolCall {
+  toolCallId: string;
+  title?: string;
+  content?: Array<{ type: "content"; content: { type: "text"; text: string } }>;
+  locations?: Array<{ path: string }>;
+  rawInput: unknown;
+}
+
 export function zcodePermissionToAcp(
   params: ZcodeInteractionPermissionParams,
   acpSid: string,
 ): {
   options: PermissionOption[];
   sessionId: string;
-  toolCall: { toolCallId: string; rawInput: unknown };
+  toolCall: PermissionToolCall;
 } | null {
   const options: PermissionOption[] = [];
   for (const opt of params.options ?? []) {
@@ -97,10 +184,21 @@ export function zcodePermissionToAcp(
     });
   }
   if (options.length === 0) return null;
+  const toolName = params.toolName ?? "";
+  const detail = describeToolInput(params.input);
+  const title = [toolName, detail].filter(Boolean).join(": ") || undefined;
+  const content = inputPopupContent(params.input);
+  const locations = inputLocations(params.input);
   return {
     options,
     sessionId: acpSid,
-    toolCall: { toolCallId: params.toolCallId ?? "", rawInput: params.input },
+    toolCall: {
+      toolCallId: params.toolCallId ?? "",
+      rawInput: params.input,
+      ...(title ? { title } : {}),
+      ...(content ? { content } : {}),
+      ...(locations ? { locations } : {}),
+    },
   };
 }
 
@@ -135,9 +233,17 @@ export function exitPlanModeToAcpPermission(
 ): {
   options: PermissionOption[];
   sessionId: string;
-  toolCall: { toolCallId: string; title?: string; rawInput: unknown };
+  toolCall: PermissionToolCall;
 } {
   const m = messages();
+  // The plan text rides in toolCall.content so approval popups can show WHAT
+  // is being approved — rawInput alone is a machine-readable blob some clients
+  // never render (martty's overlay shows the title and nothing else).
+  const plan =
+    typeof params.input === "object" && params.input !== null
+      ? (params.input as { plan?: unknown }).plan
+      : undefined;
+  const planText = typeof plan === "string" && plan.trim() ? plan : undefined;
   return {
     options: [
       { kind: "allow_once", name: m.planApproveOption, optionId: "approve" },
@@ -148,6 +254,13 @@ export function exitPlanModeToAcpPermission(
       toolCallId: params.toolCallId ?? "",
       title: m.planPopupTitle,
       rawInput: params.input,
+      ...(planText
+        ? {
+            content: [
+              { type: "content" as const, content: { type: "text" as const, text: planText } },
+            ],
+          }
+        : {}),
     },
   };
 }
@@ -166,6 +279,94 @@ export function acpPermissionResponseToExitPlanMode(
     return { action: "accept", content: { answer_0: "approve" } };
   }
   return { action: "decline", reason: "rejected" };
+}
+
+// ---------- ExitPlanMode via elicitation form ----------
+
+/**
+ * Build an elicitation FORM for ExitPlanMode plan approval.
+ *
+ * Form-capable clients (martty) render the field's `description` through their
+ * full markdown pipeline in a scrollable detail pane — the COMPLETE plan lives
+ * there, not in a one-line popup title. The decision itself is a required enum
+ * field (approve / reject); a cancelled or declined form maps to decline.
+ * Clients without form support fall back to the requestPermission path, whose
+ * toolCall carries the plan in `content` for the same reason.
+ */
+export function buildPlanApprovalElicitationForm(
+  params: ZcodeInteractionUserInputParams,
+  acpSid: string,
+  toolCallId?: string,
+): {
+  mode: "form";
+  sessionId: string;
+  toolCallId?: string;
+  message: string;
+  requestedSchema: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+} {
+  const m = messages();
+  const plan =
+    typeof params.input === "object" && params.input !== null
+      ? (params.input as { plan?: unknown }).plan
+      : undefined;
+  const form: {
+    mode: "form";
+    sessionId: string;
+    toolCallId?: string;
+    message: string;
+    requestedSchema: {
+      type: "object";
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+  } = {
+    mode: "form",
+    sessionId: acpSid,
+    message: m.planPopupTitle,
+    requestedSchema: {
+      type: "object",
+      properties: {
+        approval: {
+          type: "string",
+          title: m.planFieldTitle,
+          ...(typeof plan === "string" && plan.trim() ? { description: plan } : {}),
+          oneOf: [
+            { const: "approve", title: m.planApproveOption },
+            { const: "reject", title: m.planRejectOption },
+          ],
+        },
+      },
+      required: ["approval"],
+    },
+  };
+  if (toolCallId) form.toolCallId = toolCallId;
+  return form;
+}
+
+/**
+ * Parse an elicitation form response → zcode ExitPlanMode response.
+ * Mirrors `acpPermissionResponseToExitPlanMode`: approve → accept with
+ * content.answer_0 (the backend reads answer_0), anything else → decline.
+ */
+export function parsePlanApprovalElicitationResponse(
+  acpResp: unknown,
+): Extract<ZcodeInteractionResponse, { action: string }> {
+  if (!acpResp || typeof acpResp !== "object") {
+    return { action: "decline", reason: "invalid client response" };
+  }
+  const action = (acpResp as { action?: string }).action;
+  if (action === "decline" || action === "cancel") {
+    return { action: "decline", reason: "plan rejected" };
+  }
+  const content = (acpResp as { content?: Record<string, unknown> }).content ?? {};
+  if (content["approval"] === "approve") {
+    return { action: "accept", content: { answer_0: "approve" } };
+  }
+  return { action: "decline", reason: "plan rejected" };
 }
 
 // ---------- AskUserQuestion split (single + multi-select) ----------
@@ -232,15 +433,22 @@ export function buildAskUserAcpParams(
   params: ZcodeInteractionUserInputParams,
   acpSid: string,
   options: PermissionOption[],
+  popupTitle?: string,
 ): {
   options: PermissionOption[];
   sessionId: string;
-  toolCall: { toolCallId: string; rawInput: unknown };
+  toolCall: PermissionToolCall;
 } {
   return {
     options,
     sessionId: acpSid,
-    toolCall: { toolCallId: params.toolCallId ?? "", rawInput: params.input },
+    toolCall: {
+      toolCallId: params.toolCallId ?? "",
+      rawInput: params.input,
+      // The question IS the popup title: martty's overlay renders nothing but
+      // the title, so without it the ask reads as a bare "tool" prompt.
+      ...(popupTitle ? { title: popupTitle } : {}),
+    },
   };
 }
 
@@ -423,8 +631,8 @@ export function parseAskUserElicitationResponse(
   return answers;
 }
 
-// ExitPlanMode is handled via session/request_permission (see
-// `exitPlanModeToAcpPermission` / `acpPermissionResponseToExitPlanMode` above) —
-// not via elicitation/create. Plan approval is a permission decision, and
-// routing it through elicitation surfaces a generic "input request" shell that
-// reads wrong for this flow. AskUserQuestion is the elicitation use case.
+// ExitPlanMode has two client paths, both built above: form-capable clients
+// get the elicitation form (`buildPlanApprovalElicitationForm` — the plan
+// renders as markdown in the field description); everyone else gets
+// session/request_permission (`exitPlanModeToAcpPermission` — the plan rides
+// in toolCall.content). Both parse back through their respective functions.
