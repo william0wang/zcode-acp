@@ -8,7 +8,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
@@ -51,45 +51,64 @@ interface SentUpdate {
   content?: { type: string; text: string };
 }
 
-function recordingCx(): { cx: acp.AgentContext; updates: SentUpdate[] } {
-  const updates: SentUpdate[] = [];
-  const cx = {
-    notify: async (_method: string, params: { update?: SentUpdate }) => {
-      if (params.update) updates.push(params.update);
-    },
-  } as unknown as acp.AgentContext;
-  return { cx, updates };
-}
-
 const chunkKinds = new Set(["user_message_chunk", "agent_message_chunk"]);
 const chunks = (updates: SentUpdate[]) => updates.filter((u) => chunkKinds.has(u.sessionUpdate));
-/** setImmediate chain: one hop for the deferred replay, one for its awaits. */
-const flushDeferred = () =>
-  new Promise<void>((resolve) => setImmediate(() => setImmediate(() => resolve())));
+/**
+ * Flush the deferred replay to completion. The deferring setImmediate and
+ * any remaining microtasks fire within a 0ms advance.
+ */
+const flushDeferred = () => vi.advanceTimersByTimeAsync(0);
 
 const HISTORY: ZcodeMessage[] = [
   { info: { id: "m1", role: "user" }, parts: [{ type: "text", text: "hello there" }] },
   { info: { id: "m2", role: "assistant" }, parts: [{ type: "text", text: "hi, welcome back" }] },
 ];
 
+/**
+ * Drive session/resume under fake timers. The resume flight settles hydration
+ * (two 300ms gaps) before the response, so the timer advance that resolves
+ * the handler ALSO fires the deferred replay immediate — the response/replay
+ * ORDER is therefore asserted via two buckets (pre-response vs post-response
+ * updates), not via wall-clock deferral.
+ */
 async function driveResume(clientName: string | null, history: ZcodeMessage[]) {
   const server = new ZcodeAcpServer();
   server.backend = fakeBackend(history);
   server.clientName = clientName;
   server.registerSession("sess_r", "zsess_r");
-  const { cx, updates } = recordingCx();
-  const res = await resumeSession(server, { sessionId: "sess_r" }, cx);
-  return { res, updates };
+  const updates: SentUpdate[] = [];
+  const preResponse: SentUpdate[] = [];
+  let responded = false;
+  const cx = {
+    notify: async (_method: string, params: { update?: SentUpdate }) => {
+      if (params.update) (responded ? updates : preResponse).push(params.update);
+    },
+  } as unknown as acp.AgentContext;
+  const pending = resumeSession(server, { sessionId: "sess_r" }, cx);
+  void pending.then(() => {
+    responded = true;
+  });
+  await vi.advanceTimersByTimeAsync(601);
+  const res = await pending;
+  return { res, updates, preResponse };
 }
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("session/resume TUI history replay", () => {
   it("replays chunk history to martty clients after the response resolves", async () => {
-    const { res, updates } = await driveResume("martty", HISTORY);
+    const { res, updates, preResponse } = await driveResume("martty", HISTORY);
     expect(res.modes).toBeDefined();
 
     // The replay is deferred past the handler (= past the resume response
     // write): pre-response updates would be dropped by the TUI.
-    expect(chunks(updates)).toHaveLength(0);
+    expect(chunks(preResponse)).toHaveLength(0);
     await flushDeferred();
     const texts = chunks(updates).map((u) => u.content?.text);
     expect(texts).toContain("hello there");

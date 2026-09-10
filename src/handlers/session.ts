@@ -24,6 +24,7 @@ import { resolveReal } from "../backend/sandbox.js";
 import type {
   ZcodeCreateResult,
   ZcodeListResult,
+  ZcodeMessage,
   ZcodeProjection,
   ZcodeSnapshot,
 } from "../backend/types.js";
@@ -711,6 +712,8 @@ async function replayResumeHistory(
   acpSid: string,
   zcodeSid: string,
 ): Promise<void> {
+  // Plain fetch: callers only invoke this after a resume flight settled the
+  // store (or the session was already live) — see resumePreservingModel.
   const messages = await fetchMessages(server, zcodeSid);
   if (messages.length === 0) return;
   const slice = sliceTail(messages, MARTTY_RESUME_TAIL);
@@ -792,7 +795,8 @@ export async function resumeSession(
     await syncProviderRegistry(server, cwd);
     let resumeResult: unknown;
     try {
-      resumeResult = await resumePreservingModel(server, zcParams);
+      const outcome = await resumePreservingModel(server, zcParams);
+      resumeResult = outcome.result;
     } catch (e) {
       translateResumeFailure("session/resume", acpSid, origin, e);
     }
@@ -827,6 +831,8 @@ export async function resumeSession(
   // first: microtasks (the SDK's response send) drain before immediates.
   if (isMarttyClient(server)) {
     setImmediate(() => {
+      // Plain fetch, no settle: any resume flight already settled the store
+      // before this session/resume returned (the settle rides the flight).
       replayResumeHistory(server, cx, acpSid, zcodeSid).catch((e) => {
         warn(
           `session/resume: TUI history replay failed (non-fatal): ` +
@@ -909,27 +915,32 @@ export async function resumeIntoSession(
   server.titleEligibleSessions.delete(acpSid);
 
   const cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
+  // Settled history when a resume flight ran (performer OR joiner — the
+  // flight settles hydration before resolving); the read below then uses the
+  // flight's snapshot instead of re-querying mid-hydration.
+  let settledHistory: ZcodeMessage[] | undefined;
   try {
     await syncProviderRegistry(server, cwd);
-    const resumeResult = await resumePreservingModel(server, {
+    const outcome = await resumePreservingModel(server, {
       sessionId: zcodeTarget,
       workspace: workspaceFor(cwd),
     });
+    settledHistory = outcome.history;
     server.markBackendLoaded(acpSid);
     await repairUnavailableModel(server, zcodeTarget);
     server.registerSession(acpSid, zcodeTarget);
-    const backendWs = workspaceFromResumeResult(resumeResult);
+    const backendWs = workspaceFromResumeResult(outcome.result);
     const finalCwd = backendWs && !server.serveMode ? backendWs : cwd;
     server.sessionCwds.set(acpSid, finalCwd);
     recordMaterializedSession(acpSid, zcodeTarget, finalCwd);
     server.ensureBackgroundListener(zcodeTarget);
     await adoptStoredTitle(server, acpSid, zcodeTarget);
   } catch (e) {
-    warn(`/resume: adopting ${zcodeTarget} failed: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`/resume: adopting ${zcodeTarget} failed (${e instanceof Error ? e.message : String(e)})`);
     return { ok: false, error: messages().slashResumeFailed };
   }
 
-  const history = await fetchMessages(server, zcodeTarget);
+  const history = settledHistory ?? (await fetchMessages(server, zcodeTarget));
   if (history.length > 0) server.markSessionActive(acpSid);
   const slice = fullSlice(history);
   await withReplayBatch(acpSid, () =>
@@ -939,7 +950,10 @@ export async function resumeIntoSession(
       toolTurnWindow: isMarttyClient(server) ? MARTTY_TOOL_TURN_WINDOW : undefined,
     }),
   );
-  log(`/resume: replayed ${slice.meta.replayedMessages} messages into ${acpSid.slice(0, 8)}`);
+  log(
+    `/resume: replayed ${slice.meta.replayedMessages} messages into ${acpSid.slice(0, 8)}` +
+      ` (total ${slice.meta.totalMessages})`,
+  );
 
   // Same baseline dance as session/load: mark history seen so the next turn's
   // completion diff does not re-emit it, then emit the current todos from a
@@ -983,6 +997,10 @@ export async function loadSession(
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
   const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
+  // Settled history from a resume flight THIS call took part in (performer or
+  // joiner — the flight settles hydration before resolving, so using its
+  // snapshot is the mid-hydration-prefix guard; undefined = alreadyLive).
+  let settledHistory: ZcodeMessage[] | undefined;
 
   if (!alreadyLive) {
     const zcParams: Record<string, unknown> = {
@@ -995,7 +1013,9 @@ export async function loadSession(
     await syncProviderRegistry(server, cwd);
     let resumeResult: unknown;
     try {
-      resumeResult = await resumePreservingModel(server, zcParams);
+      const outcome = await resumePreservingModel(server, zcParams);
+      resumeResult = outcome.result;
+      settledHistory = outcome.history;
     } catch (e) {
       translateResumeFailure("session/load", acpSid, origin, e);
     }
@@ -1046,7 +1066,10 @@ export async function loadSession(
 
   // Named `history` — a local `messages` would shadow the i18n `messages()`
   // helper used in the error paths above (TDZ crash from the catch block).
-  const history = await fetchMessages(server, zcodeSid);
+  // A resume flight's SETTLED snapshot is the mid-hydration guard; only an
+  // already-live session (no flight) falls back to a plain read — its store
+  // is stable.
+  const history = settledHistory ?? (await fetchMessages(server, zcodeSid));
   // History on disk = real interaction (covers untitled sessions resumed from
   // a previous bridge lifetime) — make the session discoverable remotely.
   if (history.length > 0) server.markSessionActive(acpSid);
@@ -1066,9 +1089,11 @@ export async function loadSession(
     );
   } else {
     await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
+    // total M always logged: a first-entry total below the session's real size
+    // is the signature of a mid-hydration read (see fetchMessagesSettled).
     log(
       `session/load: replayed ${slice.meta.replayedMessages} messages` +
-        `${limit === null ? "" : ` (tail limit ${limit}, total ${slice.meta.totalMessages})`}`,
+        ` (total ${slice.meta.totalMessages}${limit === null ? "" : `, tail limit ${limit}`})`,
     );
   }
 
@@ -2339,6 +2364,16 @@ async function reloadBackendSession(
   await repairUnavailableModel(server, zcodeSid);
 }
 
+/** Outcome of a (possibly shared) resume flight. */
+interface ResumeOutcome {
+  /** True when THIS call performed the backend RPC (joiners waited on another). */
+  performed: boolean;
+  /** The resume RPC result — shared with joiners (cwd adoption is uniform). */
+  result?: unknown;
+  /** Settled history read (fresh flights only) — ordering guarantee vs hydration. */
+  history?: ZcodeMessage[];
+}
+
 /**
  * Resume WITHOUT pinning a model, so the session keeps its own selection (the
  * backend persists it per session — sessions the user ran on GLM-5.3-Flash
@@ -2346,20 +2381,97 @@ async function reloadBackendSession(
  * runtimeModel overlay). The overlay is now a FALLBACK repair only: when the
  * faithful resume fails outright (history carrying a stale/revoked model),
  * retry once pinned to the first enabled provider's first model.
+ *
+ * Single-flight per backend session id (server.resumeInFlight), and the
+ * flight covers resume RPC + hydration settle TOGETHER: a concurrent caller
+ * for the SAME session (the ADR-0017 first-entry race — the App's
+ * session/load racing the TUI's boot-resume) joins the in-flight flight
+ * instead of sending its own resume, AND its later history read observes the
+ * settled store — a joiner that only awaited the RPC could still read a
+ * mid-hydration prefix, and the joiner is the client that actually renders
+ * the history (the TUI boot path replays nothing). Joiners await the same
+ * promise (a failed flight fails them too) and share the performer's
+ * outcome — including the backend-authoritative workspace, so a joiner never
+ * overwrites the performer's corrected session root with its own stale cwd.
  */
 async function resumePreservingModel(
   server: ZcodeAcpServer,
   zcParams: Record<string, unknown>,
-): Promise<unknown> {
+): Promise<ResumeOutcome> {
+  const zcodeSid = String(zcParams["sessionId"] ?? "");
+  const inFlight = server.resumeInFlight.get(zcodeSid) as Promise<ResumeOutcome> | undefined;
+  if (inFlight) {
+    const shared = await inFlight; // rethrows the first flight's failure
+    return { ...shared, performed: false };
+  }
+  const flight = (async (): Promise<ResumeOutcome> => {
+    let result: unknown;
+    try {
+      result = await resumeBackendSession(server, zcParams);
+    } catch (err) {
+      const overlay = buildResumeRuntimeModel();
+      if (overlay === null) throw err;
+      warn(
+        `resume failed (${err instanceof Error ? err.message : String(err)}); ` +
+          `retrying with default-model overlay`,
+      );
+      result = await resumeBackendSession(server, { ...zcParams, runtimeModel: overlay });
+    }
+    // The settle rides the flight (see the docstring): joiners awaiting this
+    // promise are ordered after hydration, not merely after the RPC.
+    const history = await fetchMessagesSettled(server, zcodeSid);
+    return {
+      performed: true,
+      result,
+      history,
+    };
+  })();
+  server.resumeInFlight.set(zcodeSid, flight);
   try {
-    return await resumeBackendSession(server, zcParams);
-  } catch (err) {
-    const overlay = buildResumeRuntimeModel();
-    if (overlay === null) throw err;
-    warn(
-      `resume failed (${err instanceof Error ? err.message : String(err)}); retrying with default-model overlay`,
-    );
-    return resumeBackendSession(server, { ...zcParams, runtimeModel: overlay });
+    return await flight;
+  } finally {
+    // Guarded delete: only the owner removes its own entry.
+    if (server.resumeInFlight.get(zcodeSid) === flight) server.resumeInFlight.delete(zcodeSid);
+  }
+}
+
+/** Settle-poll gap after a fresh resume (see fetchMessagesSettled). */
+const RESUME_SETTLE_GAP_MS = 300;
+/** Cap for the settle poll — past this the largest snapshot seen wins. */
+const RESUME_SETTLE_CAP_MS = 2000;
+/** Non-growing reads required to call the store settled (plateau guard). */
+const RESUME_SETTLE_STABLE_READS = 2;
+
+/**
+ * fetchMessages + bounded read-back settle, for paths that JUST performed a
+ * resume. The backend's `session/messages` reflects only what it has hydrated
+ * so far — a query landing mid-restore returns a PREFIX, and replaying that
+ * prefix makes the conversation "end in the middle" on first entry (re-entry
+ * is fine once hydration finished; big sessions hydrate slowly, hence
+ * "often but not always"). Poll until the count has stopped growing for TWO
+ * consecutive reads (a single equal pair can be a >gap plateau inside a slow
+ * hydration), capped; on the cap the largest snapshot seen wins. Only fresh
+ * resumes pay the extra round-trips — an already-live session's store is
+ * stable.
+ */
+export async function fetchMessagesSettled(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+): Promise<ZcodeMessage[]> {
+  let messages = await fetchMessages(server, zcodeSid);
+  let stable = 0;
+  const deadline = Date.now() + RESUME_SETTLE_CAP_MS;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, RESUME_SETTLE_GAP_MS));
+    const next = await fetchMessages(server, zcodeSid);
+    // Shrinking should not happen; never trade down either way.
+    if (next.length <= messages.length) {
+      if (++stable >= RESUME_SETTLE_STABLE_READS) return messages;
+    } else {
+      stable = 0;
+      messages = next;
+    }
+    if (Date.now() >= deadline) return messages;
   }
 }
 

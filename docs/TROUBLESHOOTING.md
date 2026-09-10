@@ -67,13 +67,13 @@ a hardcoded version string — read the message text to identify the root cause.
 
 **Common causes:**
 
-| Message fragment                 | Cause                                                                                                                                                                                                                                                      |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                                                                                           |
-| `timeout`                        | The per-attempt 5s subscribe deadline elapsed. The bridge retries transient timeouts once (2 attempts total, ~10.5s worst case); if both fail, the backend was unresponsive for that window.                                                               |
-| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                                                                                     |
-| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                                                                                          |
-| `Session is not active` (-32004) | The backend evicted the session's resident runtime (idle ~10min, or its LRU cap). The bridge self-heals via `session/resume` (see below).                                                                                                                   |
+| Message fragment                 | Cause                                                                                                                                                                                        |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reader exited (backend dead)`   | The zcode subprocess crashed/exited. Restart the editor session.                                                                                                                             |
+| `timeout`                        | The per-attempt 5s subscribe deadline elapsed. The bridge retries transient timeouts once (2 attempts total, ~10.5s worst case); if both fail, the backend was unresponsive for that window. |
+| `pipe broken`                    | The stdin pipe to the zcode subprocess broke (process died mid-write).                                                                                                                       |
+| `method not found (code -32601)` | The CLI genuinely is too old (< 0.14.8). Upgrade.                                                                                                                                            |
+| `Session is not active` (-32004) | The backend evicted the session's resident runtime (idle ~10min, or its LRU cap). The bridge self-heals via `session/resume` (see below).                                                    |
 
 **`Session is not active` (code -32004) in detail:**
 
@@ -382,6 +382,26 @@ re-registered from the durable store without a resume (or left behind by a
 failed one) therefore replayed nothing. Fixed by explicit backend-loaded
 tracking; the backend also logs a warning now when `session/messages` errors.
 
+### Remote access: a conversation replays only PARTLY on first entry
+
+**Symptom:** entering a resumed conversation the FIRST time shows history
+that ends in the middle; leaving and re-entering shows the full conversation.
+Happens often (but not always) with large sessions.
+
+**Cause:** the hub answers the resume request as soon as the incubated
+terminal bridge registers — before the terminal's boot-resume finishes — so
+the App's `session/load` raced the boot-resume for the SAME backend session.
+Both sent `session/resume` concurrently, and `session/messages` reflects only
+what the backend has hydrated so far: a query landing mid-restore returns a
+PREFIX, which was replayed as if it were the whole conversation. Fixed by
+single-flighting `session/resume` TOGETHER WITH its hydration settle per
+backend session id (a concurrent load joins the in-flight flight and shares
+its settled history snapshot; the settle requires two consecutive
+non-growing reads, capped). The bridge log line
+`session/load: replayed N messages (total M)` now prints the total
+unconditionally — a first-entry total below the session's real size was the
+signature of this bug.
+
 ### Start Plan (zcode-plan) providers fail headless — 1113 / signing errors
 
 **Symptom:** every turn fails with HTTP 429 error `1113` ("Insufficient
@@ -432,6 +452,38 @@ backend runs sandboxed, the bridge logs a one-shot warning the first time a
 tool output contains `Operation not permitted` — that warning is your signal
 to suspect the sandbox. Path grants for legitimate writes go in
 `.zcode/acp/sandbox.json`.
+
+### UNRESOLVED: CLI (martty) freezes at an old state while the mobile app keeps updating
+
+**Symptom (observed once, 2026-09, no live instance preserved):** a CLI window
+attached to a conversation stops receiving everything — messages, model
+dropdown, thought-level updates — while the mobile app on the same
+conversation keeps receiving and interacting normally. The CLI stays frozen at
+a state noticeably older than the conversation.
+
+**Working hypotheses (in rough likelihood order), none confirmed:**
+
+1. **Session-alias divergence** — the interaction moved to an ACP session id
+   the martty connection never adopted (e.g. a phone-side `session/new` racing
+   the window's binding). martty drops every update addressed to a session id
+   it does not know (same failure shape as the 2026-09-06 boot-create
+   diagnosis in AGENTS.md). Everything stalling at once — config updates
+   included — fits a sessionId mismatch, since all of them are session-scoped.
+2. **Two different bridge processes** — the phone attached to the hub's serve
+   bridge while the CLI runs its own bridge: live events do not cross
+   processes by design (only session listings do). The CLI then only ever
+   updates for its own turns.
+3. **martty stdio wedge** — the TUI's own input thread stalls; the bridge's
+   notifies buffer into the pipe and the mobile (WS path) is unaffected.
+   Bridge-side nothing is wrong; typing in the frozen CLI would also be dead.
+
+**If it recurs, capture before closing anything:** whether typing still works
+in the frozen CLI (separates hypothesis 3 from 1/2); the bridge's stderr with
+`ZCODE_ACP_DEBUG=1` (do `session/update` notifies still leave?); the hub's
+instance listing (`GET /api/instances`) — which bridge id the phone's
+conversation is on vs the CLI's; and both ends' session ids (CLI transcript vs
+phone). See also the resume-race diagnosis in the same period: a partial
+first-entry replay is a different bug (history prefix), do not conflate.
 
 ## Log Debugging
 

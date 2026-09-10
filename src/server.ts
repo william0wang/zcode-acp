@@ -122,6 +122,18 @@ export class ZcodeAcpServer {
    */
   readonly sessionCwds = new Map<string, string>();
   /**
+   * In-flight `session/resume` single-flight, keyed by backend session id
+   * (ADR-0017 first-entry race): the hub answers the App's incubation request
+   * as soon as the TUI's bridge REGISTERS — before the TUI's boot-resume
+   * finishes — so the App's `session/load` for the SAME backend session can
+   * run concurrently and both would send `session/resume`. Concurrent callers
+   * instead join the first flight (see resumePreservingModel); the loser's
+   * `session/messages` query then lands AFTER hydration, not mid-restore
+   * (a mid-restore query returns a prefix and the first-entry replay "ends
+   * in the middle").
+   */
+  readonly resumeInFlight = new Map<string, Promise<unknown>>();
+  /**
    * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
    * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
    * on the next backend respawn in ensureBackend().

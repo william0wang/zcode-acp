@@ -53,6 +53,9 @@ function makeFixtures(turn: PendingTurn, escalateAfterMs = 0): DrainFixtures {
     nextId: () => 1,
     sessionCwds: new Map(),
     markBackendLoaded: () => {},
+    // resumePreservingModel single-flights through this map (ADR-0017 race
+    // fix) — stub servers must mirror the real shape or the reload throws.
+    resumeInFlight: new Map(),
   } as unknown as ZcodeAcpServer;
   const pollOnce = vi.fn();
   const listener = { resubscribe: vi.fn(async () => true) };
