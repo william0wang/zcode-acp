@@ -93,6 +93,43 @@ describe("sliceTail", () => {
     expect(s.batch).toEqual([]);
     expect(s.meta).toMatchObject({ hasMore: false, totalMessages: 0, totalTurns: 0 });
   });
+
+  it("hidden tool-result user messages are not turn anchors (cursor must survive replay)", () => {
+    // The backend stores tool results as user-role messages with
+    // transcriptVisibility "hidden"; replay skips them, so a slice aligned on
+    // one would mint a cursor anchored at a message the client never sees.
+    const hidden = (id: string, text: string): ZcodeMessage => ({
+      info: { id, role: "user", semantics: { transcriptVisibility: "hidden" } },
+      parts: [{ type: "text", text }],
+    });
+    const msgs: ZcodeMessage[] = [
+      msg("u1", "user", "one"),
+      msg("a1", "assistant", "A1"),
+      hidden("tr1", '{"ok":true}'),
+      msg("a2", "assistant", "A2"),
+      msg("u2", "user", "two"),
+      msg("a3", "assistant", "A3"),
+    ];
+
+    const s = sliceTail(msgs, 1);
+    // Aligns to u2 (the visible turn start), never to hidden tr1.
+    expect(ids(s.batch)).toEqual(["u2", "a3"]);
+    expect(s.meta.totalTurns).toBe(2);
+    // Cursor anchor is the message at the slice start — a replayed one.
+    const anchorId = JSON.parse(Buffer.from(s.meta.cursor, "base64url").toString("utf8")) as {
+      id?: string;
+    };
+    expect(anchorId.id).toBe("u2");
+
+    // The discriminating cut: pos 3 falls inside the FIRST turn, whose next
+    // turn start below u2 is hidden tr1 (old code) vs u1 (fixed code).
+    const wide = sliceTail(msgs, 3);
+    expect(ids(wide.batch)).toEqual(["u1", "a1", "tr1", "a2", "u2", "a3"]);
+    const wideAnchor = JSON.parse(Buffer.from(wide.meta.cursor, "base64url").toString("utf8")) as {
+      id?: string;
+    };
+    expect(wideAnchor.id).toBe("u1");
+  });
 });
 
 describe("sliceBefore pagination", () => {

@@ -65,13 +65,23 @@ interface CursorPayload {
 }
 
 /**
- * Indices where a turn starts: every user message, plus 0 so leading
+ * Hidden user-role messages are tool results and harness plumbing, not user
+ * speech — the replay pipeline skips them (see replayMessages), so they must
+ * not count as turn starts either: a slice aligned on one anchors its cursor
+ * at a message that never appears in a replay.
+ */
+function isHiddenUser(m: ZcodeMessage): boolean {
+  return m.info?.role === "user" && m.info?.semantics?.transcriptVisibility === "hidden";
+}
+
+/**
+ * Indices where a turn starts: every visible user message, plus 0 so leading
  * non-user messages (system preambles) belong to the first turn.
  */
 function turnStarts(messages: ZcodeMessage[]): number[] {
   const starts: number[] = messages.length > 0 ? [0] : [];
   messages.forEach((m, i) => {
-    if (m.info?.role === "user" && i > 0) starts.push(i);
+    if (m.info?.role === "user" && i > 0 && !isHiddenUser(m)) starts.push(i);
   });
   return starts;
 }
