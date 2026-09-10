@@ -58,6 +58,7 @@ import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
+import { sessionTabTitle } from "../terminal-title.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
@@ -1057,12 +1058,12 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
     if (kind !== "serve") {
-      // Tab title (both visible-terminal kinds): a resume carries the
-      // conversation's title when the hub resolved it; session-create and a
-      // failed lookup fall back to the project name. Rides the env —
-      // terminalTuiScript turns it into an OSC 0 before exec'ing the CLI
-      // (terminals otherwise name the tab after the process, "node").
-      env.ZCODE_ACP_TAB_TITLE = tabTitle ?? path.basename(workspacePath);
+      // Tab title (both visible-terminal kinds): "project · conversation"
+      // when the hub resolved the resume's title; session-create and a failed
+      // lookup fall back to the project name. Built with the same helper the
+      // bridge uses for its live updates (terminal-title.ts) so the title
+      // never churns when the bridge takes over the script's initial printf.
+      env.ZCODE_ACP_TAB_TITLE = sessionTabTitle(tabTitle, workspacePath);
     }
     // Terminal preference list (ADR-0016 amendment): visible-terminal kinds
     // walk it — a failed launch moves down at once, a window that never

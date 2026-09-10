@@ -1771,7 +1771,10 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     const pending = post(hub, { workspacePath: PROJECT, sessionId: "sess_closed" });
     await new Promise((r) => setTimeout(r, 400)); // one poll tick
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("Fix the login bug");
+    // "project · conversation" — the same combined shape the bridge's live
+    // title refresh uses (terminal-title.ts), so the printf and the first
+    // bridge write agree.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_TAB_TITLE).toBe("demo · Fix the login bug");
     expect(seenUrl).toBe("/sessions?limit=200");
     await registerServeBridge(hub, "resume-repl", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
     expect((await pending).status).toBe(200);

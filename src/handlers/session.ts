@@ -51,6 +51,7 @@ import {
   recordMaterializedSession,
   rememberLazySession,
 } from "../lazy-sessions.js";
+import { refreshTerminalTabTitle } from "../terminal-title.js";
 import {
   buildDiffContent,
   EventTranslator,
@@ -275,6 +276,7 @@ export async function newSession(
       server.remoteCreatedSessions.add(bindSid);
       rememberLazySession(bindSid, cwd);
       server.titleEligibleSessions.add(bindSid);
+      refreshTerminalTabTitle(server, bindSid);
       log(`session/new (create-bind) → ${bindSid} cwd=${cwd}`);
     }
     // Same banner handshake as boot-resume: the TUI's auto-submitted trigger
@@ -306,6 +308,7 @@ export async function newSession(
         { replayHistory: false },
       );
       log(`session/new: boot-resume → ${bootResume}`);
+      refreshTerminalTabTitle(server, bootResume);
       // Deferred tail replay, same as the TUI's /resume (see resumeSession):
       // once the session/new response is written the booting martty has
       // adopted the returned session id, so post-response chunks can fold
@@ -364,6 +367,7 @@ export async function newSession(
   // Only freshly-created sessions are eligible for auto-title on first
   // end_turn; resumed/loaded sessions already have a title and must keep it.
   server.titleEligibleSessions.add(acpSid);
+  refreshTerminalTabTitle(server, acpSid);
   log(`session/new (lazy) → ${acpSid} cwd=${cwd}`);
 
   // No backend RPC yet: modes/configOptions are built from defaults (the
@@ -611,6 +615,7 @@ async function adoptStoredTitle(
     if (hit?.title) {
       server.sessionTitles.set(acpSid, hit.title);
       server.touchSessionSummary(acpSid, hit.title);
+      refreshTerminalTabTitle(server, acpSid);
       log(`adopted stored title for ${acpSid.slice(0, 8)}: ${hit.title}`);
     }
   } catch (e) {
@@ -1642,6 +1647,7 @@ async function runPrompt(
         ?.slice(0, 80) ?? text.slice(0, 80);
     server.sessionTitles.set(params.sessionId, title);
     server.touchSessionSummary(params.sessionId, title);
+    refreshTerminalTabTitle(server, params.sessionId);
     const { updateSessionTitle } = await import("../tasks-index.js");
     void updateSessionTitle(zcodeSid, title, text);
     void sendSessionUpdate(cx, params.sessionId, {

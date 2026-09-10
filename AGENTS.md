@@ -187,6 +187,16 @@ ZCode protocol types into ACP notifications directly — always translate.
   would double-render. Martty passes its full env to the spawned agent, which
   is how ZCODE_ACP_RESUME_SESSION reaches the bridge. `zcode-acp tui --check`
   (= `martty --check-runtime` over the built bridge) is the CI smoke.
+- **Martty never sets a terminal title — the bridge does it (OSC 0 via
+  /dev/tty)**: martty's binary contains no SetTitle/OSC sequence, so a
+  CLI-launched or hub-incubated window otherwise stays named after the command
+  ("node"). `src/terminal-title.ts` refreshes the tab at every title lifecycle
+  point (session/new fallback = project dir name, first-prompt auto-title,
+  adoptStoredTitle on resume/load, remote rename). Do NOT remove the two
+  guards: the `marttyClientSeen` gate (a Zed extension host launched from a
+  shell HAS a controlling tty — writing there hijacks an unrelated terminal)
+  and the `process.env.VITEST` no-op in `ttyTitleIo` (a local vitest run
+  shares the developer's real terminal; titles would flash during tests).
 - **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
   RPC returns `{}` but the model stream runs to its natural end (verified by
   raw-backend probe; the backend's own log records `hadActivePrompt: false` —
