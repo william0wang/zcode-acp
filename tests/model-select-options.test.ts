@@ -1,12 +1,13 @@
 /**
- * Regression: two enabled builtin coding-plan providers ship the same GLM
- * model ids. formatModelValue encodes builtins as the bare modelId, so
- * session/new used to advertise GLM-5.3 twice. Paseo keys Command Center
- * entries on that value and crashes on the duplicate.
+ * ACP model option values always encode as providerId\modelId, including
+ * builtins. Bare GLM-5.3 collided when two coding plans shipped the same id
+ * and crashed clients that key on uniqueness (Paseo Command Center). A
+ * collision-only prefix would have advertised different id shapes depending
+ * on the user's enabled-provider set.
  *
- * Colliding builtins must stay selectable — they are different endpoints —
- * so the dropdown disambiguates with the provider-prefixed form already used
- * for third-party models, rather than dropping the second plan.
+ * parseModelValue still accepts a legacy bare modelId (first enabled builtin).
+ * Dropdown labels stay the bare modelId for a single builtin; colliding
+ * modelIds are qualified with the provider name.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -90,7 +91,7 @@ describe("model configOptions uniqueness", () => {
     ]);
   });
 
-  it("keeps a single builtin encoded as the bare modelId", async () => {
+  it("encodes a single builtin as providerId\\modelId too", async () => {
     fakeConfig = {
       provider: {
         "builtin:zai-coding-plan": codingPlan(
@@ -104,8 +105,16 @@ describe("model configOptions uniqueness", () => {
     const model = options.find((option) => option.id === "model");
     const values = model?.options.map((option) => option.value) ?? [];
 
-    expect(values).toEqual(["GLM-5.3", "GLM-5.3-Flash"]);
+    expect(values).toEqual([
+      "builtin:zai-coding-plan\\GLM-5.3",
+      "builtin:zai-coding-plan\\GLM-5.3-Flash",
+    ]);
+    expect(model?.options.map((option) => option.name)).toEqual(["GLM-5.3", "GLM-5.3-Flash"]);
     expect(model?.currentValue).toBe(formatModelValue("builtin:zai-coding-plan", "GLM-5.3"));
+    expect(parseModelValue("GLM-5.3")).toEqual({
+      providerId: "builtin:zai-coding-plan",
+      modelId: "GLM-5.3",
+    });
     expect(loadAllModels()).toHaveLength(2);
   });
 });
