@@ -174,6 +174,56 @@ export function formatModelValue(providerId: string, modelId: string): string {
   return `${providerId}\\${modelId}`;
 }
 
+function collidingBareValues(models: ModelRef[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const model of models) {
+    const encoded = formatModelValue(model.providerId, model.modelId);
+    counts.set(encoded, (counts.get(encoded) ?? 0) + 1);
+  }
+  const colliding = new Set<string>();
+  for (const [encoded, count] of counts) {
+    if (count > 1) colliding.add(encoded);
+  }
+  return colliding;
+}
+
+function encodeModelOptionValue(model: ModelRef, collidingBare: Set<string>): string {
+  const encoded = formatModelValue(model.providerId, model.modelId);
+  // Two enabled builtins can share a modelId (Z.ai Coding Plan + Start Plan
+  // both ship GLM-5.3). Bare encoding then collides; ACP clients that key on
+  // `value` reject the duplicate. Prefix those rows the same way third-party
+  // models already are.
+  if (collidingBare.has(encoded)) {
+    return `${model.providerId}\\${model.modelId}`;
+  }
+  return encoded;
+}
+
+function buildModelSelectOptions(models: ModelRef[]): Array<{ value: string; name: string }> {
+  const collidingBare = collidingBareValues(models);
+  const options: Array<{ value: string; name: string }> = [];
+  const seen = new Set<string>();
+  for (const model of models) {
+    const encoded = formatModelValue(model.providerId, model.modelId);
+    const value = encodeModelOptionValue(model, collidingBare);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const qualify = collidingBare.has(encoded) || !isBuiltinProvider(model.providerId);
+    options.push({
+      value,
+      name: qualify ? `${model.providerName} › ${model.modelId}` : model.modelId,
+    });
+  }
+  return options;
+}
+
+function encodeCurrentModelValue(models: ModelRef[], providerId: string, modelId: string): string {
+  return encodeModelOptionValue(
+    { providerId, providerName: "", modelId },
+    collidingBareValues(models),
+  );
+}
+
 /**
  * Parse a configOption `value` back into { providerId, modelId }.
  *
@@ -335,19 +385,19 @@ export async function buildConfigOptions(
 
   // currentValue encodes provider+model so the switch handler can locate the
   // right provider (and its apiKey). Fall back to the first enabled provider
-  // when settings omits providerId (legacy sessions).
-  const currentModel = formatModelValue(
-    currentProviderId || loadAllModels()[0]?.providerId || DEFAULT_PROVIDER_ID,
-    currentModelId,
-  );
+  // when settings omits providerId (legacy sessions). Colliding builtins use
+  // the same prefixed encoding as the dropdown so currentValue is one of the
+  // advertised options rather than a duplicate bare modelId.
+  const allModels = loadAllModels();
+  const currentProvider = currentProviderId || allModels[0]?.providerId || DEFAULT_PROVIDER_ID;
+  const currentModel = encodeCurrentModelValue(allModels, currentProvider, currentModelId);
 
   // Model options: config.json enabled providers are authoritative. Builtin
   // models show as the bare modelId (clean dropdown for the common case);
   // third-party models prefix the provider name so they're distinguishable.
-  let modelOptions = loadAllModels().map((m) => ({
-    value: formatModelValue(m.providerId, m.modelId),
-    name: isBuiltinProvider(m.providerId) ? m.modelId : `${m.providerName} › ${m.modelId}`,
-  }));
+  // Two enabled builtins that share a modelId (Z.ai Coding Plan + Start Plan
+  // both shipping GLM-5.3) also get the prefixed form so values stay unique.
+  let modelOptions = buildModelSelectOptions(allModels);
   if (!modelOptions.some((o) => o.value === currentModel)) {
     // The current model isn't from an enabled provider (e.g. the session was
     // created with a now-disabled provider). Append it so the dropdown still
