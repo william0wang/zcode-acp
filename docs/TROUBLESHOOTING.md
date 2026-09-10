@@ -182,6 +182,10 @@ log (`~/.zcode/cli/log/zcode-YYYY-MM-DD.jsonl`) for the underlying cause
    - `⟳ AskUserQuestion forwarding elicitation/create (form, N fields)` → elicitation path
    - `⟳ AskUserQuestion forwarding session/request_permission` → fallback path
    - The path is decided by `clientCapabilities.elicitation.form`
+   - ExitPlanMode has its own gate: `⟳ ExitPlanMode forwarding elicitation/create` only
+     fires when `hasMarttyClient` is true (a martty TUI attached to this bridge — the
+     flag is sticky for the process lifetime); other clients take
+     `session/request_permission` (their popups render the plan markdown)
 
 3. Check whether `askOnce` (fallback path) or `handleAskUserViaElicitation`
    (elicitation path) successfully sent the request:

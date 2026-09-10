@@ -1,12 +1,22 @@
 /**
- * Plan-approval elicitation → request_permission fallback.
+ * Plan-approval routing: martty → elicitation form, everyone else →
+ * request_permission, plus the form → request_permission fallback.
  *
- * `supportsElicitationForm` is OR-merged across clients at initialize and
- * survives disconnects, so the flag can outlive the form-capable client. When
- * only a non-form client (Zed) remains, the elicitation/create form fails with
- * -32601 → null — without the fallback the plan was silently declined with no
- * popup at all. The bridge must fall back once to session/request_permission,
- * which every client can answer.
+ * The form route is gated on `hasMarttyClient` (NOT on the elicitation.form
+ * capability): martty's request_permission overlay draws only the title, so
+ * the plan needs the form there — while editors like Zed render
+ * toolCall.content as full markdown and only draw form descriptions as plain
+ * text, so the form would downgrade them. Zed ≥1.12 declares the capability,
+ * so capability-gating wrongly caught it (fixed 2026-09).
+ *
+ * `hasMarttyClient` is OR-merged process state and survives disconnects, so
+ * the flag can outlive the TUI: a martty that attached earlier keeps the form
+ * route for the process lifetime — accepted, population-based trade-off. The
+ * residual hazard this file guards is a form failure mid-flight (the TUI
+ * vanished between gate and ask): elicitation/create fails → null — without
+ * the fallback the plan was silently declined with no popup at all. The
+ * bridge must fall back once to session/request_permission, which every
+ * client can answer.
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -21,9 +31,9 @@ vi.mock("../src/handlers/io.js", () => ({
 import { handleServerRequests } from "../src/handlers/server-requests.js";
 import type { ZcodeAcpServer } from "../src/server.js";
 
-function makeServer(): ZcodeAcpServer {
+function makeServer(opts?: { martty?: boolean }): ZcodeAcpServer {
   return {
-    supportsElicitationForm: () => true,
+    hasMarttyClient: () => opts?.martty ?? true,
     nextId: () => 1,
     resolveSid: () => undefined,
   } as unknown as ZcodeAcpServer;
@@ -56,6 +66,27 @@ function planRequest(): ServerRequest {
 }
 
 describe("plan approval fallback", () => {
+  it("non-martty client → straight to request_permission (no form attempt)", async () => {
+    const methods: string[] = [];
+    const cx = {
+      request: vi.fn((method: string) => {
+        methods.push(method);
+        return Promise.resolve({ outcome: { outcome: "selected", optionId: "approve" } });
+      }),
+    } as unknown as acp.AgentContext;
+    const { backend, replies } = makeBackend(planRequest());
+
+    await handleServerRequests(makeServer({ martty: false }), backend, cx, "s1");
+
+    // Even though the client may declare elicitation.form (Zed ≥1.12 does),
+    // only martty's popup is incapable of showing the plan — editors get the
+    // markdown-rendering request_permission popup.
+    expect(methods).toEqual(["session/request_permission"]);
+    expect(replies).toEqual([
+      { id: 7, result: { action: "accept", content: { answer_0: "approve" } } },
+    ]);
+  });
+
   it("form answered reject → single ask, decline (no double popup)", async () => {
     const methods: string[] = [];
     const cx = {

@@ -621,6 +621,19 @@ export class ZcodeAcpServer {
   }
 
   /**
+   * Whether a martty TUI is (or was) attached to this bridge process. Same
+   * semantics as session.ts's isMarttyClient: the sticky flag wins because
+   * clientName is last-write-wins across multi-client attaches. Used to gate
+   * surfaces where martty's rendering is the limiting factor — its
+   * request_permission overlay draws only the title, so plan approval needs
+   * the elicitation form there; editors render toolCall.content and must NOT
+   * be pushed to the form (its descriptions are plain text in Zed).
+   */
+  hasMarttyClient(): boolean {
+    return this.marttyClientSeen || (this.clientName ?? "").toLowerCase().includes("martty");
+  }
+
+  /**
    * OR-merge capabilities from a newly connected client. Each connection runs
    * its own `initialize`; boolean capabilities are unioned across clients so a
    * feature advertised by ANY attached client (Zed or a remote one) enables the

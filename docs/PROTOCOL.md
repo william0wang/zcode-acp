@@ -566,17 +566,24 @@ User input request (ExitPlanMode / AskUserQuestion).
 ### Bridge routing (protocol negotiation)
 
 ZCode `interaction/*` requests are routed to different ACP interaction
-mechanisms based on client capabilities:
+mechanisms. Each request type has its OWN gate:
 
-| Request type                                                  |      Client supports elicitation.form      |              Client does not              |
-| ------------------------------------------------------------- | :----------------------------------------: | :---------------------------------------: |
-| Tool auth (`interaction/requestPermission`)                   |        `session/request_permission`        |       `session/request_permission`        |
-| ExitPlanMode (`interaction/requestUserInput` + plan_approval) | `elicitation/create` (approve/reject form) |       `session/request_permission`        |
-| AskUserQuestion (`interaction/requestUserInput`)              |     `elicitation/create` (single form)     | per-question `session/request_permission` |
+| Request type                                                  |       Routing when the gate is OPEN        |      Routing when the gate is CLOSED      | Gate                               |
+| ------------------------------------------------------------- | :----------------------------------------: | :---------------------------------------: | :--------------------------------- |
+| Tool auth (`interaction/requestPermission`)                   |        `session/request_permission`        |       `session/request_permission`        | none (always the same path)        |
+| ExitPlanMode (`interaction/requestUserInput` + plan_approval) | `elicitation/create` (approve/reject form) |       `session/request_permission`        | `server.hasMarttyClient()`         |
+| AskUserQuestion (`interaction/requestUserInput`)              |     `elicitation/create` (single form)     | per-question `session/request_permission` | `server.supportsElicitationForm()` |
 
-**Capability detection**: at `initialize` time the client declares support via
-`clientCapabilities.elicitation.form`. The server detects it with
-`server.supportsElicitationForm()`.
+**Capability detection**: AskUserQuestion keys on
+`clientCapabilities.elicitation.form` (detected at `initialize` via
+`server.supportsElicitationForm()`) — structured input is the correct
+elicitation use for any form-capable client. ExitPlanMode keys on
+`server.hasMarttyClient()` instead: martty's request_permission overlay draws
+only the title, so the plan needs the form's scrollable detail pane — while
+editors render `toolCall.content` as full markdown (Zed: `MarkdownElement`,
+code blocks and links) and draw form descriptions as plain text, so the form
+would downgrade them. Zed ≥1.12 declares `elicitation.form`, which is why the
+gate keys on the client kind, not the capability.
 
 **Reconnect resend**: interaction requests are one-shot and raced across the
 clients connected when they fire (first response wins). A client that was
@@ -638,10 +645,10 @@ that question without cancelling the form.
 }
 ```
 
-**ExitPlanMode elicitation form** — sent only to clients that advertised
-elicitation form support; everyone else gets `session/request_permission` with
-the plan in `toolCall.content`. The form carries the COMPLETE plan markdown as
-the `approval` field's `description` (markdown-capable clients render it in a
+**ExitPlanMode elicitation form** — sent only when a martty TUI is attached
+(`server.hasMarttyClient()`); everyone else gets `session/request_permission`
+with the plan in `toolCall.content`. The form carries the COMPLETE plan
+markdown as the `approval` field's `description` (martty renders it in a
 scrollable detail pane); the decision itself is a required approve/reject enum.
 An `accept` whose `content.approval` is `"approve"` maps to the zcode accept
 (`answer_0: "approve"`); a `reject`/`cancel` action, or `"reject"` in the

@@ -490,14 +490,21 @@ async function handleSinglePermission(
   }
   await sendSessionUpdate(cx, acpSid, tcUpdate);
 
-  // ExitPlanMode routing splits by client capability:
-  //   - Form-capable clients (martty) get an elicitation FORM: the complete
-  //     plan renders as markdown in a scrollable detail pane and approve/reject
-  //     are enum choices — a one-line permission popup can never show a plan.
-  //   - Clients without forms (Zed) keep session/request_permission, whose
-  //     toolCall carries the plan in `content` for the same reason.
-  // Both converge on the same zcode accept/decline response shape.
-  if (epm && server.supportsElicitationForm()) {
+  // ExitPlanMode routing splits by client KIND, not by form capability:
+  //   - martty gets an elicitation FORM: its request_permission overlay draws
+  //     only the title — a one-line popup can never show a plan, while the
+  //     form renders the plan markdown in a scrollable detail pane.
+  //   - Every other client (Zed, remote apps) keeps session/request_permission:
+  //     editors render toolCall.content as full markdown (Zed: MarkdownElement,
+  //     code blocks and links included), while elicitation form descriptions
+  //     are plain Labels there (verified against Zed v1.19.2 sources) — the
+  //     form would DOWNGRADE the plan display. Zed ≥1.12 declares
+  //     elicitation.form, so a capability gate cannot tell the two apart;
+  //     only martty actually needs the form.
+  // Both converge on the same zcode accept/decline response shape, and the
+  // form path still falls back to request_permission if the form channel
+  // fails (see handlePlanApprovalViaElicitation).
+  if (epm && server.hasMarttyClient()) {
     const elicited = await handlePlanApprovalViaElicitation(
       server,
       cx,

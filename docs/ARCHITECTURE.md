@@ -318,8 +318,10 @@ zcode interaction request received
   │     └─ Always uses session/request_permission (its native purpose)
   │
   ├─ ExitPlanMode (interaction/requestUserInput + plan_approval)
-  │     ├─ Client supports elicitation.form → elicitation/create (approve/reject form)
-  │     └─ Otherwise → session/request_permission (fallback)
+  │     ├─ martty attached (hasMarttyClient) → elicitation/create (approve/reject form;
+  │     │     its permission overlay draws only the title — the plan needs the form)
+  │     └─ Otherwise → session/request_permission (editors render toolCall.content
+  │           as full markdown; elicitation form descriptions are plain text there)
   │
   └─ AskUserQuestion (interaction/requestUserInput)
         ├─ Client supports elicitation.form → elicitation/create (single form)
@@ -327,8 +329,11 @@ zcode interaction request received
 ```
 
 **Key**: `server.supportsElicitationForm()` is detected at `initialize` time from
-`clientCapabilities.elicitation.form`. Tool auth always goes through
-request_permission, since that is its native purpose.
+`clientCapabilities.elicitation.form` (AskUserQuestion). ExitPlanMode keys on
+`server.hasMarttyClient()` instead — Zed ≥1.12 declares `elicitation.form` too,
+but its form descriptions are plain text while its permission popups render
+`toolCall.content` as markdown, so only martty benefits from the form. Tool auth
+always goes through request_permission, since that is its native purpose.
 
 ## Deferred Notification Mechanism
 
