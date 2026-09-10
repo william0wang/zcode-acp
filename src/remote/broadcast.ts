@@ -99,20 +99,13 @@ export class ClientRegistry {
     method: string,
     build: (name: string | null) => Record<string, unknown> | null,
   ): Promise<void> {
-    const results = await Promise.allSettled(
+    // racedNotify: per-client failure/stall isolation (see notifyAll).
+    await Promise.all(
       this.snapshot().map((cx) => {
         const params = build(this.nameOf(cx));
-        return params ? cx.notify(method, params) : Promise.resolve();
+        return params ? racedNotify(cx, method, cx.notify(method, params)) : Promise.resolve();
       }),
     );
-    for (const r of results) {
-      if (r.status === "rejected") {
-        warn(
-          `broadcast: notifyEach ${method} failed on one client: ` +
-            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        );
-      }
-    }
   }
 
   /** Stable broadcast proxy satisfying the `AgentContext` call surface. */
@@ -136,15 +129,8 @@ export class ClientRegistry {
     const targets = this.snapshot().filter(
       (cx) => (cx as { connectionContext?: unknown }).connectionContext !== root,
     );
-    const results = await Promise.allSettled(targets.map((cx) => cx.notify(method, params)));
-    for (const r of results) {
-      if (r.status === "rejected") {
-        warn(
-          `broadcast: notifyOthers ${method} failed on one client: ` +
-            `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        );
-      }
-    }
+    // racedNotify: a stuck target client must not hold the caller's chain.
+    await Promise.all(targets.map((cx) => racedNotify(cx, method, cx.notify(method, params))));
   }
 
   snapshot(): ClientLike[] {
@@ -165,22 +151,78 @@ function createBroadcastProxy(registry: ClientRegistry): acp.AgentContext {
   return proxy as unknown as acp.AgentContext;
 }
 
+/**
+ * Per-client notify send timeout. The SDK's `sendWireMessage` awaits the
+ * transport write, so a half-open WebSocket (phone slept, TCP not yet dead)
+ * pends for minutes — and `notifyAll`'s allSettled, chained through the
+ * per-session FIFO guard in io.ts, would freeze EVERY client's session/update
+ * stream until the socket errors out. A send that exceeds the timeout is
+ * abandoned to the background (the client may still drain it later); the
+ * broadcast resolves and the guard moves on. Losing mid-stream updates on the
+ * stuck client is accepted — clients that re-attach replay history; what must
+ * never happen is one dead link silencing the others.
+ */
+const NOTIFY_SEND_TIMEOUT_MS = 5_000;
+
+/** Clients whose send already timed out once — the stall warning fires once per client (cleared on a recovered send). */
+const stalledClients = new WeakSet<ClientLike>();
+
+/** Race one client send against the timeout; always resolves, never rejects. */
+function racedNotify(cx: ClientLike, method: string, send: Promise<void>): Promise<void> {
+  if (stalledClients.has(cx)) {
+    // Already stalled once: fire-and-forget. Awaiting again would tax EVERY
+    // fan-out with another full timeout (throttling all clients to ~1 update
+    // per NOTIFY_SEND_TIMEOUT_MS while the dead link sits in the registry).
+    // The send still goes out — if it completes, the client un-stalls.
+    send.then(
+      () => stalledClients.delete(cx),
+      () => undefined,
+    );
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      if (!stalledClients.has(cx)) {
+        stalledClients.add(cx);
+        warn(
+          `broadcast: ${method} send stalled >${NOTIFY_SEND_TIMEOUT_MS}ms on one client ` +
+            "(half-open connection?) — not waiting for it; other clients continue",
+        );
+      }
+      done();
+    }, NOTIFY_SEND_TIMEOUT_MS);
+    timer.unref?.();
+    send.then(
+      () => {
+        stalledClients.delete(cx);
+        done();
+      },
+      (e) => {
+        warn(
+          `broadcast: ${method} failed on one client: ` +
+            `${e instanceof Error ? e.message : String(e)}`,
+        );
+        done();
+      },
+    );
+  });
+}
+
 async function notifyAll(
   registry: ClientRegistry,
   method: string,
   params?: unknown,
 ): Promise<void> {
-  const results = await Promise.allSettled(
-    registry.snapshot().map((cx) => cx.notify(method, params)),
+  await Promise.all(
+    registry.snapshot().map((cx) => racedNotify(cx, method, cx.notify(method, params))),
   );
-  for (const r of results) {
-    if (r.status === "rejected") {
-      warn(
-        `broadcast: notify ${method} failed on one client: ` +
-          `${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-      );
-    }
-  }
 }
 
 async function requestAny(

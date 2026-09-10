@@ -6,7 +6,7 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { echoUserPromptToOthers } from "../src/handlers/io.js";
 import { ClientRegistry, type ClientLike } from "../src/remote/broadcast.js";
@@ -158,6 +158,66 @@ describe("ClientRegistry broadcast", () => {
     expect(zed.notifies).toHaveLength(0);
     expect(phone.notifies).toHaveLength(1);
     expect(phone.notifies[0]![1]).toEqual({ x: 1 });
+  });
+
+  it("a stalled client cannot hold the notify fan-out (send timeout isolation)", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ClientRegistry();
+      const cli = fakeClient();
+      // Half-open connection: the SDK's sendWireMessage awaits the transport
+      // write, which pends until TCP gives up. Before the timeout guard this
+      // froze the per-session send chain for EVERY client.
+      const stalled = fakeClient();
+      stalled.cx.notify = () => new Promise<void>(() => undefined);
+      registry.add(cli.cx);
+      registry.add(stalled.cx);
+
+      const sent = registry.broadcast().notify("session/update", { x: 1 });
+      // Not resolved before the timeout elapses…
+      let resolved = false;
+      void sent.then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(resolved).toBe(false);
+      // …resolves once the stall timeout fires, without waiting for the stuck write.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(resolved).toBe(true);
+      // The healthy client got the message regardless.
+      expect(cli.notifies).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends keep flowing to healthy clients after a stall (guard not poisoned)", async () => {
+    vi.useFakeTimers();
+    try {
+      const registry = new ClientRegistry();
+      const cli = fakeClient();
+      const stalled = fakeClient();
+      stalled.cx.notify = () => new Promise<void>(() => undefined);
+      registry.add(cli.cx);
+      registry.add(stalled.cx);
+
+      const first = registry.broadcast().notify("session/update", { x: 1 });
+      await vi.advanceTimersByTimeAsync(6_000);
+      await first;
+      // A second send must ALSO settle — and immediately: a client already
+      // marked stalled is fire-and-forget, so it must not cost another
+      // full timeout (that would throttle every client to 1 update/5s).
+      const second = registry.broadcast().notify("session/update", { x: 2 });
+      let resolved = false;
+      void second.then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(resolved).toBe(true);
+      expect(cli.notifies).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
