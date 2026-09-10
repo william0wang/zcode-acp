@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0](https://github.com/william0wang/zcode-acp/compare/v0.34.0...v0.35.0) (2026-09-10)
+
+
+### Features
+
+* name the terminal tab "project · topic" for martty-hosted TUI windows ([300aa9c](https://github.com/william0wang/zcode-acp/commit/300aa9c9701e1e0f83487c0cf78d00b283931c2d))
+
+
+### Bug Fixes
+
+* single-flight session resume with hydration settle to stop partial first-entry replay ([aeff59e](https://github.com/william0wang/zcode-acp/commit/aeff59e028710dacce1bcb0986507b79eda6d5b5))
+
 ## [0.34.0](https://github.com/william0wang/zcode-acp/compare/v0.33.0...v0.34.0) (2026-09-09)
 
 
