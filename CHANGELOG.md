@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.2](https://github.com/william0wang/zcode-acp/compare/v0.35.1...v0.35.2) (2026-09-10)
+
+
+### Bug Fixes
+
+* isolate stalled client sends in broadcast so one dead link cannot silence others ([b76fd3f](https://github.com/william0wang/zcode-acp/commit/b76fd3fb74a8249a04fb90bb39633f42f63beaab))
+* skip hidden tool-result user messages when computing replay turn starts ([8c77ef2](https://github.com/william0wang/zcode-acp/commit/8c77ef2e1d89c79f97afa45b9bc6038c83184991))
+
 ## [0.35.1](https://github.com/william0wang/zcode-acp/compare/v0.35.0...v0.35.1) (2026-09-10)
 
 
