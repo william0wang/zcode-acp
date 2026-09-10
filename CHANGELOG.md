@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.1](https://github.com/william0wang/zcode-acp/compare/v0.35.0...v0.35.1) (2026-09-10)
+
+
+### Bug Fixes
+
+* gate plan-approval elicitation form to martty so editors keep markdown popups ([0542935](https://github.com/william0wang/zcode-acp/commit/0542935e210f59e683c50fe9c35a024039acab51))
+* keep the tail of long paths in permission popup titles ([7be5350](https://github.com/william0wang/zcode-acp/commit/7be53509f65e8bd97550b1ca0a89cfe0b205ab12))
+
 ## [0.35.0](https://github.com/william0wang/zcode-acp/compare/v0.34.0...v0.35.0) (2026-09-10)
 
 
