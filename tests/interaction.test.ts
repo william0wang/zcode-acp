@@ -173,9 +173,19 @@ describe("zcode permission → ACP", () => {
   });
 
   it("describeToolInput caps long commands and prefers command over path", () => {
-    expect(describeToolInput({ command: "a".repeat(300) })?.length).toBeLessThanOrEqual(160);
+    expect(describeToolInput({ command: "a".repeat(300) })?.length).toBeLessThanOrEqual(80);
     expect(describeToolInput({ command: "bun test", file_path: "/x" })).toBe("bun test");
     expect(describeToolInput(undefined)).toBeUndefined();
+  });
+
+  it("describeToolInput keeps the TAIL of long paths (filename decides, overlays cut the end)", () => {
+    const deep = `/very/deep/${"dir/".repeat(30)}src/handlers/session.ts`;
+    const shown = describeToolInput({ file_path: deep })!;
+    expect(shown.length).toBeLessThanOrEqual(80);
+    expect(shown.startsWith("…")).toBe(true);
+    expect(shown.endsWith("src/handlers/session.ts")).toBe(true);
+    // Short paths pass through untouched.
+    expect(describeToolInput({ file_path: "/a/b.ts" })).toBe("/a/b.ts");
   });
 });
 

@@ -83,15 +83,35 @@ function normalizeKind(kind: string | undefined): PermissionOption["kind"] {
 
 /**
  * Cap for the popup title built from tool input. Clients render the title in
- * a single popup line (martty draws it in the overlay border), so keep it
- * bounded — the full input still rides in `content` for detail-capable clients.
+ * a single popup line (martty draws it in the overlay border, which truncates
+ * past the terminal width), so keep it small enough to survive that cut —
+ * the full input still rides in `content` for detail-capable clients.
  */
-const POPUP_TITLE_MAX = 160;
+const POPUP_TITLE_MAX = 80;
 
-/** First line of a string, whitespace-trimmed and length-capped. */
-function firstLine(value: string, max = POPUP_TITLE_MAX): string {
-  const line = value.split("\n", 1)[0]!.trim();
-  return line.length > max ? line.slice(0, max - 1) + "…" : line;
+/** First line of a string, whitespace-trimmed. */
+function firstLine(value: string): string {
+  return value.split("\n", 1)[0]!.trim();
+}
+
+/** Head-truncated line: keeps the start, ellipsis at the end. */
+function headLine(value: string): string {
+  const line = firstLine(value);
+  return line.length > POPUP_TITLE_MAX ? line.slice(0, POPUP_TITLE_MAX - 1) + "…" : line;
+}
+
+/**
+ * Tail-truncated line for PATHS: the deciding part (parent dirs + filename)
+ * sits at the END, and popup overlays cut exactly there — so keep the tail
+ * and elide the front instead. If the cut lands inside a surrogate pair the
+ * orphaned low surrogate is dropped (display-layer hygiene only).
+ */
+function tailLine(value: string): string {
+  const line = firstLine(value);
+  if (line.length <= POPUP_TITLE_MAX) return line;
+  let start = line.length - (POPUP_TITLE_MAX - 1);
+  if (start > 0 && line.charCodeAt(start) >= 0xdc00 && line.charCodeAt(start) <= 0xdfff) start++;
+  return "…" + line.slice(start);
 }
 
 /**
@@ -100,21 +120,23 @@ function firstLine(value: string, max = POPUP_TITLE_MAX): string {
  * The command / file path IS the decision the user is making, and some clients
  * (martty) render only `toolCall.title` in their approval overlay — without
  * this summary the popup reads as a bare "tool" and the path is invisible.
- * Spec-complete clients also render `content`, which carries the full input
- * (see `inputPopupContent`) — multi-line commands included.
+ * Commands keep their head (the binary is the informative part); paths keep
+ * their TAIL (the filename is). Spec-complete clients also render `content`,
+ * which carries the full input (see `inputPopupContent`) — multi-line
+ * commands included.
  */
 export function describeToolInput(input: unknown): string | undefined {
   if (input === null || input === undefined) return undefined;
-  if (typeof input !== "object") return firstLine(String(input));
+  if (typeof input !== "object") return headLine(String(input));
   const rec = input as Record<string, unknown>;
   const command = rec["command"];
-  if (typeof command === "string" && command.trim()) return firstLine(command.trim());
+  if (typeof command === "string" && command.trim()) return headLine(command.trim());
   for (const key of ["file_path", "path", "notebook_path", "url", "pattern", "query"]) {
     const v = rec[key];
-    if (typeof v === "string" && v.trim()) return firstLine(v.trim());
+    if (typeof v === "string" && v.trim()) return tailLine(v);
   }
   try {
-    return firstLine(JSON.stringify(input) ?? "");
+    return headLine(JSON.stringify(input) ?? "");
   } catch {
     return undefined;
   }
@@ -284,14 +306,15 @@ export function acpPermissionResponseToExitPlanMode(
 // ---------- ExitPlanMode via elicitation form ----------
 
 /**
- * Build an elicitation FORM for ExitPlanMode plan approval.
- *
- * Form-capable clients (martty) render the field's `description` through their
- * full markdown pipeline in a scrollable detail pane — the COMPLETE plan lives
- * there, not in a one-line popup title. The decision itself is a required enum
- * field (approve / reject); a cancelled or declined form maps to decline.
- * Clients without form support fall back to the requestPermission path, whose
- * toolCall carries the plan in `content` for the same reason.
+ * Build an elicitation FORM for ExitPlanMode plan approval — the martty
+ * surface (see handleSinglePermission's routing comment; the gate lives
+ * there). martty renders the field's `description` through its full markdown
+ * pipeline in a scrollable detail pane — the COMPLETE plan lives there, not
+ * in a one-line popup title. The decision itself is a required enum field
+ * (approve / reject); a cancelled or declined form maps to decline. The
+ * caller falls back to the requestPermission path when the form channel
+ * fails; that path carries the plan in `toolCall.content` for the same
+ * reason.
  */
 export function buildPlanApprovalElicitationForm(
   params: ZcodeInteractionUserInputParams,
