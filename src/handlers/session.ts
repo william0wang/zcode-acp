@@ -67,6 +67,7 @@ import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
+import type { ReplaySlice } from "./replay.js";
 import { fetchMessages, fullSlice, readTailLimit, replayMessages, sliceTail } from "./replay.js";
 import {
   extractPermDeniedPath,
@@ -713,18 +714,22 @@ async function replayResumeHistory(
   acpSid: string,
   zcodeSid: string,
 ): Promise<void> {
-  // Plain fetch: callers only invoke this after a resume flight settled the
-  // store (or the session was already live) — see resumePreservingModel.
-  const messages = await fetchMessages(server, zcodeSid);
-  if (messages.length === 0) return;
-  const slice = sliceTail(messages, MARTTY_RESUME_TAIL);
-  await withReplayBatch(acpSid, () =>
-    replayMessages(cx, acpSid, slice.batch, { toolTurnWindow: MARTTY_TOOL_TURN_WINDOW }),
-  );
-  log(
-    `session/resume: replayed ${slice.meta.replayedMessages} messages for the TUI` +
-      ` (tail ${MARTTY_RESUME_TAIL} of ${slice.meta.totalMessages} on record)`,
-  );
+  // Plain fetch (callers only invoke this after a resume flight settled the
+  // store — see resumePreservingModel) INSIDE the batch: the guard must be
+  // held across the session/messages RPC. Fetched outside, a prompt landing
+  // in that window dispatches live turn updates through the lock-free fast
+  // path (enqueueSessionSend) and the TUI renders the new turn ABOVE the
+  // history that arrives afterwards.
+  await withReplayBatch(acpSid, async () => {
+    const messages = await fetchMessages(server, zcodeSid);
+    if (messages.length === 0) return;
+    const slice = sliceTail(messages, MARTTY_RESUME_TAIL);
+    await replayMessages(cx, acpSid, slice.batch, { toolTurnWindow: MARTTY_TOOL_TURN_WINDOW });
+    log(
+      `session/resume: replayed ${slice.meta.replayedMessages} messages for the TUI` +
+        ` (tail ${MARTTY_RESUME_TAIL} of ${slice.meta.totalMessages} on record)`,
+    );
+  });
 }
 
 /**
@@ -941,20 +946,22 @@ export async function resumeIntoSession(
     return { ok: false, error: messages().slashResumeFailed };
   }
 
-  const history = settledHistory ?? (await fetchMessages(server, zcodeTarget));
-  if (history.length > 0) server.markSessionActive(acpSid);
-  const slice = fullSlice(history);
-  await withReplayBatch(acpSid, () =>
-    replayMessages(cx, acpSid, slice.batch, {
+  // Fetch inside the batch (see replayResumeHistory): the guard must cover
+  // the history RPC, or a concurrent prompt renders above the replay.
+  await withReplayBatch(acpSid, async () => {
+    const history = settledHistory ?? (await fetchMessages(server, zcodeTarget));
+    if (history.length > 0) server.markSessionActive(acpSid);
+    const slice = fullSlice(history);
+    await replayMessages(cx, acpSid, slice.batch, {
       // TUI condensation (see MARTTY_TOOL_TURN_WINDOW) — an editor typing
       // /resume keeps full-fidelity replay.
       toolTurnWindow: isMarttyClient(server) ? MARTTY_TOOL_TURN_WINDOW : undefined,
-    }),
-  );
-  log(
-    `/resume: replayed ${slice.meta.replayedMessages} messages into ${acpSid.slice(0, 8)}` +
-      ` (total ${slice.meta.totalMessages})`,
-  );
+    });
+    log(
+      `/resume: replayed ${slice.meta.replayedMessages} messages into ${acpSid.slice(0, 8)}` +
+        ` (total ${slice.meta.totalMessages})`,
+    );
+  });
 
   // Same baseline dance as session/load: mark history seen so the next turn's
   // completion diff does not re-emit it, then emit the current todos from a
@@ -1065,37 +1072,46 @@ export async function loadSession(
     }
   }
 
-  // Named `history` — a local `messages` would shadow the i18n `messages()`
-  // helper used in the error paths above (TDZ crash from the catch block).
-  // A resume flight's SETTLED snapshot is the mid-hydration guard; only an
-  // already-live session (no flight) falls back to a plain read — its store
-  // is stable.
-  const history = settledHistory ?? (await fetchMessages(server, zcodeSid));
-  // History on disk = real interaction (covers untitled sessions resumed from
-  // a previous bridge lifetime) — make the session discoverable remotely.
-  if (history.length > 0) server.markSessionActive(acpSid);
   // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
   // N messages aligned to turn boundaries — the full replay stays the default
   // for editors that send no `_meta` (Zed path unchanged).
   const limit = readTailLimit(params);
-  const slice = limit === null ? fullSlice(history) : sliceTail(history, limit);
+  // Named `history` — a local `messages` would shadow the i18n `messages()`
+  // helper (TDZ crash from a catch block). A resume flight's SETTLED snapshot
+  // is the mid-hydration guard; only an already-live session (no flight) falls
+  // back to a plain read — its store is stable.
+  let slice: ReplaySlice;
   if (opts.replayHistory === false) {
     // Boot-resume interception (session/new): the terminal TUI client does not
     // render replayed updates (its transcript lives in its own local store)
     // and blocks on the response until the replay finishes — so skip the
     // dispatch. The differ baseline below still runs, so the next turn's
     // completion diff does not re-emit the historical messages.
+    const history = settledHistory ?? (await fetchMessages(server, zcodeSid));
+    // History on disk = real interaction (covers untitled sessions resumed from
+    // a previous bridge lifetime) — make the session discoverable remotely.
+    if (history.length > 0) server.markSessionActive(acpSid);
+    slice = limit === null ? fullSlice(history) : sliceTail(history, limit);
     log(
       `session/load: history replay skipped (boot-resume); ${slice.meta.totalMessages} messages on record`,
     );
   } else {
-    await withReplayBatch(acpSid, () => replayMessages(cx, acpSid, slice.batch));
-    // total M always logged: a first-entry total below the session's real size
-    // is the signature of a mid-hydration read (see fetchMessagesSettled).
-    log(
-      `session/load: replayed ${slice.meta.replayedMessages} messages` +
-        ` (total ${slice.meta.totalMessages}${limit === null ? "" : `, tail limit ${limit}`})`,
-    );
+    // The whole fetch+replay runs INSIDE the batch (see replayResumeHistory):
+    // a prompt landing while the history RPC is in flight must queue behind
+    // the batch, not dispatch above the replayed history.
+    slice = await withReplayBatch(acpSid, async () => {
+      const history = settledHistory ?? (await fetchMessages(server, zcodeSid));
+      if (history.length > 0) server.markSessionActive(acpSid);
+      const batchSlice = limit === null ? fullSlice(history) : sliceTail(history, limit);
+      await replayMessages(cx, acpSid, batchSlice.batch);
+      // total M always logged: a first-entry total below the session's real size
+      // is the signature of a mid-hydration read (see fetchMessagesSettled).
+      log(
+        `session/load: replayed ${batchSlice.meta.replayedMessages} messages` +
+          ` (total ${batchSlice.meta.totalMessages}${limit === null ? "" : `, tail limit ${limit}`})`,
+      );
+      return batchSlice;
+    });
   }
 
   // Replay the existing todo list as an initial plan so a loaded session shows
