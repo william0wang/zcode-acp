@@ -10,8 +10,8 @@
  * buildRuntimeModel() inlines apiKey as {source:"inline",value}
  * for third-party providers (the backend resolves model-call auth from the
  * overlay itself; omitting it yields HTTP 401) but omits it for builtins.
- * Builtin models encode as bare modelIds, and third-party models carry their
- * providerId prefix.
+ * Every model encodes as providerId\modelId. A legacy bare modelId still
+ * parses as the first enabled builtin.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -205,10 +205,9 @@ describe("modelContextWindow", () => {
 });
 
 describe("parseModelValue / formatModelValue", () => {
-  it("builtin providers encode as bare modelId (no prefix)", () => {
-    // The common case stays clean — builtin models show just the modelId.
+  it("builtin providers encode as providerId\\modelId", () => {
     const value = formatModelValue("builtin:primary", "model-a");
-    expect(value).toBe("model-a");
+    expect(value).toBe("builtin:primary\\model-a");
     expect(parseModelValue(value)).toEqual({
       providerId: "builtin:primary",
       modelId: "model-a",

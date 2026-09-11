@@ -164,21 +164,51 @@ export function isBuiltinProvider(providerId: string): boolean {
 /**
  * Encode a provider+model pair into a configOption `value` string.
  *
- * Builtin providers encode as the bare modelId (legacy form, keeps the dropdown
- * clean for the common case). Third-party providers encode as
- * `providerId\modelId` — `\` is unambiguous because providerIds (UUIDs) and
- * modelIds (`/`-separated) never contain it.
+ * Always `providerId\modelId` — builtins included. A collision-only prefix
+ * would advertise different id shapes depending on how many coding plans the
+ * user has enabled. `\` is unambiguous because providerIds (UUIDs / builtin:
+ * slugs) and modelIds (`/`-separated) never contain it.
+ *
+ * Inbound, `parseModelValue` still accepts a legacy bare modelId.
  */
 export function formatModelValue(providerId: string, modelId: string): string {
-  if (isBuiltinProvider(providerId)) return modelId;
   return `${providerId}\\${modelId}`;
+}
+
+function collidingModelIds(models: ModelRef[]): Set<string> {
+  const counts = new Map<string, number>();
+  for (const model of models) {
+    counts.set(model.modelId, (counts.get(model.modelId) ?? 0) + 1);
+  }
+  const colliding = new Set<string>();
+  for (const [modelId, count] of counts) {
+    if (count > 1) colliding.add(modelId);
+  }
+  return colliding;
+}
+
+function buildModelSelectOptions(models: ModelRef[]): Array<{ value: string; name: string }> {
+  const collidingIds = collidingModelIds(models);
+  const options: Array<{ value: string; name: string }> = [];
+  const seen = new Set<string>();
+  for (const model of models) {
+    const value = formatModelValue(model.providerId, model.modelId);
+    if (seen.has(value)) continue;
+    seen.add(value);
+    const qualify = collidingIds.has(model.modelId) || !isBuiltinProvider(model.providerId);
+    options.push({
+      value,
+      name: qualify ? `${model.providerName} › ${model.modelId}` : model.modelId,
+    });
+  }
+  return options;
 }
 
 /**
  * Parse a configOption `value` back into { providerId, modelId }.
  *
- * A value without `\` is a builtin modelId (legacy form) → resolve to the first
- * enabled builtin provider. A value with `\` is a third-party provider+model.
+ * A value without `\` is a legacy bare modelId → resolve to the first enabled
+ * builtin provider. A value with `\` is the current provider+model encoding.
  */
 export function parseModelValue(value: string): { providerId: string; modelId: string } {
   const idx = value.indexOf("\\");
@@ -336,18 +366,14 @@ export async function buildConfigOptions(
   // currentValue encodes provider+model so the switch handler can locate the
   // right provider (and its apiKey). Fall back to the first enabled provider
   // when settings omits providerId (legacy sessions).
-  const currentModel = formatModelValue(
-    currentProviderId || loadAllModels()[0]?.providerId || DEFAULT_PROVIDER_ID,
-    currentModelId,
-  );
+  const allModels = loadAllModels();
+  const currentProvider = currentProviderId || allModels[0]?.providerId || DEFAULT_PROVIDER_ID;
+  const currentModel = formatModelValue(currentProvider, currentModelId);
 
-  // Model options: config.json enabled providers are authoritative. Builtin
-  // models show as the bare modelId (clean dropdown for the common case);
-  // third-party models prefix the provider name so they're distinguishable.
-  let modelOptions = loadAllModels().map((m) => ({
-    value: formatModelValue(m.providerId, m.modelId),
-    name: isBuiltinProvider(m.providerId) ? m.modelId : `${m.providerName} › ${m.modelId}`,
-  }));
+  // Model options: config.json enabled providers are authoritative. Values
+  // are always providerId\modelId. Builtin labels stay the bare modelId
+  // unless two providers ship the same id; third-party labels always qualify.
+  let modelOptions = buildModelSelectOptions(allModels);
   if (!modelOptions.some((o) => o.value === currentModel)) {
     // The current model isn't from an enabled provider (e.g. the session was
     // created with a now-disabled provider). Append it so the dropdown still
