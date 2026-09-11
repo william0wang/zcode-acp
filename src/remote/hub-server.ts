@@ -1943,6 +1943,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   function startProxy(client: WebSocket, bridge: WebSocket): void {
     const pair = { client, bridge };
     proxyPairs.add(pair);
+    // Both legs start pong-responsive; the pinger below re-arms them.
+    pongResponsive.add(client);
+    pongResponsive.add(bridge);
+    client.on("pong", () => pongResponsive.add(client));
+    bridge.on("pong", () => pongResponsive.add(bridge));
     const teardown = (): void => {
       if (!proxyPairs.delete(pair)) return;
       client.close();
@@ -1981,10 +1986,29 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
   timers.push(pruner);
 
   // Keepalive pings on both legs — tunnels (notably Cloudflare) drop idle WS.
+  // Pong supervision: a ping alone keeps NAT mappings warm but never detects a
+  // dead peer — a phone whose TCP was silently cut (sleep, network change)
+  // stays readyState OPEN forever, and every proxied session/update is sent
+  // into the void while the app waits for updates that never come (observed
+  // 2026-09: app showed a stale transcript until a manual refresh reconnected
+  // and replayed). Standard ws keepalive: mark unresponsive on each ping, let
+  // the pong re-mark responsive, terminate after one full interval with no
+  // pong. terminate (not close) fires the proxy pair's teardown — the bridge
+  // leg drops too, and the client's reconnect walks the full session/load
+  // replay instead of resuming a zombie link.
+  const pongResponsive = new WeakSet<WebSocket>();
   const pinger = setInterval(() => {
     for (const { client, bridge } of proxyPairs) {
-      if (client.readyState === WebSocket.OPEN) client.ping();
-      if (bridge.readyState === WebSocket.OPEN) bridge.ping();
+      for (const ws of [client, bridge]) {
+        if (ws.readyState !== WebSocket.OPEN) continue;
+        if (pongResponsive.has(ws)) {
+          pongResponsive.delete(ws);
+          ws.ping();
+        } else {
+          log("hub: proxy leg missed a keepalive pong — terminating (dead peer)");
+          ws.terminate();
+        }
+      }
     }
   }, pingIntervalMs);
   pinger.unref();

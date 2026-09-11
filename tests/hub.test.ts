@@ -350,6 +350,58 @@ describe("hub WS proxy", () => {
     expect(JSON.parse(await reply)).toEqual({ jsonrpc: "2.0", id: 1, method: "ping" });
   });
 
+  it("terminates a proxy leg that misses a keepalive pong (dead phone link)", async () => {
+    // Regression (observed 2026-09): a phone whose TCP was silently cut keeps
+    // readyState OPEN; without pong supervision the hub proxied session
+    // updates into the void and the app showed a stale transcript until a
+    // manual refresh. A leg that misses one full ping interval is terminated —
+    // teardown drops the whole pair and the client's reconnect replays.
+    const hub = await startTestHub({ pingIntervalMs: 100 });
+    const echo = track(
+      await startEchoBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port: echo.port })),
+    });
+
+    const client = track(
+      new WebSocket(`ws://127.0.0.1:${hub.port}/acp?instance=inst-1&token=${TOKEN}`),
+      (ws) =>
+        new Promise<void>((resolve) => {
+          if (ws.readyState === WebSocket.CLOSED) {
+            resolve();
+            return;
+          }
+          ws.close();
+          ws.once("close", () => resolve());
+        }),
+    );
+    await withTimeout(
+      new Promise<void>((resolve, reject) => {
+        client.once("open", () => resolve());
+        client.once("error", (e) => reject(e));
+      }),
+      3000,
+      "ws open",
+    );
+    // A healthy ws auto-pongs; simulate the dead peer by swallowing the pong
+    // frame writes (the ping is still received and answered — into /dev/null).
+    const sender = (
+      client as unknown as { _sender: { pong: (data: Buffer, cb: () => void) => void } }
+    )._sender;
+    sender.pong = () => undefined;
+
+    const closed = withTimeout(
+      new Promise<void>((resolve) => client.once("close", () => resolve())),
+      3000,
+      "dead leg terminated",
+    );
+    await closed;
+  });
+
   it("refuses WS upgrades with a bad token or unknown instance", async () => {
     const hub = await startTestHub();
     const cases = [
