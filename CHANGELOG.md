@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.0](https://github.com/william0wang/zcode-acp/compare/v0.36.0...v0.37.0) (2026-09-11)
+
+
+### Features
+
+* **quota:** add Opencode Go monthly window and reset times to the TUI quota dock ([d322fca](https://github.com/william0wang/zcode-acp/commit/d322fcaaa81f14bcf6e47b3f79a621dfeac3ecdd))
+
+
+### Bug Fixes
+
+* disambiguate colliding builtin model ids in configOptions ([#175](https://github.com/william0wang/zcode-acp/issues/175)) ([c1bb059](https://github.com/william0wang/zcode-acp/commit/c1bb0597c50f8918f42a5b8f4555054ba0bd01f7))
+
 ## [0.36.0](https://github.com/william0wang/zcode-acp/compare/v0.35.2...v0.36.0) (2026-09-11)
 
 
