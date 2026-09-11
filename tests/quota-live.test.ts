@@ -104,7 +104,7 @@ describe("startQuotaRefresher", () => {
     startQuotaRefresher(server);
     await flushMicrotasks();
     expect(queryQuotaMock).toHaveBeenCalledTimes(1);
-    expect(server.quotaDock).toBe("5h 45% · wk 12%");
+    expect(server.quotaDock).toBe("45% · 12%");
     // Full-replace options for every known session alias (live + pending).
     const acpSids = calls.map((c) => c.params.sessionId).sort();
     expect(acpSids).toEqual(["acp-1", "acp-pending"]);
@@ -124,14 +124,14 @@ describe("startQuotaRefresher", () => {
     expect(queryQuotaMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(QUOTA_REFRESH_INTERVAL_MS);
     expect(queryQuotaMock).toHaveBeenCalledTimes(2);
-    expect(server.quotaDock).toBe("5h 45% · wk 12%");
+    expect(server.quotaDock).toBe("45% · 12%");
   });
 });
 
 describe("scheduleQuotaDockBackstop", () => {
   it("re-emits the already-fetched value to registered sessions after the response", async () => {
     const { server, calls } = fakeServer();
-    server.quotaDock = "5h 45% · wk 12%";
+    server.quotaDock = "45% · 12%";
     scheduleQuotaDockBackstop(server);
     await flushMicrotasks();
     const acpSids = calls.map((c) => c.params.sessionId).sort();
@@ -213,7 +213,7 @@ describe("hub-first lookup", () => {
       startQuotaRefresher(server);
       await flushMicrotasks();
       expect(queryQuotaMock).toHaveBeenCalledTimes(1);
-      expect(server.quotaDock).toBe("5h 45% · wk 12%");
+      expect(server.quotaDock).toBe("45% · 12%");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -266,10 +266,10 @@ describe("failure contract", () => {
     server.marttyClientSeen = true;
     startQuotaRefresher(server);
     await flushMicrotasks();
-    expect(server.quotaDock).toBe("5h 45% · wk 12%");
+    expect(server.quotaDock).toBe("45% · 12%");
     await forceRefreshQuota();
     await flushMicrotasks();
-    expect(server.quotaDock).toBe("5h 45% · wk 12%"); // sticky
+    expect(server.quotaDock).toBe("45% · 12%"); // sticky
     // The real buildConfigOptions (mocked elsewhere in this file) must still
     // attach the quota pseudo-option from the stale string.
     const { buildConfigOptions: realBuild } = await vi.importActual<
@@ -279,6 +279,6 @@ describe("failure contract", () => {
     const options = await realBuild(server, null, marttyRoot);
     const quota = options.find((o) => o.id === "quota");
     expect(quota).toBeDefined();
-    expect((quota as { currentValue?: unknown }).currentValue).toBe("5h 45% · wk 12%");
+    expect((quota as { currentValue?: unknown }).currentValue).toBe("45% · 12%");
   });
 });

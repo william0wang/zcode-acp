@@ -6,7 +6,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { formatQuotaDock } from "../src/quota/format.js";
+import { composeQuotaDock, formatGoDockSegment, formatQuotaDock } from "../src/quota/format.js";
+import type { GoQueryResult } from "../src/quota/opencode-go/types.js";
 import type { QuotaItem, QuotaResult } from "../src/quota/types.js";
 
 const NOW = 1_800_000_000_000;
@@ -29,11 +30,13 @@ describe("formatQuotaDock", () => {
       level: "pro",
       items: [
         item({ key: "token_5h", usedPercent: 45, nextResetTime: reset }),
-        item({ key: "token_week", usedPercent: 12 }),
+        item({ key: "token_week", usedPercent: 12, nextResetTime: NOW + 3 * 86_400_000 }),
         item({ key: "mcp", usedPercent: 80 }),
       ],
     };
-    expect(formatQuotaDock(result)).toBe(`5h 45% · wk 12% · reset ${clock(reset)}`);
+    const wk = new Date(NOW + 3 * 86_400_000);
+    const wkDate = `${String(wk.getMonth() + 1).padStart(2, "0")}-${String(wk.getDate()).padStart(2, "0")}`;
+    expect(formatQuotaDock(result)).toBe(`45% ${clock(reset)} · 12% ${wkDate}`);
   });
 
   it("omits the weekly segment when absent", () => {
@@ -43,7 +46,7 @@ describe("formatQuotaDock", () => {
       level: "pro",
       items: [item({ key: "token_5h", usedPercent: 7, nextResetTime: reset })],
     };
-    expect(formatQuotaDock(result)).toBe(`5h 7% · reset ${clock(reset)}`);
+    expect(formatQuotaDock(result)).toBe(`7% ${clock(reset)}`);
   });
 
   it("zero-pads the clock minutes", () => {
@@ -53,7 +56,7 @@ describe("formatQuotaDock", () => {
       level: "pro",
       items: [item({ key: "token_5h", usedPercent: 61, nextResetTime: reset })],
     };
-    expect(formatQuotaDock(result)).toBe(`5h 61% · reset ${clock(reset)}`);
+    expect(formatQuotaDock(result)).toBe(`61% ${clock(reset)}`);
     expect(clock(reset)).toMatch(/^\d{2}:\d{2}$/);
   });
 
@@ -66,7 +69,7 @@ describe("formatQuotaDock", () => {
         item({ key: "token_week", usedPercent: 5 }),
       ],
     };
-    expect(formatQuotaDock(result)).toBe("5h 30% · wk 5%");
+    expect(formatQuotaDock(result)).toBe("30% · 5%");
   });
 
   it("returns null without a 5h window even on success", () => {
@@ -91,6 +94,39 @@ describe("formatQuotaDock", () => {
       level: "pro",
       items: [item({ key: "token_5h", usedPercent: 99, nextResetTime: reset })],
     };
-    expect(formatQuotaDock(result)).toBe(`5h 99% · reset ${clock(reset)}`);
+    expect(formatQuotaDock(result)).toBe(`99% ${clock(reset)}`);
+  });
+});
+
+describe("formatGoDockSegment / composeQuotaDock", () => {
+  const goSuccess = (monthly: number | null): GoQueryResult =>
+    ({
+      kind: "success",
+      rolling: { usagePercent: 30, resetInSec: 3600 },
+      weekly: { usagePercent: 12, resetInSec: 86400 },
+      monthly: monthly === null ? null : { usagePercent: monthly, resetInSec: 2592000 },
+      fetchedAt: NOW,
+    }) as GoQueryResult;
+
+  it("renders monthly only, percent + reset date", () => {
+    const d = new Date(NOW + 2592000 * 1000);
+    const date = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    expect(formatGoDockSegment(goSuccess(8))).toBe(`go 8% ${date}`);
+  });
+
+  it("null when Go fails or has no monthly window", () => {
+    expect(formatGoDockSegment(goSuccess(null))).toBeNull();
+    expect(formatGoDockSegment({ kind: "not_configured" })).toBeNull();
+    expect(formatGoDockSegment({ kind: "auth_error" })).toBeNull();
+    expect(formatGoDockSegment({ kind: "unavailable" })).toBeNull();
+  });
+
+  it("composes GLM + Go segments with a separator", () => {
+    expect(composeQuotaDock("45% 14:23 · 12% 10-18", "go 8% 10-11")).toBe(
+      "45% 14:23 · 12% 10-18 · go 8% 10-11",
+    );
+    expect(composeQuotaDock("45%", null)).toBe("45%");
+    expect(composeQuotaDock(null, "go 8% 10-11")).toBe("go 8% 10-11");
+    expect(composeQuotaDock(null, null)).toBeNull();
   });
 });

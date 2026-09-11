@@ -16,6 +16,7 @@
  */
 
 import { pickOverlay, renderColorBar } from "./color.js";
+import type { GoQueryResult } from "./opencode-go/types.js";
 import type { QuotaItem, QuotaResult } from "./types.js";
 
 /**
@@ -287,8 +288,9 @@ export function formatQuotaPlain(result: QuotaResult, opts?: FormatOptions): str
 
 /**
  * Format a compact one-line quota string for the Martty TUI's resident dock
- * (ADR-0021): `5h 45% · wk 12% · reset 14:23` — 5h-window used percent, weekly
- * used percent, and the local clock time when the 5h window resets. MCP quota
+ * (ADR-0021): `45% 14:23 · 12% 10-18 · go 8% 10-11` — each window's used
+ * percent with its reset moment inline (clock time for the 5h window, date for
+ * weekly/monthly). MCP quota
  * is deliberately omitted (the dock line must stay short).
  *
  * Returns `null` when there is nothing to show (non-success result, or a
@@ -302,11 +304,36 @@ export function formatQuotaDock(result: QuotaResult): string | null {
   const weekly = byKey.get("token_week");
   if (!fiveHour) return null;
 
-  const parts: string[] = [`5h ${fiveHour.usedPercent}%`];
-  if (weekly) parts.push(`wk ${weekly.usedPercent}%`);
   const reset = formatResetClock(fiveHour.nextResetTime);
-  if (reset) parts.push(`reset ${reset}`);
+  const parts: string[] = [
+    reset ? `${fiveHour.usedPercent}% ${reset}` : `${fiveHour.usedPercent}%`,
+  ];
+  if (weekly) {
+    const wkDate = formatResetDate(weekly.nextResetTime);
+    parts.push(wkDate ? `${weekly.usedPercent}% ${wkDate}` : `${weekly.usedPercent}%`);
+  }
   return parts.join(" · ");
+}
+
+/**
+ * Compact Opencode Go segment for the dock: monthly window only, as
+ * `go 8% 10-11` — percent plus the reset DATE (the monthly window resets in
+ * ~30d, so a clock time is meaningless; the date is computed from the fetch
+ * time + relative countdown). `null` when Go is not usable (not configured,
+ * auth error, unavailable, or no monthly window exposed by the dashboard).
+ */
+export function formatGoDockSegment(go: GoQueryResult): string | null {
+  if (go.kind !== "success" || !go.monthly) return null;
+  const d = new Date(go.fetchedAt + go.monthly.resetInSec * 1000);
+  if (Number.isNaN(d.getTime())) return `go ${go.monthly.usagePercent}%`;
+  const date = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `go ${go.monthly.usagePercent}% ${date}`;
+}
+
+/** Join the GLM dock line and the Go segment; `null` when both are absent. */
+export function composeQuotaDock(glm: string | null, go: string | null): string | null {
+  const parts = [glm, go].filter((s): s is string => s !== null);
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
@@ -318,4 +345,15 @@ function formatResetClock(nextResetTime: number | undefined): string | null {
   const d = new Date(nextResetTime);
   if (Number.isNaN(d.getTime())) return null;
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * Date rendering for windows that reset in days (weekly/monthly): the reset
+ * moment as a local `MM-DD` date.
+ */
+function formatResetDate(nextResetTime: number | undefined): string | null {
+  if (nextResetTime === undefined || !Number.isFinite(nextResetTime)) return null;
+  const d = new Date(nextResetTime);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }

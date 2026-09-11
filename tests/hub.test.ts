@@ -509,7 +509,7 @@ describe("hub quota dock endpoint", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
     const body = (await res.json()) as { formatted: string | null; fetchedAt: number };
-    expect(body.formatted).toBe("5h 45% · wk 12%");
+    expect(body.formatted).toBe("45% · 12%");
     expect(body.fetchedAt).toBeGreaterThan(0);
   });
 
@@ -524,8 +524,8 @@ describe("hub quota dock endpoint", () => {
     const first = await fetch(dockUrl(hub), { headers });
     const second = await fetch(dockUrl(hub), { headers });
     expect(queryQuotaMock).toHaveBeenCalledTimes(1);
-    expect(((await first.json()) as { formatted: string }).formatted).toBe("5h 1%");
-    expect(((await second.json()) as { formatted: string }).formatted).toBe("5h 1%");
+    expect(((await first.json()) as { formatted: string }).formatted).toBe("1%");
+    expect(((await second.json()) as { formatted: string }).formatted).toBe("1%");
   });
 
   it("caches a null formatted (dock hidden), and answers 502 on query failure", async () => {

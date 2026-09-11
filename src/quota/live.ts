@@ -21,8 +21,9 @@ import { parseRemoteConfig } from "../remote/config.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { enqueueSessionSend } from "../handlers/io.js";
-import { formatQuotaDock } from "./format.js";
+import { composeQuotaDock, formatGoDockSegment, formatQuotaDock } from "./format.js";
 import { queryQuota } from "./index.js";
+import { queryGoUsage } from "./opencode-go/index.js";
 
 /** Interval between background refreshes. */
 export const QUOTA_REFRESH_INTERVAL_MS = 60_000;
@@ -111,7 +112,13 @@ export async function fetchDockText(env: NodeJS.ProcessEnv = process.env): Promi
       // hub absent/restarting — silent fallback below
     }
   }
-  return formatQuotaDock(await queryQuota());
+  // Go is best-effort: not_configured / auth_error / fetch failure renders as
+  // no segment, never blocking the GLM line.
+  const [glm, go] = await Promise.all([
+    queryQuota().then(formatQuotaDock),
+    queryGoUsage().then(formatGoDockSegment).catch(() => null),
+  ]);
+  return composeQuotaDock(glm, go);
 }
 
 /**

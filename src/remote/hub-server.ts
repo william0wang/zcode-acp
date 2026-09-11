@@ -65,8 +65,9 @@ import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
-import { formatQuotaDock } from "../quota/format.js";
+import { composeQuotaDock, formatGoDockSegment, formatQuotaDock } from "../quota/format.js";
 import { queryQuota } from "../quota/index.js";
+import { queryGoUsage } from "../quota/opencode-go/index.js";
 import { listKnownWorkspaces } from "../tasks-index.js";
 
 export interface HubOptions {
@@ -704,8 +705,11 @@ function getQuotaDock(): Promise<{ formatted: string | null; fetchedAt: number }
   if (dockCache && Date.now() - dockCache.at < DOCK_TTL_MS) {
     return Promise.resolve({ formatted: dockCache.formatted, fetchedAt: dockCache.at });
   }
-  return queryQuota().then((result) => {
-    dockCache = { formatted: formatQuotaDock(result), at: Date.now() };
+  return Promise.all([
+    queryQuota().then(formatQuotaDock),
+    queryGoUsage().then(formatGoDockSegment).catch(() => null),
+  ]).then(([glm, go]) => {
+    dockCache = { formatted: composeQuotaDock(glm, go), at: Date.now() };
     return { formatted: dockCache.formatted, fetchedAt: dockCache.at };
   });
 }
