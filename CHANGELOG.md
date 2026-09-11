@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0](https://github.com/william0wang/zcode-acp/compare/v0.35.2...v0.36.0) (2026-09-11)
+
+
+### Features
+
+* recover auto-mode turns from backend-lost failures (respawn + reload + retry) ([e9ca946](https://github.com/william0wang/zcode-acp/commit/e9ca946f900b4678db5138ba5f3e50f7b2bacbf6))
+
+
+### Bug Fixes
+
+* skip goal-loop turns when cancelling siblings during backend recovery ([5acd76d](https://github.com/william0wang/zcode-acp/commit/5acd76d17bae08812ea0c0661015c63b72c2dcfc))
+* supervise hub proxy keepalive pongs so dead phone links are terminated ([4c8436c](https://github.com/william0wang/zcode-acp/commit/4c8436c594ea108649b96adc54ee8d0aee3ef329))
+
 ## [0.35.2](https://github.com/william0wang/zcode-acp/compare/v0.35.1...v0.35.2) (2026-09-10)
 
 
