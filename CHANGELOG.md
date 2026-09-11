@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.1](https://github.com/william0wang/zcode-acp/compare/v0.37.0...v0.37.1) (2026-09-11)
+
+
+### Bug Fixes
+
+* hold replay batch guard across the history fetch so live turns queue behind replay ([0bf6790](https://github.com/william0wang/zcode-acp/commit/0bf6790a80b3740c6f836a6546ad0cab78e208c1))
+
 ## [0.37.0](https://github.com/william0wang/zcode-acp/compare/v0.36.0...v0.37.0) (2026-09-11)
 
 
