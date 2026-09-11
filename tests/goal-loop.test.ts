@@ -9,10 +9,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { RequestError } from "@agentclientprotocol/sdk";
 
 const runOneTurn = vi.fn();
 const compactMock = vi.fn();
 const sendTextChunk = vi.fn();
+const reloadBackendSession = vi.fn();
 
 vi.mock("../src/handlers/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/handlers/session.js")>();
@@ -22,6 +24,7 @@ vi.mock("../src/handlers/session.js", async (importOriginal) => {
     ...actual,
     runOneTurn: (...args: unknown[]) => runOneTurn(...(args as [])),
     withPreemptLock: (_server: unknown, _sid: unknown, body: () => Promise<void>) => body(),
+    reloadBackendSession: (...args: unknown[]) => reloadBackendSession(...(args as [])),
   };
 });
 vi.mock("../src/handlers/extensions.js", () => ({
@@ -121,6 +124,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   sendTextChunk.mockImplementation(async () => undefined);
   compactMock.mockImplementation(async () => ({}));
+  reloadBackendSession.mockImplementation(async () => undefined);
   fetchMessagesState.length = 0;
   pendingReplies.length = 0;
   readProjection = { contextUsed: 1000, contextWindow: 100_000 };
@@ -365,6 +369,79 @@ describe("goal-loop driver", () => {
     // ...and settled with THAT round (not resolved-and-dropped by round 1).
     expect(await midParked).toEqual({ stopReason: "end_turn" });
     expect(driver["state"].status).toBe("complete");
+  });
+
+  it("recovers from a backend-lost round failure instead of paused-crash (2026-09-11 incident)", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- fix login | tests stay green\n```");
+    // Round 1: the backend's storage died mid-turn ("database is not open"
+    // surfaced through runOneTurn's exhausted recovery as a RequestError).
+    runOneTurn.mockImplementationOnce(async () => {
+      throw new RequestError(-32603, "ZCode turn failed: database is not open", {
+        type: "zcode_turn_failed",
+        code: "ERR_INVALID_STATE",
+      });
+    });
+    // After the respawn the loop re-enters and re-dispatches the same ticket.
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    expect(driver["state"].status).toBe("complete");
+    expect(reloadBackendSession).toHaveBeenCalledWith(server, "acp-1", "zsid-1");
+    const redispatch = runOneTurn.mock.calls[2]![1] as { sendText: string };
+    expect(redispatch.sendText).toContain("fix login");
+  });
+
+  it("pauses paused-crash only after the loop-level recovery budget is exhausted", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    const backendLost = () =>
+      new RequestError(-32603, "ZCode turn failed: database is not open", {
+        type: "zcode_turn_failed",
+        code: "ERR_INVALID_STATE",
+      });
+    // Every round (decompose included) dies on the lost backend: 3 loop-level
+    // recoveries, then the 4th failure must pause.
+    runOneTurn.mockImplementation(async () => {
+      throw backendLost();
+    });
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    expect(driver["state"].status).toBe("paused-crash");
+    expect(reloadBackendSession).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets the recovery budget after a round completes on a live backend", async () => {
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    // Round 1 dies backend-lost; round 2 completes; round 3 dies again — the
+    // second loss must still recover (budget was reset by round 2).
+    runOneTurn.mockImplementationOnce(async () => {
+      throw new RequestError(-32603, "ZCode turn failed: database is not open", {
+        type: "zcode_turn_failed",
+        code: "ERR_INVALID_STATE",
+      });
+    });
+    scriptRound("wip\nVERDICT: not-yet");
+    runOneTurn.mockImplementationOnce(async () => {
+      throw new RequestError(-32603, "ZCode turn failed: database is not open", {
+        type: "zcode_turn_failed",
+        code: "ERR_INVALID_STATE",
+      });
+    });
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    expect(driver["state"].status).toBe("complete");
+    expect(reloadBackendSession).toHaveBeenCalledTimes(2);
   });
 
   it("re-dispatches the ticket when a sandbox allow-restart cancels the round", async () => {

@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { isTransientTurnError } from "../src/translators/tool-helpers.js";
+import { isBackendLostError, isTransientTurnError } from "../src/translators/tool-helpers.js";
 
 describe("isTransientTurnError", () => {
   it("matches a transient cause.code (model_request_failed)", () => {
@@ -124,5 +124,61 @@ describe("isTransientTurnError", () => {
         cause: { code: "INVALID_PARAMS", message: "bad input" }, // fatal cause
       }),
     ).toBe(false);
+  });
+});
+
+describe("isBackendLostError", () => {
+  it("matches the observed shutdown-race payload (two-level cause nesting)", () => {
+    // 2026-09-11 incident: prompt accepted during the agent's own shutdown.
+    const err = {
+      name: "Error",
+      code: "UNKNOWN_ERROR",
+      message: "Turn execution failed",
+      cause: {
+        name: "Error",
+        code: "ERR_INVALID_STATE",
+        message: "database is not open",
+      },
+    };
+    expect(isBackendLostError(err)).toBe(true);
+  });
+
+  it("matches ERR_INVALID_STATE by code alone", () => {
+    expect(isBackendLostError({ cause: { code: "ERR_INVALID_STATE" } })).toBe(true);
+  });
+
+  it("matches backend-lost message fragments", () => {
+    expect(isBackendLostError({ cause: { message: "database is not open" } })).toBe(true);
+    expect(isBackendLostError({ cause: { message: "Session is not active" } })).toBe(true);
+    expect(isBackendLostError({ cause: { message: "write EPIPE: broken pipe" } })).toBe(true);
+  });
+
+  it("matches at the inner cause.cause level", () => {
+    expect(
+      isBackendLostError({
+        cause: { code: "UNKNOWN_ERROR", cause: { message: "database is not open" } },
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to the top-level error when no cause is present", () => {
+    expect(isBackendLostError({ message: "reader dead" })).toBe(true);
+  });
+
+  it("does not match transient or plain wrapper errors", () => {
+    expect(isBackendLostError({ cause: { code: "model_request_failed" } })).toBe(false);
+    expect(isBackendLostError({ code: "UNKNOWN_ERROR", message: "Turn execution failed" })).toBe(
+      false,
+    );
+    expect(isBackendLostError({ cause: { code: "INVALID_PARAMS", message: "bad input" } })).toBe(
+      false,
+    );
+  });
+
+  it("returns false for non-object / malformed input", () => {
+    expect(isBackendLostError(null)).toBe(false);
+    expect(isBackendLostError("database is not open")).toBe(false);
+    expect(isBackendLostError([])).toBe(false);
+    expect(isBackendLostError({})).toBe(false);
   });
 });

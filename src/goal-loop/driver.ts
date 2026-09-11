@@ -19,7 +19,13 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { readFileSync, unlinkSync } from "node:fs";
 
 import { compact } from "../handlers/extensions.js";
-import { preemptInFlightTurn, runOneTurn, withPreemptLock } from "../handlers/session.js";
+import {
+  isBackendLostRequestError,
+  preemptInFlightTurn,
+  reloadBackendSession,
+  runOneTurn,
+  withPreemptLock,
+} from "../handlers/session.js";
 import { sendTextChunk } from "../handlers/io.js";
 import { messages } from "../i18n.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
@@ -85,6 +91,14 @@ export class GoalLoopDriver {
   private runId = 0;
   /** Set when the last goal turn was cancelled by the sandbox allow-restart. */
   private lastSandboxRestart = false;
+  /**
+   * Consecutive backend-lost recoveries by run()'s catch (the per-turn
+   * recovery inside runOneTurn already respawns twice before giving up —
+   * this counter only bounds the loop-level last resort). Reset on any
+   * round that completes without losing the backend.
+   */
+  private backendRecoveries = 0;
+  private static readonly MAX_BACKEND_RECOVERIES = 3;
 
   private constructor(
     server: ZcodeAcpServer,
@@ -394,16 +408,59 @@ export class GoalLoopDriver {
     // prompts, disarm the keepalive, and persist a paused status — the outer
     // .catch in start() only logs (ADR-0022 §4: unrecoverable errors end the
     // loop, they must not wedge the editor's prompt request forever).
-    try {
-      await this.runRounds(myRun);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      warn(`goal-loop: round machinery failed — pausing loop (${msg})`);
-      if (this.runId !== myRun) return;
+    // Loop rather than recurse on backend-lost recovery: a re-thrown failure
+    // from a recursive runRounds would escape this handler and reject run().
+    for (;;) {
       try {
-        await this.endLoop("paused-crash", msg);
-      } catch (e2) {
-        warn(`goal-loop: crash recovery failed (${e2 instanceof Error ? e2.message : String(e2)})`);
+        await this.runRounds(myRun);
+        return;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // A lost backend is recoverable at the loop level too: respawn,
+        // reload the session, and re-enter the round machinery instead of
+        // pausing — an unattended auto run must survive backend process
+        // churn (observed 2026-09-11: "database is not open" during the
+        // agent's own shutdown hard-stopped a night-long run). Bounded so a
+        // persistently broken spawn still ends in a pause.
+        if (
+          isBackendLostRequestError(e) &&
+          this.runId === myRun &&
+          this.backendRecoveries < GoalLoopDriver.MAX_BACKEND_RECOVERIES
+        ) {
+          this.backendRecoveries++;
+          warn(
+            `goal-loop: backend lost — respawning and resuming (${this.backendRecoveries}/${GoalLoopDriver.MAX_BACKEND_RECOVERIES}, ${msg})`,
+          );
+          try {
+            this.server.ensureBackend();
+            await reloadBackendSession(this.server, this.acpSid, this.zcodeSid);
+          } catch (e2) {
+            warn(
+              `goal-loop: backend recovery failed — pausing loop (${e2 instanceof Error ? e2.message : String(e2)})`,
+            );
+            if (this.runId !== myRun) return;
+            try {
+              await this.endLoop("paused-crash", msg);
+            } catch (e3) {
+              warn(
+                `goal-loop: crash recovery failed (${e3 instanceof Error ? e3.message : String(e3)})`,
+              );
+            }
+            return;
+          }
+          await this.announce(messages().goalBackendRecovered);
+          continue;
+        }
+        warn(`goal-loop: round machinery failed — pausing loop (${msg})`);
+        if (this.runId !== myRun) return;
+        try {
+          await this.endLoop("paused-crash", msg);
+        } catch (e2) {
+          warn(
+            `goal-loop: crash recovery failed (${e2 instanceof Error ? e2.message : String(e2)})`,
+          );
+        }
+        return;
       }
     }
   }
@@ -497,6 +554,9 @@ export class GoalLoopDriver {
         return void (await this.endLoop("paused", "cancelled"));
       }
       this.state.rounds++;
+      // A round completed against a live backend — the lost-backend streak
+      // (if any) is broken, so the loop-level recovery budget resets.
+      this.backendRecoveries = 0;
 
       // Stall detection: rounds with zero tool activity accumulate to a pause.
       const tools = await this.toolActivitySince(before);

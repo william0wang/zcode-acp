@@ -445,3 +445,48 @@ function matchesTransient(node: unknown): boolean {
   if (message && TRANSIENT_MSG_KEYWORDS.some((kw) => message.includes(kw))) return true;
   return false;
 }
+
+/**
+ * `turn.failed` codes / message fragments that mean the backend PROCESS is
+ * gone or unusable (its storage closed, its reader dead) while the session
+ * file itself is intact — observed 2026-09-11: a prompt accepted during the
+ * agent's shutdown died with `cause: {code: "ERR_INVALID_STATE", message:
+ * "database is not open"}` inside an UNKNOWN_ERROR wrapper, hard-stopping an
+ * auto-mode loop. These recover by killing/respawning the backend and
+ * reloading the session, not by a plain resend.
+ */
+const BACKEND_LOST_CODES = new Set(["ERR_INVALID_STATE", "ERR_BACKEND_LOST"]);
+const BACKEND_LOST_MSG_KEYWORDS = [
+  "database is not open",
+  "session is not active",
+  "broken pipe",
+  "reader dead",
+  "stdout closed",
+];
+
+/**
+ * Whether a `turn.failed` error object means the backend process was lost.
+ * Checks the nested cause chain first (real payloads wrap the root cause two
+ * levels deep), then the top-level fields.
+ */
+export function isBackendLostError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const e = error as Record<string, unknown>;
+  const cause = e["cause"];
+  if (matchesBackendLost(cause)) return true;
+  if (cause !== undefined) {
+    const inner = (cause as Record<string, unknown>)["cause"];
+    if (matchesBackendLost(inner)) return true;
+  }
+  return cause === undefined && matchesBackendLost(e);
+}
+
+function matchesBackendLost(node: unknown): boolean {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return false;
+  const n = node as Record<string, unknown>;
+  const code = String(n["code"] ?? "").trim();
+  if (code && BACKEND_LOST_CODES.has(code)) return true;
+  const message = String(n["message"] ?? n["detail"] ?? "").toLowerCase();
+  if (message && BACKEND_LOST_MSG_KEYWORDS.some((kw) => message.includes(kw))) return true;
+  return false;
+}

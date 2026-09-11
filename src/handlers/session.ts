@@ -58,6 +58,7 @@ import {
   EventTranslator,
   extractLocations,
   formatTurnError,
+  isBackendLostError,
   isTransientTurnError,
   ProjectionDiffer,
 } from "../translators/index.js";
@@ -1254,7 +1255,10 @@ export async function runOneTurn(
   server: ZcodeAcpServer,
   opts: RunOneTurnOptions,
 ): Promise<acp.PromptResponse> {
-  const { backend, cx, acpSid, zcodeSid, requestId, turn, preempted, sendText } = opts;
+  const { cx, acpSid, zcodeSid, requestId, turn, preempted, sendText } = opts;
+  // `backend`/`listener`/`monitor` are reassigned by the backend-lost recovery
+  // below (respawn swaps the process they are bound to).
+  let backend = opts.backend;
   const attachments = opts.attachments ?? [];
   // Out-of-band running indicator: emitted per attached alias (see
   // server.sessionAliases) so a client holding this conversation under a
@@ -1275,9 +1279,8 @@ export async function runOneTurn(
     }
   };
 
-  const listener = new EventStreamListener(backend, zcodeSid);
-  const monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
-
+  let listener = new EventStreamListener(backend, zcodeSid);
+  let monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
   // Per-session ProjectionDiffer (persists across turns). The baseline mark_seen
   // prevents the differ from re-emitting history at turn completion.
   const differ = getOrCreateDiffer(server, zcodeSid);
@@ -1339,6 +1342,11 @@ export async function runOneTurn(
     const backoffMs = (attempt: number): number =>
       Math.min(1000 * 2 ** (attempt - 1), MAX_BACKOFF_MS);
     let lastTurnError: Record<string, unknown> | null = null;
+    // Backend-lost (process died / storage closed mid-turn) gets its own cap:
+    // each recovery respawns the subprocess, so an unbounded retry would churn.
+    const MAX_BACKEND_LOST_RETRIES = 2;
+    let backendLostRetries = 0;
+    let suppressRetryNotice = false;
 
     for (let attempt = 1; attempt <= MAX_TURN_ATTEMPTS; attempt++) {
       if (attempt > 1) {
@@ -1350,12 +1358,15 @@ export async function runOneTurn(
           return { stopReason: "cancelled" };
         }
         differ.markSeen(await fetchMessages(server, zcodeSid));
-        await sendTextChunk(
-          cx,
-          acpSid,
-          messages().networkRetry(attempt - 1, MAX_TURN_ATTEMPTS - 1),
-          randomUUID(),
-        );
+        if (!suppressRetryNotice) {
+          await sendTextChunk(
+            cx,
+            acpSid,
+            messages().networkRetry(attempt - 1, MAX_TURN_ATTEMPTS - 1),
+            randomUUID(),
+          );
+        }
+        suppressRetryNotice = false;
         log(
           `  [retry] transient turn failed, re-sending (attempt ${attempt}/${MAX_TURN_ATTEMPTS})`,
         );
@@ -1502,6 +1513,62 @@ export async function runOneTurn(
 
         return result;
       } catch (e) {
+        // Backend lost (process died / storage closed mid-turn): recover by
+        // respawning the backend and reloading the session, then retry the
+        // turn. The session file is intact — only the process is gone.
+        if (e instanceof TurnFailedError && !turn.cancelled && isBackendLostError(e.turnError)) {
+          if (backendLostRetries >= MAX_BACKEND_LOST_RETRIES) throw turnFailureRequestError(e);
+          backendLostRetries++;
+          const lostDetail = formatTurnError(e.turnError);
+          log(
+            `  [recover] backend lost (${lostDetail}) — respawning and reloading session ${zcodeSid} (recovery ${backendLostRetries}/${MAX_BACKEND_LOST_RETRIES})`,
+          );
+          // The backend is process-wide: every other session's in-flight turn
+          // on it is dead too — cancel them so their loops unwind instead of
+          // hanging on the dead reader. cancelAllPendingTurns marks THIS
+          // turn as well; restore its flags so the retry below is not
+          // mistaken for a user cancel.
+          server.cancelAllPendingTurns();
+          turn.cancelled = false;
+          turn.stopSent = false;
+          // Kill the broken instance unless it already died — and only null
+          // the server's reference when it still points at OUR instance, so a
+          // concurrent respawn by someone else is never murdered.
+          if (!backend.isDead) {
+            if (server.backend === backend) server.backend = null;
+            void backend
+              .close()
+              .catch((err: unknown) =>
+                warn(
+                  `recover: backend kill failed: ${err instanceof Error ? err.message : String(err)}`,
+                ),
+              );
+          }
+          try {
+            backend = server.ensureBackend();
+            listener = new EventStreamListener(backend, zcodeSid);
+            monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
+            await reloadBackendSession(server, acpSid, zcodeSid);
+            await listener.subscribe(() => server.nextId());
+            backend.registerEventListener(zcodeSid, listener);
+          } catch (recoverErr) {
+            warn(
+              `recover: backend respawn/reload failed: ${recoverErr instanceof Error ? recoverErr.message : String(recoverErr)}`,
+            );
+            throw turnFailureRequestError(e);
+          }
+          differ.markSeen(await fetchMessages(server, zcodeSid));
+          await sendTextChunk(
+            cx,
+            acpSid,
+            messages().backendRecovered(backendLostRetries, MAX_BACKEND_LOST_RETRIES),
+            randomUUID(),
+          );
+          // The retry notice at the top of the next attempt would duplicate
+          // the recovery announcement above.
+          suppressRetryNotice = true;
+          continue;
+        }
         // Only a transient TurnFailedError is retryable; everything else (send
         // failures, non-transient turn errors, exhausted retries, cancellation)
         // propagates to the caller.
@@ -1521,6 +1588,12 @@ export async function runOneTurn(
     // session usable so the user can resend the message instead of the editor
     // surfacing a hard error and stopping. Skip auto-compact here: compaction
     // after a failed turn is more likely to confuse state than help.
+    // Goal-loop turns are the exception: returning end_turn here would let the
+    // driver parse the PREVIOUS round's assistant text as this round's verdict
+    // and mis-mark the ticket done — throw so the loop pauses cleanly instead.
+    if (turn.goalLoop) {
+      throw turnFailureRequestError(new TurnFailedError(lastTurnError ?? {}));
+    }
     const errMsg = formatTurnError(lastTurnError) || "turn failed after retries";
     await sendTextChunk(cx, acpSid, messages().requestFailed(errMsg), randomUUID());
     return { stopReason: "end_turn" };
@@ -1895,6 +1968,20 @@ function turnFailureRequestError(error: TurnFailedError): RequestError {
     -32603,
     `ZCode turn failed: ${detail}`,
     acpTurnFailureData(error.turnError),
+  );
+}
+
+/**
+ * Whether a thrown error is the RequestError form of a backend-lost turn
+ * failure (as produced by turnFailureRequestError). The goal-loop uses this
+ * to choose between respawn-and-continue and a hard pause.
+ */
+export function isBackendLostRequestError(e: unknown): boolean {
+  if (!(e instanceof RequestError)) return false;
+  const data = (e.data ?? {}) as { code?: unknown; reason?: unknown };
+  return (
+    isBackendLostError({ cause: { code: data.code, message: e.message } }) ||
+    isBackendLostError({ cause: { message: data.reason } })
   );
 }
 
@@ -2341,7 +2428,7 @@ async function resumeBackendSession(
  * recorded session cwd, default-model overlay only if a faithful resume
  * fails). Marks the session backend-loaded on success.
  */
-async function reloadBackendSession(
+export async function reloadBackendSession(
   server: ZcodeAcpServer,
   acpSid: string,
   zcodeSid: string,
@@ -2819,6 +2906,18 @@ export async function runEventTurn(
 
     const ev = await listener.pollEvent(500);
     if (ev === null) {
+      // Dead-reader fast-fail: a backend whose reader died will never emit
+      // another event — without this check the loop waits out the full stall
+      // policy (2min no-progress / 10min stale-freeze) on a dead process.
+      // Throwing the backend-lost shape routes into runOneTurn's respawn
+      // recovery instead.
+      if (!turn.cancelled && backend.isDead) {
+        throw new TurnFailedError({
+          code: "UNKNOWN_ERROR",
+          message: "Turn execution failed",
+          cause: { code: "ERR_INVALID_STATE", message: "reader dead" },
+        });
+      }
       // Thinking-phase hint: if the turn has started but produced no output
       // yet (no text/reasoning/tool streamed), and we've been silent longer
       // than the threshold, emit a single "thinking" thought chunk so the

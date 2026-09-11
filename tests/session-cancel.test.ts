@@ -278,3 +278,58 @@ describe("runEventTurn: cancel exits immediately (backend ignores session/stop)"
     expect(f.cx.notify.mock.calls.some((c) => JSON.stringify(c).includes("重新发送"))).toBe(false);
   });
 });
+
+describe("runEventTurn: dead-reader fast-fail (backend lost mid-turn)", () => {
+  it("throws the backend-lost shape as soon as the reader is dead, without waiting out the stall policy", async () => {
+    const f = makeTurnFixtures();
+    // The backend instance runEventTurn captured must report dead; pollEvent
+    // never yields an event again.
+    f.server.ensureBackend = (() => ({
+      send: (method: string, params: unknown) => {
+        f.sent.push({ method, params });
+      },
+      pollServerRequests: () => [],
+      isDead: true,
+    })) as never;
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+    f.pollEvent.mockResolvedValue(null);
+
+    await expect(
+      runEventTurn(f.server, f.listener, f.monitor, f.differ, f.cx, "acp_a", "m1", turn, false),
+    ).rejects.toThrow("Turn execution failed");
+  });
+
+  it("keeps polling while the backend is alive and no event arrives", async () => {
+    const f = makeTurnFixtures();
+    f.server.ensureBackend = (() => ({
+      send: (method: string, params: unknown) => {
+        f.sent.push({ method, params });
+      },
+      pollServerRequests: () => [],
+      isDead: false,
+    })) as never;
+    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
+    let polls = 0;
+    f.pollEvent.mockImplementation(async () => {
+      polls++;
+      if (polls >= 3) {
+        turn.cancelled = true; // end the loop through the cancel path
+      }
+      return null;
+    });
+
+    const resp = await runEventTurn(
+      f.server,
+      f.listener,
+      f.monitor,
+      f.differ,
+      f.cx,
+      "acp_a",
+      "m1",
+      turn,
+      false,
+    );
+    expect(resp).toEqual({ stopReason: "cancelled" });
+    expect(polls).toBeGreaterThanOrEqual(3);
+  });
+});
