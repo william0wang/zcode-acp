@@ -1525,10 +1525,14 @@ export async function runOneTurn(
           );
           // The backend is process-wide: every other session's in-flight turn
           // on it is dead too — cancel them so their loops unwind instead of
-          // hanging on the dead reader. cancelAllPendingTurns marks THIS
-          // turn as well; restore its flags so the retry below is not
-          // mistaken for a user cancel.
-          server.cancelAllPendingTurns();
+          // hanging on the dead reader. goalLoop turns are skipped: they have
+          // their OWN backend-lost recovery (driver-level respawn + reload);
+          // marking them cancelled here would end their loop as "paused" and
+          // defeat the recovery this commit exists for. Skipped loops hit the
+          // dead-reader fast-fail below and recover on their own. This turn
+          // may still be marked (non-goal-loop caller); restore its flags so
+          // the retry below is not mistaken for a user cancel.
+          server.cancelAllPendingTurns(true);
           turn.cancelled = false;
           turn.stopSent = false;
           // Kill the broken instance unless it already died — and only null

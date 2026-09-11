@@ -389,8 +389,9 @@ export class ZcodeAcpServer {
    * ~10 minutes per turn. stopSent: no stop pair is needed — the entire
    * process group dies with the backend.
    */
-  cancelAllPendingTurns(): void {
+  cancelAllPendingTurns(skipGoalLoop = false): void {
     for (const turn of this.pendingTurns.values()) {
+      if (skipGoalLoop && turn.goalLoop) continue;
       turn.cancelled = true;
       turn.stopSent = true;
     }
