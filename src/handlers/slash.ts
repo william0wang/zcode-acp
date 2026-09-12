@@ -148,6 +148,80 @@ export function neutralizeSlashText(text: string): string {
   return isKnownCommand(cmd) ? text : `\u200B${text}`;
 }
 
+/**
+ * Shared flow behind /auto and /goal: the bridge-driven goal loop
+ * (ADR-0022). Returns the user-facing status message; the caller wraps it
+ * in `ok()`.
+ *
+ * The first word is a subcommand ONLY when it is exactly one of the
+ * keywords — anything else is free text (the objective). Trade-off: an
+ * objective that genuinely starts with e.g. "stop the flaky test" cannot be
+ * expressed and needs rewording; preferable to silently truncating the
+ * first word of EVERY objective (the old parse).
+ */
+async function autoFlow(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  zcodeSid: string,
+  arg: string,
+  label: "auto" | "goal",
+): Promise<string> {
+  const { GoalLoopDriver } = await import("../goal-loop/driver.js");
+  const { readGoalState } = await import("../goal-loop/state.js");
+  const resumeHint = label === "goal" ? "/goal resume" : "/auto resume";
+  const sub = arg.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (sub === "pause") {
+    const live = GoalLoopDriver.live(server, zcodeSid);
+    if (!live) return messages().goalPaused("not running");
+    live.pause();
+    return messages().goalPaused(`${label} pause requested — takes effect at the round boundary`);
+  }
+  // "clear" (backend-goal-mode parity: action=clear) is a stop alias — the
+  // saved state is kept so an explicit resume is always deliberate.
+  if (sub === "stop" || sub === "clear") {
+    const live = GoalLoopDriver.live(server, zcodeSid);
+    if (!live) return messages().goalStopped;
+    live.stop();
+    return messages().goalStopped;
+  }
+  if (sub === "resume") {
+    const live = GoalLoopDriver.live(server, zcodeSid);
+    if (live) {
+      // A paused-but-still-registered driver (its current round has not
+      // reached the boundary yet) must clear the pending pause — start()
+      // would be a no-op and the pause would land anyway, swallowing the
+      // resume. The flag is only consumed at the boundary, so this is
+      // race-free by construction.
+      live.resume();
+    } else {
+      const prior = readGoalState(server.projectCwd(), zcodeSid);
+      if (!prior) {
+        throw new RequestError(
+          -32602,
+          label === "goal" ? messages().slashErrGoalArg : messages().slashErrAutoArg,
+        );
+      }
+      GoalLoopDriver.start(server, acpSid, zcodeSid, prior.objective, { resume: true });
+    }
+    return messages().slashAutoSet("resuming");
+  }
+  // No subcommand (or status) = status; free text = start a loop.
+  if (!sub || sub === "status") {
+    const live = GoalLoopDriver.live(server, zcodeSid);
+    if (live) return live.statusText();
+    const prior = readGoalState(server.projectCwd(), zcodeSid);
+    if (prior) {
+      return messages().goalPaused(`saved state: ${prior.objective} — ${resumeHint} to continue`);
+    }
+    throw new RequestError(
+      -32602,
+      label === "goal" ? messages().slashErrGoalArg : messages().slashErrAutoArg,
+    );
+  }
+  GoalLoopDriver.start(server, acpSid, zcodeSid, arg);
+  return label === "goal" ? messages().slashGoalSet(arg) : messages().slashAutoSet(arg);
+}
+
 /** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
 export async function handleSlashCommand(
   server: ZcodeAcpServer,
@@ -199,66 +273,24 @@ export async function handleSlashCommand(
         return ok(messages().slashCompacted);
       }
       case "goal": {
-        if (!arg) throw new RequestError(-32602, messages().slashErrGoalArg);
-        await goal(server, { sessionId: acpSid, action: "set", objective: arg });
-        return ok(messages().slashGoalSet(arg));
+        // Route /goal through the bridge-driven loop (ADR-0022), same as
+        // /auto. The legacy backend goal mode runs backend-internal turns
+        // whose events the translator must drop (ghost-completed guard), so
+        // ACP clients never saw goal progress — only "goal set" plus untyped
+        // leaked events the client renders as "Other" (issue #178). The loop
+        // is validated against the real backend now, so /goal shares the
+        // /auto machinery. Escape hatch: ZCODE_ACP_GOAL_MODE=backend
+        // restores the legacy backend goal mode.
+        if (process.env.ZCODE_ACP_GOAL_MODE === "backend") {
+          if (!arg) throw new RequestError(-32602, messages().slashErrGoalArg);
+          await goal(server, { sessionId: acpSid, action: "set", objective: arg });
+          return ok(messages().slashGoalSet(arg));
+        }
+        return ok(await autoFlow(server, acpSid, zcodeSid, arg, "goal"));
       }
       case "auto": {
-        // Bridge-driven goal loop (ADR-0022). Shipped under /auto while /goal
-        // keeps the backend goal mode — the loop is not yet validated against
-        // the real backend, so both entry points coexist.
-        const { GoalLoopDriver } = await import("../goal-loop/driver.js");
-        const { readGoalState } = await import("../goal-loop/state.js");
-        // The first word is a subcommand ONLY when it is exactly one of the
-        // four keywords — anything else is free text (the objective). Trade-off:
-        // an objective that genuinely starts with e.g. "stop the flaky test"
-        // cannot be expressed and needs rewording; preferable to silently
-        // truncating the first word of EVERY objective (the old parse).
-        const sub = arg.split(/\s+/)[0]?.toLowerCase() ?? "";
-        if (sub === "pause") {
-          const live = GoalLoopDriver.live(server, zcodeSid);
-          if (!live) return ok(messages().goalPaused("not running"));
-          live.pause();
-          return ok(
-            messages().goalPaused("/auto pause requested — takes effect at the round boundary"),
-          );
-        }
-        if (sub === "stop") {
-          const live = GoalLoopDriver.live(server, zcodeSid);
-          if (!live) return ok(messages().goalStopped);
-          live.stop();
-          return ok(messages().goalStopped);
-        }
-        if (sub === "resume") {
-          const live = GoalLoopDriver.live(server, zcodeSid);
-          if (live) {
-            // A paused-but-still-registered driver (its current round has not
-            // reached the boundary yet) must clear the pending pause — start()
-            // would be a no-op and the pause would land anyway, swallowing the
-            // resume. The flag is only consumed at the boundary, so this is
-            // race-free by construction.
-            live.resume();
-          } else {
-            const prior = readGoalState(server.projectCwd(), zcodeSid);
-            if (!prior) throw new RequestError(-32602, messages().slashErrAutoArg);
-            GoalLoopDriver.start(server, acpSid, zcodeSid, prior.objective, { resume: true });
-          }
-          return ok(messages().slashAutoSet("resuming"));
-        }
-        // No subcommand (or /auto status) = status; free text = start a loop.
-        if (!sub || sub === "status") {
-          const live = GoalLoopDriver.live(server, zcodeSid);
-          if (live) return ok(live.statusText());
-          const prior = readGoalState(server.projectCwd(), zcodeSid);
-          if (prior) {
-            return ok(
-              messages().goalPaused(`saved state: ${prior.objective} — /auto resume to continue`),
-            );
-          }
-          throw new RequestError(-32602, messages().slashErrAutoArg);
-        }
-        GoalLoopDriver.start(server, acpSid, zcodeSid, arg);
-        return ok(messages().slashAutoSet(arg));
+        // Bridge-driven goal loop (ADR-0022).
+        return ok(await autoFlow(server, acpSid, zcodeSid, arg, "auto"));
       }
       case "fork": {
         const result = (await fork(server, { sessionId: acpSid })) as {
