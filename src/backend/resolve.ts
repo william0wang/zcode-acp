@@ -117,6 +117,22 @@ function discoverZcodeBin(): string | null {
   return null;
 }
 
+/**
+ * Happy Eyeballs (`autoSelectFamily`, on by default since Node 20.13) gives
+ * each connect attempt a 250ms budget. On a network with no IPv6 route where
+ * the provider edge answers in just over 250ms, every undici connect is
+ * aborted before it can establish and fetch fails with an empty-message
+ * AggregateError — every model request then dies as `Cannot connect to API:`
+ * no matter how often it retries, while curl/plain connects to the same host
+ * succeed. Disabling it restores the pre-20.13 sequential connect, which
+ * works. Set ZCODE_KEEP_HAPPY_EYEBALLS=1 to keep RFC 8305 behavior.
+ */
+function happyEyeballsArgs(): string[] {
+  return process.env.ZCODE_KEEP_HAPPY_EYEBALLS
+    ? []
+    : ["--no-network-family-autoselection"];
+}
+
 /** Resolve the full argv to launch `zcode app-server --stdio`. */
 export function resolveZcodeCommand(): string[] {
   const zcodeBin = process.env.ZCODE_BIN ?? discoverZcodeBin() ?? "zcode";
@@ -138,7 +154,13 @@ export function resolveZcodeCommand(): string[] {
         // keep "?"
       }
       log(`resolve: launching zcode with node ${nodeBin} (${ver})`);
-      return [nodeBin, zcodeBin, "app-server", "--stdio"];
+      return [
+        nodeBin,
+        ...happyEyeballsArgs(),
+        zcodeBin,
+        "app-server",
+        "--stdio",
+      ];
     }
   }
   log(
