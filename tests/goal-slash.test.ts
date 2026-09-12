@@ -3,7 +3,8 @@
  * exactly pause|stop|resume|status — anything else is the objective in full.
  * Pins the regression where every objective silently lost its first word and
  * objectives starting with a keyword misfired as subcommands. Also pins that
- * /goal (restored backend mode) forwards action=set to session/goal.
+ * /goal shares the /auto bridge-driven loop (issue #178) and that
+ * ZCODE_ACP_GOAL_MODE=backend restores the legacy backend goal mode.
  */
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -23,8 +24,9 @@ vi.mock("../src/goal-loop/driver.js", () => ({
     live: (...args: unknown[]) => liveMock(...(args as [])),
   },
 }));
+const readGoalStateMock = vi.fn(() => null);
 vi.mock("../src/goal-loop/state.js", () => ({
-  readGoalState: vi.fn(() => null),
+  readGoalState: (...args: unknown[]) => readGoalStateMock(...(args as [])),
 }));
 vi.mock("../src/handlers/extensions.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/handlers/extensions.js")>()),
@@ -124,26 +126,80 @@ describe("/auto argument parsing", () => {
   });
 });
 
-describe("/goal backend mode", () => {
-  it("forwards the objective as action=set to the backend goal()", async () => {
+describe("/goal routes to the bridge-driven loop", () => {
+  it("starts the driver with the FULL objective (no backend goal call)", async () => {
     const { cx } = mockContext();
     const server = new ZcodeAcpServer();
     const result = await handleSlashCommand(server, cx, SID, SID, "/goal ship the release");
 
     expect(result?.stopReason).toBe("end_turn");
-    expect(goalBackendMock).toHaveBeenCalledTimes(1);
-    expect(goalBackendMock).toHaveBeenCalledWith(server, {
-      sessionId: SID,
-      action: "set",
-      objective: "ship the release",
-    });
+    expect(startMock).toHaveBeenCalledTimes(1);
+    expect(startMock.mock.calls[0]!.slice(0, 4)).toEqual([server, SID, SID, "ship the release"]);
+    expect(goalBackendMock).not.toHaveBeenCalled();
+  });
+
+  it("supports pause/stop/resume/status subcommands like /auto", async () => {
+    const { cx } = mockContext();
+    const server = new ZcodeAcpServer();
+    liveMock.mockReturnValue(liveDriver());
+
+    await handleSlashCommand(server, cx, SID, SID, "/goal pause");
+    expect(pauseMock).toHaveBeenCalledTimes(1);
+    expect(startMock).not.toHaveBeenCalled();
+
+    await handleSlashCommand(server, cx, SID, SID, "/goal stop");
+    expect(stopMock).toHaveBeenCalledTimes(1);
+
+    const status = await handleSlashCommand(server, cx, SID, SID, "/goal status");
+    expect(status?.stopReason).toBe("end_turn");
     expect(startMock).not.toHaveBeenCalled();
   });
 
-  it("rejects /goal without an argument", async () => {
+  it("accepts clear as a stop alias (backend action=clear parity)", async () => {
     const { cx } = mockContext();
     const server = new ZcodeAcpServer();
-    await expect(handleSlashCommand(server, cx, SID, SID, "/goal")).rejects.toThrow();
+    liveMock.mockReturnValue(liveDriver());
+
+    await handleSlashCommand(server, cx, SID, SID, "/goal clear");
+    expect(stopMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("with no argument shows status from saved state instead of starting", async () => {
+    const { cx } = mockContext();
+    const server = new ZcodeAcpServer();
+    readGoalStateMock.mockReturnValue({ objective: "ship the release" });
+
+    const result = await handleSlashCommand(server, cx, SID, SID, "/goal");
+    expect(result?.stopReason).toBe("end_turn");
+    expect(startMock).not.toHaveBeenCalled();
     expect(goalBackendMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects /goal with no argument and no loop state", async () => {
+    const { cx } = mockContext();
+    const server = new ZcodeAcpServer();
+    readGoalStateMock.mockReturnValue(null);
+    await expect(handleSlashCommand(server, cx, SID, SID, "/goal")).rejects.toThrow();
+    expect(startMock).not.toHaveBeenCalled();
+  });
+
+  it("ZCODE_ACP_GOAL_MODE=backend restores the legacy backend goal()", async () => {
+    process.env.ZCODE_ACP_GOAL_MODE = "backend";
+    try {
+      const { cx } = mockContext();
+      const server = new ZcodeAcpServer();
+      const result = await handleSlashCommand(server, cx, SID, SID, "/goal ship the release");
+
+      expect(result?.stopReason).toBe("end_turn");
+      expect(goalBackendMock).toHaveBeenCalledTimes(1);
+      expect(goalBackendMock).toHaveBeenCalledWith(server, {
+        sessionId: SID,
+        action: "set",
+        objective: "ship the release",
+      });
+      expect(startMock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.ZCODE_ACP_GOAL_MODE;
+    }
   });
 });

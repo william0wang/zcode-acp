@@ -124,6 +124,21 @@ export const CONFIG_META = {
 } as const;
 
 /** configId → zcode method + param key (model deliberately absent — switch via runtimeModel). */
+/**
+ * Default permission mode for ACP-created sessions, from ZCODE_ACP_MODE.
+ * Valid: plan/build/edit/yolo/auto — anything else (unset, typo) is yolo,
+ * the historical unconditional default. Lives here because both the create
+ * path (handlers/session.ts) and the advertised config options
+ * (config/options.ts) need it, and importing either from the other would be
+ * a cycle.
+ */
+export function defaultCreateMode(): string {
+  const m = process.env.ZCODE_ACP_MODE;
+  return m && CREATE_MODES.has(m) ? m : "yolo";
+}
+
+const CREATE_MODES = new Set(["plan", "build", "edit", "yolo", "auto"]);
+
 export const CONFIG_DISPATCH: Record<string, { method: string; paramKey: string }> = {
   mode: { method: "session/setMode", paramKey: "mode" },
   thought: { method: "session/setThoughtLevel", paramKey: "thoughtLevel" },

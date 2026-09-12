@@ -9,7 +9,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
@@ -75,6 +75,12 @@ function fakeBackend(
     request: async (id: number, method: string, params: unknown) => {
       calls.push({ method, params });
       switch (method) {
+        case "session/setThoughtLevel": {
+          const tl = (params as { thoughtLevel?: string }).thoughtLevel ?? "";
+          return tl === "bogus"
+            ? { id, error: { message: `unknown thought level: ${tl}` } }
+            : { id, result: {} };
+        }
         case "session/create":
           created += 1;
           return {
@@ -664,5 +670,68 @@ describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
       workspace: { workspacePath: process.cwd() },
     });
     expect(server.sessionCwds.get("sess_real_2")).toBeUndefined();
+  });
+});
+
+describe("ZCODE_ACP_MODE / ZCODE_ACP_THOUGHT_LEVEL create overrides", () => {
+  // Env is process-global: set per test, always restored in a finally.
+  afterEach(() => {
+    delete process.env.ZCODE_ACP_MODE;
+    delete process.env.ZCODE_ACP_THOUGHT_LEVEL;
+  });
+
+  it("ZCODE_ACP_MODE overrides the create permission mode and the advertised default", async () => {
+    process.env.ZCODE_ACP_MODE = "build";
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    expect(resp.modes.currentModeId).toBe("build");
+
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    await ensureRealSession(server, resp.sessionId);
+
+    const creates = calls.filter((c) => c.method === "session/create");
+    expect(creates[0]!.params).toMatchObject({ mode: "build" });
+  });
+
+  it("an invalid ZCODE_ACP_MODE falls back to yolo", async () => {
+    process.env.ZCODE_ACP_MODE = "sudo";
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    expect(resp.modes.currentModeId).toBe("yolo");
+
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    await ensureRealSession(server, resp.sessionId);
+    const creates = calls.filter((c) => c.method === "session/create");
+    expect(creates[0]!.params).toMatchObject({ mode: "yolo" });
+  });
+
+  it("ZCODE_ACP_THOUGHT_LEVEL applies session/setThoughtLevel after create", async () => {
+    process.env.ZCODE_ACP_THOUGHT_LEVEL = "low";
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    const sid = await ensureRealSession(server, resp.sessionId);
+
+    const tl = calls.filter((c) => c.method === "session/setThoughtLevel");
+    expect(tl).toHaveLength(1);
+    expect(tl[0]!.params).toMatchObject({ sessionId: sid, thoughtLevel: "low" });
+  });
+
+  it("a rejected thought level logs and does not fail the create", async () => {
+    process.env.ZCODE_ACP_THOUGHT_LEVEL = "bogus";
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    const sid = await ensureRealSession(server, resp.sessionId);
+    expect(sid).toBe("sess_lazy_1");
+    const tl = calls.filter((c) => c.method === "session/setThoughtLevel");
+    expect(tl).toHaveLength(1);
+    expect(server.resolveSid(resp.sessionId)).toBe(sid);
   });
 });
