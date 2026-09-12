@@ -63,7 +63,7 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { clientConnectionRoot, log, warn } from "../utils.js";
+import { clientConnectionRoot, defaultCreateMode, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
@@ -517,7 +517,12 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     // clash behaviour is the backend's own and unasserted here.
     const createParams: Record<string, unknown> = {
       workspace: workspaceFor(pending.cwd),
-      mode: "yolo",
+      // ACP-created sessions ran yolo unconditionally. ZCODE_ACP_MODE lets a
+      // host pick the default permission mode from its own config (e.g. the
+      // Paseo provider `env`) — clients like Paseo render no ACP config-option
+      // picker, so env is the only config surface they get. Invalid values
+      // fall back to yolo rather than failing the create.
+      mode: defaultCreateMode(),
     };
     if (pending.mcpServers && pending.mcpServers.length > 0) {
       createParams.mcpServers = pending.mcpServers;
@@ -536,6 +541,26 @@ export async function ensureRealSession(server: ZcodeAcpServer, acpSid: string):
     server.registerSession(acpSid, sid);
     // session/create loads the session into this backend process.
     server.markBackendLoaded(acpSid);
+    // Initial reasoning effort: apply ZCODE_ACP_THOUGHT_LEVEL once at
+    // materialization (same env surface as ZCODE_ACP_MODE). The backend
+    // validates the token against the model's variants — an unknown token
+    // logs and keeps the model default instead of failing the create.
+    const thoughtLevel = process.env.ZCODE_ACP_THOUGHT_LEVEL;
+    if (thoughtLevel) {
+      const tl = await backend.request(
+        server.nextId(),
+        "session/setThoughtLevel",
+        { sessionId: sid, thoughtLevel },
+        15000,
+      );
+      if (tl.error) {
+        warn(
+          `ZCODE_ACP_THOUGHT_LEVEL=${thoughtLevel} rejected for ${sid}: ${tl.error.message ?? ""}`,
+        );
+      } else {
+        log(`session/${sid} thoughtLevel ← ${thoughtLevel}`);
+      }
+    }
     // Keep the durable alias in sync so a later bridge restart can still
     // resume this session via the placeholder id.
     recordMaterializedSession(acpSid, sid, pending.cwd);

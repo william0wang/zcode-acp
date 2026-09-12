@@ -23,6 +23,7 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
+import { defaultCreateMode } from "../utils.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -231,7 +232,8 @@ export async function buildModes(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
 ): Promise<acp.SessionModeState> {
-  let currentMode = "yolo";
+  // Pending default mirrors what the create will use (ZCODE_ACP_MODE / yolo).
+  let currentMode = defaultCreateMode();
   if (zcodeSid !== null) {
     try {
       const read = await sessionRead(server, zcodeSid);
@@ -291,7 +293,9 @@ export async function buildConfigOptions(
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
-  let currentMode = zcodeSid === null ? "yolo" : "build";
+  // Pending sessions advertise the same default the create will actually use
+  // (ZCODE_ACP_MODE or yolo), so the client's mode dropdown matches.
+  let currentMode = zcodeSid === null ? defaultCreateMode() : "build";
   // Matches the enabled provider's default reasoning variants (GLM-5.3:
   // max/high/low, default max). Pending sessions show this until the real
   // session/read thoughtLevel arrives.
