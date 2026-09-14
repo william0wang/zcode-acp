@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.3](https://github.com/william0wang/zcode-acp/compare/v0.37.2...v0.37.3) (2026-09-14)
+
+
+### Bug Fixes
+
+* pin the zcode dns lookup to ipv4first so localhost ipv4 providers connect ([522cd89](https://github.com/william0wang/zcode-acp/commit/522cd8970ddb077491dd847cd83b47f557588ba3))
+* **tui:** pin zcode-acp-martty so the approval popup shows the full request ([bd72cd9](https://github.com/william0wang/zcode-acp/commit/bd72cd9debe36df490b9e5b4d50d868d1db2e841))
+
 ## [0.37.2](https://github.com/william0wang/zcode-acp/compare/v0.37.1...v0.37.2) (2026-09-14)
 
 
