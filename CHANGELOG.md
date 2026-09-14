@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.37.2](https://github.com/william0wang/zcode-acp/compare/v0.37.1...v0.37.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* disable Happy Eyeballs for the zcode launch so slow-edge networks connect ([#182](https://github.com/william0wang/zcode-acp/issues/182)) ([2d1496f](https://github.com/william0wang/zcode-acp/commit/2d1496fbb2676b2eab7211a790432242fae96ad3))
+* **goals:** route /goal through the bridge-driven loop so clients see goal progress ([#181](https://github.com/william0wang/zcode-acp/issues/181)) ([357b1e0](https://github.com/william0wang/zcode-acp/commit/357b1e086b18b094b5d229f267eb9d6e575fd92f))
+* **mcp:** advertise http MCP support so clients mount http servers ([c7949ec](https://github.com/william0wang/zcode-acp/commit/c7949ec4149c1b63cba09cf00605ed6dcb1ba57d)), closes [#180](https://github.com/william0wang/zcode-acp/issues/180)
+
 ## [0.37.1](https://github.com/william0wang/zcode-acp/compare/v0.37.0...v0.37.1) (2026-09-11)
 
 
