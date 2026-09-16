@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.41.0](https://github.com/william0wang/zcode-acp/compare/v0.40.1...v0.41.0) (2026-09-16)
+
+
+### Features
+
+* add Ollama Cloud quota card with dual-plan support and unified quota credentials in user config ([2c9a076](https://github.com/william0wang/zcode-acp/commit/2c9a076e490fab97902f977f9a7a6428ad6e7f67))
+
 ## [0.40.1](https://github.com/william0wang/zcode-acp/compare/v0.40.0...v0.40.1) (2026-09-16)
 
 
