@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.0](https://github.com/william0wang/zcode-acp/compare/v0.38.0...v0.39.0) (2026-09-16)
+
+
+### Features
+
+* choose the initial session mode with ZCODE_ACP_MODE ([#189](https://github.com/william0wang/zcode-acp/issues/189)) ([a1aa2e0](https://github.com/william0wang/zcode-acp/commit/a1aa2e0217386ecabe57d59b33fce0cf783dbea8))
+* honor ZCODE_HOME for the config and lazy-session store paths ([#187](https://github.com/william0wang/zcode-acp/issues/187)) ([0593488](https://github.com/william0wang/zcode-acp/commit/059348851a85bb9704c2b68eca91c4f1f3a7fbf9))
+* pin the provider and model with ZCODE_PROVIDER and ZCODE_MODEL ([#188](https://github.com/william0wang/zcode-acp/issues/188)) ([6aa8999](https://github.com/william0wang/zcode-acp/commit/6aa8999f72fe2ca35ed3d4bcf05263754c60ba1c))
+
 ## [0.38.0](https://github.com/william0wang/zcode-acp/compare/v0.37.3...v0.38.0) (2026-09-15)
 
 
