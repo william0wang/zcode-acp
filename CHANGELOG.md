@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0](https://github.com/william0wang/zcode-acp/compare/v0.39.0...v0.40.0) (2026-09-16)
+
+
+### Features
+
+* notify serve-origin clients on remote session close ([387a2c4](https://github.com/william0wang/zcode-acp/commit/387a2c4da30fe334bc503148c435b62ab9f68b70))
+
+
+### Bug Fixes
+
+* broadcast extension settings switches to every attached client ([e005045](https://github.com/william0wang/zcode-acp/commit/e0050450f904b9155bf26c97870062a961c5ddfd))
+* tell attached clients when a raced interaction ask was decided ([f5d5e5a](https://github.com/william0wang/zcode-acp/commit/f5d5e5ad625bef95284a075c8dc58d8c246bf884))
+
 ## [0.39.0](https://github.com/william0wang/zcode-acp/compare/v0.38.0...v0.39.0) (2026-09-16)
 
 
