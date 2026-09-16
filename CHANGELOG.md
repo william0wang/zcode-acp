@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.1](https://github.com/william0wang/zcode-acp/compare/v0.40.0...v0.40.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* disallow unservable Cron tools by default and record in-flight background tasks on shutdown ([#192](https://github.com/william0wang/zcode-acp/issues/192), [#194](https://github.com/william0wang/zcode-acp/issues/194)) ([444d13f](https://github.com/william0wang/zcode-acp/commit/444d13ff1b4c0bbbe9f1c5627327c67115e69ac5))
+* re-send client mcpServers on every backend session load ([#193](https://github.com/william0wang/zcode-acp/issues/193)) ([90ccc13](https://github.com/william0wang/zcode-acp/commit/90ccc138f89400cfdae86c10eb710d0e7c0c2156))
+* skip keyless builtin providers and keep self-consistent env base URL overrides ([#183](https://github.com/william0wang/zcode-acp/issues/183)) ([d510d37](https://github.com/william0wang/zcode-acp/commit/d510d37025976a200a127fa00cd44180f66457a6))
+
 ## [0.40.0](https://github.com/william0wang/zcode-acp/compare/v0.39.0...v0.40.0) (2026-09-16)
 
 
