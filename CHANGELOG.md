@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.2](https://github.com/william0wang/zcode-acp/compare/v0.42.1...v0.42.2) (2026-09-17)
+
+
+### Bug Fixes
+
+* inject ZCODE_BUILTIN_PROVIDER_CONFIG_FILE for bundled CLI launches ([8293b7c](https://github.com/william0wang/zcode-acp/commit/8293b7c4c3c8210e779a4f894018a8c5760010b6))
+* require sustained probe failure before pruning a hub instance ([ea918c5](https://github.com/william0wang/zcode-acp/commit/ea918c51fa50eef641f8191f828abb9e72aeb0eb))
+
 ## [0.42.1](https://github.com/william0wang/zcode-acp/compare/v0.42.0...v0.42.1) (2026-09-17)
 
 
