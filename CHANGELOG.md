@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.4](https://github.com/william0wang/zcode-acp/compare/v0.42.3...v0.42.4) (2026-09-17)
+
+
+### Bug Fixes
+
+* inject both provider-config env vars so the 3.12+ CLI uses the bundled table verbatim ([b0ecb89](https://github.com/william0wang/zcode-acp/commit/b0ecb8926860c1ee70a0f6f14aa1d2fc020f346f)), closes [#202](https://github.com/william0wang/zcode-acp/issues/202)
+
 ## [0.42.3](https://github.com/william0wang/zcode-acp/compare/v0.42.2...v0.42.3) (2026-09-17)
 
 
