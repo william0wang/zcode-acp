@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.3](https://github.com/william0wang/zcode-acp/compare/v0.42.2...v0.42.3) (2026-09-17)
+
+
+### Bug Fixes
+
+* push the account provider snapshot and use the 3.12+ setModel shape so coding-plan models switch ([80ad523](https://github.com/william0wang/zcode-acp/commit/80ad523d42bea857bf920f9c4fe223b17f653b57))
+
 ## [0.42.2](https://github.com/william0wang/zcode-acp/compare/v0.42.1...v0.42.2) (2026-09-17)
 
 
