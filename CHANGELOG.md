@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.42.5](https://github.com/william0wang/zcode-acp/compare/v0.42.4...v0.42.5) (2026-09-17)
+
+
+### Bug Fixes
+
+* answer provider runtime headers with the coding-plan API key so GLM turns run ([ce3bdec](https://github.com/william0wang/zcode-acp/commit/ce3bdec14cd9f17090ca46a8ca00d235e2e144ce))
+
 ## [0.42.4](https://github.com/william0wang/zcode-acp/compare/v0.42.3...v0.42.4) (2026-09-17)
 
 
