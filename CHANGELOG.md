@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.1](https://github.com/william0wang/zcode-acp/compare/v0.43.0...v0.43.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* prefer the configured model context window over the backend's placeholder in usage_update ([41d719a](https://github.com/william0wang/zcode-acp/commit/41d719aa41802f0db64458d16022aa3dabcaf9f9))
+
 ## [0.43.0](https://github.com/william0wang/zcode-acp/compare/v0.42.5...v0.43.0) (2026-09-18)
 
 
