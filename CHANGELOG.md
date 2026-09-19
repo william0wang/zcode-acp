@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.43.4](https://github.com/william0wang/zcode-acp/compare/v0.43.3...v0.43.4) (2026-09-19)
+
+
+### Bug Fixes
+
+* attach dummy exit listeners before the shutdown kill to close a linux race ([5ae87ac](https://github.com/william0wang/zcode-acp/commit/5ae87ac3dc2e7c599c8357e5087e4bc381026ef0))
+* **quota:** migrate opencode go to the console status API ([5b4966b](https://github.com/william0wang/zcode-acp/commit/5b4966bf9cc9b8844fb721c5ff5ad254834a6339))
+* **remote:** tear the whole TUI tree down on instance shutdown ([f776da0](https://github.com/william0wang/zcode-acp/commit/f776da088c0b216bf392ee21e6ced7d799d2b785))
+
 ## [0.43.3](https://github.com/william0wang/zcode-acp/compare/v0.43.2...v0.43.3) (2026-09-18)
 
 
