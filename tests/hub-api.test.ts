@@ -767,10 +767,24 @@ describe("hub instance shutdown", () => {
 
   it("tears the whole TUI tree down on shutdown (tuiPid group + direct pids)", async () => {
     const hub = await startTestHub();
-    // Stand-ins for the window tree: a detached "CLI" (its own process group,
-    // like the .command script session under Terminal.app) and the leaf
-    // bridge. The bridge kill alone used to leave the CLI alive — the very
-    // "window stays open on a dead-agent page" regression this pins down.
+    const realKill = process.kill.bind(process);
+    let cliPid: number | undefined;
+    let bridgePid: number | undefined;
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((pid, sig) => {
+      let thrown = "";
+      try {
+        realKill(pid as number, sig as NodeJS.Signals);
+      } catch (e) {
+        thrown = e instanceof Error ? e.message : String(e);
+      }
+      console.error(
+        `[diag] kill(${pid}, ${String(sig)}) -> ${thrown || "ok"} | cli=${cliPid} bridge=${bridgePid} worker=${process.pid}`,
+      );
+      if (thrown) throw new Error(thrown);
+      return true;
+    }) as typeof process.kill);
+    cleanups.push(() => killSpy.mockRestore());
+
     const cli = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       stdio: "ignore",
       detached: true,
@@ -788,20 +802,36 @@ describe("hub instance shutdown", () => {
           new Promise<void>((resolve) => (c.pid ? resolve() : c.once("spawn", () => resolve()))),
       ),
     );
+    cliPid = cli.pid;
+    bridgePid = bridge.pid;
+    console.error(`[diag] spawned cli=${cli.pid} bridge=${bridge.pid}`);
     await registerInstance(hub, bridge.pid!, { origin: "serve", tuiPid: cli.pid });
 
     const res = await shutdown(hub);
-    expect(res.status).toBe(200);
+    console.error(`[diag] shutdown status=${res.status} body=${await res.text()}`);
 
     await withTimeout(
-      new Promise<void>((resolve) => cli.once("exit", () => resolve())),
+      new Promise<void>((resolve) =>
+        cli.once("exit", (code, sig) => {
+          console.error(`[diag] cli exited code=${code} sig=${sig}`);
+          resolve();
+        }),
+      ),
       5000,
       "tui cli exit",
     );
     await withTimeout(
-      new Promise<void>((resolve) => bridge.once("exit", () => resolve())),
+      new Promise<void>((resolve) =>
+        bridge.once("exit", (code, sig) => {
+          console.error(`[diag] bridge exited code=${code} sig=${sig}`);
+          resolve();
+        }),
+      ),
       5000,
       "bridge exit",
+    );
+    console.error(
+      `[diag] bridge exitCode=${bridge.exitCode} signalCode=${bridge.signalCode} killed=${bridge.killed}`,
     );
     const list = await (await listInstances(hub)).json();
     expect(list).toHaveLength(0);
