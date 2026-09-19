@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../src/backend/credentials.js", () => ({
   loadZcodeCredentials: () => ({
     ANTHROPIC_API_KEY: "test-key",
-    ZCODE_BASE_URL: "https://open.bigmodel.cn",
+    providerBaseURL: "https://open.bigmodel.cn",
   }),
 }));
 
