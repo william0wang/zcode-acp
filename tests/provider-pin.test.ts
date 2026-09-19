@@ -56,7 +56,7 @@ describe("loadZcodeCredentials provider pinning", () => {
   it("falls back to the first enabled provider when ZCODE_PROVIDER is unset", () => {
     expect(loadZcodeCredentials()).toEqual({
       ZCODE_MODEL: "GLM-first",
-      ZCODE_BASE_URL: "https://first.example/api",
+      providerBaseURL: "https://first.example/api",
       ANTHROPIC_API_KEY: "first-key",
     });
   });
@@ -66,7 +66,7 @@ describe("loadZcodeCredentials provider pinning", () => {
 
     expect(loadZcodeCredentials()).toEqual({
       ZCODE_MODEL: "GLM-second",
-      ZCODE_BASE_URL: "https://second.example/api",
+      providerBaseURL: "https://second.example/api",
       ANTHROPIC_API_KEY: "second-key",
     });
   });
@@ -104,7 +104,7 @@ describe("loadZcodeCredentials provider pinning", () => {
 
     const creds = loadZcodeCredentials();
     expect(creds.ANTHROPIC_API_KEY).toBe("");
-    expect(creds.ZCODE_BASE_URL).toBe("http://localhost:11434/api");
+    expect(creds.providerBaseURL).toBe("http://localhost:11434/api");
   });
 
   it("honors an explicit pin even when the pinned provider is keyless", () => {
@@ -120,26 +120,42 @@ describe("loadZcodeCredentials provider pinning", () => {
   });
 });
 
-describe("mergeEnvWithCreds stale-host self-heal (#183)", () => {
+describe("mergeEnvWithCreds keeps ZCODE_BASE_URL out of the child environment", () => {
+  // The app-server resolves its service origin (configuration/signing/billing
+  // endpoints) as ZCODE_BASE_URL ?? ZCODE_ENDPOINT_ORIGIN ?? built-in default,
+  // so a provider model URL in that variable repoints those requests at the
+  // provider host. See src/backend/credentials.ts.
   const creds = {
     ZCODE_MODEL: "GLM-first",
-    ZCODE_BASE_URL: "https://first.example/api",
+    providerBaseURL: "https://first.example/api",
     ANTHROPIC_API_KEY: "first-key",
   };
 
-  it("reverts a stale env ZCODE_BASE_URL when no key is exported", () => {
-    vi.stubEnv("ZCODE_BASE_URL", "https://second.example/api");
-    vi.stubEnv("ANTHROPIC_API_KEY", "");
+  it("strips an inherited ZCODE_BASE_URL instead of passing it to the app-server", () => {
+    vi.stubEnv("ZCODE_BASE_URL", "https://first.example/api");
 
-    expect(mergeEnvWithCreds(creds).ZCODE_BASE_URL).toBe("https://first.example/api");
+    const merged = mergeEnvWithCreds(creds);
+    expect(merged.ZCODE_BASE_URL).toBeUndefined();
+    expect(merged.ZCODE_MODEL).toBe("GLM-first");
+    expect(merged.ANTHROPIC_API_KEY).toBe("first-key");
   });
 
-  it("keeps the env ZCODE_BASE_URL when ANTHROPIC_API_KEY is explicitly exported", () => {
+  it("strips ZCODE_BASE_URL even when ANTHROPIC_API_KEY is explicitly exported", () => {
     vi.stubEnv("ZCODE_BASE_URL", "https://second.example/api");
     vi.stubEnv("ANTHROPIC_API_KEY", "second-key");
 
-    expect(mergeEnvWithCreds(creds).ZCODE_BASE_URL).toBe("https://second.example/api");
-    expect(mergeEnvWithCreds(creds).ANTHROPIC_API_KEY).toBe("second-key");
+    const merged = mergeEnvWithCreds(creds);
+    expect(merged.ZCODE_BASE_URL).toBeUndefined();
+    expect(merged.ANTHROPIC_API_KEY).toBe("second-key");
+  });
+
+  it("still honors explicit ZCODE_MODEL / ANTHROPIC_API_KEY overrides", () => {
+    vi.stubEnv("ZCODE_MODEL", "GLM-override");
+    vi.stubEnv("ANTHROPIC_API_KEY", "override-key");
+
+    const merged = mergeEnvWithCreds(creds);
+    expect(merged.ZCODE_MODEL).toBe("GLM-override");
+    expect(merged.ANTHROPIC_API_KEY).toBe("override-key");
   });
 });
 

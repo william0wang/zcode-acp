@@ -125,7 +125,7 @@ non-empty `options.apiKey` in that file. Start-plan providers stay declined
 
 2. If the file is missing or the key is stale, **install and log into the ZCode desktop app** — it writes a fresh `config.json` with a valid enabled provider. There is no manual API-key configuration in the editor.
 
-3. If you need to override the key/base URL without touching `config.json`, set `ZCODE_BASE_URL` and provide the key via the provider config (see `src/backend/credentials.ts` for the merge order).
+3. There is no env override for the provider base URL: the app-server reads `ZCODE_BASE_URL` as its own service origin, so the bridge never passes one through (see `src/backend/credentials.ts`). Edit `config.json` (or the provider config in the App) instead.
 
 ### session/subscribe fails
 
