@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.0](https://github.com/william0wang/zcode-acp/compare/v0.43.4...v0.44.0) (2026-09-19)
+
+
+### Features
+
+* **config:** maintain all user preferences in the config file ([6bfb1b2](https://github.com/william0wang/zcode-acp/commit/6bfb1b24898e31f763eff8d8f5918e99f5d688d8))
+
 ## [0.43.4](https://github.com/william0wang/zcode-acp/compare/v0.43.3...v0.43.4) (2026-09-19)
 
 
