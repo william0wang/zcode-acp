@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.1](https://github.com/william0wang/zcode-acp/compare/v0.44.0...v0.44.1) (2026-09-19)
+
+
+### Bug Fixes
+
+* answer provider runtime headers at arrival so compact turns survive ([45a7f01](https://github.com/william0wang/zcode-acp/commit/45a7f014dbeed17817d7f80b69ddd534e74749ee))
+* guard compaction turns from stops and scope the runtime-headers responder ([7ec703b](https://github.com/william0wang/zcode-acp/commit/7ec703b92b4afcbbda2715bc971190be2be34419))
+* harden compaction stop guard and dead-reader settle from cross review ([34e9da1](https://github.com/william0wang/zcode-acp/commit/34e9da1f4ae0ced2a1b5f0cd8720406e5688b99d))
+* re-settle hydration on capped resumes and mark load_earlier pages ([52914c3](https://github.com/william0wang/zcode-acp/commit/52914c3e03e8028a1f694cd152ed8e30a69bf8ee))
+* run auto-compact detached from the turn so cancel/preempt cannot kill it ([01d222a](https://github.com/william0wang/zcode-acp/commit/01d222a61a43780d29bf4b3c678d28126ad49089))
+
 ## [0.44.0](https://github.com/william0wang/zcode-acp/compare/v0.43.4...v0.44.0) (2026-09-19)
 
 
