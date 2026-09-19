@@ -6,6 +6,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import net from "node:net";
 
@@ -820,18 +821,34 @@ describe("hub instance shutdown", () => {
       5000,
       "tui cli exit",
     );
+    // Probe the bridge's kernel-level state 2s after the signals: /proc tells
+    // us whether it is alive, zombie, or ignoring SIGTERM (SigIgn/SigBlk).
+    await new Promise((r) => setTimeout(r, 2000));
+    const procState = (pid: number): string => {
+      try {
+        const status = readFileSync(`/proc/${pid}/status`, "utf8");
+        return status
+          .split("\n")
+          .filter((l) => /^(State|PPid|SigBlk|SigIgn|SigCgt)/.test(l))
+          .join(" | ");
+      } catch (e) {
+        return `unreadable: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    };
+    console.error(`[diag] bridge /proc: ${procState(bridge.pid!)}`);
+    console.error(`[diag] bridge handle: exitCode=${bridge.exitCode} signalCode=${bridge.signalCode}`);
+    // Control: SIGKILL the bridge directly — if the exit event fires now, the
+    // process was alive and merely not dying to SIGTERM.
+    realKill(bridge.pid!, "SIGKILL");
     await withTimeout(
       new Promise<void>((resolve) =>
         bridge.once("exit", (code, sig) => {
-          console.error(`[diag] bridge exited code=${code} sig=${sig}`);
+          console.error(`[diag] bridge exited after SIGKILL code=${code} sig=${sig}`);
           resolve();
         }),
       ),
-      5000,
+      3000,
       "bridge exit",
-    );
-    console.error(
-      `[diag] bridge exitCode=${bridge.exitCode} signalCode=${bridge.signalCode} killed=${bridge.killed}`,
     );
     const list = await (await listInstances(hub)).json();
     expect(list).toHaveLength(0);
