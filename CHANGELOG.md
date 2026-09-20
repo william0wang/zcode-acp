@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.4](https://github.com/william0wang/zcode-acp/compare/v0.44.3...v0.44.4) (2026-09-20)
+
+
+### Bug Fixes
+
+* reject prompts during auto-compact instead of queuing behind the lock ([81fed9e](https://github.com/william0wang/zcode-acp/commit/81fed9e6473156781eafe6cbbeebacfa47bf9d5a))
+
 ## [0.44.3](https://github.com/william0wang/zcode-acp/compare/v0.44.2...v0.44.3) (2026-09-20)
 
 
