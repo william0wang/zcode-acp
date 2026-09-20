@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.44.2](https://github.com/william0wang/zcode-acp/compare/v0.44.1...v0.44.2) (2026-09-20)
+
+
+### Bug Fixes
+
+* settle big-session hydration without re-paying capped reads on every load ([b5f9773](https://github.com/william0wang/zcode-acp/commit/b5f97734f6855134afb344a57cea0af41ddc3829))
+
 ## [0.44.1](https://github.com/william0wang/zcode-acp/compare/v0.44.0...v0.44.1) (2026-09-19)
 
 
