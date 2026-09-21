@@ -15,7 +15,9 @@
  * instead of passing raw text to the model (which would confuse it).
  *
  * `/mcp` lists all configured MCP servers (from config.json + plugins),
- * showing the user exactly what's available without needing the TUI.
+ * showing the user exactly what's available without needing the TUI. When the
+ * backend answers `mcp/list` (mode:"status"), the card is upgraded to live
+ * per-server health (status / tool count / failureKind).
  *
  * `/quota` is the exception: it does not call ZCode at all — it queries the
  * GLM Coding Plan usage API directly and renders the result.
@@ -37,7 +39,12 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate } from "../config/options.js";
-import { formatMcpServers, loadMcpServers } from "../config/mcp-discovery.js";
+import {
+  formatMcpServerHealth,
+  formatMcpServers,
+  loadMcpServers,
+  type McpServerHealth,
+} from "../config/mcp-discovery.js";
 import { loadPluginCommands } from "../config/plugin-commands.js";
 import { loadSkillCommands } from "../config/skill-discovery.js";
 import { goalModeIsBackend } from "../config/settings.js";
@@ -225,6 +232,62 @@ async function autoFlow(
   return label === "goal" ? messages().slashGoalSet(arg) : messages().slashAutoSet(arg);
 }
 
+/**
+ * Fetch per-server MCP health from the backend `mcp/list` RPC with
+ * `mode:"status"` (params `{workspace:{workspacePath, workspaceKey}}` —
+ * workspace-level, no sessionId; result `statuses` keyed by server name).
+ *
+ * Best-effort: returns null on ANY failure (older backend answering -32601,
+ * timeout, malformed result, empty status map) after at most one warn, and
+ * the caller falls back to the local-discovery card unchanged.
+ */
+async function fetchMcpStatuses(
+  server: ZcodeAcpServer,
+  acpSid: string,
+): Promise<Record<string, McpServerHealth> | null> {
+  const cwd = server.sessionCwds.get(acpSid) ?? server.projectCwd();
+  try {
+    const resp = await server
+      .ensureBackend()
+      .request(
+        server.nextId(),
+        "mcp/list",
+        { workspace: { workspacePath: cwd, workspaceKey: cwd }, mode: "status" },
+        15000,
+      );
+    if (resp.error) {
+      warn(`/mcp: mcp/list failed (${resp.error.message}) — using local discovery`);
+      return null;
+    }
+    const raw = (resp.result as { statuses?: unknown } | null)?.statuses;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      warn("/mcp: mcp/list returned no statuses — using local discovery");
+      return null;
+    }
+    const out: Record<string, McpServerHealth> = {};
+    for (const [name, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (!entry || typeof entry !== "object") continue;
+      const o = entry as Record<string, unknown>;
+      const health: McpServerHealth = {
+        status: typeof o["status"] === "string" ? o["status"] : "unknown",
+        toolCount: typeof o["toolCount"] === "number" ? o["toolCount"] : 0,
+      };
+      if (typeof o["failureKind"] === "string") health.failureKind = o["failureKind"];
+      const authUrl = (o["authorization"] as { authorizationUrl?: unknown } | undefined)
+        ?.authorizationUrl;
+      if (typeof authUrl === "string" && authUrl) health.authorizationUrl = authUrl;
+      out[name] = health;
+    }
+    // An empty map carries no health information — keep the local card.
+    return Object.keys(out).length > 0 ? out : null;
+  } catch (e) {
+    warn(
+      `/mcp: mcp/list threw (${e instanceof Error ? e.message : String(e)}) — using local discovery`,
+    );
+    return null;
+  }
+}
+
 /** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
 export async function handleSlashCommand(
   server: ZcodeAcpServer,
@@ -260,9 +323,13 @@ export async function handleSlashCommand(
         return ok(formatQuota(result));
       }
       case "mcp": {
-        // Lists all configured MCP servers (from config.json + enabled plugins).
-        // Does not touch ZCode — reads the same config the backend auto-loads.
-        return ok(formatMcpServers(loadMcpServers()));
+        // Lists all configured MCP servers (from config.json + enabled plugins),
+        // enriched with live per-server health from the backend `mcp/list` RPC
+        // (mode:"status" — reports health WITHOUT connecting). Any RPC failure
+        // (older backend, -32601, timeout) keeps the local-discovery card.
+        const servers = loadMcpServers();
+        const statuses = await fetchMcpStatuses(server, acpSid);
+        return ok(statuses ? formatMcpServerHealth(statuses) : formatMcpServers(servers));
       }
       case "compact": {
         // `/compact <focus…>` forwards the argument as compact instructions.
