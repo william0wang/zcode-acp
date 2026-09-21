@@ -108,6 +108,12 @@ export interface ZcodeEvent {
 
 export interface ZcodeSubscribeResult {
   eventSeq: number;
+  /**
+   * Missed-window replay carried in the subscribe response itself (source:
+   * subscribeSession returns every event with seq > afterSeq). Consumed by
+   * resubscribe; absent when the request omits afterSeq (fresh subscribe).
+   */
+  events?: ZcodeEvent[];
   snapshot?: ZcodeSnapshot;
 }
 

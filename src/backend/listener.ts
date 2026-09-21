@@ -88,7 +88,12 @@ export class EventStreamListener {
           sessionId: this.sid,
           deliveryKind: "desktop-continuous",
           includeSnapshot: false,
-          afterSeq: 0,
+          // afterSeq deliberately OMITTED: a fresh subscribe wants no replay,
+          // and passing an explicit afterSeq makes the backend materialize the
+          // missed window into the response (`events`) — with afterSeq: 0 that
+          // was the FULL event log, computed and thrown away on every turn
+          // (O(session length); observed costly on multi-thousand-message
+          // sessions). The eventSeq watermark below is all we need.
         },
         5000,
       );
@@ -166,9 +171,13 @@ export class EventStreamListener {
 
   /**
    * Stall recovery: resubscribe from `lastSeq` so the server replays missed
-   * events. Failure is logged but non-fatal — the caller degrades to polling.
-   * The snapshot (if returned despite `includeSnapshot:false`) is intentionally
-   * not consumed; resubscribe only refreshes the watermark + resumes the push.
+   * events — the missed window arrives IN the response (`events`, source:
+   * subscribeSession returns every event with seq > afterSeq) and is queued
+   * into the stream in seq order, so the turn loop sees the gap instead of a
+   * silently advanced watermark (the attribution gate still decides which
+   * events belong to the current turn). Failure is logged but non-fatal —
+   * the caller degrades to polling. The snapshot (if returned despite
+   * `includeSnapshot:false`) is intentionally not consumed.
    */
   async resubscribe(nextId: NextId): Promise<boolean> {
     const resp = await this.backend.request(
@@ -189,6 +198,12 @@ export class EventStreamListener {
       return false;
     }
     const result = (resp.result ?? {}) as ZcodeSubscribeResult;
+    const missed = (result.events ?? []).slice().sort((a, b) => a.seq - b.seq);
+    for (const event of missed) {
+      // The live push may have delivered some of the window already; the
+      // watermark check skips those instead of double-dispatching.
+      if (event.seq > this.lastSeq) this.handleEvent(event);
+    }
     if ((result.eventSeq ?? this.lastSeq) > this.lastSeq) {
       this.lastSeq = result.eventSeq ?? this.lastSeq;
     }
