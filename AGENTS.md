@@ -200,10 +200,25 @@ ZCode protocol types into ACP notifications directly — always translate.
   same bridge works on both builds. `workspace/updateProviderRegistry` is
   GONE in 3.12+ (method-not-found) — the bridge logs it as a no-op, not a
   failure. Also note `session.model_selection.persist_failed` ("FOREIGN KEY
-  constraint failed") fires on EVERY setModel since at least 2026-09-14 —
-  including working third-party switches — it is a backend-side persistence
-  wart, NOT a switch failure (the following `session.model.updated` event is
-  the success signal); don't chase it as a switching bug. **Account turns
+  constraint failed") — ROOT CAUSE found in source (2026-09-21): the
+  per-session model selection is a `session_entry` with a session FK, but
+  the session row is only created at FIRST INPUT (`ensureSessionPersisted`,
+  core events.ts) — so a setModel/setThoughtLevel BEFORE the first prompt
+  applies in-memory but cannot persist, and a session resumed without an
+  entry silently reverts to the workspace default
+  (`restorePersistedModelSelection` → `setSessionModelSelection(undefined)`)
+  while the editor dropdown keeps showing the user's choice ("displayed
+  default ≠ actually called", observed 2026-09-21). NOT a switch failure
+  itself (the following `session.model.updated` event is the success
+  signal); the bridge compensates: every switch path records the choice
+  (`server.sessionModelChoices` + `LazySessionRecord.modelChoice` in the
+  lazy-alias store, surviving bridge restarts) and `reassertModelChoice`
+  re-applies it after EVERY resume flight (silent, best-effort;
+  `repairUnavailableModel` still wins for unavailable models). Same-process
+  drafts self-heal: first-input persistence captures the runtime's then-
+  current selection. Don't chase persist_failed as a switching bug — chase
+  it as a stickiness bug only if the re-assert stops firing.
+  **Account turns
   also need runtime headers**: the backend asks its host
   `interaction/requestProviderRuntimeHeaders` before EVERY model request on a
   `zhipu-account` provider and a `headersApplied:false` answer throws -32031

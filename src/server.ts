@@ -196,6 +196,16 @@ export class ZcodeAcpServer {
    */
   readonly compactOutcomes = new Map<string, { reason: string; at: number }>();
   /**
+   * Last model/thought choice per backend session id (config spelling), set
+   * by every switch path (setConfigOption + the setModel/setThoughtLevel
+   * extensions) and re-applied after every resume — the backend's own
+   * selection entry can be lost (see LazySessionRecord.modelChoice), and a
+   * resumed session silently reverts to the workspace default while the
+   * editor dropdown still shows the user's choice. Survives backend
+   * respawns on purpose (it is per-session, not per-process state).
+   */
+  readonly sessionModelChoices = new Map<string, { model?: string; thought?: string }>();
+  /**
    * True once THIS backend process rejected a session/send with the
    * whole-turn busy error (-32010 "A prompt is already running for this
    * session"). 0.16.9 source semantics (sendPrompt's activeAbortController

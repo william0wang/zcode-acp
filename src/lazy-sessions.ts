@@ -43,6 +43,16 @@ export interface LazySessionRecord {
   /** Backend session id once the placeholder materialized (absent = never used). */
   zcodeSid?: string;
   createdAt: number;
+  /**
+   * Last model/thought choice the user set through this bridge (config
+   * spelling, e.g. "providerId\modelId"). The backend's own per-session
+   * selection entry can be LOST (session_entry has a session FK; setModel
+   * before the first prompt hits FOREIGN KEY — source: the row is only
+   * created at first input), and a resumed session then silently reverts to
+   * the workspace default. Re-applied after every resume (see
+   * reassertModelChoice in handlers/session.ts).
+   */
+  modelChoice?: { model?: string; thought?: string };
 }
 
 /** Store file lives next to config.json / tasks-index.sqlite under ~/.zcode/v2/. */
@@ -165,8 +175,25 @@ export function recordMaterializedSession(acpSid: string, zcodeSid: string, cwd:
       cwd: existing?.cwd ?? cwd,
       zcodeSid,
       createdAt: existing?.createdAt ?? Date.now(),
+      ...(existing?.modelChoice ? { modelChoice: existing.modelChoice } : {}),
     },
   });
+}
+
+/** Merge a model/thought choice patch into an existing record (merge-write). */
+export function recordModelChoice(
+  acpSid: string,
+  patch: { model?: string; thought?: string },
+): void {
+  const { kept } = readTable();
+  const existing = kept[acpSid];
+  // Unknown alias (foreign session / never a placeholder) — in-memory only.
+  if (!existing) return;
+  const merged = { ...(existing.modelChoice ?? {}), ...patch };
+  if (existing.modelChoice && JSON.stringify(existing.modelChoice) === JSON.stringify(merged)) {
+    return;
+  }
+  persist({ ...kept, [acpSid]: { ...existing, modelChoice: merged } });
 }
 
 /** Look up a placeholder alias (undefined = unknown to this bridge and store). */

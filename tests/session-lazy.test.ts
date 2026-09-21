@@ -48,6 +48,15 @@ vi.mock("../src/lazy-sessions.js", () => ({
       cwd: existing?.cwd ?? cwd,
       zcodeSid,
       createdAt: existing?.createdAt ?? Date.now(),
+      ...(existing?.modelChoice ? { modelChoice: existing.modelChoice } : {}),
+    });
+  },
+  recordModelChoice: (acpSid: string, patch: { model?: string; thought?: string }) => {
+    const existing = mockStore.get(acpSid);
+    if (!existing) return;
+    mockStore.set(acpSid, {
+      ...existing,
+      modelChoice: { ...(existing.modelChoice ?? {}), ...patch },
     });
   },
   lookupLazySession: (acpSid: string) => mockStore.get(acpSid),

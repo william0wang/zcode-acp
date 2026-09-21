@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
+import { recordModelChoice } from "../lazy-sessions.js";
 import {
   clientConnectionRoot,
   CONFIG_DISPATCH,
@@ -639,11 +640,13 @@ export async function setConfigOption(
   zcodeSid: string,
   configId: string,
   value: string,
+  acpSid?: string,
 ): Promise<{ kind: "model" | "mode" | "thought"; currentValue: string } | null> {
   if (configId === "model") {
     const { applyModelSwitch } = await import("./runtime-model.js");
     const ok = await applyModelSwitch(server, zcodeSid, value);
     if (!ok) return null;
+    rememberModelChoice(server, acpSid, zcodeSid, { model: value });
     return { kind: "model", currentValue: value };
   }
   const dispatch = CONFIG_DISPATCH[configId];
@@ -656,7 +659,29 @@ export async function setConfigOption(
     15000,
   );
   if (resp.error) return null;
+  if (configId === "thought") {
+    rememberModelChoice(server, acpSid, zcodeSid, { thought: value });
+  }
   return { kind: configId as "mode" | "thought", currentValue: value };
+}
+
+/**
+ * Record the session's model/thought choice: in-memory per zcodeSid (read by
+ * the post-resume re-assert) and durably per acpSid in the lazy-alias store
+ * (read back after a bridge restart). See LazySessionRecord.modelChoice for
+ * why the backend's own persistence cannot be trusted here.
+ */
+export function rememberModelChoice(
+  server: ZcodeAcpServer,
+  acpSid: string | undefined,
+  zcodeSid: string,
+  patch: { model?: string; thought?: string },
+): void {
+  server.sessionModelChoices.set(zcodeSid, {
+    ...server.sessionModelChoices.get(zcodeSid),
+    ...patch,
+  });
+  if (acpSid) recordModelChoice(acpSid, patch);
 }
 
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.

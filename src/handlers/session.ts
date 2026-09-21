@@ -559,6 +559,12 @@ export async function ensureRealSession(
     }
     if (record?.zcodeSid) {
       server.registerSession(acpSid, record.zcodeSid);
+      // Recover the remembered model/thought choice (bridge restart): the
+      // post-resume re-assert needs it to undo the backend's silent revert
+      // to the workspace default (see reassertModelChoice).
+      if (record.modelChoice) {
+        server.sessionModelChoices.set(record.zcodeSid, record.modelChoice);
+      }
       // Seed the cwd the reload's resume needs — this process never saw the
       // session/new that recorded it, and the resume workspace would
       // otherwise fall back to the bridge's own process cwd.
@@ -2142,7 +2148,13 @@ export async function setConfigOptionHandler(
   // Materialize a lazy session/new placeholder on first use.
   const zcodeSid = await ensureRealSession(server, params.sessionId);
   const { setConfigOption, emitConfigOptionUpdate } = await import("../config/options.js");
-  const result = await setConfigOption(server, zcodeSid, params.configId, params.value);
+  const result = await setConfigOption(
+    server,
+    zcodeSid,
+    params.configId,
+    params.value,
+    params.sessionId,
+  );
   if (!result) {
     throw new Error(`unsupported config option or switch failed: ${params.configId}`);
   }
@@ -2804,6 +2816,50 @@ interface ResumeOutcome {
 }
 
 /**
+ * Re-apply the bridge-remembered model/thought choice after a resume.
+ *
+ * Why: the backend persists the per-session model selection as a
+ * `session_entry` whose write carries a session FK — and the session row is
+ * only created at FIRST INPUT (source: core events.ts ensureSessionPersisted),
+ * so a setModel/setThoughtLevel before the first prompt loses its persistence
+ * (observed warn `session.model_selection.persist_failed`, FOREIGN KEY
+ * constraint failed) while applying in-memory only. A session resumed without
+ * a persisted entry then reverts to the workspace default (create-app.ts
+ * restorePersistedModelSelection → setSessionModelSelection(undefined)) — the
+ * editor dropdown still shows the user's last choice, so "displayed default ≠
+ * actually called model". The bridge's remembered choice IS the session's own
+ * last selection (every switch path funnels through setConfigOption or the
+ * setModel/setThoughtLevel extensions), so re-applying it restores the
+ * intended stickiness; a backend-side switch made outside this bridge is
+ * deliberately overridden. Silent (no config_option_update — clients already
+ * show this value) and best-effort: a failed re-assert never fails the
+ * resume, and repairUnavailableModel (run after the flight by reload callers)
+ * still wins when the remembered model is no longer enabled.
+ */
+async function reassertModelChoice(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
+  // Everything inside the try: a best-effort re-assert (and a stub server
+  // without every map) must never fail the resume flight it rides on.
+  try {
+    const choice = server.sessionModelChoices?.get(zcodeSid);
+    if (!choice?.model) return;
+    const { setConfigOption } = await import("../config/options.js");
+    if (!(await setConfigOption(server, zcodeSid, "model", choice.model))) {
+      warn(`resume: re-asserting model choice failed (${choice.model}) — keeping backend default`);
+      return;
+    }
+    if (choice.thought) {
+      await setConfigOption(server, zcodeSid, "thought", choice.thought);
+    }
+    log(
+      `resume: re-applied remembered model choice (${choice.model}` +
+        `${choice.thought ? `, thought ${choice.thought}` : ""})`,
+    );
+  } catch (e) {
+    warn(`resume: model choice re-assert threw (${e instanceof Error ? e.message : String(e)})`);
+  }
+}
+
+/**
  * Resume WITHOUT pinning a model, so the session keeps its own selection (the
  * backend persists it per session — sessions the user ran on GLM-5.3-Flash
  * used to be silently re-pinned to the first config model by an unconditional
@@ -2869,6 +2925,10 @@ async function resumePreservingModel(
     // The settle rides the flight (see the docstring): joiners awaiting this
     // promise are ordered after hydration, not merely after the RPC.
     const history = await fetchMessagesSettled(server, zcodeSid);
+    // Re-apply the bridge-remembered model choice (best-effort — never fails
+    // the resume): the resumed session may have silently reverted to the
+    // workspace default when the backend's own selection entry was lost.
+    await reassertModelChoice(server, zcodeSid);
     return {
       performed: true,
       result,

@@ -26,7 +26,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { emitInitialUsage } from "../config/model-cache.js";
 import { applyModelSwitch } from "../config/runtime-model.js";
-import { emitConfigOptionUpdate } from "../config/options.js";
+import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
 import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -230,6 +230,12 @@ export async function setThoughtLevel(
     .request(server.nextId(), "session/setThoughtLevel", zcParams, 15000);
   if (resp.error) throw new Error(`setThoughtLevel failed: ${resp.error.message}`);
   log("session/setThoughtLevel → ok");
+  // Remember for the post-resume re-assert (the backend's own selection
+  // persistence can be lost — see reassertModelChoice in session.ts).
+  const level = typeof params.thoughtLevel === "string" ? params.thoughtLevel : undefined;
+  if (level) {
+    rememberModelChoice(server, params.sessionId, zcodeSid, { thought: level });
+  }
   // Session settings are per-session, not per-connection: a switch from the
   // phone must refresh the CLI window's dropdown (and vice versa) — emit the
   // config_option_update to every attached client, not just the switcher.
@@ -250,6 +256,9 @@ export async function setModel(
   const ok = await applyModelSwitch(server, zcodeSid, modelId);
   if (!ok) throw new Error("setModel failed (model switch rejected)");
   log(`session/setModel → ${modelId} (applyModelSwitch)`);
+  // Remember for the post-resume re-assert (see reassertModelChoice in
+  // session.ts — the backend's own selection persistence can be lost).
+  rememberModelChoice(server, params.sessionId, zcodeSid, { model: modelId });
   // Broadcast so the other attached clients' dropdowns follow the switch.
   await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, "model");
   return {};
