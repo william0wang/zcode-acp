@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.45.0](https://github.com/william0wang/zcode-acp/compare/v0.44.4...v0.45.0) (2026-09-21)
+
+
+### Features
+
+* align with the open-sourced ZCode backend (compact outcomes, /compact focus, 0.16.9 lock wording) ([#220](https://github.com/william0wang/zcode-acp/issues/220)) ([2527f53](https://github.com/william0wang/zcode-acp/commit/2527f536cc968afae66b2957a8d71f1c3641aa57))
+
+
+### Bug Fixes
+
+* stop injecting the provider model endpoint as the app-server service origin ([#215](https://github.com/william0wang/zcode-acp/issues/215)) ([f7f97aa](https://github.com/william0wang/zcode-acp/commit/f7f97aa4f7aaa9410c052ad6bac4ebe23287db13))
+
 ## [0.44.4](https://github.com/william0wang/zcode-acp/compare/v0.44.3...v0.44.4) (2026-09-20)
 
 
