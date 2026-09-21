@@ -184,6 +184,26 @@ export function builtinProviderEnv(entryArg?: string): NodeJS.ProcessEnv {
 }
 
 /**
+ * Translate the bridge's `ZCODE_HOME` into the backend's own data-root
+ * spelling for the spawn.
+ *
+ * The bridge reads the ZCode data tree through `ZCODE_HOME` (it replaces
+ * `~/.zcode` outright — utils.ts zcodeHomeDir), but the backend's contract is
+ * `ZCODE_DATA_BASE_DIR`: the PARENT of `.zcode`
+ * (packages/services/src/paths.ts:11,33-45 — getZCodeDataRootDir() is
+ * `join(getDataBaseDir(), ".zcode")`; provider-runtime-env.ts:60,76 reads the
+ * same var). Without the translation, a bridge running against an isolated
+ * tree discovers skills/MCP/credentials there while the spawned backend still
+ * reads the real `~/.zcode` — split-brain. An unset ZCODE_HOME returns {} so
+ * any ambient ZCODE_DATA_BASE_DIR passes through untouched.
+ */
+export function zcodeDataBaseDirEnv(): NodeJS.ProcessEnv {
+  const home = process.env.ZCODE_HOME?.trim();
+  if (!home) return {};
+  return { ZCODE_DATA_BASE_DIR: path.dirname(path.resolve(home)) };
+}
+
+/**
  * Happy Eyeballs (`autoSelectFamily`, on by default since Node 20.13) gives
  * each connect attempt a 250ms budget. On a network with no IPv6 route where
  * the provider edge answers in just over 250ms, every undici connect is

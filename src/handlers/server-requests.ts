@@ -528,7 +528,7 @@ async function handleSinglePermission(
     return { action: "decline", reason: "declined or cancelled" };
   }
   return perm
-    ? acpPermissionResponseToZcode(acpResp)
+    ? acpPermissionResponseToZcode(acpResp, (p as ZcodeInteractionPermissionParams).options)
     : acpPermissionResponseToExitPlanMode(acpResp);
 }
 

@@ -656,27 +656,11 @@ export async function ensureRealSession(
     const sid = session.sessionId;
     if (!sid) throw new Error("zcode create returned no sessionId");
 
-    // Cache the FULL model-availability list: session/create is the only
-    // response carrying every model with its reasoning metadata. Model
-    // switches resolve a target's default level from here (the object form of
-    // session/setModel rejects level-bearing models without one).
-    type AvailEntry = {
-      ref?: { providerId?: string; modelId?: string };
-      reasoning?: { defaultLevel?: string; levels?: Array<{ value?: string }> };
-    };
-    const availability = ((result.settings ?? {}) as Record<string, unknown>).model as
-      { available?: AvailEntry[] } | undefined;
-    const avail = availability?.available ?? [];
-    if (avail.length > 0) {
-      server.modelAvailability.set(
-        sid,
-        avail.map((a) => ({
-          providerId: a.ref?.providerId,
-          modelId: a.ref?.modelId,
-          defaultLevel: a.reasoning?.defaultLevel ?? a.reasoning?.levels?.[0]?.value,
-        })),
-      );
-    }
+    // Cache the FULL model-availability list: create (and every resume/fork)
+    // returns every model with its reasoning metadata. Model switches resolve
+    // a target's default level from here (the object form of session/setModel
+    // rejects level-bearing models without one).
+    cacheModelAvailability(server, sid, result);
 
     server.pendingSessions.delete(acpSid);
     server.registerSession(acpSid, sid);
@@ -2896,6 +2880,48 @@ async function reassertModelChoice(server: ZcodeAcpServer, zcodeSid: string): Pr
 }
 
 /**
+ * Cache the FULL model-availability list from a session snapshot's
+ * `settings.model.available`.
+ *
+ * `session/create` AND `session/resume`/`fork` all return the complete list
+ * with authoritative `reasoning.defaultLevel` — only `session/read` is
+ * hardcoded to `modelAvailability:"current"` (source: server-operations.ts:1828-1831
+ * vs the option-less snapshot resume/fork get at :1518-1521/:2323). A resume is
+ * therefore a free refresh for models added after create (a personal
+ * `provider_config.json` rule, a host account push) that the create snapshot
+ * missed: model switches resolve a target's default reasoning level from this
+ * cache, and the object form of `session/setModel` hard-fails a level-bearing
+ * model without one ("Reasoning level is required").
+ *
+ * Best-effort: an empty or missing list leaves any previous cache intact.
+ */
+export function cacheModelAvailability(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  result: unknown,
+): void {
+  const settings = (result as { settings?: Record<string, unknown> } | null | undefined)?.settings;
+  const model = settings?.model as
+    | {
+        available?: Array<{
+          ref?: { providerId?: string; modelId?: string };
+          reasoning?: { defaultLevel?: string; levels?: Array<{ value?: string }> };
+        }>;
+      }
+    | undefined;
+  const avail = model?.available ?? [];
+  if (avail.length === 0) return;
+  server.modelAvailability.set(
+    zcodeSid,
+    avail.map((a) => ({
+      providerId: a.ref?.providerId,
+      modelId: a.ref?.modelId,
+      defaultLevel: a.reasoning?.defaultLevel ?? a.reasoning?.levels?.[0]?.value,
+    })),
+  );
+}
+
+/**
  * Resume WITHOUT pinning a model, so the session keeps its own selection (the
  * backend persists it per session — sessions the user ran on GLM-5.3-Flash
  * used to be silently re-pinned to the first config model by an unconditional
@@ -2961,6 +2987,11 @@ async function resumePreservingModel(
     // The settle rides the flight (see the docstring): joiners awaiting this
     // promise are ordered after hydration, not merely after the RPC.
     const history = await fetchMessagesSettled(server, zcodeSid);
+    // Resume/fork snapshots carry the FULL model-availability list (only
+    // session/read is hardcoded "current") — refresh the switch-time level
+    // lookup for models added after create BEFORE the remembered choice
+    // re-asserts (it resolves its level from this cache).
+    cacheModelAvailability(server, zcodeSid, result);
     // Re-apply the bridge-remembered model choice (best-effort — never fails
     // the resume): the resumed session may have silently reverted to the
     // workspace default when the backend's own selection entry was lost.
@@ -3439,6 +3470,26 @@ export async function runEventTurn(
     }
   };
 
+  // Shared "the turn finished but its terminal event was lost" ending: deliver
+  // the last reply when nothing streamed, then end the turn as a recovered one
+  // (prompt() skips auto-compact for it — the completion was inferred, and
+  // compressing an in-flight task's context would destroy the work).
+  const recoverLostTerminalTurn = async (): Promise<acp.PromptResponse> => {
+    if (!emittedText) {
+      const reply = await fetchLastReply(server, turn.zcodeSid, differ);
+      if (reply) {
+        registerFetchedReply(translator, reply);
+        await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
+      } else if (!emittedOutput) {
+        // No text and no output → suspected failure.
+        stopBackendTurn(server, turn.zcodeSid, turn);
+        throw new RequestError(-32603, "turn produced no output");
+      }
+    }
+    turn.stallRecovered = true;
+    return turnResult(translator, "end_turn");
+  };
+
   while (true) {
     if (Date.now() >= nextNoProgressDecisionAt) {
       if (listener.hasQueuedEvents()) {
@@ -3583,6 +3634,14 @@ export async function runEventTurn(
         Date.now() - lastStallCheck > 15_000
       ) {
         lastStallCheck = Date.now();
+        // Authoritative terminal broadcast (0.16.9): the protocol layer's
+        // state.updated {reason:"prompt_completed"|"prompt_failed"}
+        // (server-operations.ts:2469/:2445) proves the backend finished our
+        // turn even though turn.completed was lost. End now instead of
+        // waiting out the double-idle probe or STALE_FREEZE_MS (10 min).
+        if (translator.sawPromptCompleted || translator.sawPromptFailed) {
+          return await recoverLostTerminalTurn();
+        }
         const proj = await monitor.pollOnce();
         noteWatermark(proj);
         await forwardAuthoritativeProgress();
@@ -3604,22 +3663,7 @@ export async function runEventTurn(
           await forwardAuthoritativeProgress();
           if (proj2?.status === "idle" && !listener.hasQueuedEvents()) {
             // Turn completed but the event was lost (double-confirmed).
-            if (!emittedText) {
-              const reply = await fetchLastReply(server, turn.zcodeSid, differ);
-              if (reply) {
-                registerFetchedReply(translator, reply);
-                await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
-              } else if (!emittedOutput) {
-                // No text and no output → suspected failure.
-                stopBackendTurn(server, turn.zcodeSid, turn);
-                throw new RequestError(-32603, "turn produced no output");
-              }
-            }
-            // Heuristic ending: prompt() must skip auto-compact for this
-            // turn — the completion was inferred, and compressing an
-            // in-flight task's context would destroy the work.
-            turn.stallRecovered = true;
-            return turnResult(translator, "end_turn");
+            return await recoverLostTerminalTurn();
           }
           // Second probe says the backend is still working (or events arrived
           // mid-probe) — keep waiting; queued events are consumed by the next

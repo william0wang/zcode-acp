@@ -223,5 +223,13 @@ export interface ZcodeInteractionUserInputParams {
 
 /** The response we send back to a ZCode server→client request. */
 export type ZcodeInteractionResponse =
-  | { decision: "allow" | "deny" | "escalate" | "modify"; reason?: string; modifiedInput?: unknown }
+  | {
+      decision: "allow" | "deny" | "escalate" | "modify";
+      reason?: string;
+      modifiedInput?: unknown;
+      /** Persistent rule updates the selected option carries (e.g. the
+       * "Always allow in this project" option's addRules) — echoed back
+       * verbatim so the runtime persists them. */
+      permissionUpdates?: unknown[];
+    }
   | { action: "accept" | "decline" | "cancel"; content?: unknown; reason?: string };

@@ -116,14 +116,16 @@ export function buildResumeRuntimeModel(): unknown | null {
  * `value` is the configOption value: either `"providerId\modelId"` (encoded) or
  * a legacy plain modelId (resolved to the first enabled builtin provider).
  *
- * 3.12+ schema (verified 2026-09 against the bare app-server): the body is
- * `{sessionId, model: {providerId, modelId, options?}, persistAsWorkspaceLastUsed}`
- * — STRICT. The old `runtimeModel` overlay is gone (`Unrecognized key`), and
- * the object form REQUIRES `options.reasoningLevel` for models that declare
- * levels ("Reasoning level is required for <p>/<m>"; a bare string form skips
- * that check but cannot carry the level). We therefore send the target model's
- * own default level, read from the account/registry entry when we have it, and
- * fall back to omitting `options` for level-less models.
+ * 3.12+ schema (source-verified 2026-09-21 against the open-sourced 0.16.9):
+ * `zcodeSessionSetModelParamsSchema` is strict and `model` must be the
+ * modelSelectionSchema OBJECT — no `runtimeModel` key, no string form
+ * (zcode-protocol/index.ts:1952-1959; model-selection.ts:4-15). The object
+ * form REQUIRES `options.reasoningLevel` for models that declare levels
+ * ("Reasoning level is required for <p>/<m>"); the string form that skips that
+ * check exists only inside the app facade and is unreachable over the
+ * protocol. We therefore send the target model's own default level, read from
+ * the captured create/resume snapshot when we have it, and fall back to
+ * omitting `options` for level-less models.
  *
  * Provider ids are translated to the registry's own spelling: config.json says
  * `builtin:bigmodel-coding-plan` while the registry exposes
@@ -140,51 +142,21 @@ export async function applyModelSwitch(
   const registryProviderId = accountProviderIdFor(providerId);
   const model: Record<string, unknown> = { providerId: registryProviderId, modelId };
   // The object form requires the level for level-bearing models; resolve the
-  // target's authoritative default from the captured create snapshot.
+  // target's authoritative default from the captured create/resume snapshot.
   const level = resolveDefaultReasoningLevel(server, zcodeSid, registryProviderId, modelId);
   if (level) model.options = { reasoningLevel: level };
-  // 3.12+ shape first: `{sessionId, model:{providerId, modelId, options?},
-  // persistAsWorkspaceLastUsed}`. `session/setModel` is strict in every build
-  // we know, so an OLDER app-server answers `Unrecognized key: "options"` (it
-  // predates `options`) or rejects a level-bearing model for the missing
-  // overlay. Both are schema drift, not a bad target — fall back to the legacy
-  // shape once (bare model ref + the `runtimeModel` provider overlay) so the
-  // same bridge works against either build.
-  const modern = await backend.request(
+  const resp = await backend.request(
     server.nextId(),
     "session/setModel",
     { sessionId: zcodeSid, model, persistAsWorkspaceLastUsed: false },
     15000,
   );
-  if (!modern.error) {
-    invalidateModelCache(server, zcodeSid);
-    return true;
-  }
-  const runtimeModel = buildRuntimeModel({ providerId, providerName: providerId, modelId });
-  if (runtimeModel !== null) {
-    const legacy = await backend.request(
-      server.nextId(),
-      "session/setModel",
-      {
-        sessionId: zcodeSid,
-        model: { providerId, modelId },
-        runtimeModel,
-        persistAsWorkspaceLastUsed: false,
-      },
-      15000,
-    );
-    if (!legacy.error) {
-      log(`runtime-model: switched via the legacy runtimeModel shape (${registryProviderId})`);
-      invalidateModelCache(server, zcodeSid);
-      return true;
-    }
-    warn(
-      `runtime-model: switch failed (modern: ${modern.error.message}; legacy: ${legacy.error.message})`,
-    );
+  if (resp.error) {
+    warn(`runtime-model: switch failed: ${resp.error.message}`);
     return false;
   }
-  warn(`runtime-model: switch failed: ${modern.error.message}`);
-  return false;
+  invalidateModelCache(server, zcodeSid);
+  return true;
 }
 
 /**

@@ -30,7 +30,7 @@ import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.j
 import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { ensureRealSession } from "./session.js";
+import { cacheModelAvailability, ensureRealSession } from "./session.js";
 
 /** Build the zcode `target` object from ACP params (checkpoint or latest). */
 function buildCheckpointTarget(params: ExtensionParams): unknown {
@@ -72,6 +72,10 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
   // Register it so subsequent ACP calls targeting the fork can resolve the sid.
   const result = (resp.result ?? {}) as { forkedSessionId?: string };
   if (result.forkedSessionId) {
+    // The fork response carries a full session snapshot (the backend's fork
+    // handler builds one without options) — mine it for the model-availability
+    // list so switches on the fork resolve reasoning levels like create does.
+    cacheModelAvailability(server, result.forkedSessionId, result);
     server.registerSession(result.forkedSessionId, result.forkedSessionId);
     // The fork is live in THIS backend already (session/fork created it) —
     // mark it loaded or a first-use ensureRealSession treats it as evicted

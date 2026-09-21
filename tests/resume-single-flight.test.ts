@@ -50,6 +50,8 @@ interface FakeBackendSpec {
   messagesQueue: ZcodeMessage[][];
   /** Gate holding session/resume in flight until released (undefined: resolve at once). */
   resumeGate?: Promise<unknown>;
+  /** Result payload for session/resume when no gate is set (default: {}). */
+  resumeResult?: unknown;
 }
 
 /** Fake backend with per-method call counts. */
@@ -65,7 +67,7 @@ function makeBackend(spec: FakeBackendSpec): {
       counts.set(method, (counts.get(method) ?? 0) + 1);
       switch (method) {
         case "session/resume":
-          return spec.resumeGate ?? {};
+          return spec.resumeGate ?? (spec.resumeResult ? { result: spec.resumeResult } : {});
         case "workspace/updateProviderRegistry":
           return { result: {} };
         case "session/read":
@@ -189,6 +191,45 @@ describe("resume single-flight (ADR-0017 first-entry race)", () => {
     await expect(p1).rejects.toThrow("boom");
     await expect(p2).rejects.toThrow("boom");
     expect(server.resumeInFlight.size).toBe(0);
+  });
+});
+
+describe("resume snapshot model-availability mining", () => {
+  it("caches the FULL settings.model.available list from the resume snapshot", async () => {
+    // session/resume (like create/fork, unlike session/read) returns the
+    // complete list with reasoning metadata (server-operations.ts:1518-1521
+    // builds the snapshot without options → app.listModels(); read hardcodes
+    // "current" at :1828-1831). A model added after session/create must enter
+    // the switch-time level lookup for free — the bridge used to cache
+    // create-only, so level-bearing switches on it hard-failed.
+    const { backend } = makeBackend({
+      messagesQueue: [hist(2)],
+      resumeResult: {
+        session: { sessionId: "sess_race" },
+        settings: {
+          model: {
+            available: [
+              {
+                ref: { providerId: "account:bigmodel-individual-coding-plan", modelId: "GLM-5.2" },
+                reasoning: { defaultLevel: "high", levels: [{ value: "low" }, { value: "high" }] },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx } = collectCx();
+
+    await loadSession(server, loadParams(), cx);
+    expect(server.modelAvailability.get("sess_race")).toEqual([
+      {
+        providerId: "account:bigmodel-individual-coding-plan",
+        modelId: "GLM-5.2",
+        defaultLevel: "high",
+      },
+    ]);
   });
 });
 

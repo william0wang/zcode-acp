@@ -616,3 +616,57 @@ describe("EventTranslator foreign internal-turn attribution", () => {
     expect(t.turnDone).toBe(true);
   });
 });
+
+describe("EventTranslator protocol-layer terminal broadcast (state.updated)", () => {
+  // 0.16.9's protocol layer emits state.updated {reason:"prompt_completed"} in
+  // runPromptTurnInBackground's finally (server-operations.ts:2469) and
+  // "prompt_failed" when the turn threw (:2445). Unlike turn.completed it is
+  // emitted by the protocol layer, so it survives a deaf event stream; the
+  // turn loop's stall branch consults these flags to end a lost-terminal turn
+  // in seconds instead of waiting out STALE_FREEZE_MS.
+  it("records prompt_completed after our turn.started", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("state.updated", { reason: "prompt_completed", revision: 7 }));
+    expect(t.sawPromptCompleted).toBe(true);
+    expect(t.sawPromptFailed).toBe(false);
+    // The flag alone must NOT end the turn — the loop decides at its stall gate
+    // (the notification carries no turnId, so it cannot attribute turns).
+    expect(t.turnDone).toBe(false);
+  });
+
+  it("records prompt_failed as the failed flavour", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("state.updated", { reason: "prompt_failed" }));
+    expect(t.sawPromptFailed).toBe(true);
+    expect(t.sawPromptCompleted).toBe(false);
+    expect(t.turnFailed).toBe(false);
+  });
+
+  it("ignores a terminal broadcast that arrives before our turn.started (previous turn's)", () => {
+    const t = new EventTranslator();
+    t.translate(ev("state.updated", { reason: "prompt_completed" }));
+    expect(t.sawPromptCompleted).toBe(false);
+  });
+
+  it("ignores a terminal broadcast once the terminal event already landed", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
+    t.translate(ev("state.updated", { reason: "prompt_completed" }));
+    expect(t.sawPromptCompleted).toBe(false);
+  });
+
+  it("still forwards the settings patch alongside the terminal reason", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    const out = t.translate(
+      ev("state.updated", {
+        reason: "prompt_completed",
+        patch: { model: { current: { providerId: "p", modelId: "m" } } },
+      }),
+    );
+    expect(out).toEqual([{ kind: "ConfigChanged", model: { providerId: "p", modelId: "m" } }]);
+  });
+});

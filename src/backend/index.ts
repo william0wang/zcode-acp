@@ -2,7 +2,7 @@
 
 export { ZcodeBackend, type ServerRequest, type EventListener } from "./client.js";
 export { EventStreamListener, TurnMonitor, type NextId } from "./listener.js";
-export { resolveZcodeCommand, builtinProviderEnv } from "./resolve.js";
+export { resolveZcodeCommand, builtinProviderEnv, zcodeDataBaseDirEnv } from "./resolve.js";
 export { loadZcodeCredentials, mergeEnvWithCreds, type ZcodeCredentials } from "./credentials.js";
 export {
   SANDBOX_ENV,

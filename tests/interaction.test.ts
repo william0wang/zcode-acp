@@ -228,6 +228,66 @@ describe("ACP response → zcode permission", () => {
       acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "deny" } }).decision,
     ).toBe("deny");
   });
+
+  // The backend's options each carry the authoritative response object
+  // (zcodePermissionOptionSchema, zcode-protocol/index.ts:589-597): "Always
+  // allow in this project" ships permissionUpdates the runtime persists
+  // (core/src/tool/executor/permission-flow.ts:359-366), and deny ships the
+  // normalized STOP reason (bootstrap/src/permission-options.ts:75-99).
+  // Echoing the selected option's response verbatim is what the desktop host
+  // does (interaction-broker.ts:70-124) — synthesizing {decision:"allow"}
+  // instead degraded "always allow" to a one-shot allow.
+  it("echoes the selected option's response verbatim (permissionUpdates + reason)", () => {
+    const options = [
+      {
+        optionId: "allow_once",
+        kind: "allow_once",
+        name: "Allow once",
+        response: { decision: "allow" },
+      },
+      {
+        optionId: "allow_project",
+        kind: "allow_always",
+        name: "Always allow in this project",
+        response: {
+          decision: "allow",
+          reason: "Approved for this project",
+          permissionUpdates: [
+            { type: "addRules", behavior: "allow", rules: [{ toolName: "Bash" }] },
+          ],
+        },
+      },
+      {
+        optionId: "deny",
+        kind: "deny",
+        name: "Deny",
+        response: { decision: "deny", reason: "PERMISSION_DENIED_BY_USER" },
+      },
+    ];
+    expect(
+      acpPermissionResponseToZcode(
+        { outcome: { outcome: "selected", optionId: "allow_project" } },
+        options,
+      ),
+    ).toEqual({
+      decision: "allow",
+      reason: "Approved for this project",
+      permissionUpdates: [{ type: "addRules", behavior: "allow", rules: [{ toolName: "Bash" }] }],
+    });
+    // Deny's normalized reason rides along too.
+    expect(
+      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "deny" } }, options),
+    ).toEqual({ decision: "deny", reason: "PERMISSION_DENIED_BY_USER" });
+  });
+
+  it("falls back to the allow-id set when the option carries no response (older builds)", () => {
+    expect(
+      acpPermissionResponseToZcode(
+        { outcome: { outcome: "selected", optionId: "allow_project" } },
+        [{ optionId: "allow_project", kind: "allow_always", name: "Always allow" }],
+      ),
+    ).toEqual({ decision: "allow" });
+  });
 });
 
 describe("ExitPlanMode", () => {

@@ -14,6 +14,7 @@ import {
   loadZcodeCredentials,
   mergeEnvWithCreds,
   resolveZcodeCommand,
+  zcodeDataBaseDirEnv,
   ZcodeBackend,
 } from "./backend/index.js";
 import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
@@ -486,7 +487,13 @@ export class ZcodeAcpServer {
     if (this.backend && !this.backend.isDead) return this.backend;
     // builtinProviderEnv injects the CLI's built-in provider table the way the
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
-    const env = { ...mergeEnvWithCreds(loadZcodeCredentials()), ...builtinProviderEnv() };
+    // zcodeDataBaseDirEnv translates the bridge's ZCODE_HOME into the CLI's
+    // own ZCODE_DATA_BASE_DIR spelling so both sides read the same data tree.
+    const env = {
+      ...mergeEnvWithCreds(loadZcodeCredentials()),
+      ...builtinProviderEnv(),
+      ...zcodeDataBaseDirEnv(),
+    };
     let argv = resolveZcodeCommand();
     this.backendSandboxed = sandboxActive(this.sandboxRoots());
     if (this.backendSandboxed) {

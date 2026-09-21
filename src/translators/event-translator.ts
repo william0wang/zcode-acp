@@ -70,6 +70,24 @@ export class EventTranslator {
    */
   turnCacheStats: TurnCacheStats | null = null;
   /**
+   * The protocol layer's authoritative terminal broadcast for a session/send
+   * turn: `state.updated {reason:"prompt_completed"}` from
+   * runPromptTurnInBackground's finally (server-operations.ts:2469), and
+   * `"prompt_failed"` when the turn threw (:2445). Unlike `turn.completed` it
+   * is emitted by the protocol layer, so it survives a deaf event stream — the
+   * turn loop consults these flags in its stall branch to end a
+   * lost-terminal turn in seconds instead of waiting out STALE_FREEZE_MS
+   * (10 min).
+   *
+   * Deliberately NOT a primary terminal: the notification carries no turnId,
+   * and a prompt accepted during the previous turn's post-clear snapshot build
+   * (`afterStateMutation` awaits real I/O before emitting) could deliver a
+   * stale one to the next turn's translator. Only set after OUR
+   * `turn.started`, and only acted on after 15s of stream silence.
+   */
+  sawPromptCompleted = false;
+  sawPromptFailed = false;
+  /**
    * True while inside a background-task notification turn
    * (`turn.started {inputSource:"background_task"}`). Set on its turn.started,
    * cleared on the next user-initiated turn.started. While true, `translate`
@@ -223,6 +241,18 @@ export class EventTranslator {
       // mid-turn). The backend notification carries the authoritative full
       // settings patch — forward the new values so the editor UI follows the
       // switch immediately instead of at the next turn's completion.
+      const reason = payload["reason"];
+      if (
+        (reason === "prompt_completed" || reason === "prompt_failed") &&
+        this.turnStarted &&
+        !this.turnDone
+      ) {
+        // Authoritative terminal broadcast for OUR turn (see the field
+        // docstrings for why this is not a primary terminal).
+        if (reason === "prompt_failed") this.sawPromptFailed = true;
+        else this.sawPromptCompleted = true;
+        log(`  [event] state.updated (${reason}) → terminal broadcast recorded`);
+      }
       results.push(...this.translateStateUpdated(payload));
     }
     return results;

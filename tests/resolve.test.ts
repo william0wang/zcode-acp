@@ -14,6 +14,8 @@
  * sqlite-capable.
  */
 
+import path from "node:path";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import { resolveZcodeCommand } from "../src/backend/resolve.js";
@@ -127,5 +129,42 @@ describe("resolveZcodeCommand disallowed tools", () => {
     const argv = resolveZcodeCommand();
     expect(argv.slice(-2)).toEqual(["--disallowed-tools", `Bash Write ${CRON_DEFAULTS}`]);
     expect(argv.indexOf("/nonexistent/zcode.cjs")).toBeLessThan(argv.indexOf("app-server"));
+  });
+});
+
+describe("zcodeDataBaseDirEnv (ZCODE_HOME → ZCODE_DATA_BASE_DIR)", () => {
+  // The bridge reads the data tree through ZCODE_HOME (it replaces ~/.zcode
+  // outright), but the backend's contract is ZCODE_DATA_BASE_DIR — the PARENT
+  // of .zcode (packages/services/src/paths.ts:11,33-45). Without the
+  // translation both sides read different trees (split-brain discovery).
+  const savedHome = process.env.ZCODE_HOME;
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.ZCODE_HOME;
+    else process.env.ZCODE_HOME = savedHome;
+  });
+
+  it("derives the parent directory of the isolated data root", async () => {
+    const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
+    process.env.ZCODE_HOME = "/tmp/isolated-zcode-home";
+    // ZCODE_HOME replaces ~/.zcode OUTRIGHT, and the backend's contract is the
+    // PARENT of .zcode — so the translation is a plain dirname.
+    expect(zcodeDataBaseDirEnv()).toEqual({
+      ZCODE_DATA_BASE_DIR: path.dirname("/tmp/isolated-zcode-home"),
+    });
+  });
+
+  it("resolves a relative ZCODE_HOME against the cwd", async () => {
+    const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
+    process.env.ZCODE_HOME = "rel-home";
+    expect(zcodeDataBaseDirEnv()).toEqual({
+      ZCODE_DATA_BASE_DIR: path.dirname(path.resolve("rel-home")),
+    });
+  });
+
+  it("returns {} when ZCODE_HOME is unset (ambient ZCODE_DATA_BASE_DIR passes through)", async () => {
+    const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
+    delete process.env.ZCODE_HOME;
+    expect(zcodeDataBaseDirEnv()).toEqual({});
   });
 });

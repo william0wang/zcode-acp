@@ -128,32 +128,25 @@ function knownCommandSet(): Set<string> {
   return knownCommands;
 }
 
-/** Whether `cmd` (already lowercased, no leading slash) is a real command. */
-function isKnownCommand(cmd: string): boolean {
-  // $-prefixed names are discovered Skills (e.g. /$tdd) — always passthrough.
-  return cmd.startsWith("$") || knownCommandSet().has(cmd);
-}
-
 /**
- * Neutralise slash-command resolution for prompts that are NOT real commands.
+ * Wire text for `/`-leading prompts. Identity on 0.16.9 — see below.
  *
- * The backend parses any prompt whose trimmed text starts with `/` as a
- * command invocation (`name + args`), and an unresolvable name can fail the
- * whole turn. This helper decides the wire text for `/`-leading prompts:
- *   - known command → returned unchanged (the backend resolves it);
- *   - anything else (e.g. a pasted path `/Users/me/proj`) → prefixed with a
- *     zero-width space. U+200B survives the backend's trim(), so the
- * `^\/` command parse can never match, while the model sees the prompt
- *     verbatim (ZWSP is invisible and tokenizes as nothing).
+ * This used to prefix unknown `/x` prompts with a zero-width space, on the
+ * reverse-engineered belief that the backend hard-fails a turn whose prompt
+ * fails command resolution. The open-sourced runtime disproves that: command
+ * parsing recognizes ONLY /compact, /fork, /rewind
+ * (core/src/runtime/methods/turn.ts:105-106,240-267), and every other name
+ * returns undefined from resolveZCodeCustomCommandPrompt — the input facade
+ * then passes the ORIGINAL text to the model as a normal prompt, with no
+ * half-expansion and no turn failure (bootstrap/src/custom-command-prompt.ts:31-44,
+ * comment at :39-41). The ZWSP injection therefore only corrupted session
+ * history and model input.
  *
- * Non-slash prompts pass through unchanged.
+ * Kept as the single seam where a legacy-build guard would live if a build
+ * that DOES hard-fail unknown commands ever needs supporting again.
  */
 export function neutralizeSlashText(text: string): string {
-  const stripped = text.trimStart();
-  if (!stripped.startsWith("/")) return text;
-  const parts = stripped.slice(1).split(/\s(.*)/s);
-  const cmd = (parts[0] ?? "").toLowerCase();
-  return isKnownCommand(cmd) ? text : `\u200B${text}`;
+  return text;
 }
 
 /**
@@ -502,8 +495,8 @@ export async function handleSlashCommand(
         if (knownCommandSet().has(cmd)) return null;
         // Unknown /x (not advertised, not a built-in — e.g. a pasted directory
         // path): NOT a command. Return null for the normal turn loop; the
-        // caller runs the prompt through neutralizeSlashText() so the backend
-        // never attempts command resolution on it.
+        // backend itself passes unresolvable /x through as a normal prompt
+        // (custom-command-prompt.ts:31-44), so no text rewriting is needed.
         return null;
     }
   } catch (e) {
