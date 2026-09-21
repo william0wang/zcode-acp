@@ -3213,6 +3213,74 @@ export async function runEventTurn(
   let thinkingHintSent = false;
   const THINKING_HINT_DELAY_MS = 1200;
 
+  // Sub-agent visibility (session/subagents RPC, 0.16.9): the model can run
+  // sub-agents for minutes behind a silent stream — the watermark keeps
+  // moving but the editor shows nothing. Piggyback on the stall-reconcile
+  // cadence (it fires exactly in those quiet phases) to poll the backend's
+  // sub-agent roster and surface CHANGES as one-line text updates, plus a
+  // one-shot terminal summary when the roster drains. Best-effort: probe
+  // failures (old backends answer -32601) are silent and never affect the
+  // turn.
+  let lastSubagentLine = "";
+  let subagentEndedBaseline: number | null = null;
+  let subagentEndedLineSent = false;
+  const turnEpoch = Date.now();
+  const pollSubagentsOnce = async (): Promise<void> => {
+    if (turn.cancelled) return;
+    let result: unknown;
+    try {
+      const resp = await backend.request(
+        server.nextId(),
+        "session/subagents",
+        { sessionId: turn.zcodeSid },
+        8000,
+      );
+      if (resp.error || resp.result === undefined) return;
+      result = resp.result;
+    } catch {
+      return;
+    }
+    const roster = result as {
+      running?: Array<{ status?: string }>;
+      ended?: { total?: number; items?: Array<{ status?: string; endedAt?: number }> };
+    };
+    const running = Array.isArray(roster.running) ? roster.running : [];
+    const endedTotal = typeof roster.ended?.total === "number" ? roster.ended.total : 0;
+    if (subagentEndedBaseline === null) subagentEndedBaseline = endedTotal;
+    if (running.length > 0) {
+      const count = (status: string) => running.filter((a) => a.status === status).length;
+      const line = messages().subagentStatusLine(
+        count("running"),
+        count("waiting"),
+        count("blocked"),
+      );
+      if (line !== lastSubagentLine) {
+        lastSubagentLine = line;
+        await sendTextChunk(cx, acpSid, line, randomUUID());
+      }
+    } else if (lastSubagentLine !== "") {
+      lastSubagentLine = "";
+      const endedDuringTurn = (roster.ended?.items ?? []).filter(
+        (item) => typeof item.endedAt === "number" && item.endedAt >= turnEpoch - 5_000,
+      );
+      if (
+        !subagentEndedLineSent &&
+        subagentEndedBaseline !== null &&
+        endedTotal > subagentEndedBaseline
+      ) {
+        subagentEndedLineSent = true;
+        const failed = endedDuringTurn.filter((item) => item.status === "failed").length;
+        const cancelled = endedDuringTurn.filter((item) => item.status === "cancelled").length;
+        await sendTextChunk(
+          cx,
+          acpSid,
+          messages().subagentEndedLine(endedTotal - subagentEndedBaseline, failed, cancelled),
+          randomUUID(),
+        );
+      }
+    }
+  };
+
   const recordProtocolProgress = (): void => {
     lastProtocolProgressAt = Date.now();
     nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
@@ -3407,6 +3475,7 @@ export async function runEventTurn(
         const proj = await monitor.pollOnce();
         noteWatermark(proj);
         await forwardAuthoritativeProgress();
+        await pollSubagentsOnce();
         if (proj?.status === "idle") {
           // A single idle probe can also fire mid-work: the backend is silent
           // during the model's thinking/connection phase and may report idle

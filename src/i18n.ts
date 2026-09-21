@@ -112,6 +112,10 @@ export interface Messages {
   goalBackendRecovered: string;
   /** Prompt queued behind a still-generating turn (drain gate). */
   promptQueuedBehindTurn: string;
+  /** Live sub-agent roster line during silent phases (session/subagents). */
+  subagentStatusLine: (running: number, waiting: number, blocked: number) => string;
+  /** One-shot terminal summary for sub-agents that ended during the turn. */
+  subagentEndedLine: (ended: number, failed: number, cancelled: number) => string;
   thinkingPlaceholder: string;
   /** Steered prompt silently swallowed by the still-running turn. */
   messageSwallowedByTurn: string;
@@ -191,6 +195,13 @@ export interface Messages {
   mcpFromConfig: string;
   mcpFromPlugins: string;
   mcpFooter: string;
+  /** `/mcp` live health panel (backend mcp/list mode:"status"). */
+  mcpHealthHeader: (count: number) => string;
+  mcpHealthTools: (count: number) => string;
+  /** Turn-end status line (`turn.completed` resultType + cacheStats). */
+  turnCompleted: string;
+  turnCompletedCache: (cached: number, total: number, cacheRead?: string) => string;
+  turnStoppedEarly: (resultType: string) => string;
   /** Editor slash-command menu: localized descriptions for the static
    *  commands (names and argument hints stay as-is — they are tokens). */
   slashCommandDescriptions: Record<string, string>;
@@ -261,6 +272,10 @@ const zh: Messages = {
     `[后端进程异常中断，已重启并恢复会话，自动继续刚才的任务 (${attempt}/${total})…]`,
   goalBackendRecovered: "[后端进程异常中断，auto 任务已自动恢复并继续…]",
   promptQueuedBehindTurn: "[上一个回复仍在生成，等待结束后发送…]",
+  subagentStatusLine: (running, waiting, blocked) =>
+    `[子代理] ${running} 运行中${waiting ? ` · ${waiting} 等待` : ""}${blocked ? ` · ${blocked} 阻塞` : ""}`,
+  subagentEndedLine: (ended, failed, cancelled) =>
+    `[子代理完成] ${ended} 个结束${failed ? ` · ${failed} 失败` : ""}${cancelled ? ` · ${cancelled} 取消` : ""}`,
   thinkingPlaceholder: "正在思考…",
   messageSwallowedByTurn: "[消息被并入仍在生成的回合，将被丢弃，请重新发送]",
   interactionInterrupted: "交互中断：连接关闭或超时，请重新发起对话。",
@@ -322,6 +337,12 @@ const zh: Messages = {
   mcpFromConfig: "来自 config.json:",
   mcpFromPlugins: "来自插件:",
   mcpFooter: "MCP 工具会在需要时由模型自动调用。",
+  mcpHealthHeader: (n) => `📡 MCP 服务器 (${n}) · 后端状态`,
+  mcpHealthTools: (n) => `${n} 个工具`,
+  turnCompleted: "✓ 已完成",
+  turnCompletedCache: (c, t, r) =>
+    `✓ 已完成 · 缓存 ${c}/${t} 条消息${r ? ` · ${r} 缓存读取 token` : ""}`,
+  turnStoppedEarly: (rt) => `⚠ 提前结束：${rt}`,
   slashCommandDescriptions: {
     auto: "自治目标循环：开始、查看、暂停、恢复、停止",
     compact: "压缩对话上下文（释放 token）",
@@ -394,6 +415,10 @@ const en: Messages = {
   goalBackendRecovered:
     "[Backend process was interrupted; the auto task recovered automatically and is continuing…]",
   promptQueuedBehindTurn: "[The previous reply is still generating; sending once it finishes…]",
+  subagentStatusLine: (running, waiting, blocked) =>
+    `[subagents] ${running} running${waiting ? ` · ${waiting} waiting` : ""}${blocked ? ` · ${blocked} blocked` : ""}`,
+  subagentEndedLine: (ended, failed, cancelled) =>
+    `[subagents finished] ${ended} ended${failed ? ` · ${failed} failed` : ""}${cancelled ? ` · ${cancelled} cancelled` : ""}`,
   thinkingPlaceholder: "Thinking…",
   messageSwallowedByTurn:
     "[The message was merged into a still-generating turn and will be dropped; please resend it.]",
@@ -462,6 +487,12 @@ const en: Messages = {
   mcpFromConfig: "From config.json:",
   mcpFromPlugins: "From plugins:",
   mcpFooter: "MCP tools are auto-invoked by the model when needed.",
+  mcpHealthHeader: (n) => `📡 MCP Servers (${n}) · backend status`,
+  mcpHealthTools: (n) => `${n} tools`,
+  turnCompleted: "✓ completed",
+  turnCompletedCache: (c, t, r) =>
+    `✓ completed · cache ${c}/${t} messages${r ? ` · ${r} cache-read tokens` : ""}`,
+  turnStoppedEarly: (rt) => `⚠ stopped early: ${rt}`,
   slashCommandDescriptions: {
     auto: "Autonomous goal loop: start, status, pause, resume, stop",
     compact: "Compress conversation context (free up tokens)",
