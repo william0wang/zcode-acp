@@ -285,7 +285,7 @@ Thanks to everyone who has contributed (updated automatically from the
 <a href="https://github.com/william0wang/zcode-acp/graphs/contributors">
   <!-- release-please re-stamps &v= on every release: the new URL busts the
        contrib.rocks and GitHub camo image caches. -->
-  <img src="https://contrib.rocks/image?repo=william0wang/zcode-acp&v=0.46.1" alt="Contributors" /> <!-- x-release-please-version -->
+  <img src="https://contrib.rocks/image?repo=william0wang/zcode-acp&v=0.46.2" alt="Contributors" /> <!-- x-release-please-version -->
 </a>
 
 ## Related Projects

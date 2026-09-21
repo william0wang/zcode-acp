@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.2](https://github.com/william0wang/zcode-acp/compare/v0.46.1...v0.46.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* replay targeting + model-choice hardening ([#225](https://github.com/william0wang/zcode-acp/issues/225)) ([f7628eb](https://github.com/william0wang/zcode-acp/commit/f7628eb77dfe1b73b851ecb560c8904251094cc5))
+
 ## [0.46.1](https://github.com/william0wang/zcode-acp/compare/v0.46.0...v0.46.1) (2026-09-21)
 
 
