@@ -24,9 +24,16 @@
  *
  * XDG_CONFIG_HOME is DELETED for the same reason as HOME is redirected: the
  * user config loader (~/.config/zcode-acp/config.json) prefers it, so a
- * developer with it exported (Linux desktops, dotfile shells) would point
- * the suite's file-config reads at their real config — e.g. a real
+ * developer with it exported (Linux desktops, dotfile shells) would point the
+ * suite's file-config reads at their real config — e.g. a real
  * `sandbox.enabled: true` would flip "sandbox stays off by default" tests.
+ *
+ * ZCODE_MODEL / ANTHROPIC_API_KEY are DELETED for the same reason: a vitest
+ * run started from inside a bridge session (ZCODE_PROVIDER/ZCODE_MODEL pin,
+ * key export) inherits them, and `mergeEnvWithCreds` deliberately lets the
+ * explicit env override the config — assertions on the merged child env then
+ * see the developer's pin instead of the fixture value (observed: the PR #215
+ * regression tests failing only inside bridge-run sessions).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -38,6 +45,8 @@ const home = mkdtempSync(path.join(tmpdir(), "zacp-test-home-"));
 process.env.HOME = home;
 delete process.env.ZCODE_HOME;
 delete process.env.XDG_CONFIG_HOME;
+delete process.env.ZCODE_MODEL;
+delete process.env.ANTHROPIC_API_KEY;
 delete process.env.ZCODE_ACP_REMOTE_ORIGIN;
 delete process.env.ZCODE_ACP_TUI_CLI_PID;
 

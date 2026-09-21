@@ -127,9 +127,8 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 该文件。
 
 刻意不进文件的是:进程态变量(`ZCODE_ACP_RESUME_SESSION`、
-`ZCODE_ACP_REMOTE_ORIGIN`、`ZCODE_ACP_REMOTE_PIN_CWD`、
-`ZCODE_ACP_TUI_CLI_PID`)和启动引导变量(`ZCODE_BIN`、`ZCODE_NODE`、
-`ZCODE_HOME`、`ZCODE_PROVIDER`、`ZCODE_MODEL`、`ZCODE_BASE_URL`、
+`ZCODE_ACP_REMOTE_ORIGIN`、`ZCODE_ACP_REMOTE_PIN_CWD`、`ZCODE_ACP_TUI_CLI_PID`)和启动引导变量(`ZCODE_BIN`、`ZCODE_NODE`、
+`ZCODE_HOME`、`ZCODE_PROVIDER`、`ZCODE_MODEL`、
 `ZCODE_DISALLOWED_TOOLS`)——前者承载单次运行状态,后者在任何配置可读
 之前就已解析。
 
@@ -143,7 +142,6 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_BIN`                        | `zcode`          | ZCode CLI 二进制文件路径或其 `.cjs` 入口                                                                                                                                                                                                                                            |
 | `ZCODE_NODE`                       | _（自动发现）_   | 显式指定运行 `ZCODE_BIN` 的 Node 二进制（必须支持 `node:sqlite`）                                                                                                                                                                                                                   |
 | `ZCODE_MODEL`                      | _（来自 config） | 覆盖当前使用的模型 id                                                                                                                                                                                                                                                               |
-| `ZCODE_BASE_URL`                   | _（来自 config） | 覆盖 provider 的 base URL。若检测到是切换套餐残留的旧地址会自动回退为 config 的 URL——但同时导出了 `ANTHROPIC_API_KEY` 时视为用户有意指定，不再回退。默认选择凭证来源时会跳过 enabled 但 `apiKey` 为空的 provider。                                                                                                                                                                                                                                                           |
 | `ZCODE_DISALLOWED_TOOLS`            | _（Cron 工具）_  | 以空格或逗号分隔的工具名，作为 `--disallowed-tools` 传给 app-server，并与内置默认值合并——默认禁用 `CronCreate CronList CronUpdate CronDelete`（桥接层无法应答后端的 `automation/*` 客户端请求，这些工具对模型可见但必然失败，见 #192）。 |
 | `ZCODE_ENABLE_AUTOMATION_TOOLS`     | _（未设置）      | 设为 `1` 取消对 Cron* 工具的默认禁用——仅对真正实现了后端 `automation/*` 端口的宿主有意义。 |
 | `ZCODE_ACP_AUTO_COMPACT_THRESHOLD` | _（未设置）      | 触发自动压缩的绝对 token 阈值。每次回合成功完成后（`end_turn`），若 `contextUsed >= 阈值`，服务端会自动调用 `session/compact` 压缩上下文，为下一个 prompt 腾出空间。设为 `0` 或不设置则禁用（默认）。例如 `240000` 表示上下文达 24 万 token 时触发压缩。压缩目标由 ZCode 后端决定。 |
