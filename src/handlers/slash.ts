@@ -265,13 +265,26 @@ export async function handleSlashCommand(
         return ok(formatMcpServers(loadMcpServers()));
       }
       case "compact": {
-        const result = (await compact(server, { sessionId: acpSid }, cx)) as {
+        // `/compact <focus…>` forwards the argument as compact instructions.
+        const result = (await compact(
+          server,
+          { sessionId: acpSid, instructions: arg || undefined },
+          cx,
+        )) as {
           __lockTimeout?: boolean;
+          __compactFailed?: boolean;
+          __alreadyRunning?: boolean;
         };
         if (result.__lockTimeout) {
           // 300s elapsed but the lock never released — the backend may still be
           // compacting; the next prompt will hit "a prompt is already running".
           return ok(messages().slashCompactTimeout);
+        }
+        if (result.__compactFailed) {
+          return ok(messages().slashCompactFailed);
+        }
+        if (result.__alreadyRunning) {
+          return ok(messages().slashCompactAlreadyRunning);
         }
         return ok(messages().slashCompacted);
       }

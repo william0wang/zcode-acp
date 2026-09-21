@@ -35,7 +35,6 @@ import {
   setMode,
   setModel,
   setThoughtLevel,
-  updateRuntimeModelConfig,
 } from "./handlers/extensions.js";
 import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadEarlier } from "./handlers/replay.js";
@@ -234,9 +233,9 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/setThoughtLevel", extParams, (ctx) =>
         setThoughtLevel(server, ctx.params, server.clients.broadcast()),
       )
-      .onRequest("session/updateRuntimeModelConfig", extParams, (ctx) =>
-        updateRuntimeModelConfig(server, ctx.params, server.clients.broadcast()),
-      )
+      // session/updateRuntimeModelConfig was removed 2026-09: the method is
+      // absent from the app-server 0.16.9 enum (every call answered -32601);
+      // setModel + applyModelSwitch cover the switch path on all builds.
       .onRequest("session/setModel", extParams, (ctx) =>
         setModel(server, ctx.params, server.clients.broadcast()),
       )

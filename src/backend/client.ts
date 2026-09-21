@@ -72,6 +72,17 @@ export class ZcodeBackend {
    * answer; returning false falls back to queueing (turn-loop handling).
    */
   providerRuntimeHeadersResponder?: (id: number, params: Record<string, unknown>) => boolean;
+  /**
+   * Arrival-time hook for compact terminal states. `session/compact` runs its
+   * internal turn in the background and NEVER reports failure on the RPC —
+   * the outcome only surfaces as a `state.updated` notification whose reason
+   * is one of `session_compacted` / `session_compact_cancelled` /
+   * `session_compact_failed` (source: server-operations.ts
+   * `runCompactTurnInBackground` → `afterStateMutation`). Wired by
+   * ZcodeAcpServer.ensureBackend to record per-session outcomes so compact()
+   * can report real failure instead of assuming success from the RPC ack.
+   */
+  onCompactOutcome?: (sessionId: string, reason: string) => void;
 
   constructor(argv: string[], env: NodeJS.ProcessEnv) {
     this.proc = spawn(argv[0]!, argv.slice(1), {
@@ -221,6 +232,10 @@ export class ZcodeBackend {
         //   { patch: {mode, model, thoughtLevel, …}, reason, revision, sessionId }
         // Wrap as a ZcodeEvent so it flows through the same listener pipeline.
         const params = (msg.params ?? {}) as Record<string, unknown>;
+        const reason = typeof params["reason"] === "string" ? params["reason"] : "";
+        if (reason.startsWith("session_compact_") && params["sessionId"] !== undefined) {
+          this.onCompactOutcome?.(String(params["sessionId"]), reason);
+        }
         const ev: ZcodeEvent = {
           sessionId: String(params.sessionId ?? ""),
           seq: 0,
@@ -228,6 +243,13 @@ export class ZcodeBackend {
           payload: params,
         };
         this.dispatchEvent(ev);
+      } else if (method === "interaction/providerRuntimeHeadersCancelled") {
+        // The backend aborted a pending runtime-headers refresh (turn cancel,
+        // 180s cap). Our responder answers at frame arrival, so the reply is
+        // already out and there is nothing to un-answer — acknowledge only.
+        log(
+          `provider runtime headers ask cancelled by backend: ${JSON.stringify(msg.params ?? {})}`,
+        );
       }
       // Other notifications are currently ignored (process/resourceSample, …).
     }

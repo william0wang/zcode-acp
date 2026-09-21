@@ -1,8 +1,8 @@
 /**
- * Extension settings-method broadcasts (setModel / setThoughtLevel / setMode /
- * updateRuntimeModelConfig): a switch from ANY attached client must refresh
- * every other client's dropdown — historically these handlers emitted nothing
- * (or initiator-only), leaving the CLI window stale after a phone-side switch.
+ * Extension settings-method broadcasts (setModel / setThoughtLevel / setMode):
+ * a switch from ANY attached client must refresh every other client's
+ * dropdown — historically these handlers emitted nothing (or initiator-only),
+ * leaving the CLI window stale after a phone-side switch.
  *
  * Handlers are invoked through the broadcast proxy exactly as index.ts wires
  * them, which also pins the no-double-delivery contract: the proxy's notify

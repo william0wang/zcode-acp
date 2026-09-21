@@ -2294,12 +2294,13 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string, turn: Pending
       `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
     );
   }
-  // The official stop path (this is what the desktop app's stop button uses —
-  // found in the app bundle): a v4 command that asks the runtime to stop the
-  // active foreground execution. session/stop alone is a no-op on the Aug-28
-  // app-server (its abort controller is never registered; backend log shows
-  // `hadActivePrompt: false`), while this kills the generation instantly —
-  // verified: turn.completed arrives the same instant the command lands.
+  // The official stop path (the desktop app's stop button sends exactly this):
+  // a v4 command that asks the runtime to stop the active foreground
+  // execution — it also holds the queue and pauses the active goal, reaching
+  // runtime-owned executions the bootstrap abort controller can miss. On
+  // 0.16.9 session/stop alone also works (the abort controller is registered
+  // at send-accept now — source: server-operations.ts sendPrompt), but the
+  // pair stays: belt and braces, and 0.16.5 builds need the v4 leg.
   // expectedForegroundExecutionId is passed when known — it is captured from
   // the turn's own turn.started, so it names the execution that is foreground
   // at cancel time, letting the backend guard against stopping a newer one.

@@ -233,6 +233,18 @@ describe("maybeAutoCompact", () => {
     expect(texts[1]).toContain("⚠ auto-compact timed out");
   });
 
+  it("reports failure when the backend swallowed a compaction failure (__compactFailed)", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockResolvedValueOnce({ __compactFailed: true });
+    const notifySpy = vi.fn().mockResolvedValue(undefined);
+    await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
+    const texts = chunkTexts(notifySpy);
+    expect(texts).toHaveLength(2);
+    expect(texts[1]).toContain("⚠ auto-compact failed");
+    expect(texts[1]).toContain("session_compact_failed");
+  });
+
   it("sends an error notification when compact throws", async () => {
     process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
     const { server } = makeServerWithProjection(150_000);

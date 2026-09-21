@@ -188,6 +188,14 @@ export class ZcodeAcpServer {
    */
   readonly autoCompactInFlight = new Set<string>();
   /**
+   * Last compact terminal state per backend session id, recorded from the
+   * backend's `state.updated` notification (reasons `session_compacted` /
+   * `session_compact_cancelled` / `session_compact_failed`) — the RPC ack
+   * alone cannot distinguish success from a swallowed background failure
+   * (see ZcodeBackend.onCompactOutcome).
+   */
+  readonly compactOutcomes = new Map<string, { reason: string; at: number }>();
+  /**
    * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
    * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
    * on the next backend respawn in ensureBackend().
@@ -476,6 +484,7 @@ export class ZcodeAcpServer {
     // settle bookkeeping from the previous instance is void.
     this.hydrationUnsettled.clear();
     this.hydrationWatermark.clear();
+    this.compactOutcomes.clear();
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the
@@ -508,6 +517,12 @@ export class ZcodeAcpServer {
         }
       });
       return true;
+    };
+    // Record compact terminal states (per-session) as they arrive — compact()
+    // reads the entry after its lock wait to detect failures the RPC never
+    // reports.
+    backend.onCompactOutcome = (sid, reason) => {
+      this.compactOutcomes.set(sid, { reason, at: Date.now() });
     };
     return backend;
   }

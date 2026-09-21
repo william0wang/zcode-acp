@@ -79,9 +79,14 @@ export async function maybeAutoCompact(
     // compact() handles: session/compact → waitForTurnIdle → emitInitialUsage.
     const result = (await compact(server, { sessionId: acpSid }, cx)) as {
       __lockTimeout?: boolean;
+      __compactFailed?: boolean;
     };
     if (result.__lockTimeout) {
       await sendTextChunk(cx, acpSid, m.autoCompactTimeout, msgId);
+    } else if (result.__compactFailed) {
+      // The backend swallowed the failure into a state.updated notification —
+      // without this check the user saw "✓ compressed" while nothing shrank.
+      await sendTextChunk(cx, acpSid, m.autoCompactFailed(m.autoCompactBackendFailed), msgId);
     } else {
       await sendTextChunk(cx, acpSid, m.autoCompactDone, msgId);
     }

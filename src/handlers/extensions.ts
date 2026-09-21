@@ -2,19 +2,22 @@
  * ZCode-specific session method handlers (non-standard ACP extensions).
  *
  * Thin passthroughs for the extended session/* methods (0.14.8+):
- * fork/goal/compact/cancelBackgroundTask +
- * 0.15.0+: setThoughtLevel/updateRuntimeModelConfig/setModel/setMode.
- * (rewind/rewindCascade/steer existed up to 0.15.x; app-server 0.16+ removed
- * them in favor of the v4 conversation API, so the bridge dropped them.)
+ * fork/goal/compact/cancelBackgroundTask + 0.15.0+: setThoughtLevel/setModel/
+ * setMode. (rewind/rewindCascade/steer existed up to 0.15.x; app-server 0.16+
+ * removed them in favor of the v4 conversation API, so the bridge dropped
+ * them. The bridge's own `session/updateRuntimeModelConfig` passthrough was
+ * removed 2026-09: the method is absent from the 0.16.9 enum — every call
+ * answered -32601 — and `applyModelSwitch` already speaks the modern
+ * `session/setModel` shape with a legacy fallback.)
  *
  * These share a near-identical shape (resolve sid → build params → forward →
  * check error). Only the genuine per-method differences are spelled out:
  * fork's new sid mapping, compact/goal(set)'s internal-turn lock wait, and
- * setModel rerouting through updateRuntimeModelConfig.
+ * setModel routing through applyModelSwitch.
  *
- * The settings methods (setModel/setThoughtLevel/setMode/updateRuntimeModel-
- * Config) emit the config_option_update broadcast afterwards: session settings
- * are per-SESSION, so a switch from any attached client must refresh the
+ * The settings methods (setModel/setThoughtLevel/setMode) emit the
+ * config_option_update broadcast afterwards: session settings are
+ * per-SESSION, so a switch from any attached client must refresh the
  * others (phone ↔ CLI window). They receive the broadcast-proxy cx, whose
  * notify already fans out to every connection.
  */
@@ -119,22 +122,50 @@ export async function compact(
 ): Promise<Result> {
   const acpSid = params.sessionId;
   const zcodeSid = await resolveSidOrThrow(server, params);
+  // `/compact <focus>` (or a direct ACP call) forwards the focus text as
+  // compact instructions (0.16.9 params: {sessionId, inputId?, instructions?,
+  // expectedRevision?}).
+  const zcParams: Record<string, unknown> = { sessionId: zcodeSid };
+  const instructions = typeof params.instructions === "string" ? params.instructions.trim() : "";
+  if (instructions) zcParams.instructions = instructions;
+  const startedAt = Date.now();
   const resp = await server
     .ensureBackend()
-    .request(server.nextId(), "session/compact", { sessionId: zcodeSid }, 30000);
+    .request(server.nextId(), "session/compact", zcParams, 30000);
   if (resp.error) throw new Error(`compact failed: ${resp.error.message}`);
+  const ack = ((resp.result ?? {}) as { compact?: { state?: string } }).compact?.state;
+  const alreadyRunning = ack === "already_running";
+  if (alreadyRunning) {
+    // Another compaction (e.g. started from the desktop app) is mid-flight;
+    // the same lock wait below settles when THAT run ends.
+    log("session/compact → already_running (another compaction is mid-flight)");
+  }
   // compact's internal AI turn (read history → LLM compress → write back) can
   // take minutes; expectLock=true avoids the startup-delay false-success window.
   // timeout is in MILLISECONDS (Date.now()-based), not seconds — Python's
   // timeout=300 becomes 300000. A bare 300 expires on the first probe sleep,
   // making compact return "✓" while the internal turn lock is still held.
   const released = await waitForTurnIdle(server, zcodeSid, 300_000, "session/goal", true);
-  if (released) {
+  // The RPC ack is "accepted", never whether the background turn SUCCEEDED —
+  // failures are swallowed into a state.updated notification (source:
+  // runCompactTurnInBackground → afterStateMutation). Read the recorded
+  // outcome; the lock wait can return a tick before the broadcast lands, so
+  // accept outcomes from shortly before our own RPC onward. Optional chaining:
+  // test harnesses build partial servers without this map.
+  const outcome = server.compactOutcomes?.get(zcodeSid);
+  const failed =
+    released === true &&
+    outcome !== undefined &&
+    outcome.at >= startedAt - 1500 &&
+    (outcome.reason === "session_compact_failed" || outcome.reason === "session_compact_cancelled");
+  if (failed) {
+    warn(`session/compact → backend reported ${outcome!.reason} (context NOT compressed)`);
+  } else if (released) {
     log("session/compact → ok (lock released)");
   } else {
     warn("session/compact → ⚠ lock wait timeout (backend may still be compacting)");
   }
-  if (released) {
+  if (released && !failed) {
     // Refresh usage so the UI reflects the reduced contextUsed post-compact.
     // Ensure a differ exists (compact may be the first action on a fresh session)
     // and sync its usage baseline so the next turn won't re-emit the same value.
@@ -145,10 +176,15 @@ export async function compact(
     }
     await emitInitialUsage(server, cx, acpSid, zcodeSid, differ);
   }
-  // Surface the lock-timeout to the slash-command path so it can warn the user
-  // (the ACP method path ignores this non-standard flag). Mirrors Python's
+  // Surface the outcomes to the slash-command path so it can tell the user
+  // (the ACP method path ignores these non-standard flags). Mirrors Python's
   // "⚠ 压缩超时" branch in _handle_slash_command.
-  return { ...((resp.result ?? {}) as Result), __lockTimeout: !released };
+  return {
+    ...((resp.result ?? {}) as Result),
+    __lockTimeout: !released,
+    __compactFailed: failed,
+    __alreadyRunning: alreadyRunning,
+  };
 }
 
 /** session/cancelBackgroundTask → zcode session/cancelBackgroundTask. */
@@ -201,29 +237,8 @@ export async function setThoughtLevel(
   return (resp.result ?? {}) as Result;
 }
 
-/** session/updateRuntimeModelConfig → same: runtime overlay of session model config. */
-export async function updateRuntimeModelConfig(
-  server: ZcodeAcpServer,
-  params: ExtensionParams,
-  cx: acp.AgentContext,
-): Promise<Result> {
-  const zcodeSid = await resolveSidOrThrow(server, params);
-  const runtimeModel = params.runtimeModel;
-  if (!runtimeModel) throw new Error("updateRuntimeModelConfig requires runtimeModel");
-  const zcParams: Record<string, unknown> = { sessionId: zcodeSid, runtimeModel };
-  if (params.applyModelSelection !== undefined)
-    zcParams.applyModelSelection = params.applyModelSelection;
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/updateRuntimeModelConfig", zcParams, 15000);
-  if (resp.error) throw new Error(`updateRuntimeModelConfig failed: ${resp.error.message}`);
-  log("session/updateRuntimeModelConfig → ok");
-  // Broadcast so the other attached clients' model context bar follows.
-  await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, "model");
-  return (resp.result ?? {}) as Result;
-}
-
-/** session/setModel → applyModelSwitch (runtime overlay, not persistence). */
+/** session/setModel → applyModelSwitch (modern session/setModel shape first,
+ * legacy overlay fallback for pre-3.12 builds). */
 export async function setModel(
   server: ZcodeAcpServer,
   params: ExtensionParams,
@@ -234,7 +249,7 @@ export async function setModel(
   if (!modelId) throw new Error("setModel requires modelId");
   const ok = await applyModelSwitch(server, zcodeSid, modelId);
   if (!ok) throw new Error("setModel failed (model switch rejected)");
-  log(`session/setModel → ${modelId} (updateRuntimeModelConfig)`);
+  log(`session/setModel → ${modelId} (applyModelSwitch)`);
   // Broadcast so the other attached clients' dropdowns follow the switch.
   await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, "model");
   return {};
@@ -314,7 +329,10 @@ export async function waitForTurnIdle(
       10000,
     );
     const errMsg = resp.error?.message ?? "";
-    if (errMsg.includes("prompt is running")) {
+    // 0.16.5 spelled the busy lock "…prompt is running…"; 0.16.9 says
+    // "A prompt is already running for this session" — match both (source:
+    // server-operations.ts sendPrompt's -32010).
+    if (errMsg.includes("prompt is running") || errMsg.includes("already running")) {
       log(
         `  [probe] #${probeCount} @${elapsed}s: LOCK HELD ("${errMsg.slice(0, 60)}") → lockSeen=true`,
       );

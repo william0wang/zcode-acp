@@ -134,6 +134,8 @@ export interface Messages {
   /** Ack for the boot-resume banner handshake (auto-submitted trigger). */
   bootResumeAck: string;
   slashCompactTimeout: string;
+  slashCompactFailed: string;
+  slashCompactAlreadyRunning: string;
   slashGoalSet: (value: string) => string;
   slashAutoSet: (value: string) => string;
   slashErrAutoArg: string;
@@ -197,6 +199,9 @@ export interface Messages {
   autoCompactTimeout: string;
   autoCompactDone: string;
   autoCompactFailed: (err: string) => string;
+  /** Fixed reason text for a backend-reported compaction failure (state.updated
+   *  session_compact_failed/cancelled) — fed into autoCompactFailed. */
+  autoCompactBackendFailed: string;
   /** Prompt rejection notice: a detached auto-compact is running, the message
    * was NOT sent — resend after the ✓ compressed line. */
   autoCompactBusy: string;
@@ -271,6 +276,8 @@ const zh: Messages = {
   slashCompacted: "✓ 已压缩对话上下文",
   bootResumeAck: "⟲ 已恢复会话 · 历史已回放",
   slashCompactTimeout: "⚠ 压缩超时（300s），后端可能仍在处理——稍等片刻再发送",
+  slashCompactFailed: "⚠ 压缩失败：后端未完成上下文压缩（详见日志）",
+  slashCompactAlreadyRunning: "⏳ 已有压缩正在进行——已等待其完成",
   slashGoalSet: (v) => `✓ 目标已设置：${v}`,
   slashAutoSet: (v) => `✓ auto loop：${v}`,
   slashErrAutoArg: "/auto 需要目标描述（或 status | pause | resume | stop）",
@@ -333,6 +340,7 @@ const zh: Messages = {
   autoCompactTimeout: "⚠ 自动压缩超时（300s）——后端可能仍在处理",
   autoCompactDone: "✓ 自动压缩: 上下文已压缩",
   autoCompactFailed: (err) => `⚠ 自动压缩失败: ${err}`,
+  autoCompactBackendFailed: "后端报告压缩失败（session_compact_failed）",
   autoCompactBusy: "🔄 自动压缩进行中，这条消息未发送；看到“✓ 自动压缩”提示后请重新发送。",
   autoCompactGoalWait: "⏳ 自动压缩进行中，auto 任务将在压缩结束后自动继续…",
   popupTitleExitPlan: "可以开始编码了吗？",
@@ -404,6 +412,8 @@ const en: Messages = {
   bootResumeAck: "⟲ session resumed — history replayed",
   slashCompactTimeout:
     "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
+  slashCompactFailed: "⚠ compaction failed: the backend did not compress the context (see logs)",
+  slashCompactAlreadyRunning: "⏳ a compaction was already running — waited for it to finish",
   slashGoalSet: (v) => `✓ goal set: ${v}`,
   slashAutoSet: (v) => `✓ auto loop: ${v}`,
   slashErrAutoArg: "/auto requires an objective (or status | pause | resume | stop)",
@@ -470,6 +480,7 @@ const en: Messages = {
   autoCompactTimeout: "⚠ auto-compact timed out (300s) — backend may still be processing",
   autoCompactDone: "✓ auto-compact: context compressed",
   autoCompactFailed: (err) => `⚠ auto-compact failed: ${err}`,
+  autoCompactBackendFailed: "backend reported compaction failed (session_compact_failed)",
   autoCompactBusy:
     '🔄 auto-compact in progress — this message was NOT sent; resend it after the "✓ auto-compact" notice.',
   autoCompactGoalWait:
