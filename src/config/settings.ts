@@ -70,6 +70,20 @@ export function debugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
+ * TUI stats-dock segment filter (martty's DSH_TUI_STATS vocabulary). The
+ * file value wins over the env var: the hub daemon that incubates TUI
+ * windows is long-lived and detached, so its birth env predates most shell
+ * exports — an env-only preference silently stops reaching every window the
+ * hub opens afterwards. Undefined = martty's default (full dock).
+ */
+export function tuiStatsSegments(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const file = loadUserConfig(env).tui?.stats;
+  if (file !== undefined) return file;
+  const raw = env.DSH_TUI_STATS;
+  return raw !== undefined ? raw : undefined;
+}
+
+/**
  * Explicit user-facing-string language override ("zh" | "en"); undefined
  * lets the caller's fallback chain (app locale → POSIX → en) decide.
  * Prefix-tolerant on both sources ("zh_CN" reads as "zh"), like the env-only

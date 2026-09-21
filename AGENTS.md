@@ -365,6 +365,25 @@ ZCode protocol types into ACP notifications directly — always translate.
   (prompt() keeps the broadcast cx); only replay-shaped dispatch is targeted.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **User-level TUI env does NOT reach hub-incubated windows by itself — two
+  gates, both must pass** (observed 2026-09-21: `DSH_TUI_STATS=tokens,context`
+  exported in the user's shell never filtered the composer dock in a
+  hub-incubated CLI window — every segment still rendered). Gate 1: the
+  terminal shell inherits launchd's environment, NOT the hub's and NOT the
+  user's interactive shell, so `terminalTuiScript` (hub-server.ts) re-exports
+  an allowlist — `ZCODE_ACP_*` plus `MARTTY_PASSTHROUGH_ENV`
+  (`DSH_TUI_AUTOPROMPT`, `DSH_TUI_STATS`); martty's INTERNAL vars
+  (`DSH_TUI_ATTACH_TOKEN`, `DSH_TUI_FORCE_TCP`) must never widen the list.
+  Gate 2: the hub is a detached daemon whose birth env predates most shell
+  exports, so the env value alone goes stale on every hub rebirth — the same
+  lesson as the terminal prefs. `incubateServe` therefore resolves the value
+  live per incubation through `tuiStatsSegments` (settings.ts: user config
+  `tui.stats` > `DSH_TUI_STATS` env), and `runTui` injects the same resolved
+  value into its martty spawn so a direct `zcode-acp` launch honors a
+  file-only setup. New user-facing martty env knobs must be added to
+  `MARTTY_PASSTHROUGH_ENV` AND resolved through a settings.ts accessor —
+  an env-only knob silently works from a shell and fails from every
+  hub-opened window.
 - **User remote prefs live in `~/.config/zcode-acp/config.json`, NOT env**:
   the hub is a detached daemon that idle-exits (~10 min) and is re-spawned by
   whichever bridge needs it next, so its birth env rotates between

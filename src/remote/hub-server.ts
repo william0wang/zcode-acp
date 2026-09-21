@@ -61,6 +61,7 @@ import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { sessionTabTitle } from "../terminal-title.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import type { TerminalPrefs } from "../config/user-config.js";
+import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
@@ -440,18 +441,32 @@ export function resolveTerminalLaunches(prefs: TerminalPrefs): TerminalLaunch[] 
 }
 
 /**
+ * Non-ZCODE_ACP_* env vars the incubation script re-exports into the
+ * terminal's fresh shell. `DSH_TUI_AUTOPROMPT` is bridge-injected (the
+ * boot-resume banner handshake); `DSH_TUI_STATS` is USER-set — martty's
+ * stats-view plugin reads it at process start to filter the composer dock
+ * (e.g. `DSH_TUI_STATS=tokens,context`). The terminal shell inherits
+ * launchd's environment, NOT the hub's or the user's interactive shell, so
+ * without this export a hub-incubated TUI window never sees the user's
+ * dock config and the dock renders every segment (statsSegments() reads
+ * undefined as "no filtering").
+ */
+const MARTTY_PASSTHROUGH_ENV = ["DSH_TUI_AUTOPROMPT", "DSH_TUI_STATS"] as const;
+
+/**
  * The .command script body. The incubation env MUST be embedded as exports:
  * the script runs in a fresh shell spawned by the terminal app, which
  * inherits launchd's environment — NOT the hub's — so without them the TUI
  * would boot as a plain local session and never register back (the
- * incubation would stall into its timeout). Everything ZCODE_ACP_* travels;
- * values are single-quoted.
+ * incubation would stall into its timeout). Everything ZCODE_ACP_* travels,
+ * plus the MARTTY_PASSTHROUGH_ENV allowlist; values are single-quoted.
  */
 export function terminalTuiScript(cwd: string, cliJs: string, env: NodeJS.ProcessEnv): string {
   const exports = Object.keys(env)
-    // DSH_TUI_AUTOPROMPT is the one non-ZCODE_ACP_* passenger: the boot-resume
-    // banner handshake (martty reads it at its own process start).
-    .filter((k) => k.startsWith("ZCODE_ACP_") || k === "DSH_TUI_AUTOPROMPT")
+    .filter(
+      (k) =>
+        k.startsWith("ZCODE_ACP_") || (MARTTY_PASSTHROUGH_ENV as readonly string[]).includes(k),
+    )
     .map((k) => `export ${k}=${shQuote(String(env[k]))}`);
   // Prefer bun --smol for the long-lived bridge (src/runtime.ts); the tokens
   // are quoted individually because the interpreter may carry flags.
@@ -1075,6 +1090,16 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // would SIGTERM that UNRELATED tree's process group on its last close.
     // The terminal script re-exports its own live $$ for real TUI spawns.
     delete env.ZCODE_ACP_TUI_CLI_PID;
+    // Martty dock filter (tui.stats in the user config, DSH_TUI_STATS as the
+    // env fallback). Resolved HERE, per incubation, from a live file read:
+    // this hub is a detached daemon whose birth env predates most shell
+    // exports, so an inherited DSH_TUI_STATS would go stale the moment the
+    // user edits the preference (or would be missing entirely on a hub that
+    // never saw it). terminalTuiScript exports it into the terminal's fresh
+    // shell — launchd's environment would otherwise drop it, and martty
+    // reads the variable once at its own process start.
+    const statsFilter = tuiStatsSegments(process.env);
+    if (statsFilter !== undefined) env.DSH_TUI_STATS = statsFilter;
     if (kind === "resume") {
       // ADR-0017: the requested session rides the env — terminalTuiScript
       // exports every ZCODE_ACP_* var into the terminal's fresh shell, so the

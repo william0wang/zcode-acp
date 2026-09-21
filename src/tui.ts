@@ -24,6 +24,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { resolveRuntime } from "./runtime.js";
+import { tuiStatsSegments } from "./config/settings.js";
 import { log, warn } from "./utils.js";
 
 /** Path to Martty's Node wrapper (bin/martty.js), or null when not installed. */
@@ -31,9 +32,7 @@ export function resolveMarttyJs(): string | null {
   try {
     // "./bin/martty.js" is outside Martty's exports map, so resolve the
     // package.json (always exported) and walk into the package dir.
-    const pkgJson = createRequire(import.meta.url).resolve(
-      "zcode-acp-martty/package.json",
-    );
+    const pkgJson = createRequire(import.meta.url).resolve("zcode-acp-martty/package.json");
     return path.join(path.dirname(pkgJson), "bin", "martty.js");
   } catch {
     return null;
@@ -78,8 +77,19 @@ export async function runTui(): Promise<void> {
     throw new Error("martty is not installed — reinstall the zcode-acp-server package");
   }
   seedMarttyQuotaPlugin();
+  // Martty's stats-view plugin reads DSH_TUI_STATS once at its process start
+  // to filter the composer dock. Resolve tui.stats (user config) over the
+  // inherited env so a file-only setup works on a direct launch too — the
+  // hub-incubated path injects the same value into its terminal script
+  // (hub-server.ts incubateServe).
+  const statsFilter = tuiStatsSegments(process.env);
+  const env =
+    statsFilter !== undefined && statsFilter !== process.env.DSH_TUI_STATS
+      ? { ...process.env, DSH_TUI_STATS: statsFilter }
+      : process.env;
   const child = spawn(process.execPath, [marttyJs, ...buildTuiArgs(agentEntryJs())], {
     stdio: "inherit",
+    env,
   });
   const code = await settle(child);
   if (code !== 0) process.exitCode = code ?? 1;

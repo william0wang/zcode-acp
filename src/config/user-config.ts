@@ -103,6 +103,20 @@ export interface InteractionUserConfig {
   timeoutMs?: number;
 }
 
+/** The `tui` section: Martty TUI presentation preferences. */
+export interface TuiUserConfig {
+  /**
+   * Composer-dock segment filter for the TUI's stats view (martty's
+   * `DSH_TUI_STATS` vocabulary): comma-separated segment ids in render
+   * order — `tokens`, `context`, `counts`, `cache`, `time`, `speed`.
+   * `all` spells the full dock out; `none`/`off`/empty hides every
+   * segment; unset keeps the full dock. File-configured so hub-incubated
+   * TUI windows (whose shell inherits launchd's env, not the user's
+   * shell) see the same dock as a direct `zcode-acp` launch.
+   */
+  stats?: string;
+}
+
 /** The `sandbox` section: global Seatbelt arming switch (per-project stays in sandbox.json). */
 export interface SandboxUserConfig {
   /** true = arm the sandbox globally (same as ZCODE_ACP_SANDBOX=1). */
@@ -121,6 +135,7 @@ export interface UserConfig {
   goal?: GoalUserConfig;
   interaction?: InteractionUserConfig;
   sandbox?: SandboxUserConfig;
+  tui?: TuiUserConfig;
 }
 
 /** Resolve the config file path: $XDG_CONFIG_HOME/zcode-acp or ~/.config/zcode-acp. */
@@ -268,6 +283,16 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     warn(
       `config: ${label}.enabled=${JSON.stringify(enabled)} in ${file} is not a boolean — ignoring`,
     );
+    return {};
+  });
+
+  // An empty string is a VALID value here (martty reads it as "hide every
+  // dock segment") — only non-strings are rejected.
+  result.tui = parseSection(parsed, "tui", file, (body, label) => {
+    const stats = body["stats"];
+    if (stats === undefined) return {};
+    if (typeof stats === "string") return { stats };
+    warn(`config: ${label}.stats=${JSON.stringify(stats)} in ${file} is not a string — ignoring`);
     return {};
   });
 

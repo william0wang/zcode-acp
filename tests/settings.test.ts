@@ -23,6 +23,7 @@ import {
   initialSessionMode,
   interactionTimeoutMs,
   languageOverride,
+  tuiStatsSegments,
 } from "../src/config/settings.js";
 
 let scratch: string;
@@ -168,5 +169,30 @@ describe("languageOverride", () => {
     expect(languageOverride(envOf({ ZCODE_ACP_LANG: "en" }))).toBe("zh");
     writeConfig({ lang: "fr" });
     expect(languageOverride(envOf({ ZCODE_ACP_LANG: "en" }))).toBe("en");
+  });
+});
+
+describe("tuiStatsSegments", () => {
+  it("undefined with no file and no env (martty renders the full dock)", () => {
+    expect(tuiStatsSegments(envOf())).toBeUndefined();
+  });
+
+  it("reads the env fallback (martty's own DSH_TUI_STATS vocabulary)", () => {
+    expect(tuiStatsSegments(envOf({ DSH_TUI_STATS: "tokens,context" }))).toBe("tokens,context");
+    // An empty string is a VALUE (hide every segment), not "absent".
+    expect(tuiStatsSegments(envOf({ DSH_TUI_STATS: "" }))).toBe("");
+  });
+
+  it("file tui.stats wins over env — the hub reads the file live per incubation", () => {
+    // The detached hub daemon's birth env predates most shell exports, so
+    // the file must win or an env-only preference goes stale for every
+    // window the hub opens afterwards.
+    writeConfig({ tui: { stats: "context,tokens" } });
+    expect(tuiStatsSegments(envOf({ DSH_TUI_STATS: "speed" }))).toBe("context,tokens");
+  });
+
+  it("a file empty string hides the dock even when env asks for segments", () => {
+    writeConfig({ tui: { stats: "" } });
+    expect(tuiStatsSegments(envOf({ DSH_TUI_STATS: "tokens" }))).toBe("");
   });
 });

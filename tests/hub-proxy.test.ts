@@ -6,7 +6,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -845,6 +845,22 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(body).not.toContain("DSH_IRRELEVANT");
   });
 
+  it("exports DSH_TUI_STATS so the incubated window honors the dock filter", () => {
+    // Regression (2026-09-21): the terminal shell inherits launchd's
+    // environment — NOT the hub's or the user's interactive shell — so a
+    // stats filter that is not embedded as an export never reaches martty's
+    // stats-view plugin, which then renders EVERY dock segment.
+    const body = terminalTuiScript(PROJECT, "/opt/cli.js", {
+      ZCODE_ACP_REMOTE: "1",
+      DSH_TUI_STATS: "tokens,context",
+      DSH_TUI_ATTACH_TOKEN: "internal",
+    });
+    expect(body).toContain("export DSH_TUI_STATS='tokens,context'");
+    // martty's INTERNAL transport vars are not user preferences — the
+    // allowlist must not widen to every DSH_TUI_* name.
+    expect(body).not.toContain("DSH_TUI_ATTACH_TOKEN");
+  });
+
   it("names the tab via OSC 0 when a title rides the incubation env", () => {
     // Terminals otherwise name the tab after the running process ("node");
     // the script emits OSC 0 before exec, and martty never sets a terminal
@@ -1043,6 +1059,29 @@ describe("hub terminal-TUI session create (session binding + slow-window fallbac
     const res = await pending;
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ id: "create-tui", reused: false });
+  });
+
+  it("injects the user's dock filter into the incubation env from the config file", async () => {
+    // The hub is a detached daemon whose birth env predates most shell
+    // exports; tui.stats is resolved live from the user config file per
+    // incubation so an edit reaches the next window without a hub restart.
+    const cfgDir = await mkdtemp(path.join(tmpdir(), "zacp-tui-stats-"));
+    track(cfgDir, (d) => rm(d, { recursive: true, force: true }));
+    await mkdir(path.join(cfgDir, "zcode-acp"), { recursive: true });
+    await writeFile(
+      path.join(cfgDir, "zcode-acp", "config.json"),
+      JSON.stringify({ tui: { stats: "tokens,context" } }),
+    );
+    vi.stubEnv("XDG_CONFIG_HOME", cfgDir);
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const pending = post(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.env.DSH_TUI_STATS).toBe("tokens,context");
+    await registerServeBridge(hub, "stats-tui", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    const res = await pending;
+    expect(res.status).toBe(200);
+    vi.unstubAllEnvs();
   });
 
   it("answers a slow-to-register create with the live serve bridge instead of a 502", async () => {

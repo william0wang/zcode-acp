@@ -148,6 +148,7 @@ describe("loadUserConfig", () => {
         goal: { maxTurns: 7, mode: "backend" },
         interaction: { timeoutMs: 0 },
         sandbox: { enabled: true },
+        tui: { stats: "tokens,context" },
       }),
     );
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
@@ -158,7 +159,15 @@ describe("loadUserConfig", () => {
       goal: { maxTurns: 7, mode: "backend" },
       interaction: { timeoutMs: 0 },
       sandbox: { enabled: true },
+      tui: { stats: "tokens,context" },
     });
+  });
+
+  it("accepts an empty tui.stats (hide the dock) but drops non-strings", () => {
+    writeConfig(JSON.stringify({ tui: { stats: "" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ tui: { stats: "" } });
+    writeConfig(JSON.stringify({ tui: { stats: 7 } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });
 
   it("drops every invalid behavior value, keeps valid siblings", () => {
