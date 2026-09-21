@@ -40,9 +40,10 @@ function subagentBackend(phases?: RosterPhase[]): {
   let contextUsed = 0;
   let phase = 0;
   const sendRequests = vi.fn();
+  const subagentsParams: Array<Record<string, unknown>> = [];
   const backend = {
     isDead: false,
-    request: async (_id: number, method: string) => {
+    request: async (_id: number, method: string, params?: Record<string, unknown>) => {
       switch (method) {
         case "workspace/updateProviderRegistry":
         case "session/resume":
@@ -61,6 +62,7 @@ function subagentBackend(phases?: RosterPhase[]): {
           };
         }
         case "session/subagents": {
+          if (params) subagentsParams.push(params);
           if (!phases) return { error: { code: -32601, message: "method not found" } };
           const current = phases[Math.min(phase, phases.length - 1)];
           return {
@@ -98,6 +100,7 @@ function subagentBackend(phases?: RosterPhase[]): {
       for (const listener of listeners) listener.handleEvent(event);
     },
     sendRequests,
+    subagentsParams,
     advancePhase: () => {
       phase += 1;
     },
@@ -204,6 +207,30 @@ describe("sub-agent status lines during silent phases", () => {
     ]);
 
     // The status channel never interferes with the turn itself.
+    control.emit({
+      sessionId: "zs_sa",
+      seq: 99,
+      type: "turn.completed",
+      payload: { resultType: "success" },
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(turn).resolves.toEqual({ stopReason: "end_turn" });
+  });
+
+  it("asks the backend for the full ended roster (endedLimit raises the 20-item cap)", async () => {
+    // The failed/cancelled breakdown derives from `ended.items`, which the
+    // backend caps at 20 by default — batches above that undercounted the
+    // summary line (the total via `ended.total` stayed exact). The schema
+    // allows up to 100 (zcode-protocol index.ts:1615).
+    const control = subagentBackend([{ running: [], ended: { total: 0, items: [] } }]);
+    const turn = prompt(setup(control.backend), params, cx, 3);
+    await waitForSend(control.sendRequests);
+
+    await vi.advanceTimersByTimeAsync(16_000); // silence → one reconcile probe
+
+    expect(control.subagentsParams.length).toBeGreaterThan(0);
+    expect(control.subagentsParams[0]).toMatchObject({ sessionId: "zs_sa", endedLimit: 100 });
+
     control.emit({
       sessionId: "zs_sa",
       seq: 99,

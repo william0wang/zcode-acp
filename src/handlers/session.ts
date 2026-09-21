@@ -1660,8 +1660,10 @@ export async function runOneTurn(
             // residue AFTER this turn's pre-send baseline. The drain gate
             // re-baselines after its wait; the fast path has no wait, so
             // re-baseline here or the completion diff replays that residue
-            // as this turn's output.
-            if (sendAttempt > 1) {
+            // as this turn's output. Same for a recent cancel whose drain
+            // gate was skipped (busy-reject backend): the cancelled turn's
+            // finalization can still land inside the subscribe round-trip.
+            if (sendAttempt > 1 || (cancelledRecently && !drainRan)) {
               differ.markSeen(await fetchMessages(server, zcodeSid));
             }
             // From this moment the turn may own a running generation —
@@ -3326,7 +3328,11 @@ export async function runEventTurn(
       const resp = await backend.request(
         server.nextId(),
         "session/subagents",
-        { sessionId: turn.zcodeSid },
+        // endedLimit raises the backend's default 20-item cap (schema max
+        // 100, source: zcode-protocol index.ts:1615) so the failed/cancelled
+        // breakdown stays exact for larger batches — `ended.total` was
+        // always exact, only the per-status counts were truncated.
+        { sessionId: turn.zcodeSid, endedLimit: 100 },
         8000,
       );
       if (resp.error || resp.result === undefined) return;
@@ -3350,7 +3356,14 @@ export async function runEventTurn(
       );
       if (line !== lastSubagentLine) {
         lastSubagentLine = line;
-        await sendTextChunk(cx, acpSid, line, randomUUID());
+        try {
+          await sendTextChunk(cx, acpSid, line, randomUUID());
+        } catch (e) {
+          // Best-effort like forwardAuthoritativeProgress: a rejecting cx
+          // (dead connection) must never kill the turn loop over a status
+          // courtesy.
+          warn(`subagent status line failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     } else if (lastSubagentLine !== "") {
       lastSubagentLine = "";
@@ -3365,12 +3378,16 @@ export async function runEventTurn(
         subagentEndedLineSent = true;
         const failed = endedDuringTurn.filter((item) => item.status === "failed").length;
         const cancelled = endedDuringTurn.filter((item) => item.status === "cancelled").length;
-        await sendTextChunk(
-          cx,
-          acpSid,
-          messages().subagentEndedLine(endedTotal - subagentEndedBaseline, failed, cancelled),
-          randomUUID(),
-        );
+        try {
+          await sendTextChunk(
+            cx,
+            acpSid,
+            messages().subagentEndedLine(endedTotal - subagentEndedBaseline, failed, cancelled),
+            randomUUID(),
+          );
+        } catch (e) {
+          warn(`subagent ended line failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
       }
     }
   };
