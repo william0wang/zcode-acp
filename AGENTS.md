@@ -7,6 +7,35 @@
 via JSON-RPC over stdio. Translates ACP protocol requests into ZCode session
 methods and streams events back as ACP `session/update` notifications.
 
+## ZCode upstream source (open-sourced 2026-09)
+
+ZCode went open source (Apache-2.0): a local checkout lives at
+`~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; downloaded at
+desktop 3.14.0 = app-server/`apps/zcode-cli` 0.16.9 — same version the bridge
+runs today). The agent runtime is under `apps/zcode-cli/packages/core/`;
+`packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
+probing or reverse-engineering the bundled CLI** — every "verified against
+app-server" note in Gotchas below predates it and now has an authoritative
+reference. Key map:
+
+- `packages/shared/src/zcode-protocol/index.ts` — the full RPC schema: method
+  enums, request/response zod shapes, server→client requests, event union
+  (this is what `zcode.cjs` minifies; `docs/BACKLOG.md` audits against it)
+- `packages/zcode-server-cli/` — the `zcode app-server` CLI (`src/cli.ts`,
+  `src/main.ts`, `src/server-core/`, `src/runtime/`)
+- `packages/server/` + `packages/services/` — session/turn/provider runtime
+- `packages/client/` — what the official client sends and expects
+- `packages/provider/` / `packages/provider-node/` — provider registry &
+  entitlement
+- `packages/desktop/` — the Electron host (provider env injection, TCC, v4)
+
+**On every backend version bump**: `git -C ~/Develop/NoBackup/ZCode pull` (or
+fetch the matching tag), re-read `packages/shared/src/zcode-protocol/index.ts`
+for schema drift, and diff the behaviors Gotchas depends on (stop, provider
+bootstrap, runtime headers, compact, setModel strictness) against the source
+instead of the binary. Update `docs/BACKLOG.md` and the Gotchas bullets from
+source evidence (`file:line`), not bundle probes.
+
 ## Commands
 
 | Task                        | Command                               |
@@ -135,8 +164,13 @@ ZCode protocol types into ACP notifications directly — always translate.
   makes the backend accept the push but silently ignore it; derive it from the
   SAME path `ensureBackend` injects (reading the ambient env first points at a
   version-keyed runtime copy and yields a rejected revision — that failure
-  mode is the trap). **Both env vars are load-bearing**: the CLI's provider
-  bootstrap uses the injected builtin path VERBATIM only when
+  mode is the trap). **Both env vars are load-bearing** — source-confirmed 2026-09-21 as the
+  CLI's own verbatim-use fast path (`provider-runtime-env.ts:58-66`; both
+  required together, `runtime-paths.ts:20-36`; revision = sha256 of the
+  PATH, `zcode-builtin-provider-config-source.ts:41,213`; mismatch silently
+  ignored, `registry-service.ts:205-213`; app-server has NO standalone
+  account mode — the bridge's host push is the only headless path): the
+  CLI's provider bootstrap uses the injected builtin path VERBATIM only when
   `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` is set alongside
   `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`; with the builtin alone it re-syncs the
   table into a version-keyed runtime copy (`~/.zcode/v2/runtime/provider/<plat>/<ver>/…`)
@@ -233,7 +267,12 @@ ZCode protocol types into ACP notifications directly — always translate.
   shrinks" was the unanswered runtime-headers ask (see the 3.12 bullet above)
   — 3.12+ `session/compact` submits `/compact` as a background prompt and
   swallows its failure into an event the bridge never saw; both layers are
-  now fixed. Invariants that must stay: single-flight per sid
+  now fixed. (Source 2026-09-21: the swallow target is a `state.updated`
+  broadcast with mutation reason `session_compacted` /
+  `session_compact_cancelled` / `session_compact_failed`,
+  `server-operations.ts:2082-2119` — real compact failure is now OBSERVABLE
+  on the v3 stream; wiring it into the bridge's success reporting is a
+  pending alignment item, see docs/BACKLOG.md.) Invariants that must stay: single-flight per sid
   (`server.autoCompactInFlight`), drain gate exempt while it runs, and a
   prompt landing in the compaction window is REJECTED outright — entry gate
   in runPrompt plus the busy-reject fallback in runOneTurn (notice asks the
@@ -359,37 +398,39 @@ ZCode protocol types into ACP notifications directly — always translate.
   shell HAS a controlling tty — writing there hijacks an unrelated terminal)
   and the `process.env.VITEST` no-op in `ttyTitleIo` (a local vitest run
   shares the developer's real terminal; titles would flash during tests).
-- **Aug-28 app-server build (still "0.16.5") ignores `session/stop`**: the
-  RPC returns `{}` but the model stream runs to its natural end (verified by
-  raw-backend probe; the backend's own log records `hadActivePrompt: false` —
-  the in-flight generation's abort controller is never registered). The
-  official desktop app never hits that path: its stop button sends a
-  `v4/command` RPC of type `stop` (`payload.expectedForegroundExecutionId`
-  optional), which asks the runtime to stop the active foreground execution
-  — found by grepping the app bundle. stopBackendTurn sends both: the
-  session/stop formality plus the v4 stop, which kills the generation
-  instantly (verified: `turn.completed` in 0.0s). Cancel is otherwise
-  bridge-side: the turn loop returns `stopReason: "cancelled"` on the flag,
-  and a send after a recent cancel settles the backend first (drain gate:
-  poll-until-idle, with a `session/close` escalation after a 5s grace if a
-  generation somehow survives both stops — a mid-generation send is accepted
-  as steer input and silently dropped when the old turn ends; the
-  `turn.steerQueued` event proves the swallow and the bridge reports it at
-  once instead of hanging). After a close-escalation reload the drain gate
+- **`session/stop` was IGNORED by the Aug-28 0.16.5 build; 0.16.9 FIXED it —
+  keep the dual stop anyway** (source 2026-09-21: `sendPrompt` now registers
+  `record.activeAbortController` synchronously at accept,
+  `server-operations.ts:1952`, and `stopSession` aborts it — the old
+  `hadActivePrompt: false` hole, where the RPC returned `{}` while the
+  stream ran to its natural end, is closed). The v4/command stop
+  (`payload.expectedForegroundExecutionId` optional — capture it from
+  `turn.started` to make ESC precise against a follow-up turn) remains
+  strictly stronger: it reaches the runtime-owned foreground execution,
+  holds the queue, and pauses the active goal
+  (`session-flow.ts:305-368`). stopBackendTurn sends both. Cancel is
+  otherwise bridge-side: the turn loop returns `stopReason: "cancelled"` on
+  the flag, and a send after a recent cancel settles the backend first
+  (drain gate: poll-until-idle, with a `session/close` escalation after a
+  5s grace if a generation somehow survives both stops — on 0.16.9 a
+  mid-turn send is REJECTED fast with -32010 "A prompt is already running"
+  for the whole turn window; the old 0.16.5 "accepted as steer input and
+  silently dropped" path is gone, though `turn.steerQueued` can still fire
+  from OTHER clients attaching to the same backend via v4 delivery). After a close-escalation reload the drain gate
   must resubscribe the event stream (the reload revives the session but not
   its push — the next turn would run deaf) and re-baseline the projection
   differ (the abandoned turn committed messages while waiting — a stale
   baseline replays that residue as the next reply).
-- **Prompt lock ≠ turn liveness** (raw-backend verified, Aug-28 app-server):
-  `session/goal show` succeeds mid-turn (never reports the 1308 lock), and a
-  probe `session/send` is ACCEPTED while the turn runs — it is queued as
-  steer input. The 1308 lock only exists during turn finalisation, so "lock
-  released" proves nothing about whether a turn is alive. Killing a silently
-  running turn on a lock probe murdered live sub-agent turns behind quiet
-  event streams (PR #85 did exactly this for a day). The honest liveness
-  signal is the `session/read` projection watermark
-  (contextUsed/totalTokenCount/turnCount/currentTurnId): a sub-agent turn
-  advances it for minutes with zero stream events. `runEventTurn` therefore
+- **Prompt lock ≠ turn liveness** — the conclusion holds, the old framing
+  does not (source 2026-09-21: the "1308 lock" does NOT exist in 0.16.9 —
+  1308 there is a GLM quota business code; the busy error is -32010 and its
+  window is the WHOLE turn, `server-operations.ts:1929-1936`; a mid-turn
+  `session/send` now fails fast instead of being queued as steer — steer is
+  a v4-only delivery mode). Lock-free probes still prove nothing: quiet
+  sub-agent streams advance the `session/read` projection watermark
+  (contextUsed/totalTokenCount/turnCount/currentTurnId) for minutes with
+  zero stream events — killing a silently running turn on a lock probe
+  murdered live sub-agent turns once (PR #85). `runEventTurn` therefore
   defers the terminal decision while the watermark moves and only ends a
   turn after the watermark has been frozen for STALE_FREEZE_MS (10 min) —
   reply-fetch first, bounded stop as the last resort.
