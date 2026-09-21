@@ -167,7 +167,13 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       })
       .onRequest("session/list", (ctx) => listSessions(server, ctx.params))
       .onRequest("session/resume", async (ctx) => {
-        const result = await resumeSession(server, ctx.params, server.clients.broadcast());
+        // Replays target the REQUESTING connection only (ctx.client, not the
+        // broadcast proxy): a replay is per-client rendering state, and
+        // fanning it out appends the whole history to every OTHER attached
+        // client's transcript at the bottom — the "replay disorder" report
+        // (editor + TUI + app sharing one bridge through the hub). Live turn
+        // updates keep fanning out via prompt()'s broadcast cx.
+        const result = await resumeSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
           sendAvailableCommandsDeferred(server.clients, sid, allCommands);
         }
@@ -178,7 +184,8 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
         return result;
       })
       .onRequest("session/load", async (ctx) => {
-        const result = await loadSession(server, ctx.params, server.clients.broadcast());
+        // Targeted replay — see the session/resume comment above.
+        const result = await loadSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
           sendAvailableCommandsDeferred(server.clients, sid, allCommands);
         }
@@ -188,12 +195,13 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       // Tail-replay pagination (non-standard; Proposal 0001) — params stay
       // top-level because the parser below is ours, unlike spec methods where
       // bridge extensions must ride in `_meta.zcode`.
+      // Targeted replay — see the session/resume comment above.
       .onRequest(
         "session/load_earlier",
         z
           .object({ sessionId: z.string(), before: z.string(), limit: z.number().optional() })
           .passthrough(),
-        (ctx) => loadEarlier(server, ctx.params, server.clients.broadcast()),
+        (ctx) => loadEarlier(server, ctx.params, ctx.client),
       )
       // Account-level plan quota for remote clients (non-standard; Proposal
       // 0002). Pull-only, no session required; errors carry the failure kind in
