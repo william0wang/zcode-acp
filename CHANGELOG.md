@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.4](https://github.com/william0wang/zcode-acp/compare/v0.46.3...v0.46.4) (2026-09-21)
+
+
+### Bug Fixes
+
+* remember slash model switches, target /resume replay, arbitrate choices across aliases ([#230](https://github.com/william0wang/zcode-acp/issues/230)) ([3fc37ab](https://github.com/william0wang/zcode-acp/commit/3fc37ab54eb6bb00015cd6954115ad7ad1a3de2e))
+
 ## [0.46.3](https://github.com/william0wang/zcode-acp/compare/v0.46.2...v0.46.3) (2026-09-21)
 
 
