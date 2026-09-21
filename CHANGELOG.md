@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.0](https://github.com/william0wang/zcode-acp/compare/v0.45.0...v0.46.0) (2026-09-21)
+
+
+### Features
+
+* drain-gate fast path, subagent status lines, turn stats, mcp health panel ([#221](https://github.com/william0wang/zcode-acp/issues/221)) ([6540ab7](https://github.com/william0wang/zcode-acp/commit/6540ab774788d7e3816b3478761e0b7bc5f5539c))
+
 ## [0.45.0](https://github.com/william0wang/zcode-acp/compare/v0.44.4...v0.45.0) (2026-09-21)
 
 
