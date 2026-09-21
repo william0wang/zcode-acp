@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.5](https://github.com/william0wang/zcode-acp/compare/v0.46.4...v0.46.5) (2026-09-21)
+
+
+### Bug Fixes
+
+* read turnId from the event envelope so turn attribution works on 0.16.9 ([#232](https://github.com/william0wang/zcode-acp/issues/232)) ([d4dcc3f](https://github.com/william0wang/zcode-acp/commit/d4dcc3f9465d45204d8db616c8028023d97118b6))
+
 ## [0.46.4](https://github.com/william0wang/zcode-acp/compare/v0.46.3...v0.46.4) (2026-09-21)
 
 
