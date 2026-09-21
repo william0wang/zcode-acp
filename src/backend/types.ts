@@ -104,6 +104,14 @@ export interface ZcodeEvent {
   seq: number;
   type: ZcodeEventType;
   payload: Record<string, unknown>;
+  /**
+   * Turn attribution — on the event ENVELOPE, not the payload (source:
+   * `zcodeEventEnvelopeSchema`, zcode-protocol index.ts:1029-1041; the
+   * `turn.*` payloads are `.strict()` and carry no turnId). A `session/event`
+   * frame's params ARE the envelope, so the field is present at runtime on
+   * every push even though the client only types the fields it consumed.
+   */
+  turnId?: string;
 }
 
 export interface ZcodeSubscribeResult {

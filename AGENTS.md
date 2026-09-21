@@ -494,6 +494,30 @@ ZCode protocol types into ACP notifications directly — always translate.
   zod: "Unrecognized key: jsonrpc", code -32600). The bridge's backend
   client never sends one — keep it that way when hand-probing
   `zcode app-server --stdio` (frames are bare `{id, method, params}`).
+- **`turnId` lives on the event ENVELOPE, never the payload** (source
+  2026-09-21: `zcodeEventEnvelopeSchema` carries `turnId?`,
+  `packages/shared/src/zcode-protocol/index.ts:1029-1041`, while
+  `turn.started` / `turn.completed` / `turn.failed` payloads are `.strict()`
+  and have NO turnId — index.ts:1166+, 1229+; the mapper only ever writes
+  the envelope, `bootstrap/src/zcode-protocol/session-mapper.ts:320-336`).
+  A `session/event` frame's params ARE the envelope, so the field arrives
+  on every push — but `ZcodeEvent` typed only `{sessionId, seq, type,
+payload}` for years and the translator read `payload["turnId"]`, which on
+  0.16.9 is always undefined: `activeTurnId` stayed null and the whole
+  foreign-turn attribution (`skippingForeignTurn` + the terminal-event
+  mismatch guard in event-translator.ts) was DEAD CODE. The failure it
+  cannot see: a control-only turn (`session/goal` set — appends its events
+  directly, bypassing the send-path serialization, so it can land mid-user-
+  turn) flipping `turnDone` and ending the user's turn with a half reply
+  while the backend keeps generating (the "ghost completed" the code already
+  claimed to fix). Same-family bug in `BackgroundTaskListener`
+  (background-tasks.ts): the notification turn's `activeNotifyTurnId` never
+  armed, so its text deltas were never forwarded and the
+  `notifyTurnActiveSince` busy window never opened. Reads are now
+  envelope-first with the payload spelling kept as a legacy fallback; the
+  unit tests used to put `turnId` in the payload (a shape production never
+  emits) — they now build the envelope form (fixed 2026-09-21). Any NEW
+  per-event attribution must read the envelope.
 - **SBPL (Seatbelt) resolves overlapping rules by LAST match, not by
   deny-priority** — an `allow` emitted after a `deny` re-permits the write
   (verified via scripts/verify-sandbox.sh; the deny-island test failed until

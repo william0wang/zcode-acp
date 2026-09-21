@@ -26,6 +26,12 @@ import type { InternalEvent, TurnCacheStats } from "./types.js";
 interface ZcodeEventPayload {
   type?: string;
   payload?: Record<string, unknown>;
+  /**
+   * Turn attribution from the event ENVELOPE (0.16.9 puts turnId there, not
+   * in the payload — see ZcodeEvent). The payload spelling remains as a
+   * fallback for builds that carried it inside.
+   */
+  turnId?: string;
 }
 
 /**
@@ -78,6 +84,10 @@ export class EventTranslator {
    * the user's turn while the backend kept generating (the "ghost completed"
    * remote-status bug). turnId-less backends keep the old behavior (both ids
    * must be present for a mismatch to drop an event).
+   *
+   * Read from the event ENVELOPE (`event.turnId`) — 0.16.9's turn.* payloads
+   * are strict and carry no turnId; a payload-only read silently nulled this
+   * and the whole attribution below was dead code (fixed 2026-09-21).
    */
   private activeTurnId: string | null = null;
   private skippingForeignTurn = false;
@@ -141,7 +151,9 @@ export class EventTranslator {
         return results;
       }
       this.skippingBackgroundTurn = false;
-      const turnId = (payload["turnId"] as string) ?? null;
+      // Envelope-first (0.16.9 shape); a payload-carried turnId stays valid
+      // for builds that spelled it that way.
+      const turnId = event.turnId ?? (payload["turnId"] as string) ?? null;
       if (!this.turnStarted) {
         this.activeTurnId = turnId;
         this.skippingForeignTurn = false;
@@ -161,7 +173,7 @@ export class EventTranslator {
       // land here and are intentionally NOT used to set turnDone.
       return results;
     } else if (etype === "turn.completed" || etype === "turn.failed") {
-      const evTurnId = (payload["turnId"] as string) ?? null;
+      const evTurnId = event.turnId ?? (payload["turnId"] as string) ?? null;
       if (this.skippingForeignTurn) {
         // A turn ended while a foreign (internal) turn was in flight. When it
         // provably belongs to the foreign turn, drop it and resume normal

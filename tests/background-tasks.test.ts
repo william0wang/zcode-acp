@@ -132,7 +132,7 @@ describe("BackgroundTaskListener", () => {
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
     // A notification turn starts.
     l.handleEvent(
-      zcodeEvent("turn.started", { inputSource: "background_task", turnId: "turn_bg1" }),
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg1" }),
     );
     await Promise.resolve();
     // The notification busy window opens with the turn.
@@ -161,7 +161,7 @@ describe("BackgroundTaskListener", () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
     l.handleEvent(
-      zcodeEvent("turn.started", { inputSource: "background_task", turnId: "turn_bg2" }),
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg2" }),
     );
     await Promise.resolve();
     expect(server.notifyTurnActiveSince.has("sess_test")).toBe(true);
@@ -177,14 +177,14 @@ describe("BackgroundTaskListener", () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
     // Task 1's notification turn.
-    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task", turnId: "t1" }));
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t1" }));
     await Promise.resolve();
     l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task1 result" }));
     await Promise.resolve();
     l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }));
     await Promise.resolve();
     // Task 2's notification turn (same session, same listener instance).
-    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task", turnId: "t2" }));
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t2" }));
     await Promise.resolve();
     l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task2 result" }));
     await Promise.resolve();
@@ -199,7 +199,9 @@ describe("BackgroundTaskListener", () => {
   it("does NOT forward a normal (non-background) turn's text_delta", async () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
-    l.handleEvent(zcodeEvent("turn.started", { inputSource: "user_prompt", turnId: "turn_user" }));
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "user_prompt" }, { turnId: "turn_user" }),
+    );
     await Promise.resolve();
     l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "user reply" }));
     await Promise.resolve();

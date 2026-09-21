@@ -138,7 +138,11 @@ export class BackgroundTaskListener implements EventListener {
       }
       if (event.type === "turn.started") {
         const inputSource = event.payload?.["inputSource"];
-        const turnId = (event.payload?.["turnId"] as string | undefined) ?? "";
+        // Envelope-first (0.16.9); the payload spelling is the legacy fallback.
+        const turnId =
+          (event.turnId as string | undefined) ??
+          (event.payload?.["turnId"] as string | undefined) ??
+          "";
         if (inputSource === "background_task") {
           this.activeNotifyTurnId = turnId || null;
           // Publish the window: the prompt path extends its send busy-retry

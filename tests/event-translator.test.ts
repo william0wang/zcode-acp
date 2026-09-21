@@ -12,11 +12,18 @@ import type { InternalEvent } from "../src/translators/types.js";
 function ev(
   type: string,
   payload: Record<string, unknown> = {},
+  /**
+   * turnId rides the event ENVELOPE in production (zcodeEventEnvelopeSchema,
+   * zcode-protocol index.ts:1029-1041) — the turn.* payloads are strict and
+   * carry no turnId. Pass it here, not inside the payload.
+   */
+  turnId?: string,
 ): {
   type: string;
+  turnId?: string;
   payload: Record<string, unknown>;
 } {
-  return { type, payload };
+  return turnId === undefined ? { type, payload } : { type, turnId, payload };
 }
 
 describe("EventTranslator", () => {
@@ -399,7 +406,7 @@ describe("EventTranslator background-task turn deferral", () => {
   it("skips every event of a background_task turn (defers to BackgroundTaskListener)", () => {
     const t = new EventTranslator();
     // A background notification turn starts.
-    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    t.translate(ev("turn.started", { inputSource: "background_task" }, "turn_bg"));
     // Its text deltas MUST NOT be emitted (else double-forwarded alongside the
     // bg listener) and MUST NOT set turnStarted.
     const out1 = t.translate(ev("model.streaming", { kind: "text_delta", delta: "bg result" }));
@@ -414,10 +421,10 @@ describe("EventTranslator background-task turn deferral", () => {
 
   it("resumes normal handling after the next user-initiated turn.started", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    t.translate(ev("turn.started", { inputSource: "background_task" }, "turn_bg"));
     t.translate(ev("model.streaming", { kind: "text_delta", delta: "bg" })); // dropped
     // A normal user turn starts → deferral cleared.
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    t.translate(ev("turn.started", {}, "turn_user"));
     expect(t.turnStarted).toBe(true);
     const out = t.translate(ev("model.streaming", { kind: "text_delta", delta: "user reply" }));
     expect(out).toEqual([{ kind: "TextDelta", text: "user reply" }]);
@@ -425,7 +432,7 @@ describe("EventTranslator background-task turn deferral", () => {
 
   it("ignores background_task tool.updated events inside the deferred turn", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { inputSource: "background_task", turnId: "turn_bg" }));
+    t.translate(ev("turn.started", { inputSource: "background_task" }, "turn_bg"));
     const out = t.translate(
       ev("tool.updated", { kind: "scheduled", toolCallId: "c1", toolName: "Read" }),
     );
@@ -520,35 +527,33 @@ describe("EventTranslator run_in_background flag threading", () => {
 describe("EventTranslator foreign internal-turn attribution", () => {
   it("ignores a goal/compact internal turn started mid-turn (ghost-completed bug)", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
+    t.translate(ev("turn.started", {}, "turn_user"));
     // session/goal(set) starts a backend-internal turn on the same session.
-    expect(t.translate(ev("turn.started", { turnId: "turn_goal" }))).toEqual([]);
+    expect(t.translate(ev("turn.started", {}, "turn_goal"))).toEqual([]);
     // Its output and terminal event MUST NOT touch this translator's state.
     expect(t.translate(ev("model.streaming", { kind: "text_delta", delta: "goal ack" }))).toEqual(
       [],
     );
-    expect(
-      t.translate(ev("turn.completed", { turnId: "turn_goal", resultType: "success" })),
-    ).toEqual([]);
+    expect(t.translate(ev("turn.completed", { resultType: "success" }, "turn_goal"))).toEqual([]);
     expect(t.turnDone).toBe(false);
     // The user's own turn completes normally afterwards.
-    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
     expect(t.turnDone).toBe(true);
   });
 
   it("drops a mismatched turn.completed even without a foreign turn.started", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
-    t.translate(ev("turn.completed", { turnId: "turn_other", resultType: "success" }));
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_other"));
     expect(t.turnDone).toBe(false);
-    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
     expect(t.turnDone).toBe(true);
   });
 
   it("drops a mismatched turn.failed too", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
-    t.translate(ev("turn.failed", { turnId: "turn_goal", error: { code: "x" } }));
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("turn.failed", { error: { code: "x" } }, "turn_goal"));
     expect(t.turnFailed).toBe(false);
     expect(t.turnDone).toBe(false);
   });
@@ -560,10 +565,39 @@ describe("EventTranslator foreign internal-turn attribution", () => {
     expect(t.turnDone).toBe(true);
   });
 
-  it("accepts a turn.completed matching the active turnId", () => {
+  it("falls back to a payload-carried turnId (legacy builds)", () => {
+    // 0.16.9 carries turnId on the envelope only; the payload spelling was
+    // the original (bundle-era) read and must keep working on builds that
+    // put it there.
     const t = new EventTranslator();
     t.translate(ev("turn.started", { turnId: "turn_user" }));
-    const out = t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    t.translate(ev("turn.completed", { turnId: "turn_other", resultType: "success" }));
+    expect(t.turnDone).toBe(false);
+    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    expect(t.turnDone).toBe(true);
+  });
+
+  it("reads turnId from the ENVELOPE, where 0.16.9 puts it", () => {
+    // The attribution guard was dead code while it read the payload: the
+    // turn.* payloads are strict and carry no turnId (source: zcode-protocol
+    // index.ts:1166+, 1229+), so a payload-only read never armed it.
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    // A control-only turn (session/goal set) lands mid-user-turn.
+    expect(t.translate(ev("turn.started", {}, "turn_ctl"))).toEqual([]);
+    expect(t.translate(ev("model.streaming", { kind: "text_delta", delta: "ctl" }))).toEqual([]);
+    // Its terminal event names ITS turn on the envelope — dropped, and our
+    // turn keeps running.
+    expect(t.translate(ev("turn.completed", { resultType: "success" }, "turn_ctl"))).toEqual([]);
+    expect(t.turnDone).toBe(false);
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
+    expect(t.turnDone).toBe(true);
+  });
+
+  it("accepts a turn.completed matching the active turnId", () => {
+    const t = new EventTranslator();
+    t.translate(ev("turn.started", {}, "turn_user"));
+    const out = t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
     expect(t.turnDone).toBe(true);
     expect(out).toEqual([
       { kind: "UsageDelta", used: 0, size: 0 },
@@ -573,12 +607,12 @@ describe("EventTranslator foreign internal-turn attribution", () => {
 
   it("processes OUR turn.completed even while a foreign turn is still in flight", () => {
     const t = new EventTranslator();
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
-    t.translate(ev("turn.started", { turnId: "turn_goal" })); // foreign, skipping
+    t.translate(ev("turn.started", {}, "turn_user"));
+    t.translate(ev("turn.started", {}, "turn_goal")); // foreign, skipping
     // The user turn completes FIRST (goal turn still running) — its terminal
     // event must NOT be swallowed as foreign, else the turn loop hangs until
     // the STALE_FREEZE_MS backstop.
-    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
+    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
     expect(t.turnDone).toBe(true);
   });
 });
