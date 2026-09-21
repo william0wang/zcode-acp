@@ -51,7 +51,7 @@ vi.mock("../src/lazy-sessions.js", () => ({
       ...(existing?.modelChoice ? { modelChoice: existing.modelChoice } : {}),
     });
   },
-  recordModelChoice: (acpSid: string, patch: { model?: string; thought?: string }) => {
+  recordModelChoice: (acpSid: string, patch: { model?: string; thought?: string; at?: number }) => {
     const existing = mockStore.get(acpSid);
     if (!existing) return;
     mockStore.set(acpSid, {

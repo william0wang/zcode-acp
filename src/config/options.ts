@@ -677,11 +677,16 @@ export function rememberModelChoice(
   zcodeSid: string,
   patch: { model?: string; thought?: string },
 ): void {
+  // `at` arbitrates multi-alias recovery (newer-wins in ensureRealSession):
+  // two windows can hold records for the SAME backend session, and a stale
+  // store record must not overwrite a fresher in-memory choice on re-seed.
+  const at = Date.now();
   server.sessionModelChoices.set(zcodeSid, {
     ...server.sessionModelChoices.get(zcodeSid),
     ...patch,
+    at,
   });
-  if (acpSid) recordModelChoice(acpSid, patch);
+  if (acpSid) recordModelChoice(acpSid, { ...patch, at });
 }
 
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.

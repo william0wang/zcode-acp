@@ -50,9 +50,11 @@ export interface LazySessionRecord {
    * before the first prompt hits FOREIGN KEY — source: the row is only
    * created at first input), and a resumed session then silently reverts to
    * the workspace default. Re-applied after every resume (see
-   * reassertModelChoice in handlers/session.ts).
+   * reassertModelChoice in handlers/session.ts). `at` arbitrates recovery:
+   * several aliases can record choices for the SAME backend session
+   * (editor + TUI attach), so ensureRealSession re-seeds newer-wins.
    */
-  modelChoice?: { model?: string; thought?: string };
+  modelChoice?: { model?: string; thought?: string; at?: number };
 }
 
 /** Store file lives next to config.json / tasks-index.sqlite under ~/.zcode/v2/. */
@@ -183,17 +185,22 @@ export function recordMaterializedSession(acpSid: string, zcodeSid: string, cwd:
 /** Merge a model/thought choice patch into an existing record (merge-write). */
 export function recordModelChoice(
   acpSid: string,
-  patch: { model?: string; thought?: string },
+  patch: { model?: string; thought?: string; at?: number },
 ): void {
   const { kept } = readTable();
   const existing = kept[acpSid];
   // Unknown alias (foreign session / never a placeholder) — in-memory only.
   if (!existing) return;
   const merged = { ...(existing.modelChoice ?? {}), ...patch };
-  if (existing.modelChoice && JSON.stringify(existing.modelChoice) === JSON.stringify(merged)) {
-    return;
-  }
-  persist({ ...kept, [acpSid]: { ...existing, modelChoice: merged } });
+  // Dedupe on the meaningful fields only — `at` always moves, it must not
+  // defeat the skip. An explicit EMPTY value (thought reset) still counts
+  // as a change: "" overwrites the stale level here AND in the re-assert.
+  const prev = existing.modelChoice;
+  if (prev && prev.model === merged.model && prev.thought === merged.thought) return;
+  persist({
+    ...kept,
+    [acpSid]: { ...existing, modelChoice: { ...merged, at: patch.at ?? Date.now() } },
+  });
 }
 
 /** Look up a placeholder alias (undefined = unknown to this bridge and store). */

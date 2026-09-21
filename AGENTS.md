@@ -212,9 +212,14 @@ ZCode protocol types into ACP notifications directly — always translate.
   itself (the following `session.model.updated` event is the success
   signal); the bridge compensates: every switch path records the choice
   (`server.sessionModelChoices` + `LazySessionRecord.modelChoice` in the
-  lazy-alias store, surviving bridge restarts) and `reassertModelChoice`
-  re-applies it after EVERY resume flight (silent, best-effort;
-  `repairUnavailableModel` still wins for unavailable models). Same-process
+  lazy-alias store, surviving bridge restarts; choices carry an `at` stamp —
+  store recovery is NEWER-WINS because two aliases can record the SAME
+  backend session) and `reassertModelChoice` re-applies it after EVERY
+  resume flight (silent, best-effort; model and thought re-applied
+  independently; `repairUnavailableModel` still wins for unavailable
+  models). A RESET (thought level absent/null) is remembered as an EMPTY
+  level — recording nothing would resurrect the old level on every resume.
+  Same-process
   drafts self-heal: first-input persistence captures the runtime's then-
   current selection. Don't chase persist_failed as a switching bug — chase
   it as a stickiness bug only if the re-assert stops firing.
@@ -348,6 +353,16 @@ ZCode protocol types into ACP notifications directly — always translate.
   loser requests resolve/reject only when the peer answers the cancellation.
   Every raced promise needs a no-op `.catch` or Node crashes on
   unhandledRejection. See `src/remote/broadcast.ts`.
+- **History replays are per-connection, NEVER broadcast** (observed 2026-09-21:
+  with editor + TUI + app attached to one bridge through the hub, every
+  client's session/load / resume / load_earlier replay fanned out to ALL of
+  them — each appended the whole history at the bottom of its transcript,
+  reading as "replay disorder: my messages sink below newer output"; the
+  backend store and the replay pipeline itself were verified ordered).
+  session/resume, session/load, session/load_earlier and the boot-resume
+  deferred replay must pass the REQUESTING connection's `ctx.client` into the
+  handler — not `server.clients.broadcast()`. Live turn updates DO fan out
+  (prompt() keeps the broadcast cx); only replay-shaped dispatch is targeted.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
 - **User remote prefs live in `~/.config/zcode-acp/config.json`, NOT env**:

@@ -204,7 +204,10 @@ export class ZcodeAcpServer {
    * editor dropdown still shows the user's choice. Survives backend
    * respawns on purpose (it is per-session, not per-process state).
    */
-  readonly sessionModelChoices = new Map<string, { model?: string; thought?: string }>();
+  readonly sessionModelChoices = new Map<
+    string,
+    { model?: string; thought?: string; at?: number }
+  >();
   /**
    * True once THIS backend process rejected a session/send with the
    * whole-turn busy error (-32010 "A prompt is already running for this

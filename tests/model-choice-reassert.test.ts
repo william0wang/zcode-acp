@@ -20,7 +20,7 @@ import {
   recordModelChoice,
   rememberLazySession,
 } from "../src/lazy-sessions.js";
-import { setConfigOption } from "../src/config/options.js";
+import { setConfigOption, rememberModelChoice } from "../src/config/options.js";
 import { ensureRealSession, reloadBackendSession } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
@@ -99,8 +99,14 @@ describe("model choice stickiness", () => {
       kind: "thought",
     });
 
-    expect(server.sessionModelChoices.get(SID_Z)).toEqual({ model: "GLM-5.3", thought: "high" });
-    expect(lookupLazySession(SID_A)?.modelChoice).toEqual({ model: "GLM-5.3", thought: "high" });
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
+      model: "GLM-5.3",
+      thought: "high",
+    });
+    expect(lookupLazySession(SID_A)?.modelChoice).toMatchObject({
+      model: "GLM-5.3",
+      thought: "high",
+    });
   });
 
   it("reloadBackendSession re-applies the remembered choice after resume", async () => {
@@ -144,6 +150,64 @@ describe("model choice stickiness", () => {
     await expect(reloadBackendSession(server, SID_A, SID_Z)).resolves.toBeUndefined();
   });
 
+  it("a reset thought level (empty) is remembered and NOT resurrected on resume", async () => {
+    seedStore("GLM-5.3", "high");
+    const { backend, calls } = makeBackend();
+    const server = makeServer(backend);
+    server.registerSession(SID_A, SID_Z);
+    server.sessionCwds.set(SID_A, "/tmp/proj");
+    server.sessionModelChoices.set(SID_Z, { model: "GLM-5.3", thought: "high" });
+
+    // The reset path in extensions.setThoughtLevel records an EMPTY level
+    // (not "no record") so the re-assert skips it instead of flipping
+    // thinking back on.
+    rememberModelChoice(server, SID_A, SID_Z, { thought: "" });
+    expect(lookupLazySession(SID_A)?.modelChoice).toMatchObject({
+      model: "GLM-5.3",
+      thought: "",
+    });
+
+    await reloadBackendSession(server, SID_A, SID_Z);
+
+    expect(calls).toContain("session/setModel");
+    expect(calls).not.toContain("session/setThoughtLevel");
+  });
+
+  it("a thought-only choice is re-applied without touching the model", async () => {
+    const { backend, calls } = makeBackend();
+    const server = makeServer(backend);
+    server.registerSession(SID_A, SID_Z);
+    server.sessionCwds.set(SID_A, "/tmp/proj");
+    server.sessionModelChoices.set(SID_Z, { thought: "high" });
+
+    await reloadBackendSession(server, SID_A, SID_Z);
+
+    const resumeAt = calls.indexOf("session/resume");
+    expect(resumeAt).toBeGreaterThanOrEqual(0);
+    expect(calls).not.toContain("session/setModel");
+    expect(calls.indexOf("session/setThoughtLevel")).toBeGreaterThan(resumeAt);
+  });
+
+  it("a stale alias record cannot overwrite a fresher choice on re-seed", async () => {
+    // Two aliases, same backend session (editor + TUI attach): acp-mc-2
+    // holds the most recent switch.
+    rememberLazySession(SID_A, "/tmp/proj");
+    recordMaterializedSession(SID_A, SID_Z, "/tmp/proj");
+    recordModelChoice(SID_A, { model: "GLM-4.5", at: 1_000 });
+    const SID_A2 = "acp-mc-2";
+    rememberLazySession(SID_A2, "/tmp/proj");
+    recordMaterializedSession(SID_A2, SID_Z, "/tmp/proj");
+    recordModelChoice(SID_A2, { model: "GLM-5.3", at: 2_000 });
+
+    const { backend } = makeBackend();
+    const server = makeServer(backend); // fresh process: no mappings
+
+    await ensureRealSession(server, SID_A2); // fresher alias recovered first
+    await ensureRealSession(server, SID_A); // stale alias re-seeds second
+
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({ model: "GLM-5.3" });
+  });
+
   it("bridge restart: ensureRealSession recovers the choice from the store and re-applies it", async () => {
     seedStore("GLM-5.3", "high");
     const { backend, calls } = makeBackend();
@@ -152,7 +216,10 @@ describe("model choice stickiness", () => {
     const zcodeSid = await ensureRealSession(server, SID_A);
 
     expect(zcodeSid).toBe(SID_Z);
-    expect(server.sessionModelChoices.get(SID_Z)).toEqual({ model: "GLM-5.3", thought: "high" });
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
+      model: "GLM-5.3",
+      thought: "high",
+    });
     // The recovery's eviction guard reloads the session — the re-assert must
     // ride that resume and re-apply the choice.
     expect(calls).toContain("session/setModel");

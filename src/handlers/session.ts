@@ -349,7 +349,12 @@ export async function newSession(
       const loaded = await loadSession(
         server,
         { sessionId: bootResume } as acp.LoadSessionRequest,
-        server.clients.broadcast(),
+        // Targeted (per-connection) delivery — a replay is the requesting
+        // client's rendering state; broadcast() would append the whole
+        // history to every OTHER attached client's transcript (the
+        // "replay disorder" bug). broadcast only as a fallback for a
+        // client-less hub bind.
+        client ?? server.clients.broadcast(),
         { replayHistory: false },
       );
       log(`session/new: boot-resume → ${bootResume}`);
@@ -364,7 +369,9 @@ export async function newSession(
         // Scope the handshake to THIS connection: a phone app attached to the
         // same bridge may prompt during the boot window and must not disarm it.
         server.bootResumeTriggerConnection = clientConnectionRoot(client);
-        const cx = server.clients.broadcast();
+        // Targeted replay — the booting TUI's own connection, never broadcast
+        // (see the loadSession comment above).
+        const cx = client ?? server.clients.broadcast();
         const zcodeSid = server.resolveSid(bootResume);
         if (zcodeSid) {
           setImmediate(() => {
@@ -562,8 +569,15 @@ export async function ensureRealSession(
       // Recover the remembered model/thought choice (bridge restart): the
       // post-resume re-assert needs it to undo the backend's silent revert
       // to the workspace default (see reassertModelChoice).
+      // Newer-wins (strictly): another alias of the SAME backend session
+      // may hold a fresher choice (editor + TUI attach); a stale store
+      // record must not overwrite what this process already recovered or
+      // a live switch recorded.
       if (record.modelChoice) {
-        server.sessionModelChoices.set(record.zcodeSid, record.modelChoice);
+        const existing = server.sessionModelChoices.get(record.zcodeSid);
+        if (!existing || (record.modelChoice.at ?? 0) > (existing.at ?? 0)) {
+          server.sessionModelChoices.set(record.zcodeSid, record.modelChoice);
+        }
       }
       // Seed the cwd the reload's resume needs — this process never saw the
       // session/new that recorded it, and the resume workspace would
@@ -2841,19 +2855,25 @@ async function reassertModelChoice(server: ZcodeAcpServer, zcodeSid: string): Pr
   // without every map) must never fail the resume flight it rides on.
   try {
     const choice = server.sessionModelChoices?.get(zcodeSid);
-    if (!choice?.model) return;
+    if (!choice) return;
+    const { model, thought } = choice;
+    // An empty thought is a remembered RESET — falsy here, so the re-apply
+    // naturally skips it instead of resurrecting the old level.
+    if (!model && !thought) return;
     const { setConfigOption } = await import("../config/options.js");
-    if (!(await setConfigOption(server, zcodeSid, "model", choice.model))) {
-      warn(`resume: re-asserting model choice failed (${choice.model}) — keeping backend default`);
-      return;
+    // Model and thought are independent settings: a failed model re-assert
+    // must not drop the thought level (and a thought-only session — the
+    // model was never switched — still gets its level back).
+    if (model && !(await setConfigOption(server, zcodeSid, "model", model))) {
+      warn(`resume: re-asserting model choice failed (${model}) — keeping backend default`);
     }
-    if (choice.thought) {
-      await setConfigOption(server, zcodeSid, "thought", choice.thought);
+    if (thought) {
+      await setConfigOption(server, zcodeSid, "thought", thought);
     }
-    log(
-      `resume: re-applied remembered model choice (${choice.model}` +
-        `${choice.thought ? `, thought ${choice.thought}` : ""})`,
+    const parts = [model ? `model ${model}` : "", thought ? `thought ${thought}` : ""].filter(
+      Boolean,
     );
+    log(`resume: re-applied remembered choice (${parts.join(", ")})`);
   } catch (e) {
     warn(`resume: model choice re-assert threw (${e instanceof Error ? e.message : String(e)})`);
   }

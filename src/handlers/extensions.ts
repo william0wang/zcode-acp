@@ -231,11 +231,12 @@ export async function setThoughtLevel(
   if (resp.error) throw new Error(`setThoughtLevel failed: ${resp.error.message}`);
   log("session/setThoughtLevel → ok");
   // Remember for the post-resume re-assert (the backend's own selection
-  // persistence can be lost — see reassertModelChoice in session.ts).
+  // persistence can be lost — see reassertModelChoice in session.ts). A
+  // RESET (absent/null level) must be remembered as an EMPTY level: skipping
+  // the record would leave the stale level in memory and the re-assert
+  // would resurrect it (turn thinking back on) after every resume.
   const level = typeof params.thoughtLevel === "string" ? params.thoughtLevel : undefined;
-  if (level) {
-    rememberModelChoice(server, params.sessionId, zcodeSid, { thought: level });
-  }
+  rememberModelChoice(server, params.sessionId, zcodeSid, { thought: level ?? "" });
   // Session settings are per-session, not per-connection: a switch from the
   // phone must refresh the CLI window's dropdown (and vice versa) — emit the
   // config_option_update to every attached client, not just the switcher.
