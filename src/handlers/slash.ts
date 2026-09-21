@@ -38,7 +38,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { RequestError } from "@agentclientprotocol/sdk";
 import { applyModelSwitch } from "../config/runtime-model.js";
-import { emitConfigOptionUpdate } from "../config/options.js";
+import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
 import {
   formatMcpServerHealth,
   formatMcpServers,
@@ -288,13 +288,20 @@ async function fetchMcpStatuses(
   }
 }
 
-/** Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise. */
+/**
+ * Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise.
+ *
+ * `client` is the REQUESTING connection (runPrompt's 6th arg, undefined for
+ * client-less invocations). Only replay-shaped dispatch — /resume's history
+ * replay — uses it; command feedback keeps going through the broadcast cx.
+ */
 export async function handleSlashCommand(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   zcodeSid: string,
   text: string,
+  client?: acp.AgentContext,
 ): Promise<acp.PromptResponse | null> {
   const stripped = text.trim();
   if (!stripped.startsWith("/")) return null;
@@ -428,7 +435,11 @@ export async function handleSlashCommand(
           if (!picked) return ok(messages().slashResumeCancelled);
           chosen = picked;
         }
-        const result = await resumeIntoSession(server, cx, acpSid, chosen);
+        // Targeted replay: the adopting connection renders the adopted
+        // history, and the broadcast cx would append it to every OTHER
+        // attached client's transcript — the "replay disorder" fixed for
+        // session/load + session/resume (2026-09-21), same rule here.
+        const result = await resumeIntoSession(server, client ?? cx, acpSid, chosen);
         if (!result.ok) return ok(result.error);
         return ok(messages().slashResumed(result.title ?? chosen));
       }
@@ -436,6 +447,11 @@ export async function handleSlashCommand(
         if (!arg) throw new RequestError(-32602, messages().slashErrModelArg);
         const switchOk = await applyModelSwitch(server, zcodeSid, arg);
         if (!switchOk) throw new RequestError(-32603, messages().slashErrSwitchFailed(arg));
+        // Remember the choice exactly like the dropdown path (setConfigOption):
+        // without it a switch made here is invisible to the post-resume
+        // re-assert, which would roll the session back to an older remembered
+        // model — and the TUI's ONLY switch path would have no stickiness.
+        rememberModelChoice(server, acpSid, zcodeSid, { model: arg });
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "model");
         return ok(messages().slashModelSet(arg));
       }
@@ -455,6 +471,9 @@ export async function handleSlashCommand(
         if (resp.error) {
           throw new RequestError(-32603, messages().slashErrFailed(cmd, resp.error.message));
         }
+        // Remember a thought-level switch like the dropdown path — /thought
+        // is the TUI's only level switch and must survive resumes.
+        if (cmd === "thought") rememberModelChoice(server, acpSid, zcodeSid, { thought: arg });
         // Notify the editor UI: emit config_option_update (+ current_mode_update
         // for mode). Without this the dropdown / mode indicator never reflects
         // the change — slash commands return end_turn and bypass the turn-

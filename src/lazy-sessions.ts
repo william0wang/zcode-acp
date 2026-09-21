@@ -203,6 +203,22 @@ export function recordModelChoice(
   });
 }
 
+/**
+ * Freshest model/thought choice recorded for a BACKEND session across every
+ * alias. One backend session can hold several acpSids (an editor tab plus a
+ * TUI/phone attachment, or an adopted conversation), each recording its own
+ * switches — recovering through a STALE alias must not resurrect a choice a
+ * fresher alias already replaced. Max-`at` wins; ties keep the first seen.
+ */
+export function lookupModelChoiceByZcodeSid(zcodeSid: string): LazySessionRecord["modelChoice"] {
+  let best: LazySessionRecord["modelChoice"];
+  for (const rec of Object.values(loadRecords())) {
+    if (rec.zcodeSid !== zcodeSid || !rec.modelChoice) continue;
+    if (!best || (rec.modelChoice.at ?? 0) > (best.at ?? 0)) best = rec.modelChoice;
+  }
+  return best;
+}
+
 /** Look up a placeholder alias (undefined = unknown to this bridge and store). */
 export function lookupLazySession(acpSid: string): LazySessionRecord | undefined {
   return loadRecords()[acpSid];

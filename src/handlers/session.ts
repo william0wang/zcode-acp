@@ -51,6 +51,7 @@ import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-mod
 import { messages } from "../i18n.js";
 import {
   lookupLazySession,
+  lookupModelChoiceByZcodeSid,
   recordMaterializedSession,
   rememberLazySession,
 } from "../lazy-sessions.js";
@@ -569,14 +570,16 @@ export async function ensureRealSession(
       // Recover the remembered model/thought choice (bridge restart): the
       // post-resume re-assert needs it to undo the backend's silent revert
       // to the workspace default (see reassertModelChoice).
-      // Newer-wins (strictly): another alias of the SAME backend session
-      // may hold a fresher choice (editor + TUI attach); a stale store
-      // record must not overwrite what this process already recovered or
-      // a live switch recorded.
-      if (record.modelChoice) {
+      // Newer-wins (strictly) across EVERY alias of this backend session:
+      // another acpSid (editor + TUI/phone attach, or an adopted
+      // conversation) may hold a fresher choice, and a stale record must
+      // not overwrite what this process already recovered or a live switch
+      // recorded.
+      const choice = lookupModelChoiceByZcodeSid(record.zcodeSid);
+      if (choice) {
         const existing = server.sessionModelChoices.get(record.zcodeSid);
-        if (!existing || (record.modelChoice.at ?? 0) > (existing.at ?? 0)) {
-          server.sessionModelChoices.set(record.zcodeSid, record.modelChoice);
+        if (!existing || (choice.at ?? 0) > (existing.at ?? 0)) {
+          server.sessionModelChoices.set(record.zcodeSid, choice);
         }
       }
       // Seed the cwd the reload's resume needs — this process never saw the
@@ -1374,6 +1377,7 @@ export async function prompt(
         cx,
         `sandbox-cont-${randomUUID()}`,
         true,
+        client,
       );
     } catch (e) {
       // The chained round runs right after a sandbox-allow respawn, inside
@@ -1981,7 +1985,17 @@ async function runPrompt(
   // returns end_turn without entering the turn loop. Known passthrough
   // commands and unknown /x both return null for the normal turn loop.
   const { handleSlashCommand, neutralizeSlashText } = await import("./slash.js");
-  const intercepted = await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text);
+  // `client` (the requesting connection) rides along so replay-shaped slash
+  // dispatch — /resume's history replay above all — targets that connection
+  // instead of the broadcast cx (see resumeIntoSession).
+  const intercepted = await handleSlashCommand(
+    server,
+    cx,
+    params.sessionId,
+    zcodeSid,
+    text,
+    client,
+  );
   if (intercepted) return intercepted;
 
   // Wire text for the backend: unknown `/x` prompts (not advertised commands)

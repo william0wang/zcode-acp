@@ -163,10 +163,16 @@ describe("resumeIntoSession", () => {
 });
 
 describe("/resume slash command", () => {
-  async function drive(server: ZcodeAcpServer, acpSid: string, text: string) {
+  async function drive(
+    server: ZcodeAcpServer,
+    acpSid: string,
+    text: string,
+    /** The requesting connection (runPrompt's `client`); omit to test the fallback. */
+    client?: acp.AgentContext,
+  ) {
     const { cx, updates } = recordingCx();
     const zcodeSid = server.resolveSid(acpSid) ?? acpSid;
-    const resp = await handleSlashCommand(server, cx, acpSid, zcodeSid, text);
+    const resp = await handleSlashCommand(server, cx, acpSid, zcodeSid, text, client);
     return { resp, updates };
   }
 
@@ -222,5 +228,38 @@ describe("/resume slash command", () => {
   it("resume is advertised as a real command (no zero-width neutralization)", () => {
     expect(neutralizeSlashText("/resume")).toBe("/resume");
     expect(neutralizeSlashText("/resume ztarget")).toBe("/resume ztarget");
+  });
+
+  it("targets the replayed history at the requesting connection, never the broadcast cx", async () => {
+    // Reported 2026-09-21: the 0.46.2 targeting fix covered session/resume +
+    // session/load but not the slash entry, whose cx is runPrompt's broadcast
+    // proxy — the adopted history flooded every OTHER attached client (a
+    // phone sharing the thread's acpSid) with the whole conversation.
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend({ ztarget: HISTORY });
+    server.backend = backend;
+    const acpSid = seedPlaceholder(server);
+
+    const { cx: broadcast, updates: others } = recordingCx();
+    const { cx: mine, updates: mineUpdates } = recordingCx();
+    const zcodeSid = server.resolveSid(acpSid) ?? acpSid;
+    const resp = await handleSlashCommand(
+      server,
+      broadcast,
+      acpSid,
+      zcodeSid,
+      "/resume ztarget",
+      mine,
+    );
+
+    expect(resp).toEqual({ stopReason: "end_turn" });
+    // The adopted history reaches ONLY the connection that ran /resume.
+    const mineTexts = mineUpdates.map((u) => u.content?.text);
+    expect(mineTexts).toContain("hello from the TUI");
+    expect(mineTexts).toContain("welcome back");
+    // Other clients keep the slash ack but never the replayed conversation.
+    const otherTexts = others.map((u) => u.content?.text);
+    expect(otherTexts).not.toContain("hello from the TUI");
+    expect(otherTexts).not.toContain("welcome back");
   });
 });

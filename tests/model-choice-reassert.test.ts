@@ -225,4 +225,28 @@ describe("model choice stickiness", () => {
     expect(calls).toContain("session/setModel");
     expect(calls).toContain("session/setThoughtLevel");
   });
+
+  it("bridge restart: re-seed scans EVERY alias of the backend session, not just this one", async () => {
+    // Reported 2026-09-21: the re-seed read only the recovering alias's own
+    // store record, so a STALE alias resurrected an older choice a fresher
+    // alias (a TUI/phone attachment to the same conversation) had already
+    // replaced — a silent model revert after every restart.
+    rememberLazySession(SID_A, "/tmp/proj");
+    recordMaterializedSession(SID_A, SID_Z, "/tmp/proj");
+    recordModelChoice(SID_A, { model: "GLM-4.5", at: 1_000 });
+    const SID_A3 = "acp-mc-3";
+    rememberLazySession(SID_A3, "/tmp/proj");
+    recordMaterializedSession(SID_A3, SID_Z, "/tmp/proj");
+    recordModelChoice(SID_A3, { model: "GLM-5.2", at: 9_000_000_000_000 });
+
+    const { backend, calls } = makeBackend();
+    const server = makeServer(backend); // fresh process: no mappings
+
+    await ensureRealSession(server, SID_A); // the STALE alias recovers first
+
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({ model: "GLM-5.2" });
+    // The re-assert rides the recovery's eviction-guard resume with the
+    // fresher choice, not the stale alias's own.
+    expect(calls).toContain("session/setModel");
+  });
 });

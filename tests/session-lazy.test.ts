@@ -60,6 +60,14 @@ vi.mock("../src/lazy-sessions.js", () => ({
     });
   },
   lookupLazySession: (acpSid: string) => mockStore.get(acpSid),
+  lookupModelChoiceByZcodeSid: (zcodeSid: string) => {
+    let best: { model?: string; thought?: string; at?: number } | undefined;
+    for (const rec of mockStore.values()) {
+      if (rec.zcodeSid !== zcodeSid || !rec.modelChoice) continue;
+      if (!best || (rec.modelChoice.at ?? 0) > (best.at ?? 0)) best = rec.modelChoice;
+    }
+    return best;
+  },
 }));
 
 beforeEach(() => {
