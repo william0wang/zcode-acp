@@ -5,6 +5,7 @@
  * so either can feed `dispatchEvent`. State held per-translator:
  *   - seenToolIds / toolNames / toolInputs / finalToolIds for tool lifecycle
  *   - turnStarted / turnDone / turnFailed / turnResultType / turnError for turn state
+ *     (plus turnUsage / turnCacheStats captured from the same terminal event)
  *
  * A critical quirk: zcode streams tool input via `model.streaming tool_call`
  * BEFORE the `tool.updated scheduled` event, whose `input` is then omitted
@@ -20,7 +21,7 @@ import {
   summarizeToolInput,
   TOOL_KIND_MAP,
 } from "./tool-helpers.js";
-import type { InternalEvent } from "./types.js";
+import type { InternalEvent, TurnCacheStats } from "./types.js";
 
 interface ZcodeEventPayload {
   type?: string;
@@ -55,6 +56,13 @@ export class EventTranslator {
    * prompt loop to fill the ACP `PromptResponse.usage` field.
    */
   turnUsage: Record<string, unknown> | null = null;
+  /**
+   * cacheStats from this turn's `turn.completed` payload (prompt-cache hit
+   * counts; `cacheReadTokens` optional). Null when the backend sent none —
+   * pre-cacheStats builds omit the field. Consumed by the dispatcher to render
+   * the turn-end status line alongside the TurnInfo event.
+   */
+  turnCacheStats: TurnCacheStats | null = null;
   /**
    * True while inside a background-task notification turn
    * (`turn.started {inputSource:"background_task"}`). Set on its turn.started,
@@ -174,6 +182,7 @@ export class EventTranslator {
         this.turnDone = true;
         this.turnResultType = (payload["resultType"] as string) ?? "success";
         this.turnUsage = (payload["usage"] as Record<string, unknown>) ?? null;
+        this.turnCacheStats = parseCacheStats(payload["cacheStats"]);
         results.push(...this.translateTurnDone(payload));
         log(`  [event] turn.completed (resultType=${this.turnResultType})`);
       } else {
@@ -404,6 +413,30 @@ export class EventTranslator {
     // be kept as-is and never fall back, diverging from the Python reference.
     const used = (usage["totalTokens"] as number) || (payload["tokenCount"] as number) || 0;
     const size = (usage["contextWindow"] as number) || 0;
-    return [{ kind: "UsageDelta", used, size }];
+    // Terminal info line: resultType verbatim (success / cancelled /
+    // error_*) plus the prompt-cache stats when the backend sent them.
+    const info: InternalEvent = { kind: "TurnInfo", resultType: this.turnResultType ?? "success" };
+    if (this.turnCacheStats) info.cacheStats = this.turnCacheStats;
+    return [{ kind: "UsageDelta", used, size }, info];
   }
+}
+
+/**
+ * Parse `turn.completed` cacheStats. Returns undefined on absent/malformed
+ * input — an unreadable stats block must never break the turn-end flow.
+ */
+function parseCacheStats(raw: unknown): TurnCacheStats | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const totalMessages = o["totalMessages"];
+  const cachedMessages = o["cachedMessages"];
+  if (typeof totalMessages !== "number" || typeof cachedMessages !== "number") return null;
+  const stats: TurnCacheStats = {
+    totalMessages,
+    cachedMessages,
+    lastCacheHit: o["lastCacheHit"] === true,
+  };
+  const read = o["cacheReadTokens"];
+  if (typeof read === "number") stats.cacheReadTokens = read;
+  return stats;
 }

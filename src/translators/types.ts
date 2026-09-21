@@ -63,6 +63,23 @@ export interface UsageDeltaEvent {
   size: number;
 }
 
+/** `turn.completed` cacheStats, verbatim subset (backend schema is strict but
+ *  older builds omit the field entirely — everything here is optional to consume). */
+export interface TurnCacheStats {
+  totalMessages: number;
+  cachedMessages: number;
+  lastCacheHit: boolean;
+  cacheReadTokens?: number;
+}
+
+/** Turn-terminal info from `turn.completed` — rendered as ONE status line at
+ *  turn end (completion + cache stats, or the concrete non-success resultType). */
+export interface TurnInfoEvent {
+  kind: "TurnInfo";
+  resultType: string;
+  cacheStats?: TurnCacheStats;
+}
+
 export interface TextDeltaEvent {
   kind: "TextDelta";
   text: string;
@@ -130,6 +147,7 @@ export type InternalEvent =
   | ToolCallNewEvent
   | ToolCallUpdateEvent
   | UsageDeltaEvent
+  | TurnInfoEvent
   | TextDeltaEvent
   | ReasoningDeltaEvent
   | PlanUpdateEvent

@@ -293,7 +293,10 @@ describe("EventTranslator", () => {
       ev("turn.completed", { resultType: "success", tokenCount: 140, usage }),
     );
     expect(t.turnUsage).toEqual(usage);
-    expect(out).toEqual([{ kind: "UsageDelta", used: 140, size: 0 }]);
+    expect(out).toEqual([
+      { kind: "UsageDelta", used: 140, size: 0 },
+      { kind: "TurnInfo", resultType: "success" },
+    ]);
   });
 
   it("leaves turnUsage null when turn.completed carries no usage", () => {
@@ -306,6 +309,89 @@ describe("EventTranslator", () => {
     const t = new EventTranslator();
     t.translate(ev("turn.failed", { error: { code: "1308" }, usage: { totalTokens: 9 } }));
     expect(t.turnUsage).toBeNull();
+  });
+});
+
+describe("EventTranslator turn.completed resultType + cacheStats", () => {
+  const cacheStats = {
+    totalMessages: 45,
+    cachedMessages: 42,
+    lastCacheHit: true,
+    cacheReadTokens: 12300,
+  };
+
+  it("captures cacheStats verbatim and carries it on the TurnInfo event", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("turn.completed", { resultType: "success", tokenCount: 140, cacheStats }),
+    );
+    expect(t.turnCacheStats).toEqual(cacheStats);
+    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
+      InternalEvent,
+      { kind: "TurnInfo" }
+    >;
+    expect(info.resultType).toBe("success");
+    expect(info.cacheStats).toEqual(cacheStats);
+  });
+
+  it("leaves cacheStats absent (null field) when turn.completed carries none", () => {
+    const t = new EventTranslator();
+    const out = t.translate(ev("turn.completed", { resultType: "success", tokenCount: 140 }));
+    expect(t.turnCacheStats).toBeNull();
+    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
+      InternalEvent,
+      { kind: "TurnInfo" }
+    >;
+    expect(info.cacheStats).toBeUndefined();
+  });
+
+  it("accepts cacheStats without the optional cacheReadTokens", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("turn.completed", {
+        resultType: "success",
+        cacheStats: { totalMessages: 10, cachedMessages: 4, lastCacheHit: false },
+      }),
+    );
+    expect(t.turnCacheStats).toEqual({
+      totalMessages: 10,
+      cachedMessages: 4,
+      lastCacheHit: false,
+    });
+    expect(t.turnCacheStats).not.toHaveProperty("cacheReadTokens");
+    expect(out).toHaveLength(2);
+  });
+
+  it("carries a non-success resultType verbatim on the TurnInfo event", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("turn.completed", { resultType: "error_max_budget", tokenCount: 140, cacheStats }),
+    );
+    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
+      InternalEvent,
+      { kind: "TurnInfo" }
+    >;
+    expect(info.resultType).toBe("error_max_budget");
+    // Non-success still carries the cache stats — the line renderer decides.
+    expect(info.cacheStats).toEqual(cacheStats);
+  });
+
+  it("ignores a malformed cacheStats block (never breaks the turn end)", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("turn.completed", {
+        resultType: "success",
+        cacheStats: { totalMessages: "many", cachedMessages: 4 },
+      }),
+    );
+    expect(t.turnCacheStats).toBeNull();
+    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
+      InternalEvent,
+      { kind: "TurnInfo" }
+    >;
+    expect(info.cacheStats).toBeUndefined();
+    // The UsageDelta still emitted.
+    expect(out[0]?.kind).toBe("UsageDelta");
   });
 });
 
@@ -479,7 +565,10 @@ describe("EventTranslator foreign internal-turn attribution", () => {
     t.translate(ev("turn.started", { turnId: "turn_user" }));
     const out = t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
     expect(t.turnDone).toBe(true);
-    expect(out).toEqual([{ kind: "UsageDelta", used: 0, size: 0 }]);
+    expect(out).toEqual([
+      { kind: "UsageDelta", used: 0, size: 0 },
+      { kind: "TurnInfo", resultType: "success" },
+    ]);
   });
 
   it("processes OUR turn.completed even while a foreign turn is still in flight", () => {
