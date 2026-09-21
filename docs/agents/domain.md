@@ -4,9 +4,11 @@ How engineering skills should consume this repo's domain documentation when expl
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, or
+- **`.zcode/CONTEXT.md`** (this repo's live glossary — the `.zcode/` path
+  supersedes the skill's default root location; the old root copy was
+  removed), or
 - **`CONTEXT-MAP.md`** at the repo root (if it exists) — it points to one `CONTEXT.md` per context. Read each file relevant to the current topic.
-- **`docs/adr/`** — read ADRs related to the area you are about to work on. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`docs/adr/`** — read ADRs related to the area you are about to work in. The series continues in `.zcode/docs/adr/` (0008+); read both when the area predates the move.
 
 If these files don't exist, **continue silently**. Don't flag the absence; don't proactively suggest creating them. The producer skill (`/grill-with-docs`) will lazily create them when terms or decisions are actually resolved.
 
