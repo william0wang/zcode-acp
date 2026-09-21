@@ -196,6 +196,19 @@ export class ZcodeAcpServer {
    */
   readonly compactOutcomes = new Map<string, { reason: string; at: number }>();
   /**
+   * True once THIS backend process rejected a session/send with the
+   * whole-turn busy error (-32010 "A prompt is already running for this
+   * session"). 0.16.9 source semantics (sendPrompt's activeAbortController
+   * guard, server-operations.ts): the busy window spans the ENTIRE turn, so
+   * a mid-turn send can never be silently accepted as steer — while set, the
+   * prompt path skips the drain gate's pre-send poll and lets the send
+   * busy-retry loop be the single readiness authority. 0.16.5 accepts
+   * mid-generation sends as (silently dropped) steer input, so backends
+   * that never showed the rejection keep the full drain gate. Behavioral
+   * evidence only — no version sniffing. Reset on backend respawn.
+   */
+  observedSendBusyReject = false;
+  /**
    * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
    * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
    * on the next backend respawn in ensureBackend().
@@ -485,6 +498,9 @@ export class ZcodeAcpServer {
     this.hydrationUnsettled.clear();
     this.hydrationWatermark.clear();
     this.compactOutcomes.clear();
+    // …and the send-semantics evidence: the respawned process may be an
+    // older build that still accepts mid-turn sends as steer.
+    this.observedSendBusyReject = false;
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the

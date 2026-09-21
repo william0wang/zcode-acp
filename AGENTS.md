@@ -410,17 +410,24 @@ ZCode protocol types into ACP notifications directly — always translate.
   holds the queue, and pauses the active goal
   (`session-flow.ts:305-368`). stopBackendTurn sends both. Cancel is
   otherwise bridge-side: the turn loop returns `stopReason: "cancelled"` on
-  the flag, and a send after a recent cancel settles the backend first
-  (drain gate: poll-until-idle, with a `session/close` escalation after a
-  5s grace if a generation somehow survives both stops — on 0.16.9 a
-  mid-turn send is REJECTED fast with -32010 "A prompt is already running"
-  for the whole turn window; the old 0.16.5 "accepted as steer input and
-  silently dropped" path is gone, though `turn.steerQueued` can still fire
-  from OTHER clients attaching to the same backend via v4 delivery). After a close-escalation reload the drain gate
-  must resubscribe the event stream (the reload revives the session but not
-  its push — the next turn would run deaf) and re-baseline the projection
-  differ (the abandoned turn committed messages while waiting — a stale
-  baseline replays that residue as the next reply).
+  the flag. The drain gate after a recent cancel is BEHAVIOR-ADAPTIVE
+  (`server.observedSendBusyReject`): once this backend process has rejected
+  a send with -32010 "A prompt is already running for this session" (code
+  AND message — -32010 is shared by e.g. "Subagent sessions are read-only";
+  source: the busy window spans the WHOLE turn, so a mid-turn send can
+  never be silently swallowed as steer), the pre-send poll is skipped and
+  the send loop's busy-retry is the single authority — with a one-shot
+  queued note and a post-accept differ re-baseline as parity for what the
+  drain used to do (`sendAttempt > 1` means the abandoned turn unwound
+  during our retries and committed residue after our pre-send baseline).
+  Backends that never showed the rejection (0.16.5: mid-generation sends
+  are accepted as steer and silently dropped) keep the full legacy gate:
+  poll-until-idle, `session/close` escalation after a 5s grace, and after a
+  close-escalation reload the gate must resubscribe the event stream (the
+  reload revives the session but not its push — the next turn would run
+  deaf) and re-baseline the projection differ (a stale baseline replays
+  residue as the next reply). `turn.steerQueued` can still fire from OTHER
+  clients attaching to the same backend via v4 delivery.
 - **Prompt lock ≠ turn liveness** — the conclusion holds, the old framing
   does not (source 2026-09-21: the "1308 lock" does NOT exist in 0.16.9 —
   1308 there is a GLM quota business code; the busy error is -32010 and its
