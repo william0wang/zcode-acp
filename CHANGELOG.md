@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.46.6](https://github.com/william0wang/zcode-acp/compare/v0.46.5...v0.46.6) (2026-09-21)
+
+
+### Bug Fixes
+
+* align permission replies, turn terminals, model lists and backend layout with 0.16.9 ([#234](https://github.com/william0wang/zcode-acp/issues/234)) ([4f8b41f](https://github.com/william0wang/zcode-acp/commit/4f8b41f464054af73d41d922b42bbc60f5d31ec6))
+
 ## [0.46.5](https://github.com/william0wang/zcode-acp/compare/v0.46.4...v0.46.5) (2026-09-21)
 
 
