@@ -381,11 +381,33 @@ export class GoalLoopDriver {
     preemptInFlightTurn(this.server, this.zcodeSid, "");
   }
 
-  /** Text of the last assistant reply at or after `since` (verdict parsing input). */
-  private async lastAssistantText(since = 0): Promise<string> {
+  /**
+   * Id of the newest stored message (null when the store is empty) — the
+   * cursor the round's other reads scope themselves with. `limit: 1` makes
+   * this a tail read: the full-history transfer it replaces existed only to
+   * produce a count.
+   */
+  private async lastMessageId(): Promise<string | null> {
     const { fetchMessages, TURN_READ } = await import("../handlers/replay.js");
-    const msgs = await fetchMessages(this.server, this.zcodeSid, TURN_READ);
-    for (let i = msgs.length - 1; i >= Math.min(since, msgs.length); i--) {
+    const msgs = await fetchMessages(this.server, this.zcodeSid, { ...TURN_READ, limit: 1 });
+    return msgs[msgs.length - 1]?.info?.id ?? null;
+  }
+
+  /**
+   * Text of the last assistant reply appended after `afterId` (the whole
+   * history when null — verdict and ticket parsing read the session's final
+   * reply). A turn's reply is its newest message, so the cursor-less case
+   * caps the read at a tail window instead of transferring everything.
+   */
+  private async lastAssistantText(afterId: string | null = null): Promise<string> {
+    const { fetchMessages, TURN_READ, GOAL_TAIL_READ_LIMIT } =
+      await import("../handlers/replay.js");
+    const msgs = await fetchMessages(this.server, this.zcodeSid, {
+      ...TURN_READ,
+      afterMessageId: afterId,
+      limit: afterId ? undefined : GOAL_TAIL_READ_LIMIT,
+    });
+    for (let i = msgs.length - 1; i >= 0; i--) {
       const m = msgs[i]!;
       if (m.info.role !== "assistant") continue;
       const text = m.parts
@@ -397,26 +419,31 @@ export class GoalLoopDriver {
     return "";
   }
 
-  /** Tool-part count in the messages appended since `before` (stall signal). */
-  private async toolActivitySince(before: number): Promise<number> {
+  /** Tool-part count among the messages appended after `afterId` (stall signal). */
+  private async toolActivitySince(afterId: string | null): Promise<number> {
     const { fetchMessages, TURN_READ } = await import("../handlers/replay.js");
-    const msgs = await fetchMessages(this.server, this.zcodeSid, TURN_READ);
+    const msgs = await fetchMessages(this.server, this.zcodeSid, {
+      ...TURN_READ,
+      afterMessageId: afterId,
+    });
     let tools = 0;
-    for (let i = Math.min(before, msgs.length); i < msgs.length; i++) {
-      if (msgs[i]!.parts.some((p) => p.type === "tool")) tools++;
+    for (const m of msgs) {
+      if (m.parts.some((p) => p.type === "tool")) tools++;
     }
     return tools;
   }
 
-  private async messageCount(): Promise<number> {
-    const { fetchMessages, TURN_READ } = await import("../handlers/replay.js");
-    return (await fetchMessages(this.server, this.zcodeSid, TURN_READ)).length;
-  }
-
   private async contextUsed(): Promise<number> {
+    // messageLimit: only the projection is read; the cap keeps the backend
+    // from serializing the whole message array into every round's snapshot.
     const resp = await this.server
       .ensureBackend()
-      .request(this.server.nextId(), "session/read", { sessionId: this.zcodeSid }, 5000);
+      .request(
+        this.server.nextId(),
+        "session/read",
+        { sessionId: this.zcodeSid, messageLimit: 1 },
+        5000,
+      );
     if (resp.error) return 0;
     return (
       ((resp.result ?? {}) as { projection?: { contextUsed?: number } }).projection?.contextUsed ??
@@ -577,7 +604,7 @@ export class GoalLoopDriver {
         undefined;
       this.state.parkedText = undefined;
 
-      const before = await this.messageCount();
+      const before = await this.lastMessageId();
       const result = await this.runGoalTurn(
         dispatchPrompt({
           objective: this.state.objective,
@@ -645,7 +672,7 @@ export class GoalLoopDriver {
         // Prose fallback reads ONLY messages appended by the verify turn: a
         // walk-back into the dispatch reply would let the worker's own "made
         // the tests pass" verify its own work.
-        const vBefore = await this.messageCount();
+        const vBefore = await this.lastMessageId();
         const vRes = await this.runGoalTurn(verifyPrompt(ticket, vPath));
         if (this.runId !== myRun) return;
         if (vRes.stopReason === "cancelled") {
@@ -733,9 +760,15 @@ export class GoalLoopDriver {
   }
 
   private async contextWindowFromRead(): Promise<number> {
+    // messageLimit: only the projection is read (see contextUsed).
     const resp = await this.server
       .ensureBackend()
-      .request(this.server.nextId(), "session/read", { sessionId: this.zcodeSid }, 5000);
+      .request(
+        this.server.nextId(),
+        "session/read",
+        { sessionId: this.zcodeSid, messageLimit: 1 },
+        5000,
+      );
     if (resp.error) return 0;
     return (
       ((resp.result ?? {}) as { projection?: { contextWindow?: number } }).projection

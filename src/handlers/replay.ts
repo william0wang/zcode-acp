@@ -240,6 +240,18 @@ export interface FetchMessagesOptions {
   timeoutMs?: number;
   /** Retry one failed read before degrading to `[]`. */
   retry?: boolean;
+  /**
+   * Native forward cursor (session/messages `afterMessageId`): the backend
+   * returns only the messages AFTER this id. When the id is no longer in the
+   * store (a rewind discarded its branch) the backend answers with the FULL
+   * list — callers that cannot tolerate that must also pass `limit`.
+   */
+  afterMessageId?: string | null;
+  /**
+   * Native tail cap (session/messages `limit`): only the last N of the
+   * (post-cursor) messages. Also bounds the not-found-cursor fallback above.
+   */
+  limit?: number;
 }
 
 /**
@@ -253,6 +265,22 @@ export interface FetchMessagesOptions {
 export const TURN_READ: FetchMessagesOptions = { timeoutMs: 8000, retry: false };
 
 /**
+ * Peek-read caps for turn-internal lookups whose target is always the
+ * NEWEST message (the just-completed edit's tool part, the just-finished
+ * reply). The anchor scopes the read; the cap only bounds the
+ * cursor-not-found fallback, which answers with the whole store.
+ */
+export const EDIT_DIFF_READ_LIMIT = 60;
+export const REPLY_READ_LIMIT = 60;
+/**
+ * Tail window for the goal loop's cursor-less reads (verdict / ticket
+ * parsing). A turn's reply is its newest message, so the scan that walks
+ * backward from the end finds it inside this window; the cap only keeps a
+ * long session's per-round reads from transferring the whole history.
+ */
+export const GOAL_TAIL_READ_LIMIT = 200;
+
+/**
  * Fetch session/messages from zcode (the bridge's only history source).
  *
  * The default RPC timeout is generous (45s): huge sessions' reads are slow by
@@ -261,6 +289,12 @@ export const TURN_READ: FetchMessagesOptions = { timeoutMs: 8000, retry: false }
  * empty store — it retries once and only then degrades to `[]` (callers treat
  * empty as "nothing to replay"). Turn-internal callers pass TURN_READ to keep
  * the pre-0.44.2 bounded behavior.
+ *
+ * `afterMessageId`/`limit` map to the backend's native pagination (schema:
+ * zcode-protocol index.ts:1658-1665; the handler slices after-id then
+ * tail-limits in memory, server-operations.ts:1865-1876). The backend still
+ * reads the whole store — these options shrink the bridge-side payload and
+ * per-message work, not the backend's sqlite scan.
  */
 export async function fetchMessages(
   server: ZcodeAcpServer,
@@ -269,13 +303,13 @@ export async function fetchMessages(
 ): Promise<ZcodeMessage[]> {
   const backend = server.ensureBackend();
   const timeoutMs = opts.timeoutMs ?? 45_000;
+  const params: { sessionId: string; afterMessageId?: string; limit?: number } = {
+    sessionId: zcodeSid,
+  };
+  if (opts.afterMessageId) params.afterMessageId = opts.afterMessageId;
+  if (opts.limit !== undefined) params.limit = opts.limit;
   const read = async (): Promise<ZcodeMessagesResult | null> => {
-    const resp = await backend.request(
-      server.nextId(),
-      "session/messages",
-      { sessionId: zcodeSid },
-      timeoutMs,
-    );
+    const resp = await backend.request(server.nextId(), "session/messages", params, timeoutMs);
     if (resp.error) {
       warn(`session/messages failed for ${zcodeSid}: ${resp.error.message ?? ""}`);
       return null;
@@ -290,6 +324,20 @@ export async function fetchMessages(
   }
   if (result === null) return [];
   return dedupeMessages(result.messages ?? []);
+}
+
+/**
+ * Fetch only what arrived after the differ's history anchor — the residue of
+ * an abandoned turn, or the messages a retry must re-baseline. A null anchor
+ * (fresh differ) degrades to a full read, which is the pre-pagination shape.
+ */
+export async function fetchMessagesSinceAnchor(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  anchor: string | null,
+  opts: FetchMessagesOptions = {},
+): Promise<ZcodeMessage[]> {
+  return fetchMessages(server, zcodeSid, { ...opts, afterMessageId: anchor });
 }
 
 /**

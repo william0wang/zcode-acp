@@ -782,7 +782,9 @@ async function sessionRead(server: ZcodeAcpServer, zcodeSid: string): Promise<Zc
   const resp = await backend.request(
     server.nextId(),
     "session/read",
-    { sessionId: zcodeSid },
+    // messageLimit: callers read settings/projection only; the cap stops the
+    // backend from serializing the session's whole message array for them.
+    { sessionId: zcodeSid, messageLimit: 1 },
     5000,
   );
   if (resp.error) throw new Error(resp.error.message);

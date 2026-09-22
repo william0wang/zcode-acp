@@ -133,10 +133,11 @@ describe("maybeAutoCompact", () => {
     const { server, backend, compactCalls } = makeServerWithProjection(50_000);
     await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
     // session/read was called to check usage, but compact was NOT.
+    // messageLimit caps the snapshot's message array: only projection is read.
     expect(backend.request).toHaveBeenCalledWith(
       expect.any(Number),
       "session/read",
-      { sessionId: "zc_1" },
+      { sessionId: "zc_1", messageLimit: 1 },
       5000,
     );
     expect(compactCalls).not.toHaveBeenCalled();

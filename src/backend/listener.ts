@@ -232,7 +232,10 @@ export class TurnMonitor {
     const resp = await this.backend.request(
       this.nextId(),
       "session/read",
-      { sessionId: this.zcodeSid },
+      // messageLimit: only `projection` is read here, and the backend
+      // serializes the snapshot's whole message array without the cap — this
+      // poll runs every second for the length of a turn.
+      { sessionId: this.zcodeSid, messageLimit: 1 },
       5000,
     );
     if (resp.error) return null;

@@ -25,10 +25,15 @@ afterEach(() => {
 });
 
 const fetchMessagesMock = vi.hoisted(() => vi.fn(async () => []));
+const fetchMessagesSinceAnchorMock = vi.hoisted(() => vi.fn(async () => []));
 
 vi.mock("../src/handlers/replay.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/handlers/replay.js")>();
-  return { ...actual, fetchMessages: fetchMessagesMock };
+  return {
+    ...actual,
+    fetchMessages: fetchMessagesMock,
+    fetchMessagesSinceAnchor: fetchMessagesSinceAnchorMock,
+  };
 });
 
 interface DrainFixtures {
@@ -69,7 +74,7 @@ function makeFixtures(turn: PendingTurn, escalateAfterMs = 0): DrainFixtures {
   } as unknown as ZcodeAcpServer;
   const pollOnce = vi.fn();
   const listener = { resubscribe: vi.fn(async () => true) };
-  const differ = { markSeen: vi.fn() };
+  const differ = { markSeen: vi.fn(), historyAnchor: null as string | null };
   const cx = { notify: vi.fn().mockResolvedValue(undefined) };
   const deps = {
     acpSid: "acp_a",
@@ -104,9 +109,25 @@ describe("drainBackendAfterCancel", () => {
     expect(f.sent).toEqual([]);
     expect(f.listener.resubscribe).not.toHaveBeenCalled();
     // Re-baseline always runs: the abandoned turn may have committed messages
-    // between the prompt's own baseline and this probe.
+    // between the prompt's own baseline and this probe. A fresh differ has no
+    // anchor, so the read degrades to the pre-pagination full fetch.
     expect(f.differ.markSeen).toHaveBeenCalledTimes(1);
-    expect(fetchMessagesMock).toHaveBeenCalledWith(f.server, "sess_z");
+    expect(fetchMessagesSinceAnchorMock).toHaveBeenCalledWith(f.server, "sess_z", null);
+    expect(fetchMessagesMock).not.toHaveBeenCalled();
+  });
+
+  it("scopes the re-baseline read to the differ's history anchor", async () => {
+    const f = makeFixtures({ zcodeSid: "sess_z", cancelled: false });
+    f.differ.historyAnchor = "msg_anchor";
+    f.pollOnce.mockResolvedValue({ status: "idle" });
+
+    const result = await drainBackendAfterCancel(f.server, f.deps);
+
+    expect(result).toBe("drained");
+    // The abandoned turn's residue is appended after the anchor, so the
+    // native cursor (not a full-history transfer) is what gets marked seen.
+    expect(fetchMessagesSinceAnchorMock).toHaveBeenCalledWith(f.server, "sess_z", "msg_anchor");
+    expect(f.differ.markSeen).toHaveBeenCalledTimes(1);
   });
 
   it("emits one wait note and keeps polling until idle (no close below the grace)", async () => {

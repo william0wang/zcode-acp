@@ -72,9 +72,12 @@ import { dispatchEvent } from "./dispatch.js";
 import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import type { FetchMessagesOptions, ReplaySlice } from "./replay.js";
 import {
+  EDIT_DIFF_READ_LIMIT,
   fetchMessages,
+  fetchMessagesSinceAnchor,
   fullSlice,
   readTailLimit,
+  REPLY_READ_LIMIT,
   replayMessages,
   sliceTail,
   TURN_READ,
@@ -457,7 +460,9 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
           const resp = await backend.request(
             server.nextId(),
             "session/read",
-            { sessionId: zcodeSid },
+            // messageLimit: only the projection is read; the cap keeps the
+            // backend from serializing the whole message array for it.
+            { sessionId: zcodeSid, messageLimit: 1 },
             5000,
           );
           const proj = ((resp.result ?? {}) as { projection?: ZcodeProjection }).projection;
@@ -1036,7 +1041,9 @@ export async function resumeIntoSession(
     if (current) {
       let existing: Awaited<ReturnType<typeof fetchMessages>>;
       try {
-        existing = await fetchMessages(server, current, TURN_READ);
+        // Only emptiness matters here: one stored message answers it, so the
+        // native tail cap keeps a huge session's /resume cheap.
+        existing = await fetchMessages(server, current, { ...TURN_READ, limit: 1 });
       } catch {
         // Cannot prove the thread empty — refuse rather than orphan history.
         return { ok: false, error: messages().slashResumeNotEmpty };
@@ -1486,8 +1493,10 @@ export async function runOneTurn(
       await reloadBackendSession(server, acpSid, zcodeSid);
       // The pre-subscribe fetchMessages ran against the evicted session and
       // came back empty — re-baseline the differ so turn completion doesn't
-      // diff-replay the whole history as new output.
-      differ.markSeen(await fetchMessages(server, zcodeSid));
+      // diff-replay the whole history as new output. The reload revives the
+      // same store, so the anchor still points at real history and the read
+      // stays scoped to what arrived since.
+      differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
       snapshot = await listener.subscribe(() => server.nextId());
     }
     // A successful subscribe proves the resident runtime is live — refresh
@@ -1538,7 +1547,7 @@ export async function runOneTurn(
           stopBackendTurn(server, zcodeSid, turn);
           return { stopReason: "cancelled" };
         }
-        differ.markSeen(await fetchMessages(server, zcodeSid));
+        differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
         if (!suppressRetryNotice) {
           await sendTextChunk(
             cx,
@@ -1647,8 +1656,12 @@ export async function runOneTurn(
             // as this turn's output. Same for a recent cancel whose drain
             // gate was skipped (busy-reject backend): the cancelled turn's
             // finalization can still land inside the subscribe round-trip.
+            // The residue is appended after the anchor, so the native
+            // cursor scopes the read to exactly what must be marked seen.
             if (sendAttempt > 1 || (cancelledRecently && !drainRan)) {
-              differ.markSeen(await fetchMessages(server, zcodeSid));
+              differ.markSeen(
+                await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor),
+              );
             }
             // From this moment the turn may own a running generation —
             // stopBackendTurn's compaction guard no longer spares it.
@@ -1840,7 +1853,7 @@ export async function runOneTurn(
             );
             throw turnFailureRequestError(e);
           }
-          differ.markSeen(await fetchMessages(server, zcodeSid));
+          differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
           await sendTextChunk(
             cx,
             acpSid,
@@ -2504,7 +2517,7 @@ export async function drainBackendAfterCancel(
     }
     await sleep(DRAIN_POLL_MS);
   }
-  differ.markSeen(await fetchMessages(server, zcodeSid));
+  differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
   return "drained";
 }
 
@@ -3128,7 +3141,9 @@ async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string):
     const resp = await backend.request(
       server.nextId(),
       "session/read",
-      { sessionId: zcodeSid },
+      // messageLimit: only settings.model.current is read; the cap keeps the
+      // backend from serializing the whole message array for it.
+      { sessionId: zcodeSid, messageLimit: 1 },
       5000,
     );
     if (resp.error) return;
@@ -3892,7 +3907,17 @@ export async function runEventTurn(
       // compaction, before the user's next send) would leave its entire output
       // invisible in the UI. `fetchLastReply` above only covers the last
       // assistant message, not the whole missing span.
-      const snapshot = await buildSnapshot(server, turn.zcodeSid, TURN_READ);
+      //
+      // Scoped to the differ's anchor: the completion diff only cares about
+      // THIS turn's messages, and the baseline markSeen at turn entry already
+      // covers everything before the anchor (so even the backend's
+      // cursor-not-found full-list fallback dedups against seen ids). No
+      // `limit`: a long turn's own message count is the natural bound, and a
+      // cap here would silently drop the earliest messages of a huge turn.
+      const snapshot = await buildSnapshot(server, turn.zcodeSid, {
+        ...TURN_READ,
+        afterMessageId: differ.historyAnchor,
+      });
       const completionEvents = differ.diff(snapshot);
       for (const iev of completionEvents) {
         // Per-kind dedup (see deliveredReasoningMessageIds): text and reasoning
@@ -3960,6 +3985,11 @@ function registerFetchedReply(
  * window after `status:idle` where `session/messages` may not yet include the
  * just-finished reply. Skips assistant messages the differ already saw (by
  * dedup key) so a previous turn's reply is never re-emitted as this turn's.
+ *
+ * Scoped to the differ's anchor plus a tail cap: the just-finished reply is
+ * the newest message, and the cap bounds the backend's cursor-not-found
+ * fallback (a rewind that discarded the anchor's branch answers with the
+ * whole store) to a window that still contains the reply.
  */
 async function fetchLastReply(
   server: ZcodeAcpServer,
@@ -3967,7 +3997,11 @@ async function fetchLastReply(
   differ: ProjectionDiffer,
 ): Promise<{ text: string; messageId: string | null } | null> {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const messages = await fetchMessages(server, zcodeSid, TURN_READ);
+    const messages = await fetchMessages(server, zcodeSid, {
+      ...TURN_READ,
+      afterMessageId: differ.historyAnchor,
+      limit: REPLY_READ_LIMIT,
+    });
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (!m) continue;
@@ -4066,6 +4100,11 @@ export async function emitModeIfChanged(
  * a ToolCallUpdate with diff content immediately (don't wait for turn
  * completion — model rate-limiting could delay it indefinitely). Always marks
  * the tool seen in the differ so turn-completion diff won't re-emit it.
+ *
+ * Scoped to the differ's anchor plus a tail cap: the tool message that just
+ * completed is the newest one in the store, so the native cursor reaches it
+ * without transferring the session's whole history on every edit of a long
+ * refactoring turn. The cap only bounds the cursor-not-found fallback.
  */
 async function dispatchEditDiff(
   server: ZcodeAcpServer,
@@ -4076,7 +4115,11 @@ async function dispatchEditDiff(
   differ: ProjectionDiffer,
   chunkMsgId: string,
 ): Promise<void> {
-  const messages = await fetchMessages(server, zcodeSid, TURN_READ);
+  const messages = await fetchMessages(server, zcodeSid, {
+    ...TURN_READ,
+    afterMessageId: differ.historyAnchor,
+    limit: EDIT_DIFF_READ_LIMIT,
+  });
   for (const m of messages) {
     for (const p of m.parts ?? []) {
       if (!p || typeof p !== "object") continue;

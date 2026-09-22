@@ -41,9 +41,12 @@ vi.mock("../src/handlers/io.js", async (importOriginal) => {
 /**
  * Scripted history: each scriptRound() queues the assistant reply that lands
  * when runOneTurn is invoked for it (a reply exists only after its turn).
- * Every fetchMessages call then sees the full history delivered so far —
- * matching the real backend, and the driver's three per-round reads
- * (count / tool activity / verdict text) all observe the same world.
+ * The fetchMessages mock mirrors the backend's session/messages handler:
+ * afterMessageId is an EXCLUSIVE forward cursor (an unknown id answers with
+ * the whole store) and limit caps the tail (server-operations.ts:1865-1876).
+ * The driver's per-round reads therefore observe the same world the real
+ * backend would show them: lastMessageId's limit:1 tail, the round's
+ * post-anchor window, and the verify turn's post-vBefore window.
  */
 const fetchMessagesState: Array<{ role: "assistant" | "user"; text: string; tools?: boolean }> = [];
 const pendingReplies: Array<{ role: "assistant" | "user"; text: string; tools?: boolean }> = [];
@@ -52,14 +55,23 @@ vi.mock("../src/handlers/replay.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/handlers/replay.js")>();
   return {
     ...actual,
-    fetchMessages: async () =>
-      fetchMessagesState.map((m) => ({
-        info: { role: m.role },
+    fetchMessages: async (
+      _server: unknown,
+      _sid: string,
+      opts?: { afterMessageId?: string | null; limit?: number },
+    ) => {
+      const all = fetchMessagesState.map((m, i) => ({
+        info: { id: `m${i}`, role: m.role },
         parts: [
           ...(m.tools ? [{ type: "tool", callId: "c" }] : []),
           ...(m.text ? [{ type: "text", text: m.text }] : []),
         ],
-      })),
+      }));
+      const after = opts?.afterMessageId;
+      const afterIndex = after ? all.findIndex((m) => m.info.id === after) : -1;
+      const scoped = afterIndex >= 0 ? all.slice(afterIndex + 1) : all;
+      return opts?.limit ? scoped.slice(-opts.limit) : scoped;
+    },
   };
 });
 

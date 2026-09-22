@@ -47,14 +47,16 @@ export async function maybeAutoCompact(
 
   const msgId = randomUUID();
   try {
-    // Read current context usage via session/read.
+    // Read current context usage via session/read. messageLimit keeps the
+    // backend from serializing the whole message array into a snapshot whose
+    // only consumer here is `projection.contextUsed`.
     let used = 0;
     try {
       const backend = server.ensureBackend();
       const resp = await backend.request(
         server.nextId(),
         "session/read",
-        { sessionId: zcodeSid },
+        { sessionId: zcodeSid, messageLimit: 1 },
         5000,
       );
       if (resp.error) return;
