@@ -12,7 +12,17 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -29,6 +39,7 @@ import {
   pickReleaseFile,
   releasePlatform,
   resetAppUpdateStateForTest,
+  setAppUpdatePlatformForTest,
   setInstallRenameForTest,
   setManifestNetworkForTest,
   startAppUpdate,
@@ -71,9 +82,13 @@ const cleanups: Array<() => Promise<void> | void> = [];
 
 beforeEach(() => {
   vi.stubEnv("ZCODE_HOME", zcodeHomeDir());
+  // Pin the platform so the macOS paths (bundle discovery, plist version, the
+  // rename swap) stay covered on a Linux runner.
+  setAppUpdatePlatformForTest("darwin");
 });
 
 afterEach(async () => {
+  setAppUpdatePlatformForTest(process.platform);
   vi.unstubAllEnvs();
   while (cleanups.length) {
     const stop = cleanups.pop()!;
@@ -177,7 +192,7 @@ describe("installed app detection", () => {
       `<?xml version="1.0"?><plist><dict><key>CFBundleIdentifier</key><string>dev.zcode.app</string><key>CFBundleShortVersionString</key><string>3.14.1</string></dict></plist>`,
       "utf8",
     );
-    expect(await installedAppVersion(app)).toBe("3.14.1");
+    expect(await installedAppVersion(app, process.env, "darwin")).toBe("3.14.1");
   });
 
   it("honours an explicit ZCODE_APP_PATH override", async () => {
@@ -227,7 +242,7 @@ describe("checkForAppUpdate", () => {
     const { fetchImpl, urls } = manifestFetch("3.14.3");
     setManifestNetworkForTest(fetchImpl);
     try {
-      const check = await checkForAppUpdate({ channel: "stable" });
+      const check = await checkForAppUpdate({ channel: "stable", platform: "darwin" });
       expect(check.updateAvailable).toBe(true);
       expect(check.currentVersion).toBe("3.14.1");
       expect(check.latestVersion).toBe("3.14.3");
@@ -243,7 +258,7 @@ describe("checkForAppUpdate", () => {
     const { fetchImpl } = manifestFetch("3.14.0");
     setManifestNetworkForTest(fetchImpl);
     try {
-      const check = await checkForAppUpdate({ channel: "stable" });
+      const check = await checkForAppUpdate({ channel: "stable", platform: "darwin" });
       expect(check.updateAvailable).toBe(false);
       expect(check.release).toBeUndefined();
     } finally {
@@ -256,7 +271,7 @@ describe("checkForAppUpdate", () => {
     const { fetchImpl, urls } = manifestFetch("3.14.9");
     setManifestNetworkForTest(fetchImpl);
     try {
-      const check = await checkForAppUpdate({ channel: "preview" });
+      const check = await checkForAppUpdate({ channel: "preview", platform: "darwin" });
       expect(check.channel).toBe("preview");
       expect(urls[0]).toContain("channel=3");
     } finally {
@@ -269,7 +284,7 @@ describe("checkForAppUpdate", () => {
     const { fetchImpl } = manifestFetch("9.9.9");
     setManifestNetworkForTest(fetchImpl);
     try {
-      const check = await checkForAppUpdate({ channel: "stable" });
+      const check = await checkForAppUpdate({ channel: "stable", platform: "darwin" });
       expect(check.updateAvailable).toBe(false);
       expect(check.currentVersion).toBeNull();
       expect(check.latestVersion).toBe("9.9.9");
@@ -284,7 +299,9 @@ describe("checkForAppUpdate", () => {
       new Response("nope", { status: 503 })) as unknown as typeof fetch;
     setManifestNetworkForTest(fetchImpl);
     try {
-      await expect(checkForAppUpdate({ channel: "stable" })).rejects.toThrow(/manifest_http_503/u);
+      await expect(checkForAppUpdate({ channel: "stable", platform: "darwin" })).rejects.toThrow(
+        /manifest_http_503/u,
+      );
     } finally {
       setManifestNetworkForTest(fetch);
     }
@@ -414,6 +431,7 @@ describe("startAppUpdate", () => {
           sha512,
         },
         "9.9.9",
+        { platform: "darwin" },
       );
       expect(state.stage).toBe("done");
       expect(state.restartRequired).toBe(true);
@@ -455,6 +473,7 @@ describe("startAppUpdate", () => {
           sha512: badSha,
         },
         "9.9.9",
+        { platform: "darwin" },
       );
       expect(state.stage).toBe("failed");
       expect(state.error).toBe("archive_app_bundle_is_not_a_directory");
@@ -498,6 +517,7 @@ describe("startAppUpdate", () => {
           sha512,
         },
         "9.9.9",
+        { platform: "darwin" },
       );
       expect(state.stage).toBe("failed");
       // The original bundle is back in place and still the old version.
@@ -516,37 +536,51 @@ describe("startAppUpdate", () => {
   it("reports needs-user-install (not success) when the location is not writable", async () => {
     // The real-world case for an app under `/Applications`: whatever the reason
     // the swap is refused, it must never be reported as a completed install.
-    if (process.platform !== "darwin") return;
-    const { zip, sha512 } = await releaseZip();
-    setManifestNetworkForTest(
-      (async () => new Response(zip, { status: 200 })) as unknown as typeof fetch,
-    );
-    vi.stubEnv("ZCODE_APP_PATH", "/Applications/ZCode.app");
+    // Hermetic on purpose: a read-only PARENT directory reproduces the refusal
+    // without depending on the machine's real `/Applications` (absent on CI, and
+    // `chmod` is a no-op on the root of a container's overlay in some runners).
+    const root = await mkdtemp(path.join(tmpdir(), "app-update-readonly-"));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const app = await installedAppAt(root, "3.14.0");
+    const previousMode = (await stat(root)).mode;
+    await chmod(root, 0o555);
+    const stageDir = await mkdtemp(path.join(tmpdir(), "app-update-artifact-"));
+    cleanups.push(() => rm(stageDir, { recursive: true, force: true }));
+    const previousTmpdir = process.env.TMPDIR;
     try {
+      const { zip, sha512 } = await releaseZip();
+      setManifestNetworkForTest(
+        (async () => new Response(zip, { status: 200 })) as unknown as typeof fetch,
+      );
+      vi.stubEnv("ZCODE_APP_PATH", app);
+      // `accessSync` reads the real filesystem, so the read-only parent must be
+      // real for the duration of the call — no stubbing involved.
+      vi.stubEnv("TMPDIR", stageDir);
       const state = await startAppUpdate(
         {
           url: "https://cdn-zcode.z.ai/zcode/electron/releases/9.9.9/macos-arm64/ZCode-9.9.9.zip",
           sha512,
         },
         "9.9.9",
+        { platform: "darwin" },
       );
       expect(state.stage).toBe("needs-user-install");
       expect(state.artifactPath).toBeTruthy();
       // The verified bundle really is there for the user to move.
       const info = await stat(path.join(state.artifactPath!, "Contents", "Info.plist"));
       expect(info.isFile()).toBe(true);
-      // And the real install is untouched.
-      const installed = await readFile("/Applications/ZCode.app/Contents/Info.plist", "utf8");
-      expect(installed).not.toContain("9.9.9");
+      // And the installed app is untouched.
+      const plist = await readFile(path.join(app, "Contents", "Info.plist"), "utf8");
+      expect(plist).toContain("3.14.0");
+      expect(plist).not.toContain("9.9.9");
+      expect(await readdir(root)).toEqual(["ZCode.app"]);
     } finally {
+      await chmod(root, previousMode & 0o777).catch(() => undefined);
       setManifestNetworkForTest(fetch);
       resetAppUpdateStateForTest();
-      if (appUpdateState().artifactPath) {
-        await rm(path.dirname(path.dirname(appUpdateState().artifactPath!)), {
-          recursive: true,
-          force: true,
-        }).catch(() => undefined);
-      }
+      if (previousTmpdir === undefined) vi.stubEnv("TMPDIR", "");
+      else vi.stubEnv("TMPDIR", previousTmpdir);
+      vi.unstubAllEnvs();
     }
   });
 
@@ -559,6 +593,7 @@ describe("startAppUpdate", () => {
       const state = await startAppUpdate(
         { url: "https://cdn-zcode.z.ai/zcode/electron/releases/9.9.9/macos-arm64/ZCode-9.9.9.zip" },
         "9.9.9",
+        { platform: "darwin" },
       );
       expect(state.stage).toBe("failed");
       expect(state.error).toBe("app_not_installed");
@@ -595,8 +630,8 @@ describe("startAppUpdate", () => {
         url: "https://cdn-zcode.z.ai/zcode/electron/releases/9.9.9/macos-arm64/ZCode-9.9.9.zip",
         sha512,
       };
-      const first = startAppUpdate(file, "9.9.9");
-      const second = startAppUpdate(file, "9.9.9");
+      const first = startAppUpdate(file, "9.9.9", { platform: "darwin" });
+      const second = startAppUpdate(file, "9.9.9", { platform: "darwin" });
       // Same promise: the second caller joins the running install rather than
       // starting a second download that would race on the destination.
       expect(second).toBe(first);

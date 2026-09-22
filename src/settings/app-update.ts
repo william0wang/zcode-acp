@@ -139,8 +139,9 @@ export function appBundlePath(env: NodeJS.ProcessEnv = process.env): string | nu
 export async function installedAppVersion(
   appPath: string,
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = updatePlatform,
 ): Promise<string | null> {
-  if (process.platform !== "darwin") return env.ZCODE_APP_VERSION?.trim() || null;
+  if (platform !== "darwin") return env.ZCODE_APP_VERSION?.trim() || null;
   const plist = path.join(appPath, "Contents", "Info.plist");
   try {
     const text = await readFile(plist, "utf8");
@@ -397,6 +398,28 @@ export function setManifestNetworkForTest(impl: typeof fetch): void {
 }
 
 /**
+ * The platform the update flows run as.
+ *
+ * Defaults to `process.platform`, which makes the feature untestable from any
+ * OS but the one it targets: on a Linux runner the whole macOS install path
+ * (bundle discovery, plist version, the rename swap) is skipped, so the route
+ * tests that exercise it pass on a developer's Mac and fail everywhere else.
+ * A module-level seam, same shape and rationale as `manifestNetwork` — the
+ * platform is not something an HTTP caller can supply.
+ */
+let updatePlatform: NodeJS.Platform = process.platform;
+
+/** Override the platform the update flows run as (test seam). */
+export function setAppUpdatePlatformForTest(platform: NodeJS.Platform): void {
+  updatePlatform = platform;
+}
+
+/** The platform the update flows run as. */
+function currentPlatform(overridden?: NodeJS.Platform): NodeJS.Platform {
+  return overridden ?? updatePlatform;
+}
+
+/**
  * Compare the installed app against the manifest.
  *
  * A missing install (the bridge running on a machine without the app) is not an
@@ -404,12 +427,17 @@ export function setManifestNetworkForTest(impl: typeof fetch): void {
  * client can hide the row instead of showing a failure.
  */
 export async function checkForAppUpdate(
-  options: { channel?: ReleaseChannel; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    channel?: ReleaseChannel;
+    env?: NodeJS.ProcessEnv;
+    platform?: NodeJS.Platform;
+  } = {},
 ): Promise<UpdateCheck> {
   const env = options.env ?? process.env;
+  const platform = currentPlatform(options.platform);
   const channel = options.channel ?? "stable";
   const appPath = appBundlePath(env);
-  const currentVersion = appPath ? await installedAppVersion(appPath, env) : null;
+  const currentVersion = appPath ? await installedAppVersion(appPath, env, platform) : null;
   const manifest = await fetchReleaseManifest(channel, env, manifestNetwork);
   const updateAvailable =
     currentVersion !== null && isNewerVersion(manifest.version, currentVersion);
@@ -630,11 +658,13 @@ export function startAppUpdate(
   options: {
     channel?: ReleaseChannel;
     env?: NodeJS.ProcessEnv;
+    platform?: NodeJS.Platform;
     fetchImpl?: typeof fetch;
   } = {},
 ): Promise<InstallState> {
   if (inFlight) return inFlight;
   const env = options.env ?? process.env;
+  const platform = currentPlatform(options.platform);
   // Defaults to the seam (not bare `fetch`) so a test that overrides the
   // network also covers the install path, not just the manifest read.
   const fetchImpl = options.fetchImpl ?? manifestNetwork;
@@ -662,7 +692,7 @@ export function startAppUpdate(
         const appPath = appBundlePath(env);
         if (!appPath) throw new Error("app_not_installed");
 
-        if (process.platform !== "darwin") {
+        if (platform !== "darwin") {
           // Linux/Windows installs belong to a package manager (apt, dnf,
           // pacman, winget); a raw file move would bypass it and leave the
           // package database disagreeing with the filesystem. Hand the verified

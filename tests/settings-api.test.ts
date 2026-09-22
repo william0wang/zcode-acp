@@ -25,7 +25,10 @@ import {
   resetAppUpdateStateForTest,
   resetPendingRestartForTest,
 } from "../src/remote/settings-endpoint.js";
-import { setManifestNetworkForTest } from "../src/settings/app-update.js";
+import {
+  setAppUpdatePlatformForTest,
+  setManifestNetworkForTest,
+} from "../src/settings/app-update.js";
 import { listAgents, setBuiltInAgentModel } from "../src/settings/agents-config.js";
 import { listSkills } from "../src/settings/skills.js";
 import { startHub, type HubHandle } from "../src/remote/hub-server.js";
@@ -44,6 +47,10 @@ let loopbackPort: number;
 beforeEach(async () => {
   home = await mkdtemp(path.join(tmpdir(), "settings-api-test-"));
   resetPendingRestartForTest();
+  // These routes are macOS-shaped (a bundle, a plist, a rename swap). Pinning the
+  // platform keeps the assertions meaningful on a Linux runner instead of
+  // letting them silently fall through to the non-macOS branch.
+  setAppUpdatePlatformForTest("darwin");
   vi.stubEnv("ZCODE_HOME", home);
   vi.stubEnv("HOME", home);
   hub = await startHub({ port: 0, host: "127.0.0.1", token: TOKEN });
@@ -70,6 +77,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  setAppUpdatePlatformForTest(process.platform);
   vi.unstubAllEnvs();
   while (cleanups.length) {
     const stop = cleanups.pop()!;
