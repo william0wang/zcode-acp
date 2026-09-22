@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.0](https://github.com/william0wang/zcode-acp/compare/v0.46.7...v0.47.0) (2026-09-22)
+
+
+### Features
+
+* settings API for ZCode configuration management ([#238](https://github.com/william0wang/zcode-acp/issues/238)) ([3f6ef1b](https://github.com/william0wang/zcode-acp/commit/3f6ef1b0a9004dcedae1fa7718bc1506e18fa236))
+
 ## [0.46.7](https://github.com/william0wang/zcode-acp/compare/v0.46.6...v0.46.7) (2026-09-22)
 
 
