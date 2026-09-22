@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -25,6 +26,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,12 +41,16 @@ import {
   pickReleaseFile,
   releasePlatform,
   resetAppUpdateStateForTest,
+  resetExtractForTest,
   setAppUpdatePlatformForTest,
+  setExtractForTest,
   setInstallRenameForTest,
   setManifestNetworkForTest,
   startAppUpdate,
 } from "../src/settings/app-update.js";
 import { zcodeHomeDir } from "../src/utils.js";
+
+const execFileAsync = promisify(execFile);
 
 /** The real manifest shape, trimmed to the fields the parser must handle. */
 const MANIFEST_YAML = `version: 3.14.0
@@ -85,10 +91,15 @@ beforeEach(() => {
   // Pin the platform so the macOS paths (bundle discovery, plist version, the
   // rename swap) stay covered on a Linux runner.
   setAppUpdatePlatformForTest("darwin");
+  // Production unzips with `ditto`, which is macOS-only and absent from CI.
+  // `unzip` exists on both, so the extraction and validation logic is still
+  // exercised everywhere instead of failing on a missing command.
+  setExtractForTest((zipPath, destDir) => execFileAsync("unzip", ["-q", zipPath, "-d", destDir]));
 });
 
 afterEach(async () => {
   setAppUpdatePlatformForTest(process.platform);
+  resetExtractForTest();
   vi.unstubAllEnvs();
   while (cleanups.length) {
     const stop = cleanups.pop()!;
@@ -385,9 +396,14 @@ describe("downloadRelease", () => {
 });
 
 describe("startAppUpdate", () => {
-  /** A real, minimal `ZCode.app/Contents/Info.plist` zip served over the seam. */
+  /**
+   * A real, minimal `ZCode.app/Contents/Info.plist` zip served over the seam.
+   *
+   * Built with `zip` (present on macOS and on the Linux CI image) rather than a
+   * hand-rolled zip writer, so the parser-under-test sees genuine archive bytes
+   * including the central directory.
+   */
   async function releaseZip(): Promise<{ zip: Buffer; sha512: string }> {
-    const { execFileSync } = await import("node:child_process");
     const src = await mkdtemp(path.join(tmpdir(), "app-update-src-"));
     cleanups.push(() => rm(src, { recursive: true, force: true }));
     await mkdir(path.join(src, "ZCode.app", "Contents"), { recursive: true });
@@ -397,7 +413,7 @@ describe("startAppUpdate", () => {
       "utf8",
     );
     const zipPath = path.join(src, "release.zip");
-    execFileSync("zip", ["-qr", zipPath, "ZCode.app"], { cwd: src });
+    await execFileAsync("zip", ["-qr", zipPath, "ZCode.app"], { cwd: src });
     const zip = await readFile(zipPath);
     return { zip, sha512: createHash("sha512").update(zip).digest("base64") };
   }
@@ -455,12 +471,11 @@ describe("startAppUpdate", () => {
     // A zip whose ZCode.app entry is a FILE. Renaming that over the installed
     // bundle would leave a file where a directory is expected and the app would
     // no longer launch — so it must fail before any rename happens.
-    const { execFileSync } = await import("node:child_process");
     const badSrc = await mkdtemp(path.join(tmpdir(), "app-update-badsrc-"));
     cleanups.push(() => rm(badSrc, { recursive: true, force: true }));
     await writeFile(path.join(badSrc, "ZCode.app"), "not a bundle", "utf8");
     const badZip = path.join(root, "bad.zip");
-    execFileSync("zip", ["-qr", badZip, "ZCode.app"], { cwd: badSrc });
+    await execFileAsync("zip", ["-qr", badZip, "ZCode.app"], { cwd: badSrc });
     const badBytes = await readFile(badZip);
     const badSha = createHash("sha512").update(badBytes).digest("base64");
     setManifestNetworkForTest(

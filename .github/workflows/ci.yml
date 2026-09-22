@@ -50,6 +50,14 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # The app-update installer tests build and unpack real archives. The
+      # unzip is injected (production uses macOS `ditto`, absent on Linux), but
+      # `zip`/`unzip` themselves must exist — they ship with ubuntu-latest, yet
+      # an implicit dependency on a preinstalled tool is exactly the kind of
+      # thing that breaks on a runner image update.
+      - name: Install archive tools
+        run: sudo apt-get update && sudo apt-get install -y zip unzip
+
       - name: Typecheck
         run: pnpm run typecheck
 
@@ -99,6 +107,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # Same rationale as the Node job: the app-update tests need real
+      # `zip`/`unzip` binaries on PATH.
+      - name: Install archive tools
+        run: sudo apt-get update && sudo apt-get install -y zip unzip
 
       - name: Build
         run: pnpm run build

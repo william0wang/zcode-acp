@@ -556,6 +556,31 @@ export function appUpdateState(): InstallState {
 }
 
 /**
+ * The unzip command used for a downloaded archive.
+ *
+ * `ditto` is the macOS one (it preserves the resource forks and extended
+ * attributes an Electron bundle relies on, which `unzip -X` can corrupt on
+ * older builds). A module-level seam so tests can supply an unzip that exists
+ * on the host they run on — `ditto` is absent from Linux, and a test that
+ * depends on it cannot assert the extraction logic at all.
+ */
+let extractCommand: (zipPath: string, destDir: string) => Promise<void> = defaultExtract;
+
+async function defaultExtract(zipPath: string, destDir: string): Promise<void> {
+  await execFileAsync("ditto", ["-xk", zipPath, destDir], { timeout: 600_000 });
+}
+
+/** Override the unzip used by the installer (test seam). */
+export function setExtractForTest(impl: (zipPath: string, destDir: string) => Promise<void>): void {
+  extractCommand = impl;
+}
+
+/** Restore the platform's own unzip (test seam). */
+export function resetExtractForTest(): void {
+  extractCommand = defaultExtract;
+}
+
+/**
  * Extract a downloaded zip into a staging directory.
  *
  * The zip contains a single `ZCode.app/` at its root, so extraction happens
@@ -565,7 +590,7 @@ export function appUpdateState(): InstallState {
  */
 async function extractZip(zipPath: string, destDir: string): Promise<string> {
   await mkdir(destDir, { recursive: true });
-  await execFileAsync("ditto", ["-xk", zipPath, destDir], { timeout: 600_000 });
+  await extractCommand(zipPath, destDir);
   const bundle = path.join(destDir, "ZCode.app");
   let info: Stats;
   try {
