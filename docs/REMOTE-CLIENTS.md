@@ -393,6 +393,258 @@ section — so clients can reproduce the CLI layout exactly:
   later. Only transport-level failures reject the request.
 - Cached ~10s server-side (same caches as the `/quota` command).
 
+## Settings API
+
+The machine's ZCode configuration, exposed as JSON so a native client can
+render the management UI that the desktop app provides (ADR-0025). Plain HTTP,
+no ACP connection needed. **User scope only** — `~/.zcode/`; project-level
+(`<ws>/.zcode/`) configuration is not part of this contract yet.
+
+Two mounts, identical routes and identical semantics:
+
+- `{hub}/api/settings/*` — token-gated (`Authorization: Bearer …` or
+  `?token=…`), the only public entry.
+- `http://127.0.0.1:{bridgePort}/settings/*` — the bridge's own loopback
+  server, **unauthenticated** like `/status` and `/fs`. Any local process can
+  already write these files, so the HTTP route grants no new capability. The
+  bind is `127.0.0.1` only.
+- Per-instance proxying is available too:
+  `{hub}/api/instances/{id}/settings/*` relays to that bridge's loopback
+  mount (same body passthrough as session close/rename).
+
+Every write answers with an **effect class** — read it before deciding whether
+to prompt the user:
+
+| `effect`        | Meaning                                                                 |
+| --------------- | ----------------------------------------------------------------------- |
+| `immediate`     | Applied to the running backend within ~1s (provider table poll, skills) |
+| `needs-restart` | Read once at agent start — needs a new backend process to take effect   |
+
+`needs-restart` applies to MCP servers, hooks, and subagent markdown. After
+such a write, either prompt the user or call
+`POST {hub}/api/instances/{id}/backend/restart`, which cancels in-flight turns
+and respawns that bridge's backend (see below). `GET /api/settings/pending-restart`
+reports whether this process has recorded any `needs-restart` write since it
+started.
+
+### Read endpoints
+
+| Endpoint                     | Purpose                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `GET /settings/all`          | One-shot snapshot of every section (first screen)                        |
+| `GET /settings/models`       | Selectable models, unioned across `config.json` + `provider_config.json` |
+| `GET /settings/skills`       | Discovered skills with their enabled state                               |
+| `GET /settings/mcp`          | Configured MCP servers (user config + enabled plugins)                   |
+| `GET /settings/hooks`        | The full hooks tree, 7 event names                                       |
+| `GET /settings/agents`       | Subagents with enabled state and model override                          |
+| `GET /settings/usage?range=` | `7d` \| `30d` \| `all` per-model token usage                             |
+| `GET /settings/quota`        | Same payload as `/api/quota` (account-level, hub only)                   |
+| `GET /settings/reset-cards`  | Coding-plan reset card status (`?providerId=` required)                  |
+| `GET /settings/backups`      | Config backups available for restore                                     |
+| `GET /settings/app-update`   | ZCode desktop app version check (`?channel=stable\|preview`)             |
+
+`/settings/all` degrades per section: a failure to read the local config files
+is a whole-request `500` (the environment is broken), while `usage` and
+`resetCards` report their own state — no database and no credentials are normal,
+not errors. `resetCards` in the snapshot carries **eligibility only**
+(`providers` + whether the credential store decrypts); the cards themselves need
+a `providerId` and a network read, so fetch them from
+`GET /settings/reset-cards?providerId=…`.
+
+### Write endpoints
+
+| Endpoint                                  | Effect          | Purpose                                     |
+| ----------------------------------------- | --------------- | ------------------------------------------- |
+| `PUT /settings/providers/{id}`            | `immediate`     | Enable/disable, rename                      |
+| `POST /settings/models`                   | `immediate`     | Add a model to an existing provider         |
+| `DELETE /settings/models/{pid}/{mid}`     | `immediate`     | Remove a model                              |
+| `POST /settings/skills/enable`            | `immediate`     | `{path, enable}`                            |
+| `DELETE /settings/skills/{path}`          | `immediate`     | Delete a skill directory                    |
+| `POST /settings/skills/copy-to-user`      | `immediate`     | Copy a workspace skill to `~/.zcode/skills` |
+| `PUT /settings/mcp/{name}`                | `needs-restart` | Create or update an MCP server              |
+| `DELETE /settings/mcp/{name}`             | `needs-restart` | Remove an MCP server                        |
+| `POST /settings/mcp/enable`               | `needs-restart` | `{name, enable}`                            |
+| `PUT /settings/hooks/{event}/{index}`     | `needs-restart` | Edit one existing hook entry                |
+| `POST /settings/hooks/enabled`            | `needs-restart` | `{enabled}` — the whole hooks tree          |
+| `PUT /settings/agents/{id}`               | `needs-restart` | Create or update a subagent                 |
+| `DELETE /settings/agents/{id}`            | `needs-restart` | Delete a subagent                           |
+| `POST /settings/agents/{id}/enable`       | `needs-restart` | `{enable}`                                  |
+| `POST /settings/reset-cards/use`          | —               | Consume a reset card (see below)            |
+| `POST /settings/reset-cards/opportunity`  | —               | Request an opportunity (see below)          |
+| `POST /settings/reset-cards/history-read` | —               | Mark the reset history read                 |
+| `POST /settings/backups/restore`          | per file        | Restore a backup                            |
+| `POST /settings/app-update/install`       | —               | Download and stage a new app build          |
+
+Notes that clients must honor:
+
+- **Providers cannot be created or deleted** through this API — only enabled
+  state, display name, and the models inside an existing provider. Adding a
+  brand-new provider stays a desktop-app (or hand-edit) operation.
+- **Hooks are read-complete but write-limited**: the tree is returned in full,
+  and writes may only modify an existing entry's `command` / `timeoutMs` /
+  `enabled`. Adding or removing events, matchers, or hook entries is not
+  supported. Unknown keys on a hook object are preserved verbatim.
+- **Subagents**: `name`, `description`, `color`, `model`, `thoughtLevel` are
+  editable; the system-prompt body is not. Built-in agents (`general-purpose`,
+  `Explore`) cannot be edited or deleted — only their model override can change.
+  Send `{"providerId": null, "modelId": null}` on a built-in agent to CLEAR its
+  override and return it to the workspace default.
+- **Reset cards are irreversible.** `POST /settings/reset-cards/use` requires
+  the `nonce` returned by `GET /settings/reset-cards`, is restricted to
+  `account:*` providers (`403` otherwise), and carries an idempotency key so a
+  retry cannot burn two cards. `credentials_unavailable` means the machine's
+  encrypted credential store could not be decrypted.
+- Every write is a locked read-modify-write of the real file: unknown keys are
+  preserved, a backup is taken first, and a write that fails self-validation
+  never lands. Concurrent writers are serialized by ZCode's own cross-process
+  lock, so the last write wins and no change is silently dropped.
+
+### Restarting the backend
+
+```text
+POST {hub}/api/instances/{id}/backend/restart → 200 { "ok": true, "cancelledTurns": 2 }
+```
+
+Cancels that bridge's in-flight turns, kills its `zcode app-server` child, and
+lets the next prompt respawn it — the same path the sandbox arm-flip uses.
+`cancelledTurns` is how many conversations were interrupted; surface it before
+the user commits to the action.
+
+`GET /api/instances/{id}/settings/pending-restart` reports whether that bridge
+process has recorded any `needs-restart` write since it last restarted its
+backend, so a client can ask "is a restart needed?" on a fresh screen instead of
+tracking it itself. The flag is cleared by a successful backend restart.
+
+Use the **per-instance** spelling, not the hub-local
+`GET /api/settings/pending-restart`: the counter lives in the bridge that served
+the write, and the hub has no backend of its own to restart, so its copy can
+never be cleared (the hub-local route answers `501` on a restart attempt and
+keeps reporting `true` until the hub idle-exits).
+
+### Reset cards (coding-plan quota)
+
+Three calls, in this order:
+
+```text
+GET  /settings/reset-cards?providerId=account:bigmodel-individual-coding-plan
+POST /settings/reset-cards/use            { providerId, resetType, nonce, idempotencyKey }
+POST /settings/reset-cards/history-read   { providerId }
+```
+
+```json
+→ { "ok": true, "resetCards": {
+      "availableFiveHour": [{ "expireAt": 1790000000000 }],
+      "availableWeek": [],
+      "latestFiveHour": { "usedAt": 1789000000000 },
+      "latestWeek": null,
+      "hasUnreadHistory": true,
+      "nonce": "3f6c…" } }
+```
+
+- `resetType` is `FIVE_HOUR` or `WEEK`.
+- The `nonce` is single-use and issued per status read. Sending a stale one
+  answers `409` — refresh the status and retry. This is what stops a screen the
+  user left open an hour ago from spending a card they have since seen change.
+- The `idempotencyKey` is what makes a retry safe: the same key always answers
+  the same outcome, so a dropped response cannot burn a second card. Generate
+  it once per user gesture and reuse it on retry.
+- A denial is `{ok: true, granted: false, nextTryAt: <ms>}` — a countdown to
+  render, not an error.
+- `credentials_unavailable` means the machine's encrypted credential store
+  could not be decrypted (missing file, wrong `ZCODE_CREDENTIAL_SECRET`, or a
+  different machine's store).
+- Known limit: a **team** plan needs organization/project scope headers whose
+  ids are not in the credential store a headless process can read, so team-plan
+  resets answer a backend error. Personal plans work.
+
+### Usage payload
+
+```json
+{
+  "available": true,
+  "range": "7d",
+  "summary": { "totalTokens": 1587917357, "requestCount": 20630, "models": 7 },
+  "models": [
+    {
+      "modelId": "GLM-5.3",
+      "totalTokens": 1587917357,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "reasoningTokens": 0,
+      "cacheReadTokens": 0,
+      "requestCount": 11419,
+      "share": 0.53
+    }
+  ],
+  "daily": [{ "date": "2026-09-22", "models": [{ "modelId": "GLM-5.3", "totalTokens": 100 }] }]
+}
+```
+
+`available: false` with zero values means the local agent database does not
+exist on this machine (never ran an agent) — render an empty state, not an
+error. Tool statistics and the activity heatmap are not in the first version.
+
+### Updating the ZCode desktop app
+
+The bridge checks the official release feed and stages the verified download, so
+a client can offer "update available" without the user opening the app.
+
+```text
+GET  /settings/app-update?channel=stable
+POST /settings/app-update/install  { version, url, channel? }
+```
+
+```json
+→ { "ok": true, "appUpdate": {
+      "updateAvailable": true,
+      "currentVersion": "3.14.1",
+      "latestVersion": "3.14.3",
+      "channel": "preview",
+      "platform": "darwin-aarch64",
+      "appPath": "/Applications/ZCode.app",
+      "releaseName": "Release v3.14.3",
+      "releaseNotes": "## 新功能\n…",
+      "files": [{ "url": "https://cdn-zcode.z.ai/…/ZCode-3.14.3-mac-arm64.zip", "sha512": "…" }],
+      "install": { "stage": "idle", "version": null, "receivedBytes": 0, "totalBytes": null } } }
+```
+
+- `channel` is `stable` (default) or `preview`. The preview channel is the app's
+  own opt-in setting; do not switch a user into it silently.
+- `updateAvailable: false` with `currentVersion: null` means **no ZCode app is
+  installed on this machine** — hide the row, do not show an error.
+- Pass `version` and `url` from the same `GET` response you just read. The bridge
+  then **re-reads the manifest itself** and refuses (`409`) unless that exact URL
+  is a current manifest entry with a checksum, and `version` is what the channel
+  is actually serving — so a client cannot ask for an old build (a silent
+  downgrade) or skip verification. A `sha512` in the request body is ignored for
+  the same reason: the manifest's checksum is the one that counts.
+- Only `https://cdn-zcode.z.ai/…` URLs are accepted (`400` otherwise).
+- The install answers `202 Accepted` immediately and runs in the background;
+  poll `GET /settings/app-update` (its `install` field) for progress. A second
+  install while one is running answers `409`.
+
+`install.stage` is the outcome, and clients must render each one differently:
+
+| `stage`              | Meaning and what to show                                                      |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `downloading`        | `receivedBytes` / `totalBytes` progress                                       |
+| `installing`         | Verified, swapping the bundle                                                 |
+| `done`               | Installed. `restartRequired: true` — ask the user to quit and reopen the app  |
+| `needs-user-install` | `artifactPath` holds the verified bundle; the install location needs the user |
+| `failed`             | `error` carries the reason                                                    |
+
+**`needs-user-install` is an outcome, not a failure.** The bridge probes whether
+the install location is writable and swaps the bundle only when it is. When it
+is not, the download and checksum still ran, so the verified bundle is left at
+`artifactPath` and the user finishes the job: show the path (or reveal it in
+Finder), and they drag `ZCode.app` over the old one — macOS raises a one-shot
+confirmation for that replacement. Reporting `done` here would be a lie the user
+discovers on relaunch.
+
+An app installed in a writable location is replaced directly and answers `done`.
+The old bundle is only deleted after the new one is in place, so a failed install
+leaves the previous version intact.
+
 ## Session running status
 
 Two layers (ADR-0005), both plain HTTP — no ACP connection needed:

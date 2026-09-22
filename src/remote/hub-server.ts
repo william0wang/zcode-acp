@@ -66,6 +66,7 @@ import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
+import { createSettingsHandler } from "./settings-endpoint.js";
 import {
   composeQuotaDock,
   formatGoDockSegment,
@@ -1365,7 +1366,57 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
 
   let idleSince: number | null = null;
 
+  // Settings API (ADR-0025): the same handler factory the bridge mounts on its
+  // loopback server. No server is passed because settings are machine level —
+  // no session or backend state is consulted, which is also why this works
+  // with zero bridges registered.
+  const settingsHandler = createSettingsHandler();
+
   const wss = new WebSocketServer({ noServer: true });
+
+  /**
+   * Forward a request to one bridge's loopback port, relaying the response.
+   *
+   * Hop-by-hop headers are stripped and the client-side abort is the only thing
+   * that destroys the upstream: `req`'s own 'close' fires as soon as its (often
+   * empty) body drains, which is typically BEFORE the relayed response has
+   * finished writing — keying on it resets the bridge socket on every request.
+   */
+  function relayToBridge(
+    req: IncomingMessage,
+    res: ServerResponse,
+    port: number,
+    path: string,
+    method = req.method ?? "GET",
+  ): void {
+    const upstream = httpRequest({ host: "127.0.0.1", port, path, method }, (up) => {
+      const headers = { ...up.headers };
+      delete headers["transfer-encoding"];
+      delete headers["connection"];
+      res.writeHead(up.statusCode ?? 502, headers);
+      up.pipe(res);
+    });
+    upstream.on("error", () => {
+      if (res.headersSent) res.destroy();
+      else {
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("bridge unreachable");
+      }
+    });
+    // A mid-body upstream failure (the bridge dying after the headers were
+    // written) emits on the RESPONSE stream, not on the request — so the
+    // 'error' handler above never fires and the client would hang until its own
+    // timeout. Destroy the downstream here so the fetch rejects immediately.
+    upstream.on("response", (up) => {
+      up.on("error", () => {
+        if (!res.writableEnded) res.destroy();
+      });
+    });
+    res.on("close", () => {
+      if (!res.writableEnded) upstream.destroy();
+    });
+    req.pipe(upstream);
+  }
 
   /**
    * Reject a WS upgrade with a real HTTP status before destroying. A bare
@@ -1800,6 +1851,62 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           `hub: on-disk code is newer (${check.reason}: ${check.diskVersion ?? "rebuilt dist"}) — restarting onto it`,
         );
       }
+      return;
+    }
+    // /api/settings/* — the ZCode configuration API (ADR-0025), served by the
+    // hub itself rather than proxied. The state is machine-level (files under
+    // ~/.zcode/) and no backend RPC is involved, so it works with zero bridges
+    // registered — the same reason /api/quota is hub-local. The handler is the
+    // SAME factory the bridge mounts on its loopback server, so the two routes
+    // cannot drift apart.
+    if (url.pathname.startsWith("/api/settings/")) {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      settingsHandler(req, res);
+      return;
+    }
+    // /api/instances/{id}/settings/... — the per-instance form, proxied to that
+    // bridge's loopback mount. Semantics are identical (same factory); the
+    // instance form exists so a client that is already addressing one bridge
+    // keeps a single base URL.
+    const settingsMatch = url.pathname.match(/^\/api\/instances\/([^/]+)(\/settings\/.*)$/);
+    if (settingsMatch) {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const entry = instances.get(settingsMatch[1]!);
+      if (!entry) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("unknown instance");
+        return;
+      }
+      relayToBridge(req, res, entry.port, settingsMatch[2]! + url.search);
+      return;
+    }
+    // /api/instances/{id}/backend/restart — the documented spelling of the
+    // backend restart (ADR-0025 §needs-restart). It is a bridge-side operation
+    // with no settings state of its own, so the documented URL omits the
+    // /settings/ segment; map it onto the bridge's /settings/backend/restart
+    // rather than making clients guess which prefix carries it.
+    const restartMatch = url.pathname.match(/^\/api\/instances\/([^/]+)\/backend\/restart$/u);
+    if (restartMatch && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const entry = instances.get(restartMatch[1]!);
+      if (!entry) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("unknown instance");
+        return;
+      }
+      relayToBridge(req, res, entry.port, "/settings/backend/restart");
       return;
     }
     // /api/instances/{id}/fs/... and /status — byte-level proxy to the

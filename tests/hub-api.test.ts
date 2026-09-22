@@ -662,6 +662,98 @@ describe("hub session rename proxy", () => {
   });
 });
 
+describe("hub backend restart proxy", () => {
+  /** Register a bridge under the canonical test instance id. */
+  async function registerBridge(hub: HubHandle, port: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port })),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  /**
+   * Fake bridge loopback server accepting the restart the settings endpoint
+   * exposes at `POST /settings/backend/restart`. The hub's documented spelling
+   * omits the `/settings/` segment, so what is under test is the rewrite.
+   */
+  function startRestartBridge(): Promise<{ server: Server; port: number; seen: string[] }> {
+    return new Promise((resolve) => {
+      const seen: string[] = [];
+      const server = createServer((req, res) => {
+        seen.push(`${req.method} ${req.url ?? ""}`);
+        if (req.method === "POST" && req.url === "/settings/backend/restart") {
+          req.resume();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end('{"ok":true,"cancelledTurns":2}');
+        } else {
+          req.resume();
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("not found");
+        }
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve({
+          server,
+          port: typeof addr === "object" && addr ? addr.port : 0,
+          seen,
+        });
+      });
+    });
+  }
+
+  it("routes the documented instance restart spelling to the bridge", async () => {
+    const hub = await startTestHub();
+    const bridge = track(
+      await startRestartBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await registerBridge(hub, bridge.port);
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/backend/restart`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, cancelledTurns: 2 });
+    // The hub rewrites the documented path onto the bridge's settings route.
+    expect(bridge.seen).toEqual(["POST /settings/backend/restart"]);
+  });
+
+  it("guards the restart route and answers 404 for an unknown instance", async () => {
+    const hub = await startTestHub();
+    const call = (token: string | null, id = "inst-1") =>
+      fetch(`http://127.0.0.1:${hub.port}/api/instances/${id}/backend/restart`, {
+        method: "POST",
+        ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+      });
+    expect((await call(null)).status).toBe(401);
+    expect((await call("wrong")).status).toBe(401);
+    expect((await call(TOKEN)).status).toBe(404);
+    // A GET is not a restart — it must not reach the bridge.
+    const get = await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/backend/restart`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(get.status).toBe(404);
+  });
+
+  it("also serves the per-instance /settings/ spelling", async () => {
+    const hub = await startTestHub();
+    const bridge = track(
+      await startRestartBridge(),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    await registerBridge(hub, bridge.port);
+    const res = await fetch(
+      `http://127.0.0.1:${hub.port}/api/instances/inst-1/settings/backend/restart`,
+      { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+    );
+    expect(res.status).toBe(200);
+    expect(bridge.seen).toEqual(["POST /settings/backend/restart"]);
+  });
+});
+
 describe("hub idle exit", () => {
   it("exits after the idle window with no instances and no proxies", async () => {
     let exited = false;

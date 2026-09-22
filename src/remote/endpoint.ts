@@ -33,6 +33,7 @@ import { createFileHandler } from "./file-endpoint.js";
 import { createSessionCloseHandler } from "./session-close-endpoint.js";
 import { createSessionListHandler } from "./session-list-endpoint.js";
 import { createSessionRenameHandler } from "./session-rename-endpoint.js";
+import { createSettingsHandler } from "./settings-endpoint.js";
 import { createStatusHandler, runningZcodeSids, type SessionRunStatus } from "./status-endpoint.js";
 import type { RemoteConfig } from "./config.js";
 
@@ -222,6 +223,7 @@ export async function startRemoteEndpoint(
   const upgradeHandler = createNodeWebSocketUpgradeHandler(acpServer, wss);
   const fileHandler = createFileHandler(server);
   const statusHandler = createStatusHandler(server);
+  const settingsHandler = createSettingsHandler(server);
   const sessionCloseHandler = createSessionCloseHandler(server);
   const sessionRenameHandler = createSessionRenameHandler(server);
   const sessionListHandler = createSessionListHandler(server);
@@ -230,7 +232,10 @@ export async function startRemoteEndpoint(
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
     const closeMatch = path.match(/^\/sessions\/([^/]+)\/close$/);
     const renameMatch = path.match(/^\/sessions\/([^/]+)\/rename$/);
+    // Settings lives under a prefix so the routes above stay unambiguous, and
+    // so the hub can strip the same prefix when it re-serves them (ADR-0025).
     if (path === "/acp") acpHttpHandler(req, res);
+    else if (path.startsWith("/settings")) settingsHandler(req, res);
     else if (path.startsWith("/fs/")) fileHandler(req, res);
     else if (path === "/status") statusHandler(req, res);
     else if (closeMatch) sessionCloseHandler(req, res, closeMatch[1]!);

@@ -79,6 +79,32 @@ export function zcodePluginCacheDir(): string {
 }
 
 /**
+ * Root of the ZCode user-scope agent definitions (`~/.zcode/agents/*.md`).
+ * Per call, so discovery follows a `ZCODE_HOME` change made after import.
+ */
+export function zcodeAgentsDir(): string {
+  return path.join(zcodeHomeDir(), "agents");
+}
+
+/**
+ * Path of the agent state file (`~/.zcode/v2/agents-state.json`): per-agent
+ * enablement plus the built-in agents' model overrides. Per call — see above.
+ */
+export function zcodeAgentsStatePath(): string {
+  return path.join(zcodeHomeDir(), "v2", "agents-state.json");
+}
+
+/** Path of the CLI agent database (`~/.zcode/cli/db/db.sqlite`) — usage stats. */
+export function zcodeUsageDbPath(): string {
+  return path.join(zcodeHomeDir(), "cli", "db", "db.sqlite");
+}
+
+/** Path of the encrypted credential store (`~/.zcode/v2/credentials.json`). */
+export function zcodeCredentialsPath(): string {
+  return path.join(zcodeHomeDir(), "v2", "credentials.json");
+}
+
+/**
  * Slash commands surfaced to the editor. Each maps to a ZCode session method
  * that the server forwards when the user types the command.
  *

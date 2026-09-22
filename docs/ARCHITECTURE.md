@@ -196,6 +196,20 @@ API only because the ZCode backend itself sends them for inference.
 | `runtime-model.ts` | runtimeModel overlay construction and application              |
 | `model-cache.ts`   | Model ID cache and usage initialization                        |
 
+### `settings/` — ZCode configuration management (ADR-0025–0028)
+
+| File                 | Responsibility                                                                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `file-lock.ts`       | ZCode's cross-process file lock (`<path>.lock` + owner files + stale reclaim) so the bridge and a running desktop app never overwrite each other |
+| `atomic-write.ts`    | Locked read-modify-write of a config file: unknown keys preserved, self-validation, backup, temp + rename                                        |
+| `provider-config.ts` | `~/.zcode/v2/provider_config.json`: provider enable/rename, model add/remove, contextWindow / reasoningLevel                                     |
+| `cli-config.ts`      | `~/.zcode/cli/config.json`: skills enablement, MCP servers, hooks tree, plugin enablement                                                        |
+| `agents-config.ts`   | `~/.zcode/v2/agents-state.json` + `~/.zcode/agents/*.md`: subagent CRUD (frontmatter only), enable, model override                               |
+| `skills.ts`          | Skill discovery + enable/delete/copy-to-user with realpath escape guards                                                                         |
+| `usage-stats.ts`     | Local `~/.zcode/cli/db.sqlite` aggregation: per-model tokens + daily buckets                                                                     |
+| `coding-plan.ts`     | Credential decryption + coding-plan reset card status/opportunity/use                                                                            |
+| `app-update.ts`      | ZCode desktop app release check + verified download + bundle swap where the location allows (ADR-0028)                                           |
+
 ### `remote/` — Remote access (opt-in via `ZCODE_ACP_REMOTE=1`)
 
 | File                        | Responsibility                                                                                                                                                                                                                      |
@@ -206,6 +220,7 @@ API only because the ZCode backend itself sends them for inference.
 | `file-endpoint.ts`          | Read-only `GET /fs/list` + `GET /fs/file` on the loopback server (ADR-0004): Session Root scoping, byte/line windows, streaming                                                                                                     |
 | `status-endpoint.ts`        | `GET /status` on the loopback server (ADR-0005): in-memory per-session running state (`pendingTurns` derivation), zero backend RPC                                                                                                  |
 | `session-close-endpoint.ts` | `POST /sessions/{id}/close` on the loopback server (ADR-0006): running-guarded discovery retirement with self-healing re-appearance                                                                                                 |
+| `settings-endpoint.ts`      | `settings/*` routes on the loopback server (ADR-0025): the ZCode configuration API, mounted again by the hub behind the token                                                                                                       |
 | `hub-server.ts`             | The hub singleton: token auth, instance discovery, byte-level WS proxying, heartbeat pruning, on-demand `?probe=1` liveness, idle exit, version self-upgrade, `GET /api/quota` direct query (ADR-0005), POST close proxy (ADR-0006) |
 
 When enabled, the same `AgentApp` serves the stdio editor and a loopback
@@ -247,6 +262,56 @@ so it works with zero bridges registered. Session close (ADR-0006) is the
 surface's first write op: `POST /api/instances/{id}/sessions/{sid}/close`
 retires a conversation from discovery (running-guarded, self-healing if the
 editor still has it open).
+
+### `settings/` — ZCode configuration management (ADR-0025–0028)
+
+The settings API exposes the desktop app's management surface as JSON so a
+native client can render it: models, skills, MCP servers, hooks, subagents,
+app usage, coding-plan reset cards, and app updates. All of it is machine-level
+state under `~/.zcode/` that the desktop app owns, which drives two design
+choices.
+
+First, **the bridge is not the owner of these files** — it is a second writer
+next to a running desktop app. Every write therefore goes through
+`file-lock.ts`, a re-implementation of ZCode's own cross-process lock
+(`<path>.lock` directory + per-holder owner file + stale reclaim), and through
+`atomic-write.ts`'s read-modify-write that preserves unknown keys, self-
+validates, backs up, then temp-file + rename (ADR-0026). Without the shared
+lock a settings write landing during an app write silently discards the app's
+change.
+
+Second, **the API layer is mounted twice from one factory**
+(`remote/settings-endpoint.ts`): on the bridge's loopback server unauthenticated
+(exactly like `/status` and `/fs` — any local process can already write these
+files) and on the hub under `/api/settings/*` behind the token, plus the
+per-instance proxy `…/settings/*`. Writing the routing once and mounting twice
+is what keeps the two in sync (ADR-0025).
+
+Each write reports an **effect class**: `immediate` for the provider table
+(absorbed by the backend's ~1s poll) and skills enablement (read live), versus
+`needs-restart` for MCP servers, hooks, and subagent markdown, which the agent
+reads once at start. The client either prompts or calls
+`POST /api/instances/{id}/backend/restart`, which reuses the sandbox
+arm-flip's cancel-then-respawn path.
+
+App usage stats are aggregated locally from the agent database
+(`~/.zcode/cli/db/db.sqlite`) rather than proxying the backend's `usage/stats`
+RPC, so usage works with no backend process alive and degrades to
+`{available: false}` on a machine that never ran an agent (ADR-0027). Coding-
+plan reset cards are the one irreversible operation: they require the nonce
+from a fresh status read, are restricted to `account:*` providers, and carry an
+idempotency key so a retry cannot burn two cards.
+
+App updates (ADR-0028) reproduce the desktop app's own discovery half — the same
+manifest endpoint, platform/channel spelling, and sha512 verification — but stop
+short of privileged escalation. Whether the bundle can be swapped is probed at
+install time with `accessSync(dirname(app), W_OK)` rather than assumed: a
+writable location is replaced directly (old bundle renamed aside first, deleted
+only after the new one is in place, so a failed install leaves the previous
+version intact), and anything else is reported as `needs-user-install` with the
+artifact path so the client can hand the user a one-step instruction. The
+running app is never killed. No claim is made about which branch a given machine
+takes — that is what the probe is for.
 
 ## Key State Machines
 
