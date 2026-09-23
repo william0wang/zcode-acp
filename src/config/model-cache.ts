@@ -76,14 +76,11 @@ export async function emitInitialUsage(
 ): Promise<void> {
   try {
     const read = await sessionRead(server, zcodeSid);
-    const proj = (read.projection ?? {}) as {
-      contextUsed?: number;
-      totalTokenCount?: number;
-      contextWindow?: number;
-    };
-    // `||` (not `??`): an explicit contextUsed=0 is falsy and should fall back
-    // to totalTokenCount, matching Python's `proj.get("contextUsed",0) or ...`.
-    const used = proj.contextUsed || proj.totalTokenCount || 0;
+    const proj = (read.projection ?? {}) as { contextUsed?: number; contextWindow?: number };
+    // Occupancy only (#228): totalTokenCount is lifetime consumption — never
+    // a context meter. contextUsed absent/0 → nothing trustworthy to show
+    // yet; the completion diff reports real occupancy once turns run.
+    const used = proj.contextUsed ?? 0;
     if (!used) return; // resume before any turn: skip to avoid showing 0.
     // Configured limit wins over the projection's contextWindow — the
     // projection seeds a hardcoded 200K default for models without registry

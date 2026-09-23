@@ -153,7 +153,9 @@ describe("translate → dispatch end-to-end", () => {
     const last = sent[sent.length - 1]!;
     expect(last["sessionUpdate"]).toBe("agent_message_chunk");
     expect(textOf(last)).toBe("✓ completed · cache 42/45 messages · 12.3k cache-read tokens");
-    // The reply text streamed before it, untouched.
-    expect(sent).toHaveLength(3); // agent text + usage_update + turn line
+    // The reply text streamed before it, untouched. No usage_update here:
+    // turn.completed's usage is cumulative consumption, never the context
+    // meter (#228) — occupancy comes from the reconciliation diff instead.
+    expect(sent).toHaveLength(2); // agent text + turn line
   });
 });

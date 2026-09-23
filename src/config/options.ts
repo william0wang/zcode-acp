@@ -752,11 +752,11 @@ export async function emitConfigOptionUpdate(
     // behind a model switch, so read the new model's limit from config.json.
     try {
       const read = await sessionRead(server, zcodeSid);
-      const proj = (read.projection ?? {}) as {
-        contextUsed?: number;
-        totalTokenCount?: number;
-      };
-      const used = proj.contextUsed || proj.totalTokenCount || 0;
+      const proj = (read.projection ?? {}) as { contextUsed?: number };
+      // Occupancy only (#228): totalTokenCount is lifetime consumption, never
+      // a meter. This refresh exists to re-show SIZE after the switch; used
+      // reads 0 until the backend reports real occupancy.
+      const used = proj.contextUsed ?? 0;
       // The rebuilt options[0] (model) currentValue is the just-switched value.
       const modelOpt = options.find((o) => o.id === "model");
       const { providerId, modelId } = parseModelValue(String(modelOpt?.currentValue ?? ""));

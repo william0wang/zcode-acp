@@ -108,11 +108,16 @@ export class ProjectionDiffer {
     const curProj = (curSnapshot?.projection ?? {}) as ZcodeProjection;
     const curMsgs = curSnapshot?.messages ?? [];
 
-    // 1. usage_update: prefer contextUsed (current occupancy) over totalTokenCount
-    //    (cumulative). `||` so an explicit contextUsed=0 falls back to totalTokenCount.
-    const used = curProj.contextUsed || curProj.totalTokenCount || 0;
-    const size = curProj.contextWindow ?? 0;
-    if (this.lastUsage === null || used !== this.lastUsage) {
+    // 1. usage_update: contextUsed is the authoritative CURRENT occupancy. A
+    //    missing value means unknown — skip the update entirely rather than
+    //    fabricate a meter from totalTokenCount (lifetime consumption; a
+    //    multi-request turn's total can exceed the window, #228). An explicit
+    //    0 is valid (post-compaction) and IS reported; the baseline is only
+    //    advanced when a real value was seen, so an unknown snapshot never
+    //    suppresses the next real one.
+    const used = curProj.contextUsed;
+    if (typeof used === "number" && (this.lastUsage === null || used !== this.lastUsage)) {
+      const size = curProj.contextWindow ?? 0;
       if (size > 0) events.push({ kind: "UsageDelta", used, size });
       this.lastUsage = used;
     }

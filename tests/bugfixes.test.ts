@@ -300,8 +300,8 @@ describe("Bug 6: thought option is discoverable and honest", () => {
   });
 });
 
-describe("Bug 5: usage fallback treats contextUsed=0 as falsy", () => {
-  it("ProjectionDiffer falls back to totalTokenCount when contextUsed is 0", () => {
+describe("Bug #228: usage meter reports occupancy only, never cumulative consumption", () => {
+  it("keeps an explicit contextUsed=0 (post-compaction) instead of falling back to totalTokenCount", () => {
     const d = new ProjectionDiffer();
     const events = d.diff({
       projection: { contextUsed: 0, totalTokenCount: 5000, contextWindow: 200000 },
@@ -311,7 +311,28 @@ describe("Bug 5: usage fallback treats contextUsed=0 as falsy", () => {
     const usage = events.find((e) => e.kind === "UsageDelta") as
       { kind: "UsageDelta"; used: number; size: number } | undefined;
     expect(usage).toBeDefined();
-    expect(usage?.used).toBe(5000); // contextUsed=0 falls back to totalTokenCount
+    expect(usage?.used).toBe(0); // valid zero, NOT the cumulative 5000
+  });
+
+  it("skips the update when occupancy is unknown (contextUsed missing)", () => {
+    const d = new ProjectionDiffer();
+    const events = d.diff({
+      projection: { totalTokenCount: 1240000, contextWindow: 1000000 },
+      messages: [],
+      todos: [],
+    });
+    // A multi-request turn's cumulative total (124% of the window here) must
+    // never be fabricated into the meter — and the unknown snapshot must not
+    // suppress the next real one.
+    expect(events.find((e) => e.kind === "UsageDelta")).toBeUndefined();
+    const next = d.diff({
+      projection: { contextUsed: 310000, totalTokenCount: 1240000, contextWindow: 1000000 },
+      messages: [],
+      todos: [],
+    });
+    const usage = next.find((e) => e.kind === "UsageDelta") as
+      { kind: "UsageDelta"; used: number; size: number } | undefined;
+    expect(usage?.used).toBe(310000);
   });
 });
 

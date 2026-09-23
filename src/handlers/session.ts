@@ -466,7 +466,10 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
             5000,
           );
           const proj = ((resp.result ?? {}) as { projection?: ZcodeProjection }).projection;
-          used = proj?.contextUsed || proj?.totalTokenCount || 0;
+          // Occupancy only (#228): never substitute totalTokenCount (lifetime
+          // consumption) for the meter — boot shows size first, used stays 0
+          // until the backend reports real occupancy.
+          used = proj?.contextUsed ?? 0;
         }
         let providerId = loadAllModels()[0]?.providerId ?? DEFAULT_PROVIDER_ID;
         let modelId = loadAllModels()[0]?.modelId ?? DEFAULT_MODEL_ID;
@@ -3463,33 +3466,37 @@ export async function runEventTurn(
     if (Date.now() - lastUpstreamProgressAt < UPSTREAM_PROGRESS_INTERVAL_MS) return;
 
     const proj = pendingWatermarkProgress;
-    const used = proj ? proj.contextUsed || proj.totalTokenCount || 0 : 0;
+    // Occupancy only (#228): a watermark projection without contextUsed
+    // carries liveness, not a meter — never substitute totalTokenCount
+    // (lifetime consumption). Fall through to the tool heartbeat instead.
+    const used = proj?.contextUsed;
     const activeToolId = [...translator.seenToolIds].find(
       (toolId) => !translator.finalToolIds.has(toolId),
     );
     if (!proj && !activeToolId) return;
 
     try {
-      if (proj) {
+      if (typeof used === "number") {
         // Reuse normal UsageDelta dispatch so a projection that reports a zero
-        // contextWindow gets the configured model limit instead of emitting an
-        // invalid/empty context bar.  The token count itself comes directly
+        // contextWindow gets the configured model limit instead of emitting
+        // an invalid/empty context bar.  The token count itself comes directly
         // from the authoritative session/read projection.
         await dispatchEvent(
           server,
           cx,
           acpSid,
-          { kind: "UsageDelta", used, size: proj.contextWindow ?? 0 },
+          { kind: "UsageDelta", used, size: proj?.contextWindow ?? 0 },
           chunkMsgId,
         );
+        lastUpstreamProgressAt = Date.now();
       } else if (activeToolId) {
         await sendSessionUpdate(cx, acpSid, {
           sessionUpdate: "tool_call_update",
           toolCallId: activeToolId,
           status: "in_progress",
         });
+        lastUpstreamProgressAt = Date.now();
       }
-      lastUpstreamProgressAt = Date.now();
       pendingWatermarkProgress = null;
     } catch (e) {
       // Liveness forwarding is best-effort.  A detached client must not kill

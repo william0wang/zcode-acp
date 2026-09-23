@@ -282,7 +282,7 @@ describe("EventTranslator", () => {
     expect(t.turnResultType).toBe("cancelled");
   });
 
-  it("captures turn.completed usage payload verbatim (and still emits UsageDelta)", () => {
+  it("captures turn.completed usage verbatim and emits NO UsageDelta (#228)", () => {
     const t = new EventTranslator();
     const usage = {
       source: "provider",
@@ -299,11 +299,11 @@ describe("EventTranslator", () => {
     const out = t.translate(
       ev("turn.completed", { resultType: "success", tokenCount: 140, usage }),
     );
+    // The usage block is CUMULATIVE turn consumption (multi-request turns can
+    // exceed the window) — it must never reach the context meter. Occupancy
+    // comes from the reconciliation diff; consumption from PromptResponse.
     expect(t.turnUsage).toEqual(usage);
-    expect(out).toEqual([
-      { kind: "UsageDelta", used: 140, size: 0 },
-      { kind: "TurnInfo", resultType: "success" },
-    ]);
+    expect(out).toEqual([{ kind: "TurnInfo", resultType: "success" }]);
   });
 
   it("leaves turnUsage null when turn.completed carries no usage", () => {
@@ -366,7 +366,7 @@ describe("EventTranslator turn.completed resultType + cacheStats", () => {
       lastCacheHit: false,
     });
     expect(t.turnCacheStats).not.toHaveProperty("cacheReadTokens");
-    expect(out).toHaveLength(2);
+    expect(out).toHaveLength(1); // TurnInfo only (#228: no UsageDelta on turn end)
   });
 
   it("carries a non-success resultType verbatim on the TurnInfo event", () => {
@@ -397,8 +397,8 @@ describe("EventTranslator turn.completed resultType + cacheStats", () => {
       { kind: "TurnInfo" }
     >;
     expect(info.cacheStats).toBeUndefined();
-    // The UsageDelta still emitted.
-    expect(out[0]?.kind).toBe("UsageDelta");
+    // The terminal info line still emitted (#228: no UsageDelta on turn end).
+    expect(out[0]?.kind).toBe("TurnInfo");
   });
 });
 
@@ -599,10 +599,7 @@ describe("EventTranslator foreign internal-turn attribution", () => {
     t.translate(ev("turn.started", {}, "turn_user"));
     const out = t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
     expect(t.turnDone).toBe(true);
-    expect(out).toEqual([
-      { kind: "UsageDelta", used: 0, size: 0 },
-      { kind: "TurnInfo", resultType: "success" },
-    ]);
+    expect(out).toEqual([{ kind: "TurnInfo", resultType: "success" }]);
   });
 
   it("processes OUR turn.completed even while a foreign turn is still in flight", () => {
