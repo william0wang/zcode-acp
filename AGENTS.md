@@ -471,7 +471,16 @@ ZCode protocol types into ACP notifications directly — always translate.
   flag let the app's prompt race ahead and the trigger LEAKED TO THE MODEL as
   a real prompt (observed live; the backend record showed both "hi" and
   "resume session" as user messages). Only the same connection submitting
-  something else first disarms (the auto-submit was lost). `marttyClientSeen`
+  something else first disarms (the auto-submit was lost). The ARM side must
+  be per-connection too (2026-09-23, mobile create/resume): both arming
+  sites gated on the STICKY `isMarttyClient`, so after the TUI's initialize
+  the PHONE's create-bind claim ALSO passed the gate and re-pointed the arm
+  at itself, and a phone winning the boot-resume env race armed NOTHING —
+  either way the TUI's auto-submit missed the ack and reached the model.
+  Arms now gate on `marttyConnectionRoots` (the per-connection set), plus a
+  first-prompt fallback: a martty connection's FIRST prompt equal to the
+  trigger acks even unarmed (`connectionPromptSeen`, non-martty never
+  matches — the app typing the same words is real input). `marttyClientSeen`
   (sticky) replaces clientName for martty gating — clientName is
   last-write-wins across multi-client attaches and an app's initialize can
   land between the TUI's initialize and its session/new. Its `/resume` prefers

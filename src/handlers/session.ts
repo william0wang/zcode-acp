@@ -331,7 +331,10 @@ export async function newSession(
     // Same banner handshake as boot-resume: the TUI's auto-submitted trigger
     // (DSH_TUI_AUTOPROMPT) drops martty's welcome banner so the window shows
     // the shared conversation instead of waiting for local input.
-    if (isMarttyClient(server)) {
+    // Per-connection martty identity, NOT the sticky process flag: the phone
+    // claims this same bind below, and a sticky-gated arm re-pointed the
+    // handshake at the phone — the TUI's trigger then reached the model.
+    if (server.marttyConnectionRoots.has(bindRoot)) {
       server.bootResumeTriggerConnection = bindRoot;
     }
     const modes = await buildModes(server, null);
@@ -369,9 +372,12 @@ export async function newSession(
       // into its transcript. The chunks sit BEHIND martty's welcome banner
       // until text is submitted — the DSH_TUI_AUTOPROMPT handshake armed
       // below drops the banner for the user.
-      if (isMarttyClient(server)) {
+      if (server.marttyConnectionRoots.has(clientConnectionRoot(client))) {
         // Scope the handshake to THIS connection: a phone app attached to the
         // same bridge may prompt during the boot window and must not disarm it.
+        // Per-connection martty identity, NOT the sticky process flag — an
+        // attaching phone's session/new can win the race for the env; it must
+        // neither arm for itself nor leave a wrong arm for the TUI's trigger.
         server.bootResumeTriggerConnection = clientConnectionRoot(client);
         // Targeted replay — the booting TUI's own connection, never broadcast
         // (see the loadSession comment above).
@@ -1955,18 +1961,40 @@ async function runPrompt(
   // connection submitting anything else first means the auto-submit was
   // lost — disarm so the trigger text typed manually later stays a normal
   // prompt.
+  const promptRoot = clientConnectionRoot(client);
+  const ackBootResumeTrigger = async (): Promise<acp.PromptResponse> => {
+    await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
+    log("session/prompt: boot-resume banner handshake acknowledged");
+    await emitSessionTurnState(server, params.sessionId, false, cx);
+    return { stopReason: "end_turn" };
+  };
   if (
     server.bootResumeTriggerConnection !== null &&
-    clientConnectionRoot(client) === server.bootResumeTriggerConnection
+    promptRoot === server.bootResumeTriggerConnection
   ) {
     server.bootResumeTriggerConnection = null;
     if (text === BOOT_RESUME_TRIGGER) {
-      await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
-      log("session/prompt: boot-resume banner handshake acknowledged");
-      await emitSessionTurnState(server, params.sessionId, false, cx);
-      return { stopReason: "end_turn" };
+      return await ackBootResumeTrigger();
     }
+  } else if (
+    // Unarmed fallback: the boot-resume env was consumed by a NON-martty
+    // first session/new (an attaching phone can win the race against the
+    // TUI's boot), so no arm exists for the TUI — its auto-submitted trigger
+    // still needs the ack or it reaches the model (observed from the mobile
+    // app, 2026-09-23). A MARTTY connection's first prompt matching the
+    // trigger verbatim is that handshake; a phone typing the same words is
+    // real input (marttyConnectionRoots does not contain it) and goes to the
+    // model as typed.
+    server.bootResumeTriggerConnection === null &&
+    text === BOOT_RESUME_TRIGGER &&
+    server.marttyConnectionRoots.has(promptRoot) &&
+    !server.connectionPromptSeen.has(promptRoot)
+  ) {
+    return await ackBootResumeTrigger();
   }
+  // First-prompt bookkeeping for the unarmed fallback above: only a martty
+  // connection's FIRST prompt is a handshake candidate.
+  if (promptRoot !== undefined) server.connectionPromptSeen.add(promptRoot);
 
   // Materialize a lazy session/new placeholder on first use. Placed after the
   // empty-prompt check so an invalid request doesn't create a backend session.

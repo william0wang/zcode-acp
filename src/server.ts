@@ -323,8 +323,22 @@ export class ZcodeAcpServer {
    * spend it — prompts from other attached clients (a phone app racing the
    * boot window) never disarm it. Null once spent or when the auto-submit was
    * lost (the same connection's first prompt was something else).
+   *
+   * Armed ONLY for a MARTTY connection (marttyConnectionRoots — the
+   * per-connection identity, NOT the sticky process flag): the create-bind
+   * path lets an attaching phone's session/new claim the same bind, and a
+   * sticky-gated arm there re-pointed the handshake at the phone — the TUI's
+   * auto-submitted trigger then missed the ack and reached the model
+   * (observed live from the mobile app, 2026-09-23).
    */
   bootResumeTriggerConnection: unknown = null;
+  /**
+   * Per-connection `connectionContext` roots that have already submitted at
+   * least one prompt. Backs the unarmed trigger fallback in runPrompt: a
+   * martty connection's FIRST prompt is a candidate for the banner
+   * handshake; anything after it is real user input.
+   */
+  readonly connectionPromptSeen = new Set<unknown>();
   /**
    * Hub session-create binding (remote create, ADR-0016): when the hub
    * incubates a TUI for a remote session-create it pre-generates the ACP
