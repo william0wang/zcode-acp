@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.9](https://github.com/william0wang/zcode-acp/compare/v0.47.8...v0.47.9) (2026-09-23)
+
+
+### Bug Fixes
+
+* report context occupancy only in usage_update, never cumulative tokens ([#257](https://github.com/william0wang/zcode-acp/issues/257)) ([11c3688](https://github.com/william0wang/zcode-acp/commit/11c36885608a556fa8daa939e445f1a94eb24296)), closes [#228](https://github.com/william0wang/zcode-acp/issues/228)
+
 ## [0.47.8](https://github.com/william0wang/zcode-acp/compare/v0.47.7...v0.47.8) (2026-09-23)
 
 
