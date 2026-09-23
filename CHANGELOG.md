@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.10](https://github.com/william0wang/zcode-acp/compare/v0.47.9...v0.47.10) (2026-09-23)
+
+
+### Bug Fixes
+
+* scope the boot-resume handshake arm per connection and ack unarmed TUI triggers ([#259](https://github.com/william0wang/zcode-acp/issues/259)) ([83bd091](https://github.com/william0wang/zcode-acp/commit/83bd091c67e6af6ac3e89f58d9ffbf74e328c495))
+
 ## [0.47.9](https://github.com/william0wang/zcode-acp/compare/v0.47.8...v0.47.9) (2026-09-23)
 
 
