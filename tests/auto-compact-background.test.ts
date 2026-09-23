@@ -62,12 +62,15 @@ function makeBackend(): {
   counts: Map<string, number>;
   sentFrames: SentFrame[];
   releaseGoal: () => void;
+  /** Reject the next N sends with the whole-turn busy error, then accept. */
+  busySends: (n: number) => void;
 } {
   const counts = new Map<string, number>();
   const sentFrames: SentFrame[] = [];
   const listeners: Array<{ handleEvent: (e: ZcodeEvent) => void }> = [];
   let goalLock = true;
   let sendCount = 0;
+  let busySendsLeft = 0;
   const bump = (m: string) => counts.set(m, (counts.get(m) ?? 0) + 1);
   const deliver = (events: ZcodeEvent[]) => {
     for (const e of events) for (const l of listeners) l.handleEvent(e);
@@ -104,6 +107,13 @@ function makeBackend(): {
             : { result: {} };
         case "session/send": {
           sendCount++;
+          // The compaction's lock released (goalLock=false) but the backend is
+          // still winding its internal turn down: a send landing in that window
+          // is rejected and must be retried, not answered as a failure.
+          if (busySendsLeft > 0) {
+            busySendsLeft--;
+            return { error: { code: 1308, message: "prompt is running" } };
+          }
           if (sendCount > 1 && goalLock) {
             return { error: { code: 1308, message: "prompt is running" } };
           }
@@ -129,7 +139,15 @@ function makeBackend(): {
       if (i >= 0) listeners.splice(i, 1);
     },
   } as unknown as ZcodeBackend;
-  return { backend, counts, sentFrames, releaseGoal: () => (goalLock = false) };
+  return {
+    backend,
+    counts,
+    sentFrames,
+    releaseGoal: () => (goalLock = false),
+    busySends: (n: number) => {
+      busySendsLeft = n;
+    },
+  };
 }
 
 /** Server with a pre-registered, backend-loaded session (no create/resume). */
@@ -185,42 +203,40 @@ describe("detached auto-compact", () => {
     });
   }, 15_000);
 
-  it("a follow-up prompt during the compaction is REJECTED at once (one notice, no send, no kill)", async () => {
+  it("a follow-up prompt during the compaction is HELD and delivered once it settles (no resend, no kill)", async () => {
     const { backend, counts, sentFrames, releaseGoal } = makeBackend();
     const server = setup(backend);
-    const { cx, turnStates, texts } = collectCx();
+    const { cx, texts } = collectCx();
 
     await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
     await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));
 
-    // Rejected outright — the message is NOT queued behind the compaction
-    // (a queued turn's already-subscribed listener would accumulate the
-    // compaction's stream and dispatch it as this prompt's output once the
-    // lock released).
-    const r2 = await prompt(server, promptParams(), cx, 2);
-    expect(r2).toEqual({ stopReason: "max_turn_requests" });
-    // The resend notice fired exactly once; the send was never attempted
-    // (turn 1's send is still the only one).
-    const notices = texts.filter((t) => t.includes("auto-compact in progress"));
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("NOT sent");
-    expect(counts.get("session/send")).toBe(1);
-    // The rejected prompt never registered: no turnState pair for it, no
-    // preempt victim, no stop pair, no drain-gate close escalation.
-    expect(turnStates).toEqual([
-      { sessionId: "sess_ac", running: true }, // turn 1 starts
-      { sessionId: "sess_ac", running: false }, // turn 1 settles BEFORE the compaction
-    ]);
+    // The prompt is held BEFORE its listener subscribes — the only residue-free
+    // place to wait (a subscribed listener would accumulate the compaction's
+    // internal-turn stream and dispatch it as this prompt's output). It must
+    // NOT be answered while the compaction still runs, and it must NOT be
+    // rejected: the user typed a message, so the turn delivers it.
+    const r2 = prompt(server, promptParams(), cx, 2);
+    // The hold notice fires immediately — not after the wait — so the client
+    // shows something during a window that can run for minutes.
+    await vi.waitFor(() => expect(texts.filter((t) => t.includes("queued")).length).toBe(1));
+
+    // Nothing fired a stop or close while the prompt waited.
     expect(killFrames(sentFrames)).toEqual([]);
 
-    // Settle the compaction so no probe loop outlives the test; turn 2's
-    // threshold read never happened (it was rejected), so no re-arm.
+    // Settle the compaction: the held prompt's send now goes out and its turn
+    // runs. Turn 1's response already settled, so only turn 2 registers.
     releaseGoal();
+    expect(await r2).toEqual({ stopReason: "end_turn" });
+    expect(counts.get("session/send")).toBe(2);
+    expect(killFrames(sentFrames)).toEqual([]);
     await vi.waitFor(() => expect(server.autoCompactInFlight.has("zs_ac")).toBe(false), {
       timeout: 10_000,
     });
+    // The threshold read on turn 2's end re-arms nothing: the compacted usage
+    // (1,000) is far below the threshold.
     expect(counts.get("session/compact")).toBe(1);
-  }, 20_000);
+  }, 30_000);
 
   it("ESC on a turn racing the compaction gate (registered, send never accepted) does not fire the stop pair at the compaction", async () => {
     const { backend, sentFrames } = makeBackend();
@@ -254,4 +270,50 @@ describe("detached auto-compact", () => {
     expect(turn.cancelled).toBe(true);
     expect(sentFrames.map((f) => f.method)).toEqual(["session/stop", "v4/command"]);
   });
+
+  it("a send landing in the compaction's lock-teardown window is retried, not answered as a failure", async () => {
+    const { backend, counts, sentFrames, releaseGoal, busySends } = makeBackend();
+    const server = setup(backend);
+    const { cx, texts } = collectCx();
+
+    await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
+    await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));
+
+    // The compaction settles, but its internal turn is still unwinding: the
+    // next send is rejected with the whole-turn busy error. The held prompt
+    // must ride it out on the send-retry loop rather than fail — this is the
+    // window the pre-subscribe wait cannot cover (the flag clears before the
+    // backend's lock does).
+    busySends(2);
+    releaseGoal();
+    const r2 = await prompt(server, promptParams(), cx, 2);
+    expect(r2).toEqual({ stopReason: "end_turn" });
+    expect(counts.get("session/send")).toBe(4); // turn 1 + 3 attempts
+    // No rejection notice and no kill frame: the message went through.
+    expect(texts.filter((t) => t.includes("NOT sent"))).toHaveLength(0);
+    expect(killFrames(sentFrames)).toEqual([]);
+  }, 30_000);
+
+  it("the held prompt's output is its OWN turn's — the compaction's internal stream never leaks in", async () => {
+    const { backend, counts, releaseGoal } = makeBackend();
+    const server = setup(backend);
+    const { cx, texts } = collectCx();
+
+    await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
+    await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));
+
+    const r2 = prompt(server, promptParams(), cx, 2);
+    await vi.waitFor(() => expect(texts.filter((t) => t.includes("queued")).length).toBe(1));
+    releaseGoal();
+    expect(await r2).toEqual({ stopReason: "end_turn" });
+
+    // Every notice the user saw is accounted for: turn 1's compaction start
+    // and done lines, plus the hold notice. Nothing from the compaction's
+    // internal turn (which never delivered any event here) appears as this
+    // prompt's output, and no foreign turn.completed ended it early.
+    const compactLines = texts.filter((t) => t.includes("auto-compact"));
+    expect(compactLines.length).toBeGreaterThanOrEqual(3);
+    expect(compactLines.some((t) => t.includes("✓ auto-compact"))).toBe(true);
+    expect(counts.get("session/send")).toBe(2);
+  }, 30_000);
 });

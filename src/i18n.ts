@@ -214,8 +214,13 @@ export interface Messages {
    *  session_compact_failed/cancelled) — fed into autoCompactFailed. */
   autoCompactBackendFailed: string;
   /** Prompt rejection notice: a detached auto-compact is running, the message
-   * was NOT sent — resend after the ✓ compressed line. */
+   *  was NOT sent — resend after the ✓ compressed line. Now only the bounded
+   *  fallback (a compaction that outlived its settle cap) answers this. */
   autoCompactBusy: string;
+  /** Prompt hold notice: a detached auto-compact is running, the message is
+   *  QUEUED and goes out by itself once the compaction settles — the session
+   *  stays "executing" and the user has nothing to resend. */
+  autoCompactHeld: string;
   /** Goal-loop wait note: a compaction holds the lock, the round resumes by
    * itself once it settles (no user action needed). */
   autoCompactGoalWait: string;
@@ -363,6 +368,7 @@ const zh: Messages = {
   autoCompactFailed: (err) => `⚠ 自动压缩失败: ${err}`,
   autoCompactBackendFailed: "后端报告压缩失败（session_compact_failed）",
   autoCompactBusy: "🔄 自动压缩进行中，这条消息未发送；看到“✓ 自动压缩”提示后请重新发送。",
+  autoCompactHeld: "🔄 自动压缩进行中，这条消息已排队，压缩完成后会自动发送。",
   autoCompactGoalWait: "⏳ 自动压缩进行中，auto 任务将在压缩结束后自动继续…",
   popupTitleExitPlan: "可以开始编码了吗？",
   popupTitleToolPermission: (tool) => `工具权限 (${tool})`,
@@ -514,6 +520,8 @@ const en: Messages = {
   autoCompactBackendFailed: "backend reported compaction failed (session_compact_failed)",
   autoCompactBusy:
     '🔄 auto-compact in progress — this message was NOT sent; resend it after the "✓ auto-compact" notice.',
+  autoCompactHeld:
+    "🔄 auto-compact in progress — this message is queued and will be sent automatically once it finishes.",
   autoCompactGoalWait:
     "⏳ auto-compact in progress — the auto run continues automatically once it finishes…",
   popupTitleExitPlan: "Ready to code?",

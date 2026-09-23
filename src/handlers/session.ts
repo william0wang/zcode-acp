@@ -1721,6 +1721,11 @@ export async function runOneTurn(
         // this turn's listener unregister in the finally, and
         // turn.compactRejected lets the goal-loop driver (no user to resend)
         // wait the compaction out and retry the round.
+        //
+        // This is the RACE fallback, not the normal path: runPrompt holds a
+        // prompt that meets a compaction already running, so reaching here
+        // means the compaction armed between the hold and this send (or
+        // outlived the hold's settle cap).
         if (isBusy && server.autoCompactInFlight.has(zcodeSid)) {
           // Goal rounds get no user-directed notice: the driver retries them
           // automatically — a "resend" instruction would point at an internal
@@ -2029,12 +2034,44 @@ async function runPrompt(
   // same lock). Slash commands /auto pause|resume|stop|status were
   // intercepted above, so anything reaching here is conversational input.
   let parked: Promise<acp.PromptResponse> | undefined;
-  // Set when the compaction gate below rejected this prompt.
+  // Set when the compaction wait below outlived its settle cap: the prompt is
+  // rejected rather than held forever (the bounded fallback path).
   let compactBusy = false;
-  // A sandbox continuation has no user watching to resend it: wait the
-  // compaction out instead of hitting the rejection gate. The wait happens
-  // BEFORE any subscribe, so it is residue-free by construction.
+  // Compaction hold. A detached auto-compact holds the backend prompt lock for
+  // minutes; queueing BEHIND the lock is fatal for a subscribed listener (the
+  // compaction's internal-turn stream would be dispatched as THIS prompt's
+  // output, its turn.completed ending the turn before the real reply starts).
+  // So the wait happens HERE — before the turn registers, before the listener
+  // subscribes — where it is residue-free by construction: the prompt then
+  // proceeds through the normal send path, and the send-retry loop absorbs the
+  // tail of the lock window if the compaction is still winding down. This is
+  // the same pre-subscribe shape the goal-loop driver and the sandbox
+  // continuations already use; a user-facing prompt now gets it too instead of
+  // being rejected with "resend after the ✓ line" — the message the user typed
+  // is delivered, the session keeps showing as executing, and there is nothing
+  // to resend. Never wait while holding the preempt lock: a long wait would
+  // block other sessions' register/preempt critical sections.
+  if (server.autoCompactInFlight.has(zcodeSid)) {
+    // Tell the user BEFORE the wait, not after: the wait can run for minutes,
+    // and silence for that long is exactly what made the old rejection read as
+    // "my message vanished". Announced here the client shows the hold notice
+    // while the spinner stays live (the turn is not registered yet, so the
+    // notice is the only feedback during the window).
+    await sendTextChunk(cx, params.sessionId, messages().autoCompactHeld, randomUUID());
+    const { waitForAutoCompactIdle } = await import("../config/auto-compact.js");
+    const settled = await waitForAutoCompactIdle(server, zcodeSid);
+    if (!settled) {
+      // The compaction outlived AUTO_COMPACT_SETTLE_MS. Sending anyway would
+      // hit the busy-reject inside runOneTurn and land in the same trap; reject
+      // so the user can resend against a known-settled session.
+      compactBusy = true;
+    } else {
+      log("session/prompt: held for a detached auto-compact, now sending");
+    }
+  }
   if (continuationRound && server.autoCompactInFlight.has(zcodeSid)) {
+    // A second compaction armed while this continuation waited out the first:
+    // wait again (still pre-subscribe, still residue-free).
     const { waitForAutoCompactIdle } = await import("../config/auto-compact.js");
     await waitForAutoCompactIdle(server, zcodeSid);
   }
@@ -2044,25 +2081,16 @@ async function runPrompt(
       parked = goalLoop.parkPrompt(sendText);
       return;
     }
-    // Compaction gate: a detached auto-compact holds the backend prompt lock
-    // for minutes. NEVER queue behind it — this prompt's listener subscribes
-    // before the send, so waiting out the compaction would accumulate its
-    // whole internal-turn stream in our queue and dispatch it as THIS
-    // prompt's output once the lock releases (its turn.completed even ends
-    // the turn before the real reply starts). Reject with a resend notice;
-    // runOneTurn's busy-reject fallback covers the arm race between this
-    // check and the send.
-    if (server.autoCompactInFlight.has(zcodeSid)) {
-      compactBusy = true;
-      return;
-    }
     server.pendingTurns.set(requestId, turn);
     preempted = preemptInFlightTurn(server, zcodeSid, requestId);
   });
   if (parked) return parked;
   if (compactBusy) {
+    // Only reachable when the compaction outlived AUTO_COMPACT_SETTLE_MS: the
+    // hold above refused to wait indefinitely. The message was never queued, so
+    // the user resends against a session the compaction has (by now) settled.
     await sendTextChunk(cx, params.sessionId, messages().autoCompactBusy, randomUUID());
-    log("session/prompt: rejected — a detached auto-compact is in flight");
+    log("session/prompt: rejected — a detached auto-compact outlived its settle cap");
     return { stopReason: "max_turn_requests" };
   }
   // Discovery: the session is live the moment its turn STARTS — mark it active
