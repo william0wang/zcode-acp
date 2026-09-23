@@ -12,6 +12,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { describe, expect, it, vi } from "vitest";
 
+import { waitForAutoCompactIdle } from "../src/config/auto-compact.js";
 import { compact } from "../src/handlers/extensions.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeResponse } from "../src/backend/types.js";
@@ -181,5 +182,114 @@ describe("compact() already_running ack", () => {
     };
     expect(res.__alreadyRunning).toBe(false);
     expect(res.__compactFailed).toBe(false);
+  });
+});
+
+/**
+ * Manual /compact busy window: the compaction must report running:true to
+ * EVERY client for its whole duration — without it the session read as idle,
+ * clients offered Send, and the prompt died against the backend's compact
+ * lock as "backend still busy" instead of queueing (the client-side hold the
+ * auto-compact path has had since #247; this suite pins the manual path).
+ */
+describe("compact() busy window (manual /compact)", () => {
+  type Gate = { releaseCompact: (resp: ZcodeResponse) => void };
+
+  /** makeServer variant whose session/compact RPC blocks on a manual gate. */
+  function makeGatedServer(c: CompactCase): { server: ZcodeAcpServer; gate: Gate } {
+    const base = makeServer(c);
+    const server = base.server;
+    let goalProbe = 0;
+    let releaseCompact!: (resp: ZcodeResponse) => void;
+    const gated = new Promise<ZcodeResponse>((r) => (releaseCompact = r));
+    server.backend = {
+      isDead: false,
+      request: async (
+        id: number,
+        method: string,
+        _params: Record<string, unknown>,
+      ): Promise<ZcodeResponse> => {
+        if (method === "session/compact") return gated;
+        if (method === "session/goal") {
+          goalProbe++;
+          if (goalProbe === 1) {
+            return {
+              id,
+              error: { code: -32010, message: "A prompt is already running for this session" },
+            } as ZcodeResponse;
+          }
+          return { id, result: {} } as ZcodeResponse;
+        }
+        if (method === "session/read") {
+          return {
+            id,
+            result: { settings: {}, projection: { contextUsed: 1, contextWindow: 100 } },
+          } as ZcodeResponse;
+        }
+        return { id, result: {} } as ZcodeResponse;
+      },
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+    return { server, gate: { releaseCompact } };
+  }
+
+  /** A fake registered client whose notify calls are inspectable. */
+  function attachClient(server: ZcodeAcpServer): { turnStates: () => Array<boolean | undefined> } {
+    const seen: Array<{ method: string; running?: boolean }> = [];
+    server.clients.add({
+      notify: async (method: string, params?: unknown) => {
+        const p = params as { running?: boolean } | undefined;
+        seen.push({ method, running: p?.running });
+      },
+      request: async () => undefined,
+    });
+    return {
+      turnStates: () => seen.filter((s) => s.method === "$/zcode/turnState").map((s) => s.running),
+    };
+  }
+
+  const flush = () => new Promise<void>((r) => setImmediate(r));
+
+  const ACCEPTED = { response: "", compact: { state: "accepted" } };
+
+  it("broadcasts running:true for the whole window and settles at the end", async () => {
+    const { server, gate } = makeGatedServer({ compactResult: ACCEPTED });
+    const client = attachClient(server);
+    const running = compact(server, { sessionId: SID_A }, cx);
+    await flush();
+    await flush();
+    // Mid-window: every client sees busy, and the in-flight flag (the prompt
+    // path's hold gate) is registered BEFORE the RPC goes out.
+    expect(client.turnStates()).toEqual([true]);
+    expect(server.autoCompactInFlight.has(SID_Z)).toBe(true);
+    gate.releaseCompact({ id: 1, result: ACCEPTED } as ZcodeResponse);
+    await running;
+    expect(client.turnStates()).toEqual([true, false]);
+    expect(server.autoCompactInFlight.has(SID_Z)).toBe(false);
+  });
+
+  it("is visible to waitForAutoCompactIdle — a prompt sent mid-window queues", async () => {
+    const { server, gate } = makeGatedServer({ compactResult: ACCEPTED });
+    attachClient(server);
+    const running = compact(server, { sessionId: SID_A }, cx);
+    await flush();
+    await flush();
+    const idle = waitForAutoCompactIdle(server, SID_Z, 2_000);
+    gate.releaseCompact({ id: 1, result: ACCEPTED } as ZcodeResponse);
+    await running;
+    // The wait releases only once the manual compaction leaves the set —
+    // runPrompt's hold sits on exactly this gate instead of erroring.
+    expect(await idle).toBe(true);
+  });
+
+  it("settles and clears the flag even when the RPC itself fails", async () => {
+    const { server, gate } = makeGatedServer({ compactResult: ACCEPTED });
+    const client = attachClient(server);
+    const running = compact(server, { sessionId: SID_A }, cx);
+    await flush();
+    await flush();
+    gate.releaseCompact({ id: 1, error: { code: -32000, message: "boom" } } as ZcodeResponse);
+    await expect(running).rejects.toThrow("compact failed");
+    expect(client.turnStates()).toEqual([true, false]);
+    expect(server.autoCompactInFlight.has(SID_Z)).toBe(false);
   });
 });

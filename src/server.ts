@@ -182,11 +182,14 @@ export class ZcodeAcpServer {
    */
   readonly hydrationWatermark = new Map<string, number>();
   /**
-   * Backend session ids with a DETACHED auto-compact in flight (see
-   * runAutoCompactDetached in config/auto-compact.ts). The turn that armed it
-   * has already returned — cancel/preempt must not touch the compaction, the
-   * drain gate must not escalate on it, and a concurrent prompt's busy-retry
-   * extends its budget to the compaction settle bound instead of failing.
+   * Backend session ids with a compaction in flight — detached auto-compact
+   * (see runAutoCompactDetached in config/auto-compact.ts) AND manual
+   * /compact or direct session/compact calls (extensions.ts compact()
+   * registers the same flag). The turn that armed it has already returned —
+   * cancel/preempt must not touch the compaction, the drain gate must not
+   * escalate on it, a concurrent prompt HOLDS on this flag instead of racing
+   * the compact lock, and a busy-retry extends its budget to the compaction
+   * settle bound instead of failing.
    */
   readonly autoCompactInFlight = new Set<string>();
   /**

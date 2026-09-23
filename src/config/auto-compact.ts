@@ -25,7 +25,7 @@ import { compact } from "../handlers/extensions.js";
 import { messages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
-import { emitSessionTurnState, sendTextChunk } from "../handlers/io.js";
+import { sendTextChunk } from "../handlers/io.js";
 import { autoCompactThreshold } from "./settings.js";
 
 // Re-exported for existing importers (tests, docs); the merge lives in settings.ts.
@@ -46,10 +46,6 @@ export async function maybeAutoCompact(
   if (threshold <= 0) return; // disabled
 
   const msgId = randomUUID();
-  // Set only once this run actually reported running:true. The finally below
-  // settles the indicator, and an early return (threshold not met, session/read
-  // failed) must not emit a settle for an indicator it never raised.
-  let reportedBusy = false;
   try {
     // Read current context usage via session/read. messageLimit keeps the
     // backend from serializing the whole message array into a snapshot whose
@@ -74,13 +70,11 @@ export async function maybeAutoCompact(
     if (used < threshold) return;
 
     log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
-    // The session is BUSY from here: report it so clients show the spinner and
-    // a Cancel button, and so a prompt the user types during the window queues
-    // client-side instead of racing the compaction. The turn that armed us
-    // already reported running:false (detached design) — without this the whole
-    // compaction window reads as idle on every client.
-    await emitSessionTurnState(server, acpSid, true);
-    reportedBusy = true;
+    // The busy window (running:true to every client, settle at the end) is
+    // owned by compact() itself — the single raise point for manual AND auto
+    // compactions alike, so the window is reported identically wherever the
+    // compaction was started from. Until it raises, the in-flight flag this
+    // run's detached wrapper already set holds any prompt that arrives.
     const m = messages();
     await sendTextChunk(
       cx,
@@ -113,17 +107,6 @@ export async function maybeAutoCompact(
       msgId,
     );
     // Best-effort: never break the prompt response.
-  } finally {
-    // Settle only what this run raised: an early return (threshold not met,
-    // session/read failed) must not emit a settle for an indicator it never
-    // raised. The settle can land a few ms BEFORE a prompt held at the
-    // compaction gate registers — that turn's own running:true follows
-    // immediately and clients are last-write-wins, so the pair reads as one
-    // continuous busy window (verified: the gap measures ~17ms, well inside a
-    // single UI frame).
-    if (reportedBusy) {
-      await emitSessionTurnState(server, acpSid, false);
-    }
   }
 }
 

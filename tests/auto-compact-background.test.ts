@@ -206,12 +206,16 @@ describe("detached auto-compact", () => {
     expect(result).toEqual({ stopReason: "end_turn" });
     // The turn's own pair, then the compaction's own running:true: the session
     // never reads idle during the compaction window (a client tracking only
-    // turns would drop its spinner and Cancel button for minutes).
-    expect(turnStates).toEqual([
-      { sessionId: "sess_ac", running: true },
-      { sessionId: "sess_ac", running: false },
-      { sessionId: "sess_ac", running: true },
-    ]);
+    // turns would drop its spinner and Cancel button for minutes). waitFor:
+    // the raise now lands inside compact() (a couple of microtask hops past
+    // the threshold-read notice), a tick after the prompt response resolves.
+    await vi.waitFor(() =>
+      expect(turnStates).toEqual([
+        { sessionId: "sess_ac", running: true },
+        { sessionId: "sess_ac", running: false },
+        { sessionId: "sess_ac", running: true },
+      ]),
+    );
     expect(server.pendingTurns.size).toBe(0);
 
     // The detached compaction started: threshold read → session/compact.
@@ -362,10 +366,14 @@ describe("detached auto-compact", () => {
     expect(await r2).toEqual({ stopReason: "end_turn" });
 
     // Every notice the user saw is accounted for: turn 1's compaction start
-    // and done lines, plus the hold notice. Nothing from the compaction's
-    // internal turn (which never delivered any event here) appears as this
-    // prompt's output, and no foreign turn.completed ended it early.
-    const compactLines = texts.filter((t) => t.includes("auto-compact"));
+    // and done lines, plus the hold notice (worded for compactions generally —
+    // manual /compact and auto-compact queue identically). Nothing from the
+    // compaction's internal turn (which never delivered any event here)
+    // appears as this prompt's output, and no foreign turn.completed ended it
+    // early.
+    const compactLines = texts.filter(
+      (t) => t.includes("auto-compact") || t.includes("compaction in progress"),
+    );
     expect(compactLines.length).toBeGreaterThanOrEqual(3);
     expect(compactLines.some((t) => t.includes("✓ auto-compact"))).toBe(true);
     expect(counts.get("session/send")).toBe(2);

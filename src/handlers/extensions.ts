@@ -30,6 +30,7 @@ import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.j
 import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
+import { emitSessionTurnState } from "./io.js";
 import { cacheModelAvailability, ensureRealSession } from "./session.js";
 
 /** Build the zcode `target` object from ACP params (checkpoint or latest). */
@@ -118,7 +119,19 @@ export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Pro
   return (resp.result ?? {}) as Result;
 }
 
-/** session/compact → zcode session/compact + wait for the internal AI turn. */
+/**
+ * session/compact → zcode session/compact + wait for the internal AI turn.
+ *
+ * The compaction window is reported as BUSY to EVERY client, not just the
+ * caller's: without the raise below, a manual /compact (or a direct
+ * session/compact call) left the session reading idle for the whole internal
+ * AI turn — clients offered Send, the prompt hit the backend's compact lock
+ * (-32010), and the busy-retry died as "backend still busy" instead of
+ * queueing. Registering the same in-flight flag auto-compact uses also puts
+ * manual compactions inside the prompt path's hold (runPrompt's
+ * waitForAutoCompactIdle), so even a client that sends anyway gets the
+ * queued-notice semantics, never the error.
+ */
 export async function compact(
   server: ZcodeAcpServer,
   params: ExtensionParams,
@@ -126,6 +139,29 @@ export async function compact(
 ): Promise<Result> {
   const acpSid = params.sessionId;
   const zcodeSid = await resolveSidOrThrow(server, params);
+  server.autoCompactInFlight.add(zcodeSid);
+  await emitSessionTurnState(server, acpSid, true);
+  try {
+    return await runCompact(server, params, cx, acpSid, zcodeSid);
+  } finally {
+    // Both releases are safe to be last-write-wins: the lock the compaction
+    // held is gone by the time we get here, and an auto-compact caller that
+    // raised its own flag settles again in its own finally (idempotent
+    // running:false; a prompt held at the gate follows with its own
+    // running:true within one UI frame).
+    server.autoCompactInFlight.delete(zcodeSid);
+    await emitSessionTurnState(server, acpSid, false);
+  }
+}
+
+/** The compact body, separated so the busy raise/settle above cannot be bypassed. */
+async function runCompact(
+  server: ZcodeAcpServer,
+  params: ExtensionParams,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<Result> {
   // `/compact <focus>` (or a direct ACP call) forwards the focus text as
   // compact instructions (0.16.9 params: {sessionId, inputId?, instructions?,
   // expectedRevision?}).

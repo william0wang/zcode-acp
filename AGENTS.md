@@ -293,11 +293,15 @@ ZCode protocol types into ACP notifications directly — always translate.
   `server-operations.ts:2082-2119` — real compact failure is now OBSERVABLE
   on the v3 stream; wiring it into the bridge's success reporting is a
   pending alignment item, see docs/BACKLOG.md.) Invariants that must stay: single-flight per sid
-  (`server.autoCompactInFlight`) and the drain gate exempt while it runs. The
-  compaction window is reported as BUSY (`emitCompactTurnState`, raising
-  running:true at start and settling it only if this run actually raised it) —
+  (`server.autoCompactInFlight` — keyed by the BACKEND sid and covering manual
+  /compact too, not just auto) and the drain gate exempt while it runs. The
+  compaction window is reported as BUSY by `compact()` itself (extensions.ts:
+  broadcast `running:true` at entry — every client, every entry path — settle
+  in the finally; `maybeAutoCompact` no longer raises its own indicator) —
   a client that tracks only turns would otherwise read the whole window as
-  idle, drop its spinner, and offer Send where Cancel belongs. A prompt landing
+  idle, drop its spinner, and offer Send where Cancel belongs (manual /compact
+  had exactly that hole: the prompt hit the backend's compact lock and died as
+  "backend still busy" instead of queueing). A prompt landing
   in the window is HELD, never queued behind the lock: `runPrompt` announces
   the neutral `autoCompactHeld` notice and waits via `waitForAutoCompactIdle`
   BEFORE the turn registers and BEFORE the listener subscribes — the only

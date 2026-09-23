@@ -367,9 +367,9 @@ const zh: Messages = {
   autoCompactDone: "✓ 自动压缩: 上下文已压缩",
   autoCompactFailed: (err) => `⚠ 自动压缩失败: ${err}`,
   autoCompactBackendFailed: "后端报告压缩失败（session_compact_failed）",
-  autoCompactBusy: "🔄 自动压缩进行中，这条消息未发送；看到“✓ 自动压缩”提示后请重新发送。",
-  autoCompactHeld: "🔄 自动压缩进行中，这条消息已排队，压缩完成后会自动发送。",
-  autoCompactGoalWait: "⏳ 自动压缩进行中，auto 任务将在压缩结束后自动继续…",
+  autoCompactBusy: "🔄 压缩进行中，这条消息未发送；压缩完成后请重新发送。",
+  autoCompactHeld: "🔄 压缩进行中，这条消息已排队，压缩完成后会自动发送。",
+  autoCompactGoalWait: "⏳ 压缩进行中，auto 任务将在压缩结束后自动继续…",
   popupTitleExitPlan: "可以开始编码了吗？",
   popupTitleToolPermission: (tool) => `工具权限 (${tool})`,
   popupTitleInteraction: "交互",
@@ -519,11 +519,11 @@ const en: Messages = {
   autoCompactFailed: (err) => `⚠ auto-compact failed: ${err}`,
   autoCompactBackendFailed: "backend reported compaction failed (session_compact_failed)",
   autoCompactBusy:
-    '🔄 auto-compact in progress — this message was NOT sent; resend it after the "✓ auto-compact" notice.',
+    "🔄 compaction in progress — this message was NOT sent; resend it once the compaction finishes.",
   autoCompactHeld:
-    "🔄 auto-compact in progress — this message is queued and will be sent automatically once it finishes.",
+    "🔄 compaction in progress — this message is queued and will be sent automatically once it finishes.",
   autoCompactGoalWait:
-    "⏳ auto-compact in progress — the auto run continues automatically once it finishes…",
+    "⏳ compaction in progress — the auto run continues automatically once it finishes…",
   popupTitleExitPlan: "Ready to code?",
   popupTitleToolPermission: (tool) => `tool permission (${tool})`,
   popupTitleInteraction: "interaction",
