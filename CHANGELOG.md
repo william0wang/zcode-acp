@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.6](https://github.com/william0wang/zcode-acp/compare/v0.47.5...v0.47.6) (2026-09-23)
+
+
+### Bug Fixes
+
+* run the login-shell env probe non-interactively and union PATH ([#251](https://github.com/william0wang/zcode-acp/issues/251)) ([b2e3ba0](https://github.com/william0wang/zcode-acp/commit/b2e3ba0716188808e4ff9c389a5e8046f625c697))
+
 ## [0.47.5](https://github.com/william0wang/zcode-acp/compare/v0.47.4...v0.47.5) (2026-09-23)
 
 
