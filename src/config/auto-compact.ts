@@ -25,7 +25,7 @@ import { compact } from "../handlers/extensions.js";
 import { messages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
-import { sendTextChunk } from "../handlers/io.js";
+import { emitSessionTurnState, sendTextChunk } from "../handlers/io.js";
 import { autoCompactThreshold } from "./settings.js";
 
 // Re-exported for existing importers (tests, docs); the merge lives in settings.ts.
@@ -56,7 +56,7 @@ export async function maybeAutoCompact(
     // only consumer here is `projection.contextUsed`.
     let used = 0;
     try {
-      const backend = server.ensureBackend();
+      const backend = await server.ensureBackend();
       const resp = await backend.request(
         server.nextId(),
         "session/read",
@@ -79,7 +79,7 @@ export async function maybeAutoCompact(
     // client-side instead of racing the compaction. The turn that armed us
     // already reported running:false (detached design) — without this the whole
     // compaction window reads as idle on every client.
-    await emitCompactTurnState(server, acpSid, true);
+    await emitSessionTurnState(server, acpSid, true);
     reportedBusy = true;
     const m = messages();
     await sendTextChunk(
@@ -122,7 +122,7 @@ export async function maybeAutoCompact(
     // continuous busy window (verified: the gap measures ~17ms, well inside a
     // single UI frame).
     if (reportedBusy) {
-      await emitCompactTurnState(server, acpSid, false);
+      await emitSessionTurnState(server, acpSid, false);
     }
   }
 }
@@ -147,33 +147,6 @@ export function runAutoCompactDetached(
       warn(`auto-compact: detached run failed (${e instanceof Error ? e.message : String(e)})`);
     })
     .finally(() => server.autoCompactInFlight.delete(zcodeSid));
-}
-
-/**
- * Out-of-band running indicator for the compaction window, per attached alias
- * (see session.ts's emitTurnState): the compaction owns the backend prompt lock
- * for minutes, so the session IS busy — clients that only track turns would
- * show idle, drop their spinner, and offer a plain Send button where a Cancel
- * belongs. Best-effort: a dead client must never fail the compaction.
- */
-async function emitCompactTurnState(
-  server: ZcodeAcpServer,
-  acpSid: string,
-  running: boolean,
-): Promise<void> {
-  const results = await Promise.allSettled(
-    server.sessionAliases(acpSid).map((sid) =>
-      server.clients
-        .broadcast()
-        .notify("$/zcode/turnState", { sessionId: sid, running })
-        .catch(() => undefined),
-    ),
-  );
-  for (const r of results) {
-    if (r.status === "rejected") {
-      log(`auto-compact: turnState notify failed: ${String(r.reason)}`);
-    }
-  }
 }
 
 /** Worst-case compaction wall time: settle cap 300s + startup + probe gaps. */

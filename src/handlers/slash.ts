@@ -240,14 +240,14 @@ async function fetchMcpStatuses(
 ): Promise<Record<string, McpServerHealth> | null> {
   const cwd = server.sessionCwds.get(acpSid) ?? server.projectCwd();
   try {
-    const resp = await server
-      .ensureBackend()
-      .request(
-        server.nextId(),
-        "mcp/list",
-        { workspace: { workspacePath: cwd, workspaceKey: cwd }, mode: "status" },
-        15000,
-      );
+    const resp = await (
+      await server.ensureBackend()
+    ).request(
+      server.nextId(),
+      "mcp/list",
+      { workspace: { workspacePath: cwd, workspaceKey: cwd }, mode: "status" },
+      15000,
+    );
     if (resp.error) {
       warn(`/mcp: mcp/list failed (${resp.error.message}) — using local discovery`);
       return null;
@@ -453,14 +453,14 @@ export async function handleSlashCommand(
         if (!arg) throw new RequestError(-32602, messages().slashErrArg(cmd));
         const dispatch = CONFIG_DISPATCH[cmd];
         if (!dispatch) throw new RequestError(-32602, messages().slashErrUnknown(cmd));
-        const resp = await server
-          .ensureBackend()
-          .request(
-            server.nextId(),
-            dispatch.method,
-            { sessionId: zcodeSid, [dispatch.paramKey]: arg },
-            15000,
-          );
+        const resp = await (
+          await server.ensureBackend()
+        ).request(
+          server.nextId(),
+          dispatch.method,
+          { sessionId: zcodeSid, [dispatch.paramKey]: arg },
+          15000,
+        );
         if (resp.error) {
           throw new RequestError(-32603, messages().slashErrFailed(cmd, resp.error.message));
         }

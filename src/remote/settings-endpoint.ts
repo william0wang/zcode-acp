@@ -60,6 +60,7 @@ import {
   setSkillEnabledByPath,
 } from "../settings/skills.js";
 import { listBackups, readJsonDocument, writeJsonAtomic } from "../settings/atomic-write.js";
+import { BrokenConfigError, UpstreamError } from "../settings/errors.js";
 import {
   appBundlePath,
   appUpdateState,
@@ -181,31 +182,43 @@ function messageOf(error: unknown): string {
  * been carried out, ask again with the same idempotency key" rather than "you
  * built the request wrong". Only a genuine business rejection is a 400.
  *
- * The upstream patterns are deliberately narrow. The upstream modules tag their
- * failures with a module prefix (`coding_plan_reset_*`, `manifest_*`,
- * `download_*`) and a bare `fetch` failure surfaces as Node's own message, so
- * those are the only spellings that count. Matching loosely on a word like
- * `timeout` also hits `src/settings/cli-config.ts`'s field validators
- * ("timeoutMs must be a positive number"), and a hooks `PUT` with a bad
- * `timeoutMs` would then answer 504 — telling the client to retry a request
- * that can never succeed.
+ * Classification is structural, never message-matching (#240's original bug
+ * shape): the settings modules throw typed errors at the site where the
+ * intent is known (`BadRequest` here, `BrokenConfigError`/`UpstreamError` in
+ * src/settings/errors.ts), and Node's own network failures carry their errno
+ * structurally — `fetch` wraps it in `cause.code` (an `AggregateError` nests
+ * it in `cause.errors[].code`), the http client sets `error.code` directly,
+ * and the AbortSignal timeout surfaces as a DOMException named TimeoutError.
+ * A bare `Error` is the default and stays a 400: the bulk of those are the
+ * modules' own request validation ("timeoutMs must be a positive number" is
+ * the client's fault, not a gateway timeout).
  */
 function statusFor(error: unknown): number {
   if (error instanceof BadRequest) return 400;
-  const message = error instanceof Error ? error.message : String(error);
-  // Node's own wording for an aborted request (the reset API's AbortSignal
-  // timeout) and for a dead connection.
-  if (/\btimed out\b|\babort(ed|error)\b/iu.test(message)) return 504;
-  if (/\bfetch failed\b|econnreset|enotfound|econnrefused|socket hang up/iu.test(message)) {
-    return 502;
-  }
-  // The upstream modules' own prefixed codes: a non-2xx from the reset API or
-  // the release manifest. Prefixed on purpose so a config-file field named
-  // `http_status` cannot masquerade as an upstream answer.
-  if (/^(coding_plan_reset|manifest|download)_/u.test(message)) return 502;
-  if (/is not valid JSON|not a JSON object|refusing to write|could not be read/u.test(message)) {
-    // The environment is broken (a damaged config file) — not the client's fault.
-    return 500;
+  if (error instanceof BrokenConfigError) return 500;
+  if (error instanceof UpstreamError) return 502;
+  if (error instanceof Error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") return 504;
+    const err = error as NodeJS.ErrnoException & {
+      cause?: { code?: unknown; errors?: Array<{ code?: unknown }> };
+    };
+    const codes = [
+      err.code,
+      err.cause?.code,
+      ...(err.cause?.errors ?? []).map((e) => e.code),
+    ].filter((c): c is string => typeof c === "string");
+    if (
+      codes.some(
+        (c) =>
+          /^(ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ECONNABORTED|EPIPE)$/u.test(c) ||
+          // undici's own failure family — e.g. a destroyed socket surfaces as
+          // cause.code UND_ERR_SOCKET ("fetch failed" with no errno).
+          /^UND_ERR_/u.test(c),
+      )
+    ) {
+      return 502;
+    }
+    if (codes.some((c) => /^(EACCES|EPERM|EISDIR|ENOTDIR)$/u.test(c))) return 500;
   }
   return 400;
 }

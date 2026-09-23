@@ -34,33 +34,33 @@ function fakeBackend(): ZcodeBackend & { registered: string[] } {
 const BOTH = ["zs_1", "zs_1"];
 
 describe("ensureBackgroundListener across backend respawns", () => {
-  it("returns the cached listener on the SAME backend instance", () => {
+  it("returns the cached listener on the SAME backend instance", async () => {
     const server = new ZcodeAcpServer();
     const backend = fakeBackend();
     server.backend = backend;
-    const a = server.ensureBackgroundListener("zs_1");
-    const b = server.ensureBackgroundListener("zs_1");
+    const a = await server.ensureBackgroundListener("zs_1");
+    const b = await server.ensureBackgroundListener("zs_1");
     expect(a).toBe(b);
     // One BackgroundTaskListener + one SessionTitleListener, registered once.
     expect(backend.registered).toEqual(BOTH);
   });
 
-  it("re-registers (both listeners) after the backend instance is replaced", () => {
+  it("re-registers (both listeners) after the backend instance is replaced", async () => {
     const server = new ZcodeAcpServer();
     const first = fakeBackend();
     server.backend = first;
-    const a = server.ensureBackgroundListener("zs_1");
+    const a = await server.ensureBackgroundListener("zs_1");
     expect(first.registered).toEqual(BOTH);
 
     // Respawn: a brand-new instance takes over.
     const second = fakeBackend();
     server.backend = second;
-    const b = server.ensureBackgroundListener("zs_1");
+    const b = await server.ensureBackgroundListener("zs_1");
     // Same listener object (its per-task state survives), fresh registration
     // of BOTH listeners on the new instance — and no duplicate on a third call.
     expect(b).toBe(a);
     expect(second.registered).toEqual(BOTH);
-    const c = server.ensureBackgroundListener("zs_1");
+    const c = await server.ensureBackgroundListener("zs_1");
     expect(c).toBe(a);
     expect(second.registered).toEqual(BOTH);
   });

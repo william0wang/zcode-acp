@@ -144,22 +144,32 @@ describe("zcodeDataBaseDirEnv (ZCODE_HOME → ZCODE_DATA_BASE_DIR)", () => {
     else process.env.ZCODE_HOME = savedHome;
   });
 
-  it("derives the parent directory of the isolated data root", async () => {
+  it("derives the parent directory when the tree is named .zcode", async () => {
     const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
-    process.env.ZCODE_HOME = "/tmp/isolated-zcode-home";
+    process.env.ZCODE_HOME = "/tmp/isolated/.zcode";
     // ZCODE_HOME replaces ~/.zcode OUTRIGHT, and the backend's contract is the
     // PARENT of .zcode — so the translation is a plain dirname.
     expect(zcodeDataBaseDirEnv()).toEqual({
-      ZCODE_DATA_BASE_DIR: path.dirname("/tmp/isolated-zcode-home"),
+      ZCODE_DATA_BASE_DIR: "/tmp/isolated",
     });
   });
 
   it("resolves a relative ZCODE_HOME against the cwd", async () => {
     const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
-    process.env.ZCODE_HOME = "rel-home";
+    process.env.ZCODE_HOME = "rel-home/.zcode";
     expect(zcodeDataBaseDirEnv()).toEqual({
-      ZCODE_DATA_BASE_DIR: path.dirname(path.resolve("rel-home")),
+      ZCODE_DATA_BASE_DIR: path.dirname(path.resolve("rel-home/.zcode")),
     });
+  });
+
+  it("refuses to translate a tree not named .zcode", async () => {
+    const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
+    process.env.ZCODE_HOME = "/tmp/isolated-zcode-home";
+    // The backend unconditionally appends `.zcode` to the base dir, so a
+    // differently-named tree CANNOT be projected onto it — dirname would point
+    // the backend at a sibling `.zcode` that belongs to someone else. Leaving
+    // the env unset (with a warning) is the honest failure.
+    expect(zcodeDataBaseDirEnv()).toEqual({});
   });
 
   it("returns {} when ZCODE_HOME is unset (ambient ZCODE_DATA_BASE_DIR passes through)", async () => {

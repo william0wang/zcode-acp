@@ -34,6 +34,7 @@ import { readFile } from "node:fs/promises";
 import { homedir, platform, userInfo } from "node:os";
 
 import { log, zcodeCredentialsPath } from "../utils.js";
+import { UpstreamError } from "./errors.js";
 
 /** The only provider ids that own a coding plan. */
 const CODING_PLAN_PROVIDER_PREFIX = "account:";
@@ -243,10 +244,10 @@ async function callReset(
   const envelope = (payload ?? {}) as Envelope;
   if (typeof envelope.code === "number" && envelope.code !== 0) {
     if (acceptedCodes.includes(envelope.code)) return envelope;
-    throw new Error(`coding_plan_reset_api_error:${envelope.code}`);
+    throw new UpstreamError(`coding_plan_reset_api_error:${envelope.code}`);
   }
   if (!response.ok) {
-    throw new Error(`coding_plan_reset_http_error:${response.status}`);
+    throw new UpstreamError(`coding_plan_reset_http_error:${response.status}`);
   }
   return envelope;
 }

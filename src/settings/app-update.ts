@@ -37,6 +37,7 @@ import { promisify } from "node:util";
 import type { Stats } from "node:fs";
 
 import { log, warn } from "../utils.js";
+import { UpstreamError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -295,7 +296,7 @@ export function parseManifest(raw: string): ReleaseManifest {
   }
   flushBlock();
 
-  if (!root["version"]) throw new Error("manifest_missing_version");
+  if (!root["version"]) throw new UpstreamError("manifest_missing_version");
   return {
     version: root["version"],
     ...(root["releaseName"] ? { releaseName: root["releaseName"] } : {}),
@@ -377,7 +378,7 @@ export async function fetchReleaseManifest(
     },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`manifest_http_${res.status}`);
+  if (!res.ok) throw new UpstreamError(`manifest_http_${res.status}`);
   const text = await res.text();
   return parseManifest(text);
 }
@@ -491,7 +492,7 @@ export async function downloadRelease(
   // would fire on a slow link. `AbortSignal.timeout(0)` fires immediately, so
   // no signal is passed at all.
   const res = await fetchImpl(file.url);
-  if (!res.ok || !res.body) throw new Error(`download_http_${res.status}`);
+  if (!res.ok || !res.body) throw new UpstreamError(`download_http_${res.status}`);
   const total = Number(res.headers.get("content-length") ?? "") || null;
   const hash = createHash("sha512");
   const out = createWriteStream(target);
@@ -516,7 +517,7 @@ export async function downloadRelease(
   }
   const sha512 = hash.digest("base64");
   const verified = !file.sha512 || sha512 === file.sha512;
-  if (!verified) throw new Error("download_checksum_mismatch");
+  if (!verified) throw new UpstreamError("download_checksum_mismatch");
   await chmod(target, 0o644);
   log(`app-update: downloaded ${name} (${received} bytes, sha512 ${verified ? "ok" : "MISMATCH"})`);
   return { file: target, sha512, sizeBytes: received, verified };

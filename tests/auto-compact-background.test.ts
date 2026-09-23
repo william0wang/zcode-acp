@@ -17,6 +17,9 @@
 import type * as acp from "@agentclientprotocol/sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+/// Let the fire-and-forget async stop pair run its microtasks.
+const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 import { cancel, prompt } from "../src/handlers/session.js";
@@ -316,6 +319,7 @@ describe("detached auto-compact", () => {
     server.pendingTurns.set(998, turn as never);
 
     await cancel(server, { sessionId: "sess_ac" } as acp.CancelNotification);
+    await flushAsync();
 
     expect(turn.cancelled).toBe(true);
     expect(sentFrames.map((f) => f.method)).toEqual(["session/stop", "v4/command"]);

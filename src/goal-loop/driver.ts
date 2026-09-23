@@ -291,7 +291,7 @@ export class GoalLoopDriver {
   /** One goal-loop turn through the shared runOneTurn (goalLoop-marked). */
   private async runGoalTurn(prompt: string): Promise<acp.PromptResponse> {
     const server = this.server;
-    const backend = server.ensureBackend();
+    const backend = await server.ensureBackend();
     const turn: PendingTurn = { zcodeSid: this.zcodeSid, cancelled: false, goalLoop: true };
     const requestId = `goal-${this.zcodeSid}-${this.state.rounds}-${Date.now()}`;
     // Rounds have no user to resend them: a detached compaction (armed by an
@@ -436,14 +436,13 @@ export class GoalLoopDriver {
   private async contextUsed(): Promise<number> {
     // messageLimit: only the projection is read; the cap keeps the backend
     // from serializing the whole message array into every round's snapshot.
-    const resp = await this.server
-      .ensureBackend()
-      .request(
-        this.server.nextId(),
-        "session/read",
-        { sessionId: this.zcodeSid, messageLimit: 1 },
-        5000,
-      );
+    const backend = await this.server.ensureBackend();
+    const resp = await backend.request(
+      this.server.nextId(),
+      "session/read",
+      { sessionId: this.zcodeSid, messageLimit: 1 },
+      5000,
+    );
     if (resp.error) return 0;
     return (
       ((resp.result ?? {}) as { projection?: { contextUsed?: number } }).projection?.contextUsed ??
@@ -511,7 +510,7 @@ export class GoalLoopDriver {
             `goal-loop: backend lost — respawning and resuming (${this.backendRecoveries}/${GoalLoopDriver.MAX_BACKEND_RECOVERIES}, ${msg})`,
           );
           try {
-            this.server.ensureBackend();
+            await this.server.ensureBackend();
             await reloadBackendSession(this.server, this.acpSid, this.zcodeSid);
           } catch (e2) {
             warn(
@@ -761,14 +760,13 @@ export class GoalLoopDriver {
 
   private async contextWindowFromRead(): Promise<number> {
     // messageLimit: only the projection is read (see contextUsed).
-    const resp = await this.server
-      .ensureBackend()
-      .request(
-        this.server.nextId(),
-        "session/read",
-        { sessionId: this.zcodeSid, messageLimit: 1 },
-        5000,
-      );
+    const backend = await this.server.ensureBackend();
+    const resp = await backend.request(
+      this.server.nextId(),
+      "session/read",
+      { sessionId: this.zcodeSid, messageLimit: 1 },
+      5000,
+    );
     if (resp.error) return 0;
     return (
       ((resp.result ?? {}) as { projection?: { contextWindow?: number } }).projection

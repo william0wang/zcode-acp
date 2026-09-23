@@ -105,7 +105,7 @@ export async function emitInitialUsage(
 }
 
 async function sessionRead(server: ZcodeAcpServer, zcodeSid: string): Promise<ZcodeReadResult> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const resp = await backend.request(
     server.nextId(),
     "session/read",

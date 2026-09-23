@@ -69,7 +69,7 @@ import type { InternalEvent } from "../translators/index.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
-import { sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
+import { emitSessionTurnState, sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
 import type { FetchMessagesOptions, ReplaySlice } from "./replay.js";
 import {
   EDIT_DIFF_READ_LIMIT,
@@ -180,7 +180,7 @@ async function syncProviderRegistry(server: ZcodeAcpServer, cwd: string): Promis
     // models the user's config selects never reach `settings.model.available`
     // (verified 2026-09 — switches then fail with "Provider Registry 中不存在
     // Model"). Pushing the snapshot restores desktop parity. Best-effort.
-    await pushAccountProviderConfig(server.ensureBackend(), () => server.nextId());
+    await pushAccountProviderConfig(await server.ensureBackend(), () => server.nextId());
     const registry = buildProviderRegistry();
     if (registry.providers.length === 0) {
       // Every configured provider lacks models (or none are configured). The
@@ -191,14 +191,14 @@ async function syncProviderRegistry(server: ZcodeAcpServer, cwd: string): Promis
       log("provider-registry: no usable providers — skipping sync");
       return;
     }
-    const resp = await server
-      .ensureBackend()
-      .request(
-        server.nextId(),
-        "workspace/updateProviderRegistry",
-        { workspace: workspaceFor(cwd), registry },
-        10000,
-      );
+    const resp = await (
+      await server.ensureBackend()
+    ).request(
+      server.nextId(),
+      "workspace/updateProviderRegistry",
+      { workspace: workspaceFor(cwd), registry },
+      10000,
+    );
     if (resp.error) {
       // 3.12+ removed the method (the registry is built from the bundled table,
       // personal config, and the account snapshot) — a no-op, not a failure.
@@ -456,7 +456,7 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
         const zcodeSid = server.resolveSid(acpSid);
         let used = 0;
         if (zcodeSid) {
-          const backend = server.ensureBackend();
+          const backend = await server.ensureBackend();
           const resp = await backend.request(
             server.nextId(),
             "session/read",
@@ -486,35 +486,6 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
       }
     })();
   });
-}
-
-/**
- * Broadcast turn liveness to attached clients ($/zcode/turnState): `running:true`
- * at turn start, `running:false` at completion (or on any early-return path).
- *
- * Emitted per attached alias (see server.sessionAliases) so every client holding
- * this conversation under its own ACP id updates its running indicator.
- * Clients that don't recognize the notification simply drop it.
- */
-export async function emitSessionTurnState(
-  server: ZcodeAcpServer,
-  acpSid: string,
-  running: boolean,
-  cx?: acp.AgentContext,
-): Promise<void> {
-  const targetCx = cx ?? server.clients.broadcast();
-  const results = await Promise.allSettled(
-    server
-      .sessionAliases(acpSid)
-      .map((sid) => targetCx.notify("$/zcode/turnState", { sessionId: sid, running })),
-  );
-  for (const r of results) {
-    if (r.status === "rejected") {
-      log(
-        `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-      );
-    }
-  }
 }
 
 /**
@@ -648,7 +619,7 @@ export async function ensureRealSession(
   // The create body runs synchronously up to its first await, so the `creating`
   // promise is stored before any concurrent caller can observe the entry.
   const creating = (async () => {
-    const backend = server.ensureBackend();
+    const backend = await server.ensureBackend();
     // Push the provider registry BEFORE session/create: the backend resolves
     // the session's default model against the registry, and without the
     // provider's reasoning/model definitions it falls back to the bare
@@ -715,7 +686,7 @@ export async function ensureRealSession(
     // resume this session via the placeholder id.
     recordMaterializedSession(acpSid, sid, pending.cwd);
     log(`session/new ${acpSid} → created ${sid} (lazy, on first use)`);
-    server.ensureBackgroundListener(sid);
+    await server.ensureBackgroundListener(sid);
 
     // Sync to the App's tasks-index.sqlite so the App UI shows this session.
     // Best-effort; failures are logged inside upsertSessionTask and swallowed.
@@ -744,7 +715,7 @@ export async function listSessions(
   server: ZcodeAcpServer,
   params: acp.ListSessionsRequest,
 ): Promise<acp.ListSessionsResponse> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const zcParams: Record<string, unknown> = {};
   // Serve mode (ADR-0014) pins the workspace: a remote client must not use a
   // client-supplied cwd to enumerate the machine's sessions in OTHER projects
@@ -785,7 +756,7 @@ async function adoptStoredTitle(
 ): Promise<void> {
   if (server.sessionTitles.has(acpSid)) return;
   try {
-    const backend = server.ensureBackend();
+    const backend = await server.ensureBackend();
     const resp = await backend.request(server.nextId(), "session/list", {}, 15000);
     if (resp.error) return;
     const result = (resp.result ?? {}) as ZcodeListResult;
@@ -1007,7 +978,7 @@ export async function resumeSession(
   // above); without this, a loaded session has no readable root.
   server.sessionCwds.set(acpSid, cwd);
   log(`session/resume -> ${zcodeSid}`);
-  server.ensureBackgroundListener(zcodeSid);
+  await server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
   // Martty's /resume rides session/resume (no history by ACP design) and only
   // folds updates addressed to a session id it has already adopted — i.e.
@@ -1081,7 +1052,7 @@ export async function resumeIntoSession(
       // Materialized but empty: discard the orphan backend session and the
       // stale mappings before adopting the target.
       try {
-        server.ensureBackend().send("session/close", { sessionId: current });
+        (await server.ensureBackend()).send("session/close", { sessionId: current });
       } catch (e) {
         log(
           `/resume: closing empty session ${current} failed (ignored): ` +
@@ -1128,7 +1099,7 @@ export async function resumeIntoSession(
     const finalCwd = backendWs && !server.serveMode ? backendWs : cwd;
     server.sessionCwds.set(acpSid, finalCwd);
     recordMaterializedSession(acpSid, zcodeTarget, finalCwd);
-    server.ensureBackgroundListener(zcodeTarget);
+    await server.ensureBackgroundListener(zcodeTarget);
     await adoptStoredTitle(server, acpSid, zcodeTarget);
   } catch (e) {
     warn(`/resume: adopting ${zcodeTarget} failed (${e instanceof Error ? e.message : String(e)})`);
@@ -1239,7 +1210,7 @@ export async function loadSession(
   // Same as resumeSession: backend-authoritative session root for file access.
   server.sessionCwds.set(acpSid, cwd);
   log(`session/load → ${zcodeSid}`);
-  server.ensureBackgroundListener(zcodeSid);
+  await server.ensureBackgroundListener(zcodeSid);
   await adoptStoredTitle(server, acpSid, zcodeSid);
 
   // Goal-loop restart recovery (ADR-0022 §6): surface a recovery hint at most
@@ -1561,7 +1532,7 @@ export async function runOneTurn(
         // reconcile the differ baseline so the retried turn's new messages
         // aren't treated as already-seen, surface a retry hint, then back off.
         if (turn.cancelled) {
-          stopBackendTurn(server, zcodeSid, turn);
+          void stopBackendTurn(server, zcodeSid, turn);
           return { stopReason: "cancelled" };
         }
         differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
@@ -1638,7 +1609,7 @@ export async function runOneTurn(
       let queuedNoticeSent = false;
       while (true) {
         if (turn.cancelled) {
-          stopBackendTurn(server, zcodeSid, turn);
+          void stopBackendTurn(server, zcodeSid, turn);
           return { stopReason: "cancelled" };
         }
         sendAttempt++;
@@ -1657,7 +1628,7 @@ export async function runOneTurn(
         if (expectBusy) {
           await sleep(SEND_RETRY_INTERVAL_MS);
           if (turn.cancelled) {
-            stopBackendTurn(server, zcodeSid, turn);
+            void stopBackendTurn(server, zcodeSid, turn);
             return { stopReason: "cancelled" };
           }
         }
@@ -1863,7 +1834,7 @@ export async function runOneTurn(
               );
           }
           try {
-            backend = server.ensureBackend();
+            backend = await server.ensureBackend();
             listener = new EventStreamListener(backend, zcodeSid);
             monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
             await reloadBackendSession(server, acpSid, zcodeSid);
@@ -1962,7 +1933,7 @@ async function runPrompt(
   // respawns under the profile and the subscribe-recovery path reloads the
   // session. No-op unless the config appeared mid-run.
   await server.applySandboxFlip();
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
 
   // Extract prompt text + image attachments from ACP ContentBlock[].
   const text = extractPromptText(params.prompt);
@@ -2001,7 +1972,7 @@ async function runPrompt(
   // titles): a mid-session backend respawn (sandbox flip, dynamic allow
   // batches, dead-reader recovery) replaces the instance the listeners were
   // registered on — ensureBackgroundListener re-registers on the current one.
-  server.ensureBackgroundListener(zcodeSid);
+  await server.ensureBackgroundListener(zcodeSid);
 
   // Slash-command interception: dispatches directly to ZCode methods and
   // returns end_turn without entering the turn loop. Known passthrough
@@ -2271,7 +2242,7 @@ export async function cancel(
       matched = true;
       turn.cancelled = true;
       if (!turn.stopSent) {
-        stopBackendTurn(server, zcodeSid, turn);
+        void stopBackendTurn(server, zcodeSid, turn);
         turn.stopSent = true;
       }
       // Record cancel time so a prompt arriving in the backend's ~20s
@@ -2393,7 +2364,11 @@ export function isBackendLostRequestError(e: unknown): boolean {
  * backend's prompt lock releases when ITS finalisation completes — that,
  * not any bridge-side signal, is what the next prompt's send-retry waits on.
  */
-function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string, turn: PendingTurn): void {
+async function stopBackendTurn(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  turn: PendingTurn,
+): Promise<void> {
   const foregroundExecutionId = turn.foregroundExecutionId;
   // A turn whose send was NEVER accepted owns no generation of its own; while
   // our detached compaction runs, the only thing foreground on this session
@@ -2410,7 +2385,8 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string, turn: Pending
     return;
   }
   try {
-    server.ensureBackend().send("session/stop", { sessionId: zcodeSid });
+    const backend = await server.ensureBackend();
+    backend.send("session/stop", { sessionId: zcodeSid });
   } catch (e) {
     log(
       `  [stop] session/stop send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
@@ -2428,7 +2404,8 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string, turn: Pending
   // at cancel time, letting the backend guard against stopping a newer one.
   // Omitted when unknown, targeting whatever is currently foreground.
   try {
-    server.ensureBackend().send("v4/command", {
+    const backend = await server.ensureBackend();
+    backend.send("v4/command", {
       commandId: randomUUID(),
       clientId: "zcode-acp-server",
       sessionId: zcodeSid,
@@ -2459,9 +2436,10 @@ function stopBackendTurn(server: ZcodeAcpServer, zcodeSid: string, turn: Pending
  * history). Callers reload the session on next use — prompt()'s subscribe
  * recovery and the drain gate's reload both handle the closed window.
  */
-function closeBackendSession(server: ZcodeAcpServer, zcodeSid: string): void {
+async function closeBackendSession(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
   try {
-    server.ensureBackend().send("session/close", { sessionId: zcodeSid });
+    const backend = await server.ensureBackend();
+    backend.send("session/close", { sessionId: zcodeSid });
     log(`  [stop] session/close fired for ${zcodeSid} (backend ignores session/stop)`);
   } catch (e) {
     log(
@@ -2523,7 +2501,7 @@ export async function drainBackendAfterCancel(
   let escalated = false;
   while (Date.now() - drainT0 < DRAIN_TIMEOUT_MS) {
     if (turn.cancelled) {
-      stopBackendTurn(server, zcodeSid, turn);
+      void stopBackendTurn(server, zcodeSid, turn);
       return "cancelled";
     }
     const proj = await monitor.pollOnce();
@@ -2545,7 +2523,7 @@ export async function drainBackendAfterCancel(
     if (proj.status === "idle") break;
     if (proj.status === "running" && !escalated && Date.now() - drainT0 > escalateAfterMs) {
       escalated = true;
-      closeBackendSession(server, zcodeSid);
+      void closeBackendSession(server, zcodeSid);
     }
     if (!noticed) {
       noticed = true;
@@ -2638,7 +2616,7 @@ export function preemptInFlightTurn(
     if (turn.goalLoop) continue;
     turn.cancelled = true; // signal the old turn to stop its retry loops
     if (!turn.stopSent) {
-      stopBackendTurn(server, zcodeSid, turn);
+      void stopBackendTurn(server, zcodeSid, turn);
       turn.stopSent = true;
     }
     // Record cancel time so the prompt()'s send-retry can use the recovery
@@ -2808,7 +2786,7 @@ async function resumeBackendSession(
   server: ZcodeAcpServer,
   zcParams: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const MAX_ATTEMPTS = 2;
   const ATTEMPT_TIMEOUT_MS = 15_000;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -3173,7 +3151,7 @@ async function fetchMessagesForReplay(
  */
 async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
   try {
-    const backend = server.ensureBackend();
+    const backend = await server.ensureBackend();
     const resp = await backend.request(
       server.nextId(),
       "session/read",
@@ -3332,7 +3310,7 @@ export async function runEventTurn(
   turn: PendingTurn,
   gateArmed: boolean,
 ): Promise<acp.PromptResponse> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const translator = new EventTranslator();
   differ.resetTurn();
   const NO_PROGRESS_MS = 120_000;
@@ -3533,7 +3511,7 @@ export async function runEventTurn(
         await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
       } else if (!emittedOutput) {
         // No text and no output → suspected failure.
-        stopBackendTurn(server, turn.zcodeSid, turn);
+        void stopBackendTurn(server, turn.zcodeSid, turn);
         throw new RequestError(-32603, "turn produced no output");
       }
     }
@@ -3550,7 +3528,7 @@ export async function runEventTurn(
       } else if (turn.cancelled) {
         // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
         // lock after stop must not keep a user-cancelled turn alive forever.
-        stopBackendTurn(server, turn.zcodeSid, turn);
+        void stopBackendTurn(server, turn.zcodeSid, turn);
         return turnResult(translator, "max_turn_requests");
       } else {
         const frozenMs = Date.now() - lastWatermarkAdvanceAt;
@@ -3599,7 +3577,7 @@ export async function runEventTurn(
           log(
             `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with no output; stopping backend turn`,
           );
-          stopBackendTurn(server, turn.zcodeSid, turn);
+          void stopBackendTurn(server, turn.zcodeSid, turn);
           return turnResult(translator, "max_turn_requests");
         }
       }
@@ -3633,7 +3611,7 @@ export async function runEventTurn(
       // to no turn listener, and the next turn's turn-attribution gate
       // discards any residue that slipped into the queue meanwhile.
       if (!turn.stopSent) {
-        stopBackendTurn(server, turn.zcodeSid, turn);
+        void stopBackendTurn(server, turn.zcodeSid, turn);
         turn.stopSent = true;
       }
       return turnResult(translator, "cancelled");
@@ -3912,7 +3890,7 @@ export async function runEventTurn(
       }
       if (translator.turnFailed) {
         // Best-effort stop in case the failed turn left a residual lock.
-        stopBackendTurn(server, turn.zcodeSid, turn);
+        void stopBackendTurn(server, turn.zcodeSid, turn);
         // Throw a TurnFailedError carrying the structured error so the caller
         // (prompt's retry loop) can classify transient vs fatal. The error
         // message is formatted for display when it ultimately reaches the user.
@@ -4083,7 +4061,7 @@ async function buildSnapshot(
   zcodeSid: string,
   opts: FetchMessagesOptions = {},
 ): Promise<ZcodeSnapshot> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const [msgs, readResp] = await Promise.all([
     fetchMessages(server, zcodeSid, opts),
     backend.request(server.nextId(), "session/read", { sessionId: zcodeSid }, 8000),
@@ -4213,7 +4191,7 @@ export async function dispatchPlanIfChanged(
   recheck = true,
 ): Promise<void> {
   try {
-    const backend = server.ensureBackend();
+    const backend = await server.ensureBackend();
     const readResp = await backend.request(
       server.nextId(),
       "session/read",

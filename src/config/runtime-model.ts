@@ -138,7 +138,7 @@ export async function applyModelSwitch(
   value: string,
 ): Promise<boolean> {
   const { providerId, modelId } = parseModelValue(value);
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const registryProviderId = accountProviderIdFor(providerId);
   const model: Record<string, unknown> = { providerId: registryProviderId, modelId };
   // The object form requires the level for level-bearing models; resolve the

@@ -299,6 +299,10 @@ export function serveIdleDecision(
  * endpoint exits instead of degrading.
  */
 export async function runHeadless(): Promise<void> {
+  // Crash guards FIRST, mirroring main(): a serve bridge is a long-lived hub
+  // child driving live remote sessions — a stray unhandled rejection must
+  // warn, not kill every session it hosts.
+  installCrashGuards();
   const remoteConfig = parseRemoteConfig();
   if (!remoteConfig) {
     warn(

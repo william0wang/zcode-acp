@@ -111,6 +111,17 @@ HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
 - `sessions[].status` is a coarse `"running" | "idle"` indicator riding the
   heartbeat (up to ~10s stale; absent on older bridges — treat as unknown).
   For the live value poll [`/api/instances/{id}/status`](#session-running-status).
+- **Duplicated sessions and the sort order**: two bridges can advertise the
+  same conversation (an editor bridge and a serve bridge for one workspace,
+  or two editor windows that loaded the same thread). The hub de-duplicates
+  per `sessionId` before answering: the winner is the instance whose session
+  `updatedAt` is newer, and on an exact tie the bridge whose `startedAt` is
+  newer. `startedAt` is the bridge's own boot instant (captured at process
+  start, carried identically on every heartbeat), NOT the moment the hub
+  first saw the registration — a slow cold start must not make an older
+  bridge rank as newer. The array itself sorts oldest-bridge-first, so
+  clients that pick "the first match" keep getting the longest-lived
+  instance, which is the one most likely to hold resident sessions.
 - **Prompt echo**: when any client sends `session/prompt`, the bridge
   broadcasts the user's text to every OTHER attached client as a
   `user_message_chunk` (messageId prefixed `uprompt_`). Your own prompts are

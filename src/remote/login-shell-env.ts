@@ -24,25 +24,39 @@
  * toolchain paths (`~/.zshrc`) is sourced EXPLICITLY instead, which is all the
  * paths need and none of the interactive state.
  *
- * The cache is deliberately process-wide and lazily filled: the hub is
- * long-lived (it idle-exits after ~10 min but is re-spawned for the next
- * session), and re-running a shell per incubation would add ~200ms to every
- * remote session-create for a value that cannot change without the user
- * editing their rc.
+ * The probe is ASYNC on purpose (the same invariant as the hub's terminal
+ * spawn): a synchronous probe freezes the calling process's event loop for its
+ * full timeout — on the hub that stalls WS proxying, heartbeats and settings
+ * requests for every attached client. Callers therefore await
+ * `envWithLoginShell`; the in-flight probe is shared, so concurrent callers
+ * block on ONE child instead of each starting their own.
+ *
+ * Caching: a success is cached for the process lifetime (the value cannot
+ * change without the user editing their rc); a FAILURE is remembered for a
+ * 60s cooldown, so a machine whose rc hangs or whose shell exits non-zero
+ * degrades to the inherited environment immediately instead of re-paying the
+ * timeout on every incubation/backend spawn.
  *
  * Failure is silent and non-fatal: a machine with no `zsh`, a shell that hangs,
  * or a user with no rc files all fall back to the inherited environment, which
  * is exactly today's behaviour. Nothing here may throw.
  */
 
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { log, warn } from "../utils.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Vars we never take from the login shell — they are per-process plumbing. */
 const PINNED_PREFIXES = ["ZCODE_ACP_", "DSH_TUI_", "MARTTY_"] as const;
 
 /** A POSIX env var name: rejects rc stdout noise glued onto a record. */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** How long a failed probe suppresses re-probing (see the module doc). */
+const FAILURE_COOLDOWN_MS = 60_000;
 
 /**
  * Never copy these even if the login shell sets them.
@@ -99,8 +113,10 @@ function unionPath(shellPath: string | undefined, callerPath: string | undefined
  * shell: they describe THIS process tree, and a stale copy in the user's rc
  * would hijack a spawned session into the wrong origin.
  */
-export function envWithLoginShell(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const shell = loginShellEnv();
+export async function envWithLoginShell(
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<NodeJS.ProcessEnv> {
+  const shell = await loginShellEnv();
   if (!shell) return env;
   const merged: NodeJS.ProcessEnv = { ...shell };
   for (const [k, v] of Object.entries(env)) {
@@ -119,7 +135,12 @@ export function envWithLoginShell(env: NodeJS.ProcessEnv = process.env): NodeJS.
   return merged;
 }
 
+/** Success cache: set once, read for the process lifetime. */
 let cached: NodeJS.ProcessEnv | null = null;
+/** The in-flight probe, shared by every concurrent caller. */
+let inflight: Promise<NodeJS.ProcessEnv | null> | null = null;
+/** Epoch ms of the last failed probe; 0 = no recent failure. */
+let failedAt = 0;
 
 /**
  * The command a non-interactive login shell runs to print its environment.
@@ -153,30 +174,40 @@ function probeCommand(shell: string): string {
  * session's own values (e.g. a stale `SSH_AUTH_SOCK` from whoever ran it), so
  * the merge must never blindly let it overwrite a live value.
  */
-function loginShellEnv(): NodeJS.ProcessEnv | null {
+async function loginShellEnv(): Promise<NodeJS.ProcessEnv | null> {
   if (cached) return cached;
+  if (failedAt && Date.now() - failedAt < FAILURE_COOLDOWN_MS) return null;
+  if (!inflight) {
+    inflight = probe().finally(() => {
+      inflight = null;
+    });
+  }
+  return inflight;
+}
+
+async function probe(): Promise<NodeJS.ProcessEnv | null> {
   try {
     const shell = process.env.SHELL?.trim() || "/bin/zsh";
     // -l (login) for the profile, -c for the one command; the interactive rc is
     // sourced by the command itself (see probeCommand). Never -i: the child
     // must not arm interactive/terminal machinery inside a live TUI's process
     // tree. `env -0` prints NUL-separated records.
-    const res = spawnSync(shell, ["-l", "-c", probeCommand(shell)], {
-      encoding: "buffer",
+    const { stdout } = await execFileAsync(shell, ["-l", "-c", probeCommand(shell)], {
+      encoding: "buffer", // keep stdout a Buffer: the records are NUL-split
       timeout: 10_000,
-      // A login shell writes job-control noise to stderr that must not reach
-      // the hub's own pipe.
-      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 4 * 1024 * 1024,
+      // execFile CAPTURES stderr into its result (it never reaches this
+      // process's own stderr); the job-control noise a login shell writes is
+      // simply discarded with it.
     });
-    if (res.status !== 0 || !res.stdout) {
-      // NOT remembered: a shell that timed out or was briefly unavailable must
-      // not disable completion for the life of this long-lived daemon. Only a
-      // successful probe is cached, so the next call retries.
-      log(`env: login shell ${shell} gave no environment (status ${res.status})`);
+    if (!stdout.length) {
+      failedAt = Date.now();
+      warn(`env: login shell ${shell} gave no environment`);
       return null;
     }
     const out: NodeJS.ProcessEnv = {};
-    for (const rec of res.stdout.toString("utf8").split("\0")) {
+    let added = 0;
+    for (const rec of stdout.toString("utf8").split("\0")) {
       if (!rec) continue;
       const eq = rec.indexOf("=");
       if (eq <= 0) continue;
@@ -187,20 +218,28 @@ function loginShellEnv(): NodeJS.ProcessEnv | null {
       // installing a garbage variable. Anything not a plain env name is skipped.
       if (!ENV_NAME_RE.test(key) || NEVER_COPY.has(key)) continue;
       out[key] = value;
+      added += 1;
     }
-    cached = Object.keys(out).length > 0 ? out : null;
-    if (cached) {
-      const added = Object.keys(cached).filter((k) => process.env[k] === undefined);
-      log(`env: completed from login shell (${added.length} new vars)`);
+    if (added === 0) {
+      failedAt = Date.now();
+      return null;
     }
-    return cached;
+    log(`env: completed from login shell (${added} vars)`);
+    cached = out;
+    return out;
   } catch (e) {
-    warn(`env: login-shell completion failed: ${e instanceof Error ? e.message : String(e)}`);
+    failedAt = Date.now();
+    warn(
+      `env: login-shell probe failed (${e instanceof Error ? e.message : String(e)}) — ` +
+        `falling back to the inherited environment`,
+    );
     return null;
   }
 }
 
-/** Test seam: drop the cache so the next call re-probes. */
+/** Test seam: drop the caches so the next call re-probes. */
 export function resetLoginShellEnvForTest(): void {
   cached = null;
+  inflight = null;
+  failedAt = 0;
 }

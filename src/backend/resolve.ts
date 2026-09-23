@@ -13,7 +13,7 @@ import path from "node:path";
 import process from "node:process";
 import { execFileSync } from "node:child_process";
 
-import { log, zcodePersonalProviderPath } from "../utils.js";
+import { log, warn, zcodePersonalProviderPath } from "../utils.js";
 
 /** `which bin` — resolve a binary on PATH without external deps. */
 function whichSync(bin: string): string | null {
@@ -196,11 +196,31 @@ export function builtinProviderEnv(entryArg?: string): NodeJS.ProcessEnv {
  * tree discovers skills/MCP/credentials there while the spawned backend still
  * reads the real `~/.zcode` — split-brain. An unset ZCODE_HOME returns {} so
  * any ambient ZCODE_DATA_BASE_DIR passes through untouched.
+ *
+ * The translation only EXISTS when the tree's basename is `.zcode` — the
+ * backend unconditionally appends `.zcode` to the base dir, so a differently
+ * named tree cannot be projected onto it at all. dirname() of such a path
+ * would point the backend at a sibling `.zcode` that may belong to someone
+ * else entirely; leaving the env unset (backend reads the ambient default)
+ * and warning is the honest failure — the mismatch is visible instead of
+ * silently wired to the wrong tree.
  */
+let warnedNonZcodeHome = false;
 export function zcodeDataBaseDirEnv(): NodeJS.ProcessEnv {
   const home = process.env.ZCODE_HOME?.trim();
   if (!home) return {};
-  return { ZCODE_DATA_BASE_DIR: path.dirname(path.resolve(home)) };
+  const resolved = path.resolve(home);
+  if (path.basename(resolved) !== ".zcode") {
+    if (!warnedNonZcodeHome) {
+      warnedNonZcodeHome = true;
+      warn(
+        `ZCODE_HOME='${resolved}' does not end in '.zcode' — the backend only understands a ` +
+          `base dir + '.zcode', so it will NOT see this tree (leaving ZCODE_DATA_BASE_DIR unset)`,
+      );
+    }
+    return {};
+  }
+  return { ZCODE_DATA_BASE_DIR: path.dirname(resolved) };
 }
 
 /**

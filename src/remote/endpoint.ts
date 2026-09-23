@@ -339,22 +339,24 @@ export async function startRemoteEndpoint(
     version: AGENT_INFO.version,
   });
 
-  const spawnHub = (): void => {
+  const spawnHub = async (): Promise<void> => {
     try {
       // dist/remote/endpoint.js → dist/bin/hub.js (one level up, then bin/).
       const hubJs = fileURLToPath(new URL("../bin/hub.js", import.meta.url));
+      // The hub is detached and long-lived; it spawns the terminal windows,
+      // serve bridges and (through them) the backends. If IT starts with a
+      // bare launchd PATH, every one of those inherits it and a remotely
+      // opened session cannot find the user's toolchain — so complete the
+      // environment here, once, at the root of the tree. Awaited (async probe)
+      // so this bridge's own event loop never freezes for the probe's timeout.
+      const shellEnv = await envWithLoginShell();
       const child = spawn(...runtimeSpawnParts(hubJs), {
         detached: true,
         // Surface the daemon's stderr through the bridge's diagnostics — a
         // detached "ignore" pipe silently eats startup failures.
         stdio: ["ignore", "ignore", "pipe"],
         env: {
-          // The hub is detached and long-lived; it spawns the terminal windows,
-          // serve bridges and (through them) the backends. If IT starts with a
-          // bare launchd PATH, every one of those inherits it and a remotely
-          // opened session cannot find the user's toolchain — so complete the
-          // environment here, once, at the root of the tree.
-          ...envWithLoginShell(),
+          ...shellEnv,
           ZCODE_ACP_HUB_PORT: String(config.hubPort),
           ZCODE_ACP_HUB_HOST: config.hubHost,
           ZCODE_ACP_REMOTE_TOKEN: config.token,
@@ -420,7 +422,7 @@ export async function startRemoteEndpoint(
         if (Date.now() >= nextAuthSpawnAt) {
           nextAuthSpawnAt = Date.now() + authSpawnBackoffMs;
           authSpawnBackoffMs = Math.min(authSpawnBackoffMs * 2, AUTH_SPAWN_MAX_BACKOFF_MS);
-          spawnHub();
+          void spawnHub();
           const retry = setTimeout(() => void registerOnce(), 1500);
           retry.unref();
         }
@@ -457,7 +459,7 @@ export async function startRemoteEndpoint(
             if (stopped || authRejected) return;
             if (Date.now() < spawnThrottledUntil) return;
             spawnThrottledUntil = Date.now() + SPAWN_THROTTLE_MS;
-            spawnHub();
+            void spawnHub();
             const retry = setTimeout(() => void registerOnce(), 1500);
             retry.unref();
           }, 2000);
@@ -470,7 +472,7 @@ export async function startRemoteEndpoint(
       // instead of waiting a full heartbeat cycle.
       if (Date.now() >= spawnThrottledUntil) {
         spawnThrottledUntil = Date.now() + SPAWN_THROTTLE_MS;
-        spawnHub();
+        void spawnHub();
         const retry = setTimeout(() => void registerOnce(), 1500);
         retry.unref();
       }

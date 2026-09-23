@@ -301,7 +301,7 @@ export async function fetchMessages(
   zcodeSid: string,
   opts: FetchMessagesOptions = {},
 ): Promise<ZcodeMessage[]> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const timeoutMs = opts.timeoutMs ?? 45_000;
   const params: { sessionId: string; afterMessageId?: string; limit?: number } = {
     sessionId: zcodeSid,

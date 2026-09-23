@@ -14,6 +14,9 @@
 
 import { describe, expect, it } from "vitest";
 
+/// Let fire-and-forget async helpers (the async stop pair) run their microtasks.
+const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 import { preemptInFlightTurn, shouldDropEventForTurnAttribution } from "../src/handlers/session.js";
 import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { EventTranslator } from "../src/translators/event-translator.js";
@@ -246,7 +249,7 @@ describe("gate placement: residue must be dropped BEFORE translate", () => {
 });
 
 describe("preemptInFlightTurn cancels ALL matching turns", () => {
-  it("skips the stale entry and stops the live one too (not just the first match)", () => {
+  it("skips the stale entry and stops the live one too (not just the first match)", async () => {
     // Regression: breaking on the first pendingTurns match could hit an
     // already-cancelled-but-still-finalising turn and leave the LIVE turn
     // running — the new prompt then retried against a busy backend for 30s.
@@ -271,6 +274,7 @@ describe("preemptInFlightTurn cancels ALL matching turns", () => {
       }),
     };
     const preempted = preemptInFlightTurn(server as never, "zs_1", 103);
+    await flushAsync();
     expect(preempted).toBe(true);
     expect(pendingTurns.get(101)?.cancelled).toBe(true);
     expect(pendingTurns.get(102)?.cancelled).toBe(true);

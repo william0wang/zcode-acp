@@ -7,8 +7,8 @@
  * removed them in favor of the v4 conversation API, so the bridge dropped
  * them. The bridge's own `session/updateRuntimeModelConfig` passthrough was
  * removed 2026-09: the method is absent from the 0.16.9 enum — every call
- * answered -32601 — and `applyModelSwitch` already speaks the modern
- * `session/setModel` shape with a legacy fallback.)
+ * answered -32601 — and `applyModelSwitch` already speaks the strict modern
+ * `session/setModel` shape.)
  *
  * These share a near-identical shape (resolve sid → build params → forward →
  * check error). Only the genuine per-method differences are spelled out:
@@ -60,7 +60,7 @@ type Result = Record<string, unknown>;
 /** session/fork → zcode session/fork: branch a new session from a checkpoint. */
 export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Promise<Result> {
   const zcodeSid = await resolveSidOrThrow(server, params);
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const resp = await backend.request(
     server.nextId(),
     "session/fork",
@@ -84,7 +84,7 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
     server.markBackendLoaded(result.forkedSessionId);
     const srcMcp = server.sessionMcpServers.get(params.sessionId);
     if (srcMcp) server.sessionMcpServers.set(result.forkedSessionId, srcMcp);
-    server.ensureBackgroundListener(result.forkedSessionId);
+    await server.ensureBackgroundListener(result.forkedSessionId);
   }
   log(`session/fork → ${result.forkedSessionId ?? "?"}`);
   return result;
@@ -98,9 +98,9 @@ export async function goal(server: ZcodeAcpServer, params: ExtensionParams): Pro
   if ((action === "set" || action === "replace") && params.objective !== undefined) {
     zcParams.objective = params.objective;
   }
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/goal", zcParams, 15000);
+  const resp = await (
+    await server.ensureBackend()
+  ).request(server.nextId(), "session/goal", zcParams, 15000);
   if (resp.error) throw new Error(`goal failed: ${resp.error.message}`);
   // set/replace start an internal AI turn → wait for the prompt lock to release.
   if (action === "set" || action === "replace") {
@@ -133,9 +133,9 @@ export async function compact(
   const instructions = typeof params.instructions === "string" ? params.instructions.trim() : "";
   if (instructions) zcParams.instructions = instructions;
   const startedAt = Date.now();
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/compact", zcParams, 30000);
+  const resp = await (
+    await server.ensureBackend()
+  ).request(server.nextId(), "session/compact", zcParams, 30000);
   if (resp.error) throw new Error(`compact failed: ${resp.error.message}`);
   const ack = ((resp.result ?? {}) as { compact?: { state?: string } }).compact?.state;
   const alreadyRunning = ack === "already_running";
@@ -199,14 +199,14 @@ export async function cancelBackgroundTask(
   const zcodeSid = await resolveSidOrThrow(server, params);
   const taskId = String(params.taskId ?? "");
   if (!taskId) throw new Error("cancelBackgroundTask requires taskId");
-  const resp = await server
-    .ensureBackend()
-    .request(
-      server.nextId(),
-      "session/cancelBackgroundTask",
-      { sessionId: zcodeSid, taskId },
-      15000,
-    );
+  const resp = await (
+    await server.ensureBackend()
+  ).request(
+    server.nextId(),
+    "session/cancelBackgroundTask",
+    { sessionId: zcodeSid, taskId },
+    15000,
+  );
   if (resp.error) throw new Error(`cancelBackgroundTask failed: ${resp.error.message}`);
   // Reflect the cancellation on the ACP tool card (status:failed + cancelled
   // flag) and clear the background listener's local tracking. Best-effort.
@@ -229,9 +229,9 @@ export async function setThoughtLevel(
   // default). Forward it only when present so a reset call isn't rejected.
   const zcParams: Record<string, unknown> = { sessionId: zcodeSid };
   if (params.thoughtLevel !== undefined) zcParams.thoughtLevel = params.thoughtLevel;
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/setThoughtLevel", zcParams, 15000);
+  const resp = await (
+    await server.ensureBackend()
+  ).request(server.nextId(), "session/setThoughtLevel", zcParams, 15000);
   if (resp.error) throw new Error(`setThoughtLevel failed: ${resp.error.message}`);
   log("session/setThoughtLevel → ok");
   // Remember for the post-resume re-assert (the backend's own selection
@@ -248,8 +248,8 @@ export async function setThoughtLevel(
   return (resp.result ?? {}) as Result;
 }
 
-/** session/setModel → applyModelSwitch (modern session/setModel shape first,
- * legacy overlay fallback for pre-3.12 builds). */
+/** session/setModel → applyModelSwitch (the strict modern shape — 0.16.9
+ * rejects the legacy overlay keys outright, so no fallback exists). */
 export async function setModel(
   server: ZcodeAcpServer,
   params: ExtensionParams,
@@ -283,9 +283,9 @@ export async function setMode(
   // -32601 when it wasn't routed, so both normalize here.
   const mode = params.mode ?? params.modeId;
   if (!mode) throw new Error("setMode requires mode");
-  const resp = await server
-    .ensureBackend()
-    .request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
+  const resp = await (
+    await server.ensureBackend()
+  ).request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
   if (resp.error) throw new Error(`setMode failed: ${resp.error.message}`);
   log(`session/setMode → ${mode}`);
   // Re-build configOptions (settings.mode.current is now updated) and emit
@@ -326,7 +326,7 @@ export async function waitForTurnIdle(
   expectLock: boolean,
   graceMs = 30_000,
 ): Promise<boolean> {
-  const backend = server.ensureBackend();
+  const backend = await server.ensureBackend();
   const t0 = Date.now();
   let lockSeen = !expectLock;
   let probeCount = 0;

@@ -483,8 +483,13 @@ export class ZcodeAcpServer {
    * a Seatbelt profile built from the live workspace roots — session/new
    * records cwds before any backend RPC (lazy placeholders), so the whitelist
    * is complete by the time the backend materializes here.
+   *
+   * Async because the spawn env completes from a login-shell probe that must
+   * never run synchronously (it would freeze this process's event loop for the
+   * probe's full timeout). The in-flight probe is shared, so concurrent
+   * callers pay for ONE shell.
    */
-  ensureBackend(): ZcodeBackend {
+  async ensureBackend(): Promise<ZcodeBackend> {
     if (this.backend && !this.backend.isDead) return this.backend;
     // builtinProviderEnv injects the CLI's built-in provider table the way the
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
@@ -498,7 +503,7 @@ export class ZcodeAcpServer {
     // shells out to project tooling (npm scripts, local binaries), so a
     // completed PATH changes what a session can actually do.
     const env = {
-      ...envWithLoginShell(),
+      ...(await envWithLoginShell()),
       ...mergeEnvWithCreds(loadZcodeCredentials()),
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
@@ -734,8 +739,8 @@ export class ZcodeAcpServer {
    * forwarded to the client. The turn loop's own listener coexists via the
    * backend's per-session listener Set.
    */
-  ensureBackgroundListener(zcodeSid: string): BackgroundTaskListener {
-    const backend = this.ensureBackend();
+  async ensureBackgroundListener(zcodeSid: string): Promise<BackgroundTaskListener> {
+    const backend = await this.ensureBackend();
     const existing = this.backgroundListeners.get(zcodeSid);
     if (existing && this.backgroundListenerBackend.get(zcodeSid) === backend) return existing;
     // Fresh session, or the backend was respawned since registration —

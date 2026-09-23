@@ -11,6 +11,9 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+/// Let fire-and-forget async helpers (the async stop pair) run their microtasks.
+const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 import type { TurnMonitor } from "../src/backend/listener.js";
 import { drainBackendAfterCancel } from "../src/handlers/session.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
@@ -103,6 +106,7 @@ describe("drainBackendAfterCancel", () => {
     f.pollOnce.mockResolvedValue({ status: "idle" });
 
     const result = await drainBackendAfterCancel(f.server, f.deps);
+    await flushAsync();
 
     expect(result).toBe("drained");
     // Nothing to settle: no stop/close, no resubscribe.
@@ -168,6 +172,7 @@ describe("drainBackendAfterCancel", () => {
     f.pollOnce.mockResolvedValue({ status: "running" });
 
     const result = await drainBackendAfterCancel(f.server, f.deps);
+    await flushAsync();
 
     expect(result).toBe("cancelled");
     expect(f.sent.map((s) => s.method)).toEqual(["session/stop", "v4/command"]);

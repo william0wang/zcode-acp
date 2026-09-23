@@ -36,6 +36,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { dirname, join } from "node:path";
 
 import { withFileLock, type FileLockOptions } from "./file-lock.js";
+import { BrokenConfigError } from "./errors.js";
 import { warn } from "../utils.js";
 
 /** How many timestamped backups to keep per file. */
@@ -65,12 +66,12 @@ export async function readJsonDocument(file: string): Promise<Record<string, unk
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(
+    throw new BrokenConfigError(
       `${file} is not valid JSON — refusing to write (${error instanceof Error ? error.message : String(error)})`,
     );
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`${file} is not a JSON object — refusing to write`);
+    throw new BrokenConfigError(`${file} is not a JSON object — refusing to write`);
   }
   return parsed as Record<string, unknown>;
 }
@@ -180,7 +181,7 @@ export async function writeJsonAtomic(
       if (options.validate) {
         const verdict = options.validate(next);
         if (verdict !== true) {
-          throw new Error(
+          throw new BrokenConfigError(
             typeof verdict === "string"
               ? `refusing to write ${file}: ${verdict}`
               : `refusing to write ${file}: validation failed`,
@@ -192,7 +193,7 @@ export async function writeJsonAtomic(
       // file's meaning.
       const reparsed = JSON.parse(encoded) as unknown;
       if (typeof reparsed !== "object" || reparsed === null || Array.isArray(reparsed)) {
-        throw new Error(`refusing to write ${file}: encoded document is not an object`);
+        throw new BrokenConfigError(`refusing to write ${file}: encoded document is not an object`);
       }
 
       const backup = options.skipBackup ? undefined : await backupCurrent(file);

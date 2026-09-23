@@ -1074,9 +1074,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // spawned its bridge — an editor GUI process, which means launchd's bare
     // PATH with no version managers in it. Without this, a session opened from
     // a phone cannot find `pnpm` / `cargo` / `java` even though the same
-    // command works in the user's terminal.
+    // command works in the user's terminal. The probe is async and shared, so
+    // the hub's event loop (WS proxying, heartbeats) never freezes for it.
+    const shellEnv = await envWithLoginShell();
     const env: NodeJS.ProcessEnv = {
-      ...envWithLoginShell(),
+      ...shellEnv,
       ZCODE_ACP_REMOTE: "1",
       ZCODE_ACP_REMOTE_TOKEN: token,
       ZCODE_ACP_HUB_PORT: String(port),
