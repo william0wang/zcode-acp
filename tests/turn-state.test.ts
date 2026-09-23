@@ -129,6 +129,21 @@ describe("$/zcode/turnState emission", () => {
     expect(server.pendingTurns.size).toBe(0);
   });
 
+  it("emits running:false on an intercepted slash command", async () => {
+    const server = setup(scriptedBackend(() => []));
+    const { cx, turnStates } = collectCx();
+
+    const result = await prompt(
+      server,
+      { sessionId: "sess_ts", prompt: [{ type: "text", text: "/help" }] } as acp.PromptRequest,
+      cx,
+      1,
+    );
+
+    expect(result).toEqual({ stopReason: "end_turn" });
+    expect(turnStates).toEqual([{ sessionId: "sess_ts", running: false }]);
+  });
+
   it("preserves a non-retryable model quota failure in the ACP error", async () => {
     const server = setup(
       scriptedBackend(() => [

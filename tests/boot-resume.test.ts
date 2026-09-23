@@ -234,9 +234,15 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
     expect(server.bootResumeTriggerConnection).toEqual({ id: "tui-conn" });
 
     const updates: Array<Record<string, unknown>> = [];
+    const turnStates: Array<{ sessionId: string; running: boolean }> = [];
     const cx = {
-      notify: async (method: string, params?: { update?: Record<string, unknown> }) => {
+      notify: async (
+        method: string,
+        params?: { update?: Record<string, unknown>; sessionId?: string; running?: boolean },
+      ) => {
         if (method === "session/update") updates.push(params?.update ?? {});
+        if (method === "$/zcode/turnState")
+          turnStates.push(params as { sessionId: string; running: boolean });
       },
     } as unknown as acp.AgentContext;
 
@@ -253,6 +259,8 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0].sessionUpdate).toBe("agent_message_chunk");
     expect(String(updates[0].content?.text ?? "")).toContain("⟲");
+    // Handshake settles the turn state to idle so Martty exits Running and accepts user input.
+    expect(turnStates).toEqual([{ sessionId: "sess_boot", running: false }]);
     // No turn ever reached the backend.
     expect(calls.some((c) => c.method === "session/send")).toBe(false);
     // One-shot: consumed.

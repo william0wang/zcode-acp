@@ -427,7 +427,12 @@ ZCode protocol types into ACP notifications directly — always translate.
   text on purpose: `/` would hit martty's slash dispatch before agent caps are
   known, `!` runs a local shell). Martty auto-submits it at boot — banner dives
   immediately, the text queues until the bind — and `runPrompt` answers it with
-  a one-line ack and `end_turn` (no model turn). The one-shot is scoped to the
+  a one-line ack and `end_turn` (no model turn); the ack MUST emit
+  `$/zcode/turnState { running: false }` before returning, or martty remains
+  stuck in `RunState::Running` and queues all subsequent user prompts
+  indefinitely ("remote-launched CLI unresponsive to input", observed
+  2026-09-23; slash-command early returns and compact-busy share the same
+  running:false settlement). The one-shot is scoped to the
   booting CONNECTION (`connectionContext` identity, like the prompt-echo
   exclusion): a phone app attached to the same bridge during the boot window
   and prompting first must not spend or disarm it — a global "first prompt"

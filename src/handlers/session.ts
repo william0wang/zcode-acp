@@ -489,6 +489,35 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
 }
 
 /**
+ * Broadcast turn liveness to attached clients ($/zcode/turnState): `running:true`
+ * at turn start, `running:false` at completion (or on any early-return path).
+ *
+ * Emitted per attached alias (see server.sessionAliases) so every client holding
+ * this conversation under its own ACP id updates its running indicator.
+ * Clients that don't recognize the notification simply drop it.
+ */
+export async function emitSessionTurnState(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  running: boolean,
+  cx?: acp.AgentContext,
+): Promise<void> {
+  const targetCx = cx ?? server.clients.broadcast();
+  const results = await Promise.allSettled(
+    server
+      .sessionAliases(acpSid)
+      .map((sid) => targetCx.notify("$/zcode/turnState", { sessionId: sid, running })),
+  );
+  for (const r of results) {
+    if (r.status === "rejected") {
+      log(
+        `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+      );
+    }
+  }
+}
+
+/**
  * Reload the session into the backend when the resident verification went
  * stale — the backend evicts idle resident runtimes (~10min idle + LRU), and
  * every session-scoped RPC on a non-resident session fails with "Session is
@@ -1386,6 +1415,7 @@ export async function prompt(
         messages().sandboxContinuationFailed(err),
         randomUUID(),
       ).catch(() => undefined);
+      await emitSessionTurnState(server, params.sessionId, false, cx);
       // A leftover continuation for THIS cancelled round is now orphaned —
       // drop it rather than let a later cancelled prompt adopt it.
       server.sandboxContinuations.delete(params.sessionId);
@@ -1447,20 +1477,7 @@ export async function runOneTurn(
   // server.sessionAliases) so a client holding this conversation under a
   // different ACP id opens its live turn too. Best-effort: a dead client must
   // not fail the turn.
-  const emitTurnState = async (running: boolean): Promise<void> => {
-    const results = await Promise.allSettled(
-      server
-        .sessionAliases(acpSid)
-        .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
-    );
-    for (const r of results) {
-      if (r.status === "rejected") {
-        log(
-          `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        );
-      }
-    }
-  };
+  const emitTurnState = (running: boolean) => emitSessionTurnState(server, acpSid, running, cx);
 
   let listener = new EventStreamListener(backend, zcodeSid);
   let monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -1972,6 +1989,7 @@ async function runPrompt(
     if (text === BOOT_RESUME_TRIGGER) {
       await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
       log("session/prompt: boot-resume banner handshake acknowledged");
+      await emitSessionTurnState(server, params.sessionId, false, cx);
       return { stopReason: "end_turn" };
     }
   }
@@ -2000,7 +2018,10 @@ async function runPrompt(
     text,
     client,
   );
-  if (intercepted) return intercepted;
+  if (intercepted) {
+    await emitSessionTurnState(server, params.sessionId, false, cx);
+    return intercepted;
+  }
 
   // Wire text for the backend: unknown `/x` prompts (not advertised commands)
   // are neutralized so the backend's command resolver never sees them — an
@@ -2091,6 +2112,7 @@ async function runPrompt(
     // the user resends against a session the compaction has (by now) settled.
     await sendTextChunk(cx, params.sessionId, messages().autoCompactBusy, randomUUID());
     log("session/prompt: rejected — a detached auto-compact outlived its settle cap");
+    await emitSessionTurnState(server, params.sessionId, false, cx);
     return { stopReason: "max_turn_requests" };
   }
   // Discovery: the session is live the moment its turn STARTS — mark it active
@@ -2138,21 +2160,7 @@ async function runPrompt(
   // alias (see server.sessionAliases) so a client holding this conversation
   // under a different ACP id opens its live turn too. Best-effort: a dead
   // client must not fail the turn.
-  const emitTurnState = async (running: boolean): Promise<void> => {
-    const results = await Promise.allSettled(
-      server
-        .sessionAliases(params.sessionId)
-        .map((sid) => cx.notify("$/zcode/turnState", { sessionId: sid, running })),
-    );
-    for (const r of results) {
-      if (r.status === "rejected") {
-        log(
-          `turnState notify failed: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
-        );
-      }
-    }
-  };
-  await emitTurnState(true);
+  await emitSessionTurnState(server, params.sessionId, true, cx);
 
   return runOneTurn(server, {
     backend,
