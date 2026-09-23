@@ -391,6 +391,34 @@ ZCode protocol types into ACP notifications directly — always translate.
   `MARTTY_PASSTHROUGH_ENV` AND resolved through a settings.ts accessor —
   an env-only knob silently works from a shell and fails from every
   hub-opened window.
+- **Login-shell env completion must be NON-INTERACTIVE, and its PATH must be
+  unioned — never caller-wins** (`src/remote/login-shell-env.ts`,
+  `envWithLoginShell`; wired at the hub spawn `endpoint.ts`, the hub's
+  per-incubation env `hub-server.ts`, and the backend spawn `server.ts`).
+  Observed 2026-09-23 (#242, released 0.47.2): the probe shipped as
+  `zsh -ilc 'env -0'`, and every hub-incubated CLI window froze COMPLETELY —
+  no keyboard, no mouse, not just "messages queued" (the whole TUI; a manual
+  session resume then aborted too — one root cause, same fix). (a) The shell
+  must not be interactive: `-i` arms job control / zle / prompt / terminal
+  modes inside a process that only wants a value back, and it runs INSIDE a
+  live TUI window's process tree (martty → bridge), where that is exactly
+  wrong — several rc tools (compinit, autosuggestions, orbstack) assume a
+  terminal it does not have. Use a login shell that sources the rc explicitly
+  (`. "$HOME/.zshrc"` guarded by `[ -r ]`, then `env -0`): the toolchain paths
+  live in `~/.zshrc` (interactive-only), so it is sourced EXPLICITLY, which
+  gets every path with none of the interactive state (`zsh -lc` alone loses
+  them — only `.zshenv`/`.zprofile` are read non-interactively). (b) `PATH` is
+  a UNION (shell first, deduped), NOT caller-wins: the editor-launched bridge
+  already carries launchd's bare PATH, so caller-wins silently DROPPED every
+  toolchain dir — the probe did not even achieve its goal, it only leaked ~40
+  unrelated vars (JAVA_HOME, PROMPT, mise session state). Non-env names are
+  rejected (an rc that prints to stdout would glue noise onto the first
+  record). (c) Do NOT force a `cwd` on the backend spawn (the reverted half of
+  #242): the directory already arrives by INHERITANCE — the TUI `.command`
+  script `cd`s before exec (terminalTuiScript) and the headless serve spawn
+  passes `cwd` (defaultSpawnServe) — and one backend process serves EVERY
+  session, so a single `projectCwd()` is both redundant and wrong for
+  multi-session cases.
 - **User remote prefs live in `~/.config/zcode-acp/config.json`, NOT env**:
   the hub is a detached daemon that idle-exits (~10 min) and is re-spawned by
   whichever bridge needs it next, so its birth env rotates between

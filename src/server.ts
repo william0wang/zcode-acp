@@ -520,7 +520,13 @@ export class ZcodeAcpServer {
       // never be escaped from within.
       env.ZCODE_ACP_SANDBOX_ACTIVE = "1";
     }
-    const backend = new ZcodeBackend(argv, env, this.projectCwd());
+    // The backend's working directory is inherited from THIS process, which the
+    // launch path already put in the project directory: a remote TUI window's
+    // `.command` script `cd`s before exec (terminalTuiScript), and the headless
+    // serve spawn passes `cwd` (defaultSpawnServe). Forcing a single `cwd` here
+    // would be both redundant and wrong — the backend is one process shared by
+    // every session, while the directory belongs to each window/session.
+    const backend = new ZcodeBackend(argv, env);
     this.backend = backend;
     // Fresh backend process: every session rehydrates from scratch, so the
     // settle bookkeeping from the previous instance is void.
