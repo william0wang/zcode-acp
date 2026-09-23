@@ -18,6 +18,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { z } from "zod";
 
 import { accountUsageStats } from "./handlers/account.js";
+import { installCrashGuards } from "./crash-guards.js";
 import {
   cancel,
   listSessions,
@@ -78,6 +79,9 @@ function buildAllCommands() {
 }
 
 export async function main(): Promise<void> {
+  // Crash guards FIRST: any later async task that rejects without a catch
+  // must warn, not kill the process (the whole TUI window dies with us).
+  installCrashGuards();
   // Remote config is parsed BEFORE the server exists: a hub-incubated REPL
   // bridge (ADR-0016) arrives with ZCODE_ACP_REMOTE_PIN_CWD=1, and the pin
   // must hold from the very first session/new — not from the endpoint start.

@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
+import { appendDiary } from "./crash-guards.js";
 import { debugEnabled } from "./config/settings.js";
 
 /** ACP protocol version this server speaks. */
@@ -215,9 +216,12 @@ export function log(msg: string): void {
   process.stderr.write(`[zcode-acp] ${msg}\n`);
 }
 
-/** Warning — always emitted. For perceivable failures. */
+/** Warning — always emitted. For perceivable failures. Also lands in the
+ * daily on-disk diary (`~/.zcode/cli/log/zcode-acp-<date>.log`) so a crash
+ * that takes stderr down still leaves a trace — see crash-guards.ts. */
 export function warn(msg: string): void {
   process.stderr.write(`[zcode-acp] ${msg}\n`);
+  appendDiary(msg);
 }
 
 /**
