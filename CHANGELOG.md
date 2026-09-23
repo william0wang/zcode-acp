@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.4](https://github.com/william0wang/zcode-acp/compare/v0.47.3...v0.47.4) (2026-09-23)
+
+
+### Bug Fixes
+
+* report the auto-compact window as busy so held prompts stay visible ([#247](https://github.com/william0wang/zcode-acp/issues/247)) ([cb496f7](https://github.com/william0wang/zcode-acp/commit/cb496f790fb8af75936d5eed0f07626134871d2e))
+* survive unhandled rejections and diary all warnings to disk ([#246](https://github.com/william0wang/zcode-acp/issues/246)) ([82b5122](https://github.com/william0wang/zcode-acp/commit/82b51222510a94af302f44a3651c2002aa32aef1))
+
 ## [0.47.3](https://github.com/william0wang/zcode-acp/compare/v0.47.2...v0.47.3) (2026-09-23)
 
 
