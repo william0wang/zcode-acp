@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.8](https://github.com/william0wang/zcode-acp/compare/v0.47.7...v0.47.8) (2026-09-23)
+
+
+### Bug Fixes
+
+* report the manual /compact window as busy so prompts queue instead of erroring ([#255](https://github.com/william0wang/zcode-acp/issues/255)) ([58fbbe5](https://github.com/william0wang/zcode-acp/commit/58fbbe548349b2cc2ebc0bd4e0826662a9b541a6))
+
 ## [0.47.7](https://github.com/william0wang/zcode-acp/compare/v0.47.6...v0.47.7) (2026-09-23)
 
 
