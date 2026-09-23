@@ -8,10 +8,19 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { startHub, type HubHandle } from "../src/remote/hub-server.js";
 import { AGENT_INFO } from "../src/utils.js";
+
+// These tests drive real HTTP hubs whose restart/exit paths wait on timers and
+// socket teardown. Under full-suite parallel load that can outrun vitest's 5s
+// default, and an inner withTimeout that equals the outer budget can never win
+// against it — the failure then blames the inner step instead of the load.
+vi.setConfig({ testTimeout: 15_000 });
+
+/** Inner wait budget: same 15s as the file timeout, so it can fire first. */
+const STEP_MS = 15_000;
 
 const TOKEN = "test-hub-token";
 const BASE_PORT = 18400; // bridge ports start here; ephemeral hub uses port 0
@@ -67,7 +76,7 @@ describe("hub version self-upgrade", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(registerBody({ version: "9999.0.0" })),
       }),
-      3000,
+      STEP_MS,
       "register with newer version",
     );
     expect(res.status).toBe(200);
@@ -83,7 +92,7 @@ describe("hub version self-upgrade", () => {
           }
         }, 50);
       }),
-      5000,
+      STEP_MS,
       "hub self-exit after newer-bridge register",
     );
     expect(exited).toBe(true);

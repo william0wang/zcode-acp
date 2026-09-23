@@ -84,6 +84,17 @@ async function spawnFixture(): Promise<Fixture> {
   await symlink("README.md", path.join(dir, "inner-link"));
 
   server.sessionCwds.set("s-fs", dir);
+  // The endpoint registers itself with the hub on a fire-and-forget POST, so
+  // the hub may not know this instance yet when the first proxied request goes
+  // out — that request answers 404 ("instance not found") and the test reads it
+  // as a broken endpoint. Wait for the registration to land instead.
+  await waitUntil(async () => {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const list = (await res.json()) as Array<{ id: string }>;
+    return list.some((i) => i.id === String(process.pid));
+  });
   return {
     base: `http://127.0.0.1:${hub.port}/api/instances/${process.pid}/fs`,
     hubPort: hub.port,
@@ -92,6 +103,16 @@ async function spawnFixture(): Promise<Fixture> {
     endpoint: endpoint!,
     server,
   };
+}
+
+/** Poll until `ready` holds, rather than assuming a fixed delay is enough. */
+async function waitUntil(ready: () => Promise<boolean>, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await ready()) return;
+    if (Date.now() >= deadline) throw new Error("waitUntil: condition never became true");
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 function fsFetch(base: string, route: string, token = TOKEN): Promise<Response> {

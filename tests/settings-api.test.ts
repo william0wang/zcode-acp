@@ -32,7 +32,12 @@ import {
 import { listAgents, setBuiltInAgentModel } from "../src/settings/agents-config.js";
 import { listSkills } from "../src/settings/skills.js";
 import { startHub, type HubHandle } from "../src/remote/hub-server.js";
-import { zcodeCliConfigPath, zcodeHomeDir, zcodePersonalProviderPath } from "../src/utils.js";
+import {
+  zcodeCliConfigPath,
+  zcodeCredentialsPath,
+  zcodeHomeDir,
+  zcodePersonalProviderPath,
+} from "../src/utils.js";
 
 const TOKEN = "test-settings-token";
 
@@ -86,7 +91,17 @@ afterEach(async () => {
   await rm(home, { recursive: true, force: true });
 });
 
-const settingsHandler = createSettingsHandler();
+/**
+ * The loopback stand-in for a bridge. A real bridge always passes its server to
+ * `createSettingsHandler` (only the hub's machine-level mount passes none), and
+ * that argument is what decides whether a `needs-restart` write arms the pending
+ * flag — so the stand-in must carry one too or it would model a mount that can
+ * never restart.
+ */
+const settingsHandler = createSettingsHandler({
+  pendingTurns: new Map(),
+  cancelAllPendingTurns: () => {},
+} as unknown as Parameters<typeof createSettingsHandler>[0]);
 
 /** Write a file, creating its parent directory. */
 async function put(file: string, body: unknown): Promise<void> {
@@ -276,6 +291,45 @@ describe("settings API — writes report their effect class", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects an MCP server whose known fields have the wrong types", async () => {
+    // `args` as a string persists fine and then the runtime skips just this
+    // server at the next start (per-entry safeParse), so it would vanish with
+    // no error anywhere — the write is stopped here instead.
+    const res = await loopbackSend("PUT", "mcp/ctx7", { command: "npx", args: "-y ctx7" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toMatch(/mcp\.servers\.ctx7\.args must be an array of strings/);
+    const written = JSON.parse(await readFile(zcodeCliConfigPath(), "utf8").catch(() => "{}")) as {
+      mcp?: unknown;
+    };
+    expect(written.mcp).toBeUndefined();
+  });
+
+  it("answers a hooks field error with 400, not the upstream-retry 504", async () => {
+    // The validator says "timeoutMs must be a positive number". A status map
+    // that matched `timeout` loosely answered 504 — "your request may have
+    // been carried out, retry with the same key" — for a request that can
+    // never succeed, sending the client into a retry loop on a bad field.
+    await loopbackSend("POST", "hooks/enabled", { enabled: true });
+    await put(zcodeCliConfigPath(), {
+      hooks: {
+        enabled: true,
+        events: { Stop: [{ hooks: [{ type: "command", command: "a" }] }] },
+      },
+    });
+    const res = await loopbackSend("PUT", "hooks/Stop/0", { timeoutMs: 0, hookIndex: 0 });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.error).toMatch(/timeoutMs must be a positive number/);
+  });
+
+  it("rejects a malformed percent-escape in a path segment with a 400", async () => {
+    // `decodeURIComponent` throws on a truncated escape; the route-level catch
+    // would answer 500 and log a warn, but the request was the client's fault.
+    const res = await loopbackSend("PUT", "mcp/%E0%A4", { command: "npx" });
+    expect(res.status).toBe(400);
+  });
+
   it("passes the module's actionable message through", async () => {
     const res = await loopbackSend("PUT", "providers/ghost", { enabled: false });
     expect(res.status).toBe(400);
@@ -456,6 +510,168 @@ describe("settings API — usage and reset cards", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  it("refuses a spend whose nonce was never issued", async () => {
+    const res = await loopbackSend("POST", "reset-cards/use", {
+      providerId: "account:bigmodel-individual-coding-plan",
+      resetType: "FIVE_HOUR",
+      nonce: "never-issued",
+      idempotencyKey: "k",
+    });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toMatch(/nonce is stale/);
+  });
+
+  it("burns the nonce only once the spend settles, so a retry can reuse it", async () => {
+    // Seed credentials so the status read succeeds. Values without the `enc:v1:`
+    // prefix are read as plaintext, which is a shape the store tolerates.
+    await put(zcodeCredentialsPath(), {
+      zcodejwttoken: "jwt",
+      "oauth:bigmodel:access_token": "maas",
+    });
+    // Stand up the reset API locally: `ZCODE_ENDPOINT_ORIGIN` points at it, so
+    // the status read succeeds and hands back a real nonce, while the spend is
+    // answered with a business failure — the shape a retry has to survive. No
+    // outside network is touched.
+    const upstream = createServer((req, res) => {
+      if (req.url?.endsWith("/status")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: 0,
+            data: { available_five_hour_resets: [], available_week_resets: [] },
+          }),
+        );
+        return;
+      }
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 500, msg: "upstream blew up" }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    cleanups.push(() => new Promise<void>((r) => upstream.close(() => r())));
+    vi.stubEnv("ZCODE_ENDPOINT_ORIGIN", `http://127.0.0.1:${upstreamPort}`);
+
+    const status = await loopbackGet(
+      "reset-cards?providerId=account:bigmodel-individual-coding-plan",
+    );
+    expect(status.status).toBe(200);
+    const body = (await status.json()) as { resetCards: { nonce: string } };
+    const nonce = body.resetCards.nonce;
+
+    const spend = () =>
+      loopbackSend("POST", "reset-cards/use", {
+        providerId: "account:bigmodel-individual-coding-plan",
+        resetType: "FIVE_HOUR",
+        nonce,
+        idempotencyKey: "k-1",
+      });
+    // The first attempt fails upstream. What is under test is that the nonce
+    // SURVIVES that failure: a route that burned it before calling the backend
+    // answers 409 on the retry, telling the user to refresh with no cause to
+    // guess while their card is still unspent.
+    const first = await spend();
+    expect(first.status).not.toBe(200);
+    const retried = await spend();
+    expect(retried.status).not.toBe(409);
+  });
+
+  it("refuses a second spend while one is still in flight", async () => {
+    // Same setup as the retry test, but the upstream takes its time answering —
+    // long enough for a second gesture (a double tap, another client reading
+    // the same status) to land while the first spend is still on the wire.
+    await put(zcodeCredentialsPath(), {
+      zcodejwttoken: "jwt",
+      "oauth:bigmodel:access_token": "maas",
+    });
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const upstream = createServer(async (req, res) => {
+      if (req.url?.endsWith("/status")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: 0,
+            data: { available_five_hour_resets: [], available_week_resets: [] },
+          }),
+        );
+        return;
+      }
+      await gate;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: 0, data: { used: true } }));
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    cleanups.push(() => new Promise<void>((r) => upstream.close(() => r())));
+    vi.stubEnv("ZCODE_ENDPOINT_ORIGIN", `http://127.0.0.1:${upstreamPort}`);
+
+    const status = await loopbackGet(
+      "reset-cards?providerId=account:bigmodel-individual-coding-plan",
+    );
+    const nonce = ((await status.json()) as { resetCards: { nonce: string } }).resetCards.nonce;
+
+    const spend = (idempotencyKey: string) =>
+      loopbackSend("POST", "reset-cards/use", {
+        providerId: "account:bigmodel-individual-coding-plan",
+        resetType: "FIVE_HOUR",
+        nonce,
+        idempotencyKey,
+      });
+    // The first gesture carries a DIFFERENT idempotency key — that is the whole
+    // point: the backend's per-key dedupe cannot help across two independent
+    // gestures, so without an in-flight guard both would reach it and each
+    // would burn a card.
+    const first = spend("key-one");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const second = await spend("key-two");
+    expect(second.status).toBe(409);
+    release();
+    expect((await first).status).toBe(200);
+  });
+
+  it("maps an unreachable reset API to 502, not a client error", async () => {
+    await put(zcodeCredentialsPath(), {
+      zcodejwttoken: "jwt",
+      "oauth:bigmodel:access_token": "maas",
+    });
+    // One local upstream, two personalities: the status read succeeds and hands
+    // back a real nonce, the spend's endpoint refuses every connection. That is
+    // the shape of "the API went away mid-gesture", and it must read as an
+    // upstream fault (retry with the same key) rather than "your request was
+    // malformed" — the card may well have been spent.
+    const upstream = createServer((req, res) => {
+      if (req.url?.endsWith("/status")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            code: 0,
+            data: { available_five_hour_resets: [], available_week_resets: [] },
+          }),
+        );
+        return;
+      }
+      res.socket?.destroy();
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", resolve));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+    cleanups.push(() => new Promise<void>((r) => upstream.close(() => r())));
+    vi.stubEnv("ZCODE_ENDPOINT_ORIGIN", `http://127.0.0.1:${upstreamPort}`);
+
+    const status = await loopbackGet(
+      "reset-cards?providerId=account:bigmodel-individual-coding-plan",
+    );
+    const nonce = ((await status.json()) as { resetCards: { nonce: string } }).resetCards.nonce;
+    const res = await loopbackSend("POST", "reset-cards/use", {
+      providerId: "account:bigmodel-individual-coding-plan",
+      resetType: "FIVE_HOUR",
+      nonce,
+      idempotencyKey: "k",
+    });
+    expect(res.status).toBe(502);
+  });
 });
 
 describe("settings API — pending restart and backend restart", () => {
@@ -492,6 +708,64 @@ describe("settings API — pending restart and backend restart", () => {
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
     expect(res.status).toBe(501);
+  });
+
+  it("refuses pending-restart on the machine-level (hub) mount instead of stranding the client", async () => {
+    // The hub is a SEPARATE process from any bridge, so no bridge's restart can
+    // ever clear the hub's copy of the counter. Answering "true" would strand the
+    // client on "restart needed" forever; answering "false" would be a lie it
+    // cannot verify. The route must point at the per-bridge spelling instead.
+    const res = await hubGet("pending-restart");
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/per-bridge/);
+  });
+
+  it("arms the pending flag on the per-instance route, which proxies a real bridge", async () => {
+    // The relayed write lands on the loopback mount, which HAS a backend. This is
+    // the spelling clients should use, and it must still report the need.
+    await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/settings/mcp/ctx7`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ command: "npx" }),
+    });
+    const res = (await (
+      await fetch(`http://127.0.0.1:${hub.port}/api/instances/inst-1/settings/pending-restart`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      })
+    ).json()) as { pendingRestart: boolean };
+    expect(res.pendingRestart).toBe(true);
+  });
+
+  it("keeps the pending flag armed when the old backend refuses to close", async () => {
+    // A close that fails leaves the old subprocess alive, so the needs-restart
+    // writes are NOT applied — reporting "all clear" would let the client drop
+    // the restart prompt while the config is still frozen at startup values.
+    const failing = createSettingsHandler({
+      pendingTurns: new Map(),
+      cancelAllPendingTurns: () => {},
+      backend: {
+        close: () => Promise.reject(new Error("close failed")),
+      },
+    } as unknown as Parameters<typeof createSettingsHandler>[0]);
+    const server = createServer((req, res) => failing(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    cleanups.push(() => new Promise<void>((r) => server.close(() => r())));
+    await fetch(`http://127.0.0.1:${port}/settings/mcp/ctx7`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command: "npx" }),
+    });
+    const res = await fetch(`http://127.0.0.1:${port}/settings/backend/restart`, {
+      method: "POST",
+    });
+    const body = (await res.json()) as { ok: boolean; closed: boolean };
+    expect(body.closed).toBe(false);
+    const after = (await (
+      await fetch(`http://127.0.0.1:${port}/settings/pending-restart`)
+    ).json()) as { pendingRestart: boolean };
+    expect(after.pendingRestart).toBe(true);
   });
 });
 
@@ -593,14 +867,14 @@ describe("settings API — app update", () => {
     expect(body.appUpdate.appPath).toBeNull();
   });
 
-  it("surfaces a manifest failure as an error rather than an empty answer", async () => {
+  it("surfaces a manifest failure as an upstream error rather than an empty answer", async () => {
     const app = await fakeApp("3.14.1");
     vi.stubEnv("ZCODE_APP_PATH", app);
     setManifestNetworkForTest(
       (async () => new Response("boom", { status: 502 })) as unknown as typeof fetch,
     );
     const res = await loopbackGet("app-update");
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(502);
     expect(((await res.json()) as { error: string }).error).toMatch(/manifest_http_502/);
   });
 

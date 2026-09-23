@@ -39,9 +39,22 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 // Hub + WS-proxy chains under full-suite parallel load can outrun vitest's 5s
 // default — and the proxied-WS tests hold inner 5s withTimeout waits that can
-// never win against an equal outer budget. 15s file-wide (the respawn test
-// already used 15s explicitly).
-vi.setConfig({ testTimeout: 15_000 });
+// never win against an equal outer budget. 30s file-wide: the 401 self-heal test
+// waits out a 10s heartbeat plus a 1.5s retry before it can observe recovery, so
+// anything shorter fails it before its own assertion runs. A per-test timeout
+// passed as `it(…, ms)` overrides this — do not add one.
+vi.setConfig({ testTimeout: 30_000 });
+
+/**
+ * Inner wait budget for the withTimeout races in this file.
+ *
+ * Deliberately the same 30s as the file-level testTimeout, and NOT 5s: an
+ * inner wait that can never outlast its outer budget turns a slow (but
+ * working) hub+proxy chain under parallel load into a spurious failure whose
+ * message blames the inner step. The whole point of a separate inner budget is
+ * to fire FIRST with a name for what stalled, which requires it to be able to.
+ */
+const STEP_MS = 30_000;
 
 const TOKEN = "test-endpoint-token";
 
@@ -49,6 +62,23 @@ const cleanups: Array<() => Promise<void> | void> = [];
 
 function trackStop(stop: () => Promise<void> | void): void {
   cleanups.push(stop);
+}
+
+/**
+ * Poll until `ready` holds, instead of sleeping a fixed interval.
+ *
+ * Registration is fire-and-forget from the endpoint's side, so how long it
+ * takes to land is not the code under test's contract — under full-suite
+ * parallel load it can be an order of magnitude off any chosen sleep. A fixed
+ * wait fails as "never registered" when the truth is "not yet".
+ */
+async function waitUntil(ready: () => Promise<boolean>, timeoutMs = STEP_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await ready()) return;
+    if (Date.now() >= deadline) throw new Error("waitUntil: condition never became true");
+    await new Promise((r) => setTimeout(r, 25));
+  }
 }
 
 afterEach(async () => {
@@ -172,12 +202,19 @@ describe("remote endpoint", () => {
     expect(endpoint).not.toBeNull();
     trackStop(() => endpoint!.stop());
 
-    // Registration is fired immediately; give the POST a beat to land.
-    await new Promise((r) => setTimeout(r, 250));
-    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
-      headers: { Authorization: `Bearer ${TOKEN}` },
+    // Registration is fired immediately, but how fast it lands is not ours to
+    // fix: under full-suite parallel load the POST can take far longer than a
+    // fixed sleep, and asserting on a not-yet-registered hub reads as "the
+    // endpoint never registered" — a failure that blames the code under test
+    // for the test's own wait. Poll until the hub lists the bridge.
+    let list: Array<{ id: string; port: number }> = [];
+    await waitUntil(async () => {
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      list = (await res.json()) as Array<{ id: string; port: number }>;
+      return list.length > 0;
     });
-    const list = (await res.json()) as Array<{ id: string; port: number }>;
     expect(list).toHaveLength(1);
     expect(list[0]!.port).toBe(endpoint!.port);
 
@@ -209,7 +246,7 @@ describe("remote endpoint", () => {
     // initialize handshake, so send it through the proxied pipe first.
     const reply = withTimeout(
       new Promise<string>((resolve) => ws.once("message", (d) => resolve(d.toString()))),
-      5000,
+      STEP_MS,
       "initialize response",
     );
     ws.send(
@@ -234,7 +271,7 @@ describe("remote endpoint", () => {
     ws.close();
     await withTimeout(
       new Promise<void>((resolve) => ws.once("close", () => resolve())),
-      5000,
+      STEP_MS,
       "ws close",
     );
     // Closed connections leave the registry (give the close event a beat to
@@ -281,10 +318,36 @@ describe("hub version handshake (bridge side)", () => {
     trackConnections(app, server.clients);
     const endpoint = await startRemoteEndpoint(server, app, testConfig(mock.port, 18510));
     trackStop(() => endpoint!.stop());
-    await new Promise((r) => setTimeout(r, 300));
+    await waitUntil(async () => bodies.length >= 1);
 
     expect(bodies.length).toBeGreaterThanOrEqual(1);
     expect(bodies[0]!.version).toBe(AGENT_INFO.version);
+  });
+
+  it("sends its own start time, not the register's arrival time", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const mock = startMockHub(bodies, { ok: true });
+    trackStop(() => stopMockHub(mock));
+    await mock.ready;
+
+    const server = new ZcodeAcpServer();
+    const app = acp
+      .agent({ name: AGENT_INFO.name })
+      .onRequest("initialize", (ctx) => server.initialize(ctx.params));
+    trackConnections(app, server.clients);
+    const endpoint = await startRemoteEndpoint(server, app, testConfig(mock.port, 18512));
+    trackStop(() => endpoint!.stop());
+    await waitUntil(async () => bodies.length >= 1);
+
+    expect(bodies.length).toBeGreaterThanOrEqual(1);
+    // The process's boot instant, which the hub's session-dedupe tie-break
+    // ranks on. It must be a sane epoch-ms stamp that sits BEFORE the register
+    // went out — a hub clocked at arrival time would rank a slow cold start as
+    // newer than a bridge that started after it.
+    const startedAt = bodies[0]!.startedAt;
+    expect(typeof startedAt).toBe("number");
+    expect(startedAt).toBeGreaterThan(1_600_000_000_000);
+    expect(startedAt).toBeLessThanOrEqual(Date.now());
   });
 
   it("re-registers after a hub answers restarting (upgrade respawn)", async () => {
@@ -317,7 +380,7 @@ describe("hub version handshake (bridge side)", () => {
       "second register after restarting reply",
     );
     expect(bodies.length).toBeGreaterThanOrEqual(2);
-  }, 15000);
+  });
 });
 
 describe("hub 401 self-heal (token rotation)", () => {
@@ -363,7 +426,7 @@ describe("hub 401 self-heal (token rotation)", () => {
     const opts = childProcessSpawn.mock.calls[0]![2] as { env: Record<string, string | undefined> };
     expect(opts.env.ZCODE_ACP_REMOTE_TOKEN).toBe(TOKEN);
     expect(opts.env.ZCODE_ACP_HUB_PORT).toBe(String(mock.port));
-  }, 15_000);
+  });
 });
 
 describe("running-scoped discovery payload (collectSessions)", () => {
