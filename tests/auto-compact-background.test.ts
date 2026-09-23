@@ -53,6 +53,19 @@ function collectCx(): {
   return { cx, turnStates, texts };
 }
 
+/**
+ * Give the server a working `clients.broadcast()` so the compaction's own
+ * running indicator (config/auto-compact.ts) actually reaches the recorder.
+ * Without this the indicator is swallowed by Promise.allSettled and the
+ * assertions below would pass on an empty stream.
+ */
+function withBroadcast(server: ZcodeAcpServer, cx: acp.AgentContext): void {
+  const clients = server.clients as unknown as {
+    broadcast: () => acp.AgentContext;
+  };
+  clients.broadcast = () => cx;
+}
+
 interface SentFrame {
   method: string;
 }
@@ -150,12 +163,17 @@ function makeBackend(): {
   };
 }
 
-/** Server with a pre-registered, backend-loaded session (no create/resume). */
-function setup(backend: ZcodeBackend): ZcodeAcpServer {
+/**
+ * Server with a pre-registered, backend-loaded session (no create/resume).
+ * `cx` is wired as the broadcast target so the compaction's own running
+ * indicator reaches the recorder.
+ */
+function setup(backend: ZcodeBackend, cx?: acp.AgentContext): ZcodeAcpServer {
   const server = new ZcodeAcpServer();
   server.backend = backend;
   server.registerSession("sess_ac", "zs_ac");
   server.markBackendLoaded("sess_ac");
+  if (cx) withBroadcast(server, cx);
   return server;
 }
 
@@ -175,17 +193,21 @@ beforeEach(() => {
 describe("detached auto-compact", () => {
   it("returns the response and settles running:false BEFORE the compaction; the finished turn leaves nothing to preempt", async () => {
     const { backend, counts, sentFrames, releaseGoal } = makeBackend();
-    const server = setup(backend);
     const { cx, turnStates } = collectCx();
+    const server = setup(backend, cx);
 
     const result = await prompt(server, promptParams(), cx, 1);
 
     // The response returned while the compaction still holds the probe lock —
     // the pre-fix shape parked here for the whole compaction.
     expect(result).toEqual({ stopReason: "end_turn" });
+    // The turn's own pair, then the compaction's own running:true: the session
+    // never reads idle during the compaction window (a client tracking only
+    // turns would drop its spinner and Cancel button for minutes).
     expect(turnStates).toEqual([
       { sessionId: "sess_ac", running: true },
       { sessionId: "sess_ac", running: false },
+      { sessionId: "sess_ac", running: true },
     ]);
     expect(server.pendingTurns.size).toBe(0);
 
@@ -201,12 +223,20 @@ describe("detached auto-compact", () => {
     await vi.waitFor(() => expect(server.autoCompactInFlight.has("zs_ac")).toBe(false), {
       timeout: 10_000,
     });
+    // …and the settle of that indicator: the session reads idle again. No turn
+    // was in flight, so nothing suppresses it.
+    await vi.waitFor(() =>
+      expect(turnStates[turnStates.length - 1]).toEqual({
+        sessionId: "sess_ac",
+        running: false,
+      }),
+    );
   }, 15_000);
 
   it("a follow-up prompt during the compaction is HELD and delivered once it settles (no resend, no kill)", async () => {
     const { backend, counts, sentFrames, releaseGoal } = makeBackend();
-    const server = setup(backend);
-    const { cx, texts } = collectCx();
+    const { cx, texts, turnStates } = collectCx();
+    const server = setup(backend, cx);
 
     await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
     await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));
@@ -223,6 +253,13 @@ describe("detached auto-compact", () => {
 
     // Nothing fired a stop or close while the prompt waited.
     expect(killFrames(sentFrames)).toEqual([]);
+    // The session reads BUSY the whole window (the compaction's indicator,
+    // then the held turn's own): the client keeps its spinner and Cancel
+    // button, and any text typed meanwhile queues client-side.
+    await vi.waitFor(() =>
+      expect(turnStates).toContainEqual({ sessionId: "sess_ac", running: true }),
+    );
+    expect(turnStates[turnStates.length - 1]).toEqual({ sessionId: "sess_ac", running: true });
 
     // Settle the compaction: the held prompt's send now goes out and its turn
     // runs. Turn 1's response already settled, so only turn 2 registers.
@@ -236,6 +273,19 @@ describe("detached auto-compact", () => {
     // The threshold read on turn 2's end re-arms nothing: the compacted usage
     // (1,000) is far below the threshold.
     expect(counts.get("session/compact")).toBe(1);
+    // The whole window reads BUSY with no flicker: turn 1's pair, the
+    // compaction's pair, turn 2's pair. A settle from the compaction landing
+    // between the hold and turn 2's registration would show up here as an
+    // extra false (observed before COMPACT_SETTLE_GRACE_MS), and an unraised
+    // indicator's settle as a trailing duplicate.
+    expect(turnStates).toEqual([
+      { sessionId: "sess_ac", running: true },
+      { sessionId: "sess_ac", running: false },
+      { sessionId: "sess_ac", running: true },
+      { sessionId: "sess_ac", running: false },
+      { sessionId: "sess_ac", running: true },
+      { sessionId: "sess_ac", running: false },
+    ]);
   }, 30_000);
 
   it("ESC on a turn racing the compaction gate (registered, send never accepted) does not fire the stop pair at the compaction", async () => {
@@ -273,8 +323,8 @@ describe("detached auto-compact", () => {
 
   it("a send landing in the compaction's lock-teardown window is retried, not answered as a failure", async () => {
     const { backend, counts, sentFrames, releaseGoal, busySends } = makeBackend();
-    const server = setup(backend);
     const { cx, texts } = collectCx();
+    const server = setup(backend, cx);
 
     await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
     await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));
@@ -296,8 +346,8 @@ describe("detached auto-compact", () => {
 
   it("the held prompt's output is its OWN turn's — the compaction's internal stream never leaks in", async () => {
     const { backend, counts, releaseGoal } = makeBackend();
-    const server = setup(backend);
     const { cx, texts } = collectCx();
+    const server = setup(backend, cx);
 
     await prompt(server, promptParams(), cx, 1); // turn 1 + detached compaction
     await vi.waitFor(() => expect(counts.get("session/compact")).toBe(1));

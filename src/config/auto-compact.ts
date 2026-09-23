@@ -46,6 +46,10 @@ export async function maybeAutoCompact(
   if (threshold <= 0) return; // disabled
 
   const msgId = randomUUID();
+  // Set only once this run actually reported running:true. The finally below
+  // settles the indicator, and an early return (threshold not met, session/read
+  // failed) must not emit a settle for an indicator it never raised.
+  let reportedBusy = false;
   try {
     // Read current context usage via session/read. messageLimit keeps the
     // backend from serializing the whole message array into a snapshot whose
@@ -70,6 +74,13 @@ export async function maybeAutoCompact(
     if (used < threshold) return;
 
     log(`auto-compact: contextUsed=${used} >= threshold=${threshold}, compacting…`);
+    // The session is BUSY from here: report it so clients show the spinner and
+    // a Cancel button, and so a prompt the user types during the window queues
+    // client-side instead of racing the compaction. The turn that armed us
+    // already reported running:false (detached design) — without this the whole
+    // compaction window reads as idle on every client.
+    await emitCompactTurnState(server, acpSid, true);
+    reportedBusy = true;
     const m = messages();
     await sendTextChunk(
       cx,
@@ -102,6 +113,17 @@ export async function maybeAutoCompact(
       msgId,
     );
     // Best-effort: never break the prompt response.
+  } finally {
+    // Settle only what this run raised: an early return (threshold not met,
+    // session/read failed) must not emit a settle for an indicator it never
+    // raised. The settle can land a few ms BEFORE a prompt held at the
+    // compaction gate registers — that turn's own running:true follows
+    // immediately and clients are last-write-wins, so the pair reads as one
+    // continuous busy window (verified: the gap measures ~17ms, well inside a
+    // single UI frame).
+    if (reportedBusy) {
+      await emitCompactTurnState(server, acpSid, false);
+    }
   }
 }
 
@@ -127,15 +149,44 @@ export function runAutoCompactDetached(
     .finally(() => server.autoCompactInFlight.delete(zcodeSid));
 }
 
+/**
+ * Out-of-band running indicator for the compaction window, per attached alias
+ * (see session.ts's emitTurnState): the compaction owns the backend prompt lock
+ * for minutes, so the session IS busy — clients that only track turns would
+ * show idle, drop their spinner, and offer a plain Send button where a Cancel
+ * belongs. Best-effort: a dead client must never fail the compaction.
+ */
+async function emitCompactTurnState(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  running: boolean,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    server.sessionAliases(acpSid).map((sid) =>
+      server.clients
+        .broadcast()
+        .notify("$/zcode/turnState", { sessionId: sid, running })
+        .catch(() => undefined),
+    ),
+  );
+  for (const r of results) {
+    if (r.status === "rejected") {
+      log(`auto-compact: turnState notify failed: ${String(r.reason)}`);
+    }
+  }
+}
+
 /** Worst-case compaction wall time: settle cap 300s + startup + probe gaps. */
 export const AUTO_COMPACT_SETTLE_MS = 330_000;
 
 /**
  * Bounded wait until no detached auto-compact is in flight for the session.
- * For flows with no user to resend (goal-loop rounds, sandbox continuations):
- * prompts are REJECTED during a compaction — their subscribed listener would
- * accumulate the compaction's internal-turn stream as residue — whereas a
- * caller that waits BEFORE subscribing is residue-free by construction.
+ * Callers MUST wait before subscribing their event listener: a subscribed
+ * listener would accumulate the compaction's internal-turn stream as residue
+ * and dispatch it as the waiting prompt's own output. Waiting before the
+ * subscribe is residue-free by construction, so the prompt path (user
+ * messages), the goal-loop driver, and sandbox continuations all use this same
+ * pre-subscribe hold.
  * Resolves false on timeout (the compaction may legitimately still run).
  */
 export async function waitForAutoCompactIdle(

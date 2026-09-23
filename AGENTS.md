@@ -293,24 +293,27 @@ ZCode protocol types into ACP notifications directly — always translate.
   `server-operations.ts:2082-2119` — real compact failure is now OBSERVABLE
   on the v3 stream; wiring it into the bridge's success reporting is a
   pending alignment item, see docs/BACKLOG.md.) Invariants that must stay: single-flight per sid
-  (`server.autoCompactInFlight`) and the drain gate exempt while it runs. A
-  prompt landing in the compaction window is HELD, never queued behind the
-  lock: `runPrompt` announces the neutral `autoCompactHeld` notice and waits
-  via `waitForAutoCompactIdle` BEFORE the turn registers and BEFORE the
-  listener subscribes — the only residue-free place to wait. A subscribed
-  listener would accumulate the compaction's whole internal-turn stream as
-  this prompt's own output once the lock releases (its turn.completed even
-  ends the turn before the real reply starts; observed as corrupted follow-up
-  turns). After the wait the prompt runs the normal send path, and the send
-  loop's busy-retry absorbs the tail where the flag cleared but the backend's
-  lock is still held. Only a compaction that outlived
-  `AUTO_COMPACT_SETTLE_MS` (330s) falls back to a rejection with the
-  `autoCompactBusy` resend notice — never a silent drop. Flows with no user to
-  resend use the same pre-subscribe wait (`waitForAutoCompactIdle`):
-  goal-loop rounds retry via `turn.compactRejected` — the neutral
-  `autoCompactGoalWait` note, never the resend notice; a round rejected TWICE
-  throws → `paused-crash`, never counted as a completed round — and sandbox
-  continuations wait at prompt entry.
+  (`server.autoCompactInFlight`) and the drain gate exempt while it runs. The
+  compaction window is reported as BUSY (`emitCompactTurnState`, raising
+  running:true at start and settling it only if this run actually raised it) —
+  a client that tracks only turns would otherwise read the whole window as
+  idle, drop its spinner, and offer Send where Cancel belongs. A prompt landing
+  in the window is HELD, never queued behind the lock: `runPrompt` announces
+  the neutral `autoCompactHeld` notice and waits via `waitForAutoCompactIdle`
+  BEFORE the turn registers and BEFORE the listener subscribes — the only
+  residue-free place to wait. A subscribed listener would accumulate the
+  compaction's whole internal-turn stream as this prompt's own output once the
+  lock releases (its turn.completed even ends the turn before the real reply
+  starts; observed as corrupted follow-up turns). After the wait the prompt
+  runs the normal send path, and the send loop's busy-retry absorbs the tail
+  where the flag cleared but the backend's lock is still held. Only a
+  compaction that outlived `AUTO_COMPACT_SETTLE_MS` (330s) falls back to a
+  rejection with the `autoCompactBusy` resend notice — never a silent drop.
+  Flows with no user to resend use the same pre-subscribe wait
+  (`waitForAutoCompactIdle`): goal-loop rounds retry via
+  `turn.compactRejected` — the neutral `autoCompactGoalWait` note, never the
+  resend notice; a round rejected TWICE throws → `paused-crash`, never counted
+  as a completed round — and sandbox continuations wait at prompt entry.
 - **Preempt lock**: concurrent prompts for the same session are serialized via
   `withPreemptLock`. Don't bypass it — two simultaneous turns corrupt the listener.
 - **The lazy-alias store (`~/.zcode/v2/acp-lazy-sessions.json`) is shared by
