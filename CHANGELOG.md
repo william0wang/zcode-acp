@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.47.5](https://github.com/william0wang/zcode-acp/compare/v0.47.4...v0.47.5) (2026-09-23)
+
+
+### Bug Fixes
+
+* emit turnState running:false on boot-resume trigger and early returns ([#249](https://github.com/william0wang/zcode-acp/issues/249)) ([a22d206](https://github.com/william0wang/zcode-acp/commit/a22d2064d77bca74261c2aae7520b9d3867ecd52))
+
 ## [0.47.4](https://github.com/william0wang/zcode-acp/compare/v0.47.3...v0.47.4) (2026-09-23)
 
 
