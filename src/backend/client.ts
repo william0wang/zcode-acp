@@ -84,10 +84,18 @@ export class ZcodeBackend {
    */
   onCompactOutcome?: (sessionId: string, reason: string) => void;
 
-  constructor(argv: string[], env: NodeJS.ProcessEnv) {
+  constructor(argv: string[], env: NodeJS.ProcessEnv, cwd?: string) {
     this.proc = spawn(argv[0]!, argv.slice(1), {
       stdio: ["pipe", "pipe", "ignore"],
       env,
+      // The backend reads the workspace from its own cwd (the CLI resolves
+      // relative paths, .git roots and project-local config against it). Left
+      // unset it inherits the BRIDGE's cwd, which for a remotely-incubated
+      // bridge is whatever directory the hub or terminal happened to spawn it
+      // from — so a session created for /Users/x/proj ran with the backend
+      // sitting in the hub's directory. session/new already records cwds before
+      // any backend RPC, so the caller passes the project root here.
+      ...(cwd !== undefined ? { cwd } : {}),
       detached: true, // own process group → kill(-pid) reaps the whole tree
     });
     // Spawn failures (ENOENT when the CLI can't be resolved) arrive here

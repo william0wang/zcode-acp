@@ -64,6 +64,7 @@ import type { TerminalPrefs } from "../config/user-config.js";
 import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
+import { envWithLoginShell } from "./login-shell-env.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
 import { createSettingsHandler } from "./settings-endpoint.js";
@@ -1068,8 +1069,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // terminalTuiScript exports the var into the terminal's fresh shell; the
     // detached serve spawn inherits it directly.
     const nonce = randomUUID();
+    // The login-shell completion comes FIRST so the plumbing below overrides
+    // it. This hub is a detached daemon whose birth env came from whatever
+    // spawned its bridge — an editor GUI process, which means launchd's bare
+    // PATH with no version managers in it. Without this, a session opened from
+    // a phone cannot find `pnpm` / `cargo` / `java` even though the same
+    // command works in the user's terminal.
     const env: NodeJS.ProcessEnv = {
-      ...process.env,
+      ...envWithLoginShell(),
       ZCODE_ACP_REMOTE: "1",
       ZCODE_ACP_REMOTE_TOKEN: token,
       ZCODE_ACP_HUB_PORT: String(port),
@@ -1099,7 +1106,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // never saw it). terminalTuiScript exports it into the terminal's fresh
     // shell — launchd's environment would otherwise drop it, and martty
     // reads the variable once at its own process start.
-    const statsFilter = tuiStatsSegments(process.env);
+    //
+    // Read from the completed env, not process.env: the fallback the user
+    // exported in their shell lives only in the login shell's environment.
+    const statsFilter = tuiStatsSegments(env);
     if (statsFilter !== undefined) env.DSH_TUI_STATS = statsFilter;
     if (kind === "resume") {
       // ADR-0017: the requested session rides the env — terminalTuiScript
@@ -1143,7 +1153,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     const launches =
       kind === "serve"
         ? []
-        : (terminalLaunches ?? resolveTerminalLaunches(remoteTerminalPrefs(process.env)));
+        : (terminalLaunches ?? resolveTerminalLaunches(remoteTerminalPrefs(env)));
     let li = 0;
     /**
      * Try launches[li..] until one OPENS; advance li past every failure and

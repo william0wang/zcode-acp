@@ -24,6 +24,7 @@ import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-al
 import { answerProviderRuntimeHeaders } from "./handlers/server-requests.js";
 import { SessionTitleListener } from "./handlers/session-titles.js";
 import { ClientRegistry } from "./remote/broadcast.js";
+import { envWithLoginShell } from "./remote/login-shell-env.js";
 import { AGENT_INFO, clientConnectionRoot, PROTOCOL_VERSION, log, warn } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
@@ -489,7 +490,15 @@ export class ZcodeAcpServer {
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
     // zcodeDataBaseDirEnv translates the bridge's ZCODE_HOME into the CLI's
     // own ZCODE_DATA_BASE_DIR spelling so both sides read the same data tree.
+    // The login-shell completion goes FIRST so the provider/builtin env below
+    // overrides it. An editor-launched bridge (Zed's extension host, a JetBrains
+    // plugin) inherits launchd's environment — a bare PATH with no version
+    // managers in it — so a backend spawned from it cannot find `node`, `npx`
+    // or the user's own tools even though they work in a terminal. The CLI
+    // shells out to project tooling (npm scripts, local binaries), so a
+    // completed PATH changes what a session can actually do.
     const env = {
+      ...envWithLoginShell(),
       ...mergeEnvWithCreds(loadZcodeCredentials()),
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
@@ -511,7 +520,7 @@ export class ZcodeAcpServer {
       // never be escaped from within.
       env.ZCODE_ACP_SANDBOX_ACTIVE = "1";
     }
-    const backend = new ZcodeBackend(argv, env);
+    const backend = new ZcodeBackend(argv, env, this.projectCwd());
     this.backend = backend;
     // Fresh backend process: every session rehydrates from scratch, so the
     // settle bookkeeping from the previous instance is void.

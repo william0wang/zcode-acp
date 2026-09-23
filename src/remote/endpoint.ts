@@ -30,6 +30,7 @@ import { runtimeSpawnParts } from "../runtime.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
 import { createFileHandler } from "./file-endpoint.js";
+import { envWithLoginShell } from "./login-shell-env.js";
 import { createSessionCloseHandler } from "./session-close-endpoint.js";
 import { createSessionListHandler } from "./session-list-endpoint.js";
 import { createSessionRenameHandler } from "./session-rename-endpoint.js";
@@ -348,7 +349,12 @@ export async function startRemoteEndpoint(
         // detached "ignore" pipe silently eats startup failures.
         stdio: ["ignore", "ignore", "pipe"],
         env: {
-          ...process.env,
+          // The hub is detached and long-lived; it spawns the terminal windows,
+          // serve bridges and (through them) the backends. If IT starts with a
+          // bare launchd PATH, every one of those inherits it and a remotely
+          // opened session cannot find the user's toolchain — so complete the
+          // environment here, once, at the root of the tree.
+          ...envWithLoginShell(),
           ZCODE_ACP_HUB_PORT: String(config.hubPort),
           ZCODE_ACP_HUB_HOST: config.hubHost,
           ZCODE_ACP_REMOTE_TOKEN: config.token,
