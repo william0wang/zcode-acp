@@ -244,7 +244,7 @@ function authorized(req: IncomingMessage, url: URL, token: string): boolean {
 function setCors(res: ServerResponse): void {
   // The web UI is deployed as a separate origin; the token is the boundary.
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
   // Custom response headers JS may read cross-origin; without this the file
   // viewer's line-window fetches cannot see X-Zcode-First-Line at all.
@@ -2120,7 +2120,19 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           id,
           port: bridgePort,
           pid: typeof body.pid === "number" ? body.pid : 0,
-          startedAt: prev?.startedAt ?? Date.now(),
+          // The registrant's own start time when it sends one, else the hub's
+          // clock. The sender knows its real boot instant; the hub's `Date.now()`
+          // is skewed by however long the register took to arrive, and a bridge
+          // whose first register is slow (a cold provider sync) would look NEWER
+          // than a bridge that actually started after it. That ordering is
+          // load-bearing: it is the tie-break when two bridges advertise the
+          // same session with the same updatedAt, and the winner is the one
+          // clients attach to. A re-registration keeps the first value seen.
+          startedAt:
+            prev?.startedAt ??
+            (typeof body.startedAt === "number" && Number.isFinite(body.startedAt)
+              ? body.startedAt
+              : Date.now()),
           workspace: typeof body.workspace === "string" ? body.workspace : "",
           sessions,
           lastSeen: Date.now(),

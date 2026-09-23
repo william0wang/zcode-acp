@@ -477,9 +477,20 @@ a `providerId` and a network read, so fetch them from
 
 Notes that clients must honor:
 
+- **Methods include PUT and DELETE**, and the hub's CORS preflight allows all
+  four (`GET, POST, PUT, DELETE, OPTIONS`) — a browser-based client can issue
+  them without a plugin fetch shim.
 - **Providers cannot be created or deleted** through this API — only enabled
   state, display name, and the models inside an existing provider. Adding a
   brand-new provider stays a desktop-app (or hand-edit) operation.
+- **MCP writes are type-checked**: `type` / `url` / `command` must be strings,
+  `args` an array of strings, `env` / `headers` objects of strings, `enabled` a
+  boolean — anything else is a `400`. Unknown keys still pass through, but a
+  malformed known field is refused rather than persisted: the agent runtime
+  validates each server on its own and silently SKIPS the one that fails, so a
+  bad entry would make the server you just added vanish at the next start with
+  no error anywhere. `type` may be omitted — the runtime infers `stdio` from a
+  `command` and `http` from a `url`, and also accepts a legacy `remote`.
 - **Hooks are read-complete but write-limited**: the tree is returned in full,
   and writes may only modify an existing entry's `command` / `timeoutMs` /
   `enabled`. Adding or removing events, matchers, or hook entries is not
@@ -508,7 +519,9 @@ POST {hub}/api/instances/{id}/backend/restart → 200 { "ok": true, "cancelledTu
 Cancels that bridge's in-flight turns, kills its `zcode app-server` child, and
 lets the next prompt respawn it — the same path the sandbox arm-flip uses.
 `cancelledTurns` is how many conversations were interrupted; surface it before
-the user commits to the action.
+the user commits to the action. The response also carries `closed`: `false`
+means the old child refused to die, the pending flag stays armed (the writes
+were NOT applied), and the restart is worth retrying.
 
 `GET /api/instances/{id}/settings/pending-restart` reports whether that bridge
 process has recorded any `needs-restart` write since it last restarted its
@@ -518,8 +531,10 @@ tracking it itself. The flag is cleared by a successful backend restart.
 Use the **per-instance** spelling, not the hub-local
 `GET /api/settings/pending-restart`: the counter lives in the bridge that served
 the write, and the hub has no backend of its own to restart, so its copy can
-never be cleared (the hub-local route answers `501` on a restart attempt and
-keeps reporting `true` until the hub idle-exits).
+never be cleared. The hub-local route therefore answers `409` with a pointer to
+the per-instance spelling rather than a `pendingRestart` boolean — reporting
+`true` would strand a client on "restart needed" with no request able to clear
+it, and reporting `false` would be a claim it cannot verify.
 
 ### Reset cards (coding-plan quota)
 
@@ -542,12 +557,30 @@ POST /settings/reset-cards/history-read   { providerId }
 ```
 
 - `resetType` is `FIVE_HOUR` or `WEEK`.
-- The `nonce` is single-use and issued per status read. Sending a stale one
-  answers `409` — refresh the status and retry. This is what stops a screen the
-  user left open an hour ago from spending a card they have since seen change.
+- The `nonce` is issued per status read. Sending one that was never issued (or
+  that a newer status read replaced) answers `409` — refresh the status and
+  retry. This is what stops a screen the user left open an hour ago from
+  spending a card they have since seen change.
+- The nonce is burned only **after** the spend settles, never before it. A spend
+  that reached the server and failed on the way back (timeout, dropped
+  response, upstream error) leaves the nonce valid, so the retry is judged by
+  the backend and its idempotency key — not rejected out of hand with a `409`
+  the user cannot act on.
+- A spend already in flight for the same provider is refused with `409` ("a
+  reset for this provider is already in progress"). The deferred burn is safe
+  for a RETRY of the same gesture — same key, so the backend answers with the
+  outcome it already recorded — but a second INDEPENDENT gesture (a double tap,
+  another client that read the same status) brings its own key, and nothing
+  upstream could stop it burning a second card. Serialize the UI on the busy
+  state the client already tracks.
 - The `idempotencyKey` is what makes a retry safe: the same key always answers
   the same outcome, so a dropped response cannot burn a second card. Generate
-  it once per user gesture and reuse it on retry.
+  it once per user gesture and reuse it on retry — a FRESH key per attempt is
+  exactly what defeats it.
+- Status codes carry the retry advice. A `409` is a nonce problem (refresh). A
+  `502`/`504` means the reset API was unreachable or failed — the card may have
+  been spent, so retry with the same key rather than assuming the write failed.
+  A `400` is a request the server rejected outright.
 - A denial is `{ok: true, granted: false, nextTryAt: <ms>}` — a countdown to
   render, not an error.
 - `credentials_unavailable` means the machine's encrypted credential store

@@ -47,6 +47,16 @@ interface AdvertisedSession {
 
 /** How often the bridge re-registers with the hub (also the heartbeat). */
 const HEARTBEAT_MS = 10_000;
+
+/**
+ * This process's boot instant, in epoch ms.
+ *
+ * Captured once at module load and read through `uptime()` rather than sampled
+ * with `Date.now()` at first register: `Date.now()` there measures when the
+ * register ARRIVED, not when the bridge started, and the gap is exactly what
+ * makes two bridges' start order ambiguous (see the register payload).
+ */
+const processStartTime = Date.now() - process.uptime() * 1000;
 /** Minimum spacing between hub spawn attempts (avoids spawn storms). */
 const SPAWN_THROTTLE_MS = 60_000;
 /** Cap for the 401-spawn backoff ladder (starts at SPAWN_THROTTLE_MS, doubles). */
@@ -304,6 +314,14 @@ export async function startRemoteEndpoint(
     id: instanceId,
     port,
     pid: process.pid,
+    // This process's own boot instant, for the hub's session-dedupe tie-break.
+    // The hub would otherwise stamp its `Date.now()` at first register, which
+    // is skewed by however long that first register took to arrive — a bridge
+    // whose cold start is slow (provider sync) would rank as NEWER than a
+    // bridge that really started after it, and win a session the other is
+    // driving. A heartbeat re-registration carries the same value, so the
+    // ranking is stable across the bridge's whole life.
+    startedAt: processStartTime,
     workspace: server.workspaceLabel(),
     sessions,
     // "editor" (stdio bridge) or "serve" (headless, hub-spawned, ADR-0014):

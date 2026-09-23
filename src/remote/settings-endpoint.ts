@@ -15,8 +15,10 @@
  * appears to do nothing.
  *
  * Error mapping is deliberately coarse — the module's messages are already
- * actionable, so they are passed through as `error` rather than re-coded. Only
- * the validation failures that indicate a malformed request get a 400;
+ * actionable, so they are passed through as `error` rather than re-coded.
+ * Only the validation failures that indicate a malformed request get a 400;
+ * an unreachable or failing upstream gets 502/504 (the request may still have
+ * been carried out, so the client retries with the same idempotency key);
  * everything else is a 500, because it means the environment is wrong.
  */
 
@@ -39,6 +41,7 @@ import {
   setMcpServerEnabled,
   updateHookEntry,
   upsertMcpServer,
+  validateMcpServer,
   type HookEventName,
 } from "../settings/cli-config.js";
 import {
@@ -146,13 +149,60 @@ function num(body: Record<string, unknown>, key: string): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Decode one path segment, treating a malformed escape as a bad request.
+ *
+ * `decodeURIComponent` throws on a truncated escape (`/settings/mcp/%E0`),
+ * which would otherwise fall through to the route-level catch and answer 500
+ * with a warn — the request was malformed, the server is fine.
+ */
+function segment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    throw new BadRequest(`malformed percent-encoding in path segment: ${raw}`);
+  }
+}
+
+/** A request the client got wrong — always a 400, never a 500. */
+class BadRequest extends Error {}
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Map a module error to a status code. */
+/**
+ * Map a module error to a status code.
+ *
+ * Three classes, and the distinction matters for retry: a broken environment
+ * (a damaged config file) is a 500 the client cannot fix; an UPSTREAM failure —
+ * the reset API or the release manifest being unreachable, timing out, or
+ * answering 5xx — is a 502/504, which tells the client "your request may have
+ * been carried out, ask again with the same idempotency key" rather than "you
+ * built the request wrong". Only a genuine business rejection is a 400.
+ *
+ * The upstream patterns are deliberately narrow. The upstream modules tag their
+ * failures with a module prefix (`coding_plan_reset_*`, `manifest_*`,
+ * `download_*`) and a bare `fetch` failure surfaces as Node's own message, so
+ * those are the only spellings that count. Matching loosely on a word like
+ * `timeout` also hits `src/settings/cli-config.ts`'s field validators
+ * ("timeoutMs must be a positive number"), and a hooks `PUT` with a bad
+ * `timeoutMs` would then answer 504 — telling the client to retry a request
+ * that can never succeed.
+ */
 function statusFor(error: unknown): number {
+  if (error instanceof BadRequest) return 400;
   const message = error instanceof Error ? error.message : String(error);
+  // Node's own wording for an aborted request (the reset API's AbortSignal
+  // timeout) and for a dead connection.
+  if (/\btimed out\b|\babort(ed|error)\b/iu.test(message)) return 504;
+  if (/\bfetch failed\b|econnreset|enotfound|econnrefused|socket hang up/iu.test(message)) {
+    return 502;
+  }
+  // The upstream modules' own prefixed codes: a non-2xx from the reset API or
+  // the release manifest. Prefixed on purpose so a config-file field named
+  // `http_status` cannot masquerade as an upstream answer.
+  if (/^(coding_plan_reset|manifest|download)_/u.test(message)) return 502;
   if (/is not valid JSON|not a JSON object|refusing to write|could not be read/u.test(message)) {
     // The environment is broken (a damaged config file) — not the client's fault.
     return 500;
@@ -181,6 +231,12 @@ export function createSettingsHandler(
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const path = url.pathname.replace(/^\/api/u, "").replace(/\/+$/u, "") || "/";
     void route(req, res, url, path, server ?? null).catch((error) => {
+      // A rejected path segment is the client's fault, not the server's — say
+      // so with a 400 instead of logging a warn and answering 500.
+      if (error instanceof BadRequest) {
+        if (!res.writableEnded) sendError(res, 400, error.message);
+        return;
+      }
       warn(
         `settings: unhandled route error: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -210,7 +266,7 @@ async function route(
     if (path === "/settings/usage") return void (await handleUsage(res, url));
     if (path === "/settings/quota") return void (await handleQuota(res));
     if (path === "/settings/reset-cards") return void (await handleResetCards(res, url));
-    if (path === "/settings/pending-restart") return void (await handlePendingRestart(res));
+    if (path === "/settings/pending-restart") return void (await handlePendingRestart(res, server));
     if (path === "/settings/app-update") return void (await handleAppUpdate(res, url));
     return sendError(res, 404, "not found");
   }
@@ -231,7 +287,7 @@ async function route(
     }
 
     if (method === "PUT" && path.startsWith("/settings/providers/")) {
-      const id = decodeURIComponent(path.slice("/settings/providers/".length));
+      const id = segment(path.slice("/settings/providers/".length));
       return void (await handleUpdateProvider(res, id, body));
     }
     if (method === "POST" && path === "/settings/models") {
@@ -241,8 +297,8 @@ async function route(
       const rest = path.slice("/settings/models/".length);
       const sep = rest.indexOf("/");
       if (sep <= 0) return sendError(res, 400, "expected /settings/models/{providerId}/{modelId}");
-      const providerId = decodeURIComponent(rest.slice(0, sep));
-      const modelId = decodeURIComponent(rest.slice(sep + 1));
+      const providerId = segment(rest.slice(0, sep));
+      const modelId = segment(rest.slice(sep + 1));
       return void (await handleRemoveModel(res, providerId, modelId));
     }
     if (method === "POST" && path === "/settings/skills/enable") {
@@ -252,15 +308,15 @@ async function route(
       return void (await handleSkillCopy(res, body));
     }
     if (method === "DELETE" && path.startsWith("/settings/skills/")) {
-      const skillPath = decodeURIComponent(path.slice("/settings/skills/".length));
+      const skillPath = segment(path.slice("/settings/skills/".length));
       return void (await handleSkillDelete(res, skillPath));
     }
     if (method === "PUT" && path.startsWith("/settings/mcp/")) {
-      const name = decodeURIComponent(path.slice("/settings/mcp/".length));
+      const name = segment(path.slice("/settings/mcp/".length));
       return void (await handleMcpUpsert(res, name, body));
     }
     if (method === "DELETE" && path.startsWith("/settings/mcp/")) {
-      const name = decodeURIComponent(path.slice("/settings/mcp/".length));
+      const name = segment(path.slice("/settings/mcp/".length));
       return void (await guard(res, async () => {
         await removeMcpServer(name);
         return { ok: true as const, effect: "needs-restart" as Effect };
@@ -285,15 +341,15 @@ async function route(
       path.startsWith("/settings/agents/") &&
       path.endsWith("/enable")
     ) {
-      const name = decodeURIComponent(path.slice("/settings/agents/".length, -"/enable".length));
+      const name = segment(path.slice("/settings/agents/".length, -"/enable".length));
       return void (await handleAgentEnable(res, name, body));
     }
     if (method === "PUT" && path.startsWith("/settings/agents/")) {
-      const name = decodeURIComponent(path.slice("/settings/agents/".length));
+      const name = segment(path.slice("/settings/agents/".length));
       return void (await handleAgentUpsert(res, name, body));
     }
     if (method === "DELETE" && path.startsWith("/settings/agents/")) {
-      const name = decodeURIComponent(path.slice("/settings/agents/".length));
+      const name = segment(path.slice("/settings/agents/".length));
       return void (await guard(res, async () => {
         await deleteAgent(name);
         return { ok: true as const, effect: "needs-restart" as Effect };
@@ -351,7 +407,23 @@ export function resetPendingRestartForTest(): void {
   pendingRestartWrites = 0;
 }
 
-async function handlePendingRestart(res: ServerResponse): Promise<void> {
+async function handlePendingRestart(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+): Promise<void> {
+  // Only a mount with a backend can answer this honestly. The hub is a SEPARATE
+  // process from any bridge, so its copy of the counter is never cleared by a
+  // bridge's restart: it would report "restart needed" forever, with no request
+  // the client could make to satisfy it. Point at the per-instance spelling
+  // instead, which relays to the bridge that actually served the write.
+  if (!server) {
+    sendError(
+      res,
+      409,
+      "pending-restart is per-bridge — use /api/instances/{id}/settings/pending-restart",
+    );
+    return;
+  }
   await guard(res, async () => ({
     ok: true as const,
     pendingRestart: pendingRestartWrites > 0,
@@ -614,6 +686,14 @@ async function handleMcpUpsert(
   name: string,
   body: Record<string, unknown>,
 ): Promise<void> {
+  // Type-check the known fields before they land: a value the runtime rejects
+  // (an `args` string where it wants an array) would take out every server on
+  // the next start, not just this one.
+  const verdict = validateMcpServer(name, body);
+  if (verdict !== true) {
+    sendError(res, 400, typeof verdict === "string" ? verdict : "invalid MCP server config");
+    return;
+  }
   await guard(res, async () => {
     await upsertMcpServer(name, body as never);
     return { ok: true as const, effect: "needs-restart" as Effect };
@@ -640,10 +720,10 @@ async function handleHookUpdate(
 ): Promise<void> {
   const parts = rest.split("/");
   if (parts.length !== 2) {
-    sendError(res, 400, "expected /settings/hooks/{event}/{matcherIndex}/{hookIndex}");
+    sendError(res, 400, "expected /settings/hooks/{event}/{matcherIndex}");
     return;
   }
-  const event = decodeURIComponent(parts[0]!) as HookEventName;
+  const event = segment(parts[0]!) as HookEventName;
   const matcherIndex = Number(parts[1]);
   const hookIndex = num(body, "hookIndex");
   if (!Number.isInteger(matcherIndex) || hookIndex === undefined || !Number.isInteger(hookIndex)) {
@@ -824,6 +904,16 @@ async function handleResetCards(res: ServerResponse, url: URL): Promise<void> {
  * for this provider, and the idempotency key makes a retry safe. Both are
  * required: without the nonce a stale screen could burn a card, and without the
  * key a dropped response would let a retry burn a second one.
+ *
+ * The nonce is burned only AFTER the backend call settles, never before. The
+ * backend burns the card itself keyed on the idempotency key, so a request that
+ * reached the server and failed on the way back (timeout, dropped response,
+ * credential hiccup) can be retried with the SAME nonce and the SAME key and
+ * answer the same outcome. Burning it up front left the store holding a nonce
+ * the server had already consumed: every retry answered 409 no matter how many
+ * times the user tapped, and the only escape was finding the refresh control by
+ * trial and error. A nonce that fails validation up front is still rejected
+ * untouched — the burn happens only on a nonce this process actually accepted.
  */
 async function handleResetUse(res: ServerResponse, body: Record<string, unknown>): Promise<void> {
   const providerId = str(body, "providerId");
@@ -842,14 +932,34 @@ async function handleResetUse(res: ServerResponse, body: Record<string, unknown>
     sendError(res, 400, "nonce and idempotencyKey are required");
     return;
   }
-  if (!consumeNonce(providerId, nonce)) {
+  // Validate without burning: the burn happens once the outcome is known. A
+  // spend already in flight for this provider rejects outright — without that
+  // check the deferred burn reopens the double-spend window, because a second
+  // gesture (a double tap, or a different client) reaches useResetCard with its
+  // own idempotency key before the first one settles.
+  if (!issuedNonces.get(providerId) || issuedNonces.get(providerId) !== nonce) {
     sendError(res, 409, "nonce is stale — refresh the reset card status and try again");
     return;
   }
-  await guard(res, async () => {
-    const result = await useResetCard(providerId, resetType as ResetType, idempotencyKey);
-    return { ok: true as const, ...result };
-  });
+  if (resetSpendsInFlight.has(providerId)) {
+    sendError(res, 409, "a reset for this provider is already in progress");
+    return;
+  }
+  resetSpendsInFlight.add(providerId);
+  try {
+    await guard(res, async () => {
+      const result = await useResetCard(providerId, resetType as ResetType, idempotencyKey);
+      // Burn only now: a retry that never reached the backend (a 400/500 thrown
+      // above, or a response the client never saw) may reuse this nonce. Delete
+      // only if it is still the nonce this request validated — a status read
+      // that landed mid-spend minted a newer one, and that one is what the
+      // client will send next.
+      if (issuedNonces.get(providerId) === nonce) issuedNonces.delete(providerId);
+      return { ok: true as const, ...result };
+    });
+  } finally {
+    resetSpendsInFlight.delete(providerId);
+  }
 }
 
 async function handleResetOpportunity(
@@ -893,19 +1003,32 @@ async function handleResetHistoryRead(
  * In-memory and single-use: a restart clears them, which only costs the user a
  * refresh. There is deliberately no persistence — a nonce that survived a
  * restart would outlive the status it vouched for.
+ *
+ * The burn is DEFERRED to after the backend call settles (see `handleResetUse`)
+ * so a retry after a mid-request failure is not locked out forever. That is
+ * safe because the spend itself is idempotent server-side: the same
+ * idempotency key answers the same outcome, so re-presenting a still-valid
+ * nonce cannot burn a second card. A CONCURRENT gesture is the case the
+ * deferred burn does not cover — that one is rejected by
+ * `resetSpendsInFlight` before it can race the in-flight spend.
  */
 const issuedNonces = new Map<string, string>();
+
+/**
+ * Providers with a spend in flight right now, one entry at a time per provider.
+ *
+ * The deferred burn is safe for a RETRY of the same gesture, whose second
+ * request carries the same idempotency key and therefore cannot burn a second
+ * card. It is NOT safe for a second, independent gesture (a double tap, or
+ * another client that read the same status), which brings its own key — so
+ * while a spend is running, every other use for that provider is refused
+ * instead of racing it to the backend.
+ */
+const resetSpendsInFlight = new Set<string>();
 
 /** Record the nonce a status read just issued. */
 export function rememberResetNonce(providerId: string, nonce: string): void {
   issuedNonces.set(providerId, nonce);
-}
-
-/** Validate and burn a nonce. False when it is missing, stale, or reused. */
-function consumeNonce(providerId: string, nonce: string): boolean {
-  if (issuedNonces.get(providerId) !== nonce) return false;
-  issuedNonces.delete(providerId);
-  return true;
 }
 
 /**
@@ -930,17 +1053,22 @@ async function handleBackendRestart(
   }
   const cancelled = server.pendingTurns.size;
   server.cancelAllPendingTurns();
+  let closed = false;
   try {
     await server.backend?.close();
+    closed = true;
   } catch (error) {
     warn(
       `settings: backend restart close failed: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
   // The respawned backend reads MCP servers, hooks and subagent markdown at
-  // startup, so everything this process was waiting on is now applied.
-  pendingRestartWrites = 0;
-  sendJson(res, 200, { ok: true, cancelledTurns: cancelled });
+  // startup, so everything this process was waiting on is now applied — but
+  // only if the old subprocess actually went away. A close that failed while
+  // the process survives would leave the needs-restart writes unapplied, so
+  // the flag stays armed and the client is told to retry.
+  if (closed) pendingRestartWrites = 0;
+  sendJson(res, 200, { ok: true, cancelledTurns: cancelled, closed });
 }
 
 // ---------- app update (ZCode desktop) ----------

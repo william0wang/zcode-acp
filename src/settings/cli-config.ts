@@ -166,6 +166,54 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Type-check the known MCP server fields before they reach the config file.
+ *
+ * The route passes the request body through to `upsertMcpServer` unmerged, and
+ * the schema check above only asks "is it an object" — so without this a
+ * `{"args": "npx"}` (string where the runtime expects an array) would persist
+ * happily. It does NOT take the whole map down: the runtime validates each
+ * entry separately and skips only the bad one (source: ZCode
+ * `packages/adapters/src/config/schema.ts`, `normalizeConfigFileInput` —
+ * per-entry `mcpServerSchema.safeParse` with a `config_mcp_server_invalid`
+ * warning). What the user loses is the server they just added, disappearing
+ * with no error anywhere in the bridge — so the write is refused here, where
+ * the reason can be reported, instead of being silently dropped at the next
+ * agent start. Unknown keys still pass through: the runtime keeps adding
+ * fields and the file is not ours to narrow.
+ */
+export function validateMcpServer(name: string, server: unknown): boolean | string {
+  if (!isRecord(server)) return "server must be an object";
+  for (const key of ["type", "url", "command"] as const) {
+    const value = server[key];
+    if (value !== undefined && typeof value !== "string") {
+      return `mcp.servers.${name}.${key} must be a string`;
+    }
+  }
+  for (const key of ["args"] as const) {
+    const value = server[key];
+    if (
+      value !== undefined &&
+      (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+    ) {
+      return `mcp.servers.${name}.${key} must be an array of strings`;
+    }
+  }
+  for (const key of ["env", "headers"] as const) {
+    const value = server[key];
+    if (value === undefined) continue;
+    if (!isRecord(value)) return `mcp.servers.${name}.${key} must be an object`;
+    for (const inner of Object.values(value)) {
+      if (typeof inner !== "string") return `mcp.servers.${name}.${key} values must be strings`;
+    }
+  }
+  const enabled = server["enabled"];
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    return `mcp.servers.${name}.enabled must be a boolean`;
+  }
+  return true;
+}
+
 /** The single write path for this file. */
 async function saveCliConfig(
   mutator: (doc: CliConfigFile) => CliConfigFile | Promise<CliConfigFile>,
