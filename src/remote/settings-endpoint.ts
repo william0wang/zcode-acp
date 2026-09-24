@@ -75,6 +75,28 @@ import {
 } from "../settings/app-update.js";
 import { readUsageStats, type UsageRange } from "../settings/usage-stats.js";
 import {
+  conversationRuns,
+  deleteWorkflow,
+  getWorkflow,
+  listRuns,
+  listWorkflows,
+  moveWorkflow,
+  requireWorkflowEnabled,
+  resolveWorkflowZcodeSid,
+  resumeWorkflowRun,
+  runArtifactData,
+  runArtifactRead,
+  runArtifacts,
+  runEvents,
+  runNodeResult,
+  runWorkspace,
+  startSavedWorkflow,
+  updateWorkflowMeta,
+  workflowCreatePrompt,
+  WorkflowApiError,
+  type WorkflowScope,
+} from "../settings/workflow.js";
+import {
   codingPlanProviderIds,
   isCodingPlanProvider,
   markResetHistoryRead,
@@ -269,7 +291,7 @@ async function route(
 
   // ---- reads ----
   if (method === "GET") {
-    if (path === "/settings/all") return void (await handleAll(res));
+    if (path === "/settings/all") return void (await handleAll(res, server));
     if (path === "/settings/models") return void (await handleModels(res));
     if (path === "/settings/skills") return void (await handleSkills(res));
     if (path === "/settings/mcp") return void (await handleMcp(res));
@@ -281,6 +303,45 @@ async function route(
     if (path === "/settings/reset-cards") return void (await handleResetCards(res, url));
     if (path === "/settings/pending-restart") return void (await handlePendingRestart(res, server));
     if (path === "/settings/app-update") return void (await handleAppUpdate(res, url));
+    // ---- dynamic-workflow management (per-instance; see the section comment
+    // below the write block) ----
+    if (path === "/settings/workflows") return void (await handleWorkflowList(res, server, url));
+    if (path === "/settings/workflows/runs")
+      return void (await handleWorkflowRuns(res, server, url));
+    if (path === "/settings/workflow-create-prompt") {
+      return void (await handleWorkflowCreatePrompt(res, server, url));
+    }
+    if (path === "/settings/workflow-runs") {
+      return void (await handleConversationRuns(res, server, url));
+    }
+    if (path.startsWith("/settings/workflows/")) {
+      const parts = path.slice("/settings/workflows/".length).split("/").map(segment);
+      if (parts.length === 2)
+        return void (await handleWorkflowGet(res, server, parts[0]!, parts[1]!));
+    }
+    if (path.startsWith("/settings/workflow-runs/")) {
+      const parts = path.slice("/settings/workflow-runs/".length).split("/").map(segment);
+      // [runId, kind, …] — events | artifacts | artifacts/{id}/data |
+      // artifacts/{id}/read | workspace | nodes/{siteId}/{ordinal}
+      if (parts.length === 2 && parts[1] === "events") {
+        return void (await handleRunEvents(res, server, url, parts[0]!));
+      }
+      if (parts.length === 2 && parts[1] === "artifacts") {
+        return void (await handleRunArtifacts(res, server, url, parts[0]!));
+      }
+      if (parts.length === 4 && parts[1] === "artifacts" && parts[3] === "data") {
+        return void (await handleRunArtifactData(res, server, url, parts[0]!, parts[2]!));
+      }
+      if (parts.length === 4 && parts[1] === "artifacts" && parts[3] === "read") {
+        return void (await handleRunArtifactRead(res, server, url, parts[0]!, parts[2]!));
+      }
+      if (parts.length === 2 && parts[1] === "workspace") {
+        return void (await handleRunWorkspace(res, server, url, parts[0]!));
+      }
+      if (parts.length === 4 && parts[1] === "nodes") {
+        return void (await handleRunNodeResult(res, server, url, parts[0]!, parts[2]!, parts[3]!));
+      }
+    }
     return sendError(res, 404, "not found");
   }
 
@@ -386,6 +447,49 @@ async function route(
     if (method === "POST" && path === "/settings/app-update/install") {
       return void (await handleAppUpdateInstall(res, body));
     }
+    // ---- dynamic-workflow management (writes) ----
+    if (method === "PUT" && path.startsWith("/settings/workflows/") && path.endsWith("/meta")) {
+      const rest = path.slice("/settings/workflows/".length, -"/meta".length);
+      const parts = rest.split("/").map(segment);
+      if (parts.length !== 2) {
+        return sendError(res, 400, "expected /settings/workflows/{scope}/{name}/meta");
+      }
+      return void (await handleWorkflowMeta(res, server, parts[0]!, parts[1]!, body));
+    }
+    if (method === "DELETE" && path.startsWith("/settings/workflows/")) {
+      const parts = path.slice("/settings/workflows/".length).split("/").map(segment);
+      if (parts.length !== 2) {
+        return sendError(res, 400, "expected /settings/workflows/{scope}/{name}");
+      }
+      return void (await handleWorkflowDelete(res, server, parts[0]!, parts[1]!));
+    }
+    if (method === "POST" && path.startsWith("/settings/workflows/") && path.endsWith("/move")) {
+      const rest = path.slice("/settings/workflows/".length, -"/move".length);
+      const parts = rest.split("/").map(segment);
+      if (parts.length !== 2) {
+        return sendError(res, 400, "expected /settings/workflows/{scope}/{name}/move");
+      }
+      return void (await handleWorkflowMove(res, server, parts[0]!, parts[1]!));
+    }
+    if (method === "POST" && path.startsWith("/settings/workflows/") && path.endsWith("/start")) {
+      const rest = path.slice("/settings/workflows/".length, -"/start".length);
+      const parts = rest.split("/").map(segment);
+      if (parts.length !== 2) {
+        return sendError(res, 400, "expected /settings/workflows/{scope}/{name}/start");
+      }
+      return void (await handleWorkflowStart(res, server, parts[0]!, parts[1]!, body));
+    }
+    if (
+      method === "POST" &&
+      path.startsWith("/settings/workflow-runs/") &&
+      path.endsWith("/resume")
+    ) {
+      const runId = segment(path.slice("/settings/workflow-runs/".length, -"/resume".length));
+      if (!runId || runId.includes("/")) {
+        return sendError(res, 400, "expected /settings/workflow-runs/{runId}/resume");
+      }
+      return void (await handleWorkflowResume(res, server, runId, body));
+    }
     return sendError(res, 404, "not found");
   }
 
@@ -446,7 +550,7 @@ async function handlePendingRestart(
 
 // ---------- reads ----------
 
-async function handleAll(res: ServerResponse): Promise<void> {
+async function handleAll(res: ServerResponse, server: ZcodeAcpServer | null): Promise<void> {
   // Local config files are the environment: a failure here means the machine's
   // ZCode install is broken, so the whole request fails rather than returning a
   // half-populated screen.
@@ -483,7 +587,33 @@ async function handleAll(res: ServerResponse): Promise<void> {
   // do. The client gets eligibility only, and calls
   // `GET /settings/reset-cards?providerId=…` for the cards themselves.
   const resetCards = await resetCardEligibility();
-  sendJson(res, 200, { ok: true, models, skills, mcp, hooks, agents, usage, resetCards });
+  // Workflow gate: an independent degrade like usage — the machine-level mount
+  // has no backend (and so no gate) and reports `{available:false}`; a mount
+  // with a bridge reports the pinned verdict for its current backend.
+  const workflow = server ? await readWorkflowGateBlock(server) : { available: false as const };
+  sendJson(res, 200, { ok: true, models, skills, mcp, hooks, agents, usage, resetCards, workflow });
+}
+
+/**
+ * The gate verdict for `/settings/all`, folded to the disabled default on any
+ * failure. A bridge whose backend was never spawned (App-only flow) gets one
+ * here: ensureBackend starts the gate fetch, so the snapshot reports the real
+ * verdict instead of a false disabled.
+ */
+async function readWorkflowGateBlock(server: ZcodeAcpServer): Promise<{
+  enabled: boolean;
+  mode: string;
+  source: string;
+}> {
+  try {
+    if (!server.backendWorkflowGate) {
+      await server.ensureBackend().catch((): undefined => undefined);
+    }
+    const gate = server.backendWorkflowGate ? await server.backendWorkflowGate : null;
+    return gate ?? { enabled: false, mode: "unknown", source: "default" };
+  } catch {
+    return { enabled: false, mode: "unknown", source: "default" };
+  }
 }
 
 /**
@@ -1082,6 +1212,364 @@ async function handleBackendRestart(
   // the flag stays armed and the client is told to retry.
   if (closed) pendingRestartWrites = 0;
   sendJson(res, 200, { ok: true, cancelledTurns: cancelled, closed });
+}
+
+// ---------- dynamic-workflow management (plan §7, per-instance routes) ----------
+//
+// These routes proxy the backend's saved-workflow + run surfaces and are
+// PER-INSTANCE by construction: the bridge loopback serves them directly and
+// the hub re-serves them through the per-instance proxy
+// (`/api/instances/{id}/settings/…`, already covered by the hub's settings
+// wildcard). The hub's machine-level mount has no backend and no gate, so it
+// answers 409 pointing at the per-instance spelling (the pending-restart
+// precedent). Every handler also enforces the workflow gate: the upstream v4
+// start/resume commands are NOT policy-gated backend-side, so the bridge
+// guards with 403 workflow_disabled itself.
+
+/**
+ * Run one workflow handler with the mount + gate + error translation applied.
+ * Module errors carry their own HTTP code (`WorkflowApiError.code`) and a
+ * short `reason` token; anything else is an internal error, never a silent 200.
+ */
+async function workflowGuard(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  fn: (server: ZcodeAcpServer) => Promise<OkBody>,
+): Promise<void> {
+  if (!server) {
+    sendError(
+      res,
+      409,
+      "workflow routes are per-bridge — use /api/instances/{id}/settings/workflows",
+    );
+    return;
+  }
+  try {
+    sendJson(res, 200, await fn(server));
+  } catch (error) {
+    if (error instanceof WorkflowApiError) {
+      sendJson(res, error.code, {
+        ok: false as const,
+        error: error.reason,
+        ...(error.message !== error.reason ? { message: error.message } : {}),
+      });
+      return;
+    }
+    warn(
+      `settings: workflow route failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    if (!res.writableEnded) sendError(res, 500, "internal error");
+  }
+}
+
+/** Validate a scope value from a path segment or query parameter. */
+function requireWorkflowScope(raw: string): WorkflowScope {
+  if (raw === "project" || raw === "global") return raw;
+  throw new WorkflowApiError(400, "invalid_scope", "scope must be one of project, global");
+}
+
+/** Read an optional integer query parameter; a non-integer is a 400. */
+function intQuery(url: URL, key: string): number | undefined {
+  const raw = url.searchParams.get(key);
+  if (raw === null || raw === "") return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n)) {
+    throw new WorkflowApiError(400, "invalid_query", `${key} must be an integer`);
+  }
+  return n;
+}
+
+/** Optional integer query parameter that must be ≥ 0 when present (a cursor). */
+function nonNegativeIntQuery(url: URL, key: string): number | undefined {
+  const n = intQuery(url, key);
+  if (n !== undefined && n < 0) {
+    throw new WorkflowApiError(400, "invalid_query", `${key} must not be negative`);
+  }
+  return n;
+}
+
+/** Read a REQUIRED integer query parameter (≥ 0 unless `positive`). */
+function requiredIntQuery(url: URL, key: string): number {
+  const n = intQuery(url, key);
+  if (n === undefined) {
+    throw new WorkflowApiError(400, "invalid_query", `${key} is required and must be an integer`);
+  }
+  if (n < 0) {
+    throw new WorkflowApiError(400, "invalid_query", `${key} must not be negative`);
+  }
+  return n;
+}
+
+async function handleWorkflowList(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+): Promise<void> {
+  const scopeRaw = url.searchParams.get("scope");
+  await workflowGuard(res, server, async (srv) => {
+    const scope = scopeRaw ? requireWorkflowScope(scopeRaw) : undefined;
+    return { ok: true as const, ...(await listWorkflows(srv, scope)) };
+  });
+}
+
+async function handleWorkflowGet(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  scopeRaw: string,
+  name: string,
+): Promise<void> {
+  await workflowGuard(res, server, async (srv) => {
+    const scope = requireWorkflowScope(scopeRaw);
+    return { ok: true as const, ...(await getWorkflow(srv, scope, name)) };
+  });
+}
+
+async function handleWorkflowMeta(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  scopeRaw: string,
+  name: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  await workflowGuard(res, server, async (srv) => {
+    const scope = requireWorkflowScope(scopeRaw);
+    return { ok: true as const, ...(await updateWorkflowMeta(srv, scope, name, body)) };
+  });
+}
+
+async function handleWorkflowDelete(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  scopeRaw: string,
+  name: string,
+): Promise<void> {
+  await workflowGuard(res, server, async (srv) => {
+    const scope = requireWorkflowScope(scopeRaw);
+    return { ok: true as const, ...(await deleteWorkflow(srv, scope, name)) };
+  });
+}
+
+/**
+ * Move a saved workflow global→project (the only direction the backend
+ * supports; promoting the other way goes through SaveWorkflow in a session).
+ */
+async function handleWorkflowMove(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  scopeRaw: string,
+  name: string,
+): Promise<void> {
+  await workflowGuard(res, server, async (srv) => {
+    const scope = requireWorkflowScope(scopeRaw);
+    return { ok: true as const, ...(await moveWorkflow(srv, scope, name)) };
+  });
+}
+
+async function handleWorkflowRuns(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+): Promise<void> {
+  const scopeRaw = url.searchParams.get("scope");
+  const name = url.searchParams.get("name") ?? undefined;
+  await workflowGuard(res, server, async (srv) => {
+    // intQuery runs INSIDE the guard so a malformed value answers 400, not
+    // the route-level 500 (the handleRunArtifactRead pattern).
+    const limit = intQuery(url, "limit");
+    const scope = scopeRaw ? requireWorkflowScope(scopeRaw) : undefined;
+    return { ok: true as const, ...(await listRuns(srv, { scope, name, limit })) };
+  });
+}
+
+/** List a session's runs incl. the `resumable` flag (the resume button's source). */
+async function handleConversationRuns(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    const limit = intQuery(url, "limit");
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    return { ok: true as const, ...(await conversationRuns(srv, zcodeSid, limit)) };
+  });
+}
+
+async function handleRunEvents(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    const afterSequence = nonNegativeIntQuery(url, "afterSequence");
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    return {
+      ok: true as const,
+      ...(await runEvents(srv, zcodeSid, runId, afterSequence)),
+    };
+  });
+}
+
+async function handleRunArtifacts(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    return { ok: true as const, ...(await runArtifacts(srv, zcodeSid, runId)) };
+  });
+}
+
+async function handleRunArtifactData(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+  artifactId: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    const afterSequence = nonNegativeIntQuery(url, "afterSequence");
+    const limit = intQuery(url, "limit");
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    return {
+      ok: true as const,
+      ...(await runArtifactData(srv, zcodeSid, runId, artifactId, afterSequence, limit)),
+    };
+  });
+}
+
+async function handleRunArtifactRead(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+  artifactId: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    const version = requiredIntQuery(url, "version");
+    const offset = requiredIntQuery(url, "offset");
+    const limit = intQuery(url, "limit");
+    return {
+      ok: true as const,
+      ...(await runArtifactRead(srv, zcodeSid, runId, artifactId, version, offset, limit)),
+    };
+  });
+}
+
+async function handleRunWorkspace(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    return { ok: true as const, ...(await runWorkspace(srv, zcodeSid, runId)) };
+  });
+}
+
+async function handleRunNodeResult(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+  runId: string,
+  siteId: string,
+  ordinalRaw: string,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    const zcodeSid = resolveWorkflowZcodeSid(srv, sessionId);
+    const ordinal = Number(ordinalRaw);
+    if (!Number.isInteger(ordinal) || ordinal < 0) {
+      throw new WorkflowApiError(400, "invalid_query", "ordinal must be a non-negative integer");
+    }
+    return { ok: true as const, ...(await runNodeResult(srv, zcodeSid, runId, siteId, ordinal)) };
+  });
+}
+
+/**
+ * Launch a saved workflow. No `sessionId` → the bridge creates a session the
+ * App can see and attach to; with `sessionId` → launches in that (idle)
+ * session. The response carries `acpSessionId` + the ack's `runId`/
+ * `toolCallId` so the client can join its progress card immediately.
+ */
+async function handleWorkflowStart(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  scopeRaw: string,
+  name: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const args = body["args"];
+  const sessionId = str(body, "sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    const scope = requireWorkflowScope(scopeRaw);
+    if (args !== undefined && (typeof args !== "object" || args === null || Array.isArray(args))) {
+      throw new WorkflowApiError(400, "invalid_request", "args must be a JSON object");
+    }
+    const started = await startSavedWorkflow(srv, {
+      scope,
+      name,
+      ...(sessionId ? { acpSessionId: sessionId } : {}),
+      ...(args !== undefined ? { args: args as Record<string, unknown> } : {}),
+    });
+    return { ok: true as const, ...started };
+  });
+}
+
+/** Resume a stopped run in the caller-named session. */
+async function handleWorkflowResume(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  runId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const sessionId = str(body, "sessionId");
+  const name = str(body, "name");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) {
+      throw new WorkflowApiError(400, "invalid_request", "sessionId is required");
+    }
+    await resumeWorkflowRun(srv, {
+      runId,
+      acpSessionId: sessionId,
+      ...(name ? { name } : {}),
+    });
+    return { ok: true as const };
+  });
+}
+
+/**
+ * The desktop's prefilled "create via conversation" prompt — the App puts
+ * this in the composer draft; it is prefill only, never auto-sent.
+ */
+async function handleWorkflowCreatePrompt(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  url: URL,
+): Promise<void> {
+  const scopeRaw = url.searchParams.get("scope");
+  await workflowGuard(res, server, async (srv) => {
+    await requireWorkflowEnabled(srv);
+    const scope = scopeRaw ? requireWorkflowScope(scopeRaw) : undefined;
+    return { ok: true as const, prompt: workflowCreatePrompt(scope) };
+  });
 }
 
 // ---------- app update (ZCode desktop) ----------

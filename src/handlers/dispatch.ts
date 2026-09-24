@@ -189,6 +189,10 @@ function dispatchToolCallNew(
   if (termSupported) meta["terminal_info"] = { terminal_id: ev.callId };
   // Mark sub-agent dispatch cards so editors can badge them from creation.
   if (ev.tool === "Agent" || ev.tool === "Task") meta["subagent"] = true;
+  // Workflow-run visibility feed: the background-task listener suppresses a
+  // workflow run's [background] card only when the CreateWorkflow card for
+  // this callId actually reached clients.
+  server.noteDispatchedToolCall(ev.callId, ev.callId);
 
   const update: acp.SessionUpdate = {
     sessionUpdate: "tool_call",

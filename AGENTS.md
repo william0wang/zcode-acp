@@ -10,9 +10,10 @@ methods and streams events back as ACP `session/update` notifications.
 ## ZCode upstream source (open-sourced 2026-09)
 
 ZCode went open source (Apache-2.0): a local checkout lives at
-`~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; downloaded at
-desktop 3.14.0 = app-server/`apps/zcode-cli` 0.16.9 — same version the bridge
-runs today). The agent runtime is under `apps/zcode-cli/packages/core/`;
+`~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; synced to
+desktop 3.14.3 = app-server/`apps/zcode-cli` 0.16.9 — same version the bridge
+runs today; the 3.14.3 release was workflow-internal only, see
+docs/BACKLOG.md). The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
 probing or reverse-engineering the bundled CLI** — every "verified against
 app-server" note in Gotchas below predates it and now has an authoritative
@@ -660,6 +661,28 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   call site (see `handlers/server-requests.ts`) when sending server→client
   requests; the SDK types also require the `toolCall` field on permission
   requests (Zed renders the popup against it).
+- **Dynamic workflow availability is the REMOTE verdict — there is no
+  bridge-side switch** (ADR-0029, 2026-09-24): the bridge mirrors the desktop
+  host by anonymously fetching `/api/v1/client/configs`
+  (`dynamicWorkflow.mode`, fail-closed) once per backend spawn
+  (`server.backendWorkflowGate`, `src/config/workflow-gate.ts`) and enabling
+  via the dual channel (policy push + `dynamicWorkflowEnabled` on every
+  create/resume — the `session/requestRuntimePreferences` schema still cannot
+  carry the flag). Do NOT add a config/env toggle: the desktop has none
+  (production strips the env override), and a second decision source would
+  drift from the grad system. Wire facts that bite: v3 STRIPS
+  `dynamic_workflow_run_progress` (`session-mapper.ts:366-373`) — per-actor
+  progress only exists via `v4/conversation/workflowRunEvents` (the poller,
+  `src/workflow/poller.ts`, armed by `taskKind:"workflow"` background tasks;
+  `taskId ≡ runId`); the v4 start/resume commands are gated ONLY on the
+  journal port, NOT on the policy — every settings route re-checks the gate
+  (403 `workflow_disabled`) and launch consent IS the API call (upstream
+  skips the permission popup for hub clicks); `/workflow` is a pure prompt
+  expansion the backend applies on `session/send` (bridge passes it through
+  when enabled); `computer-use/operation-event` is the CUA channel, never a
+  workflow channel. Launch creates a REAL registered session
+  (`{acpSessionId, runId, toolCallId}`) and closes it only when the bridge
+  itself created it and the ack was not accepted.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish

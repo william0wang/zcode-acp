@@ -24,6 +24,7 @@ import process from "node:process";
 
 import type { ZcodeAcpServer } from "../server.js";
 import { log } from "../utils.js";
+import { stopPollersForSession } from "../workflow/poller.js";
 
 function sendText(res: ServerResponse, code: number, message: string): void {
   if (res.writableEnded) return;
@@ -165,6 +166,10 @@ async function handleClose(
   }
   server.sessionSummaries.delete(sessionId);
   server.remoteCreatedSessions.delete(sessionId);
+  // Workflow-run progress pollers address this session's journal — stop them
+  // with the teardown (best-effort, never throws) instead of letting them run
+  // to the hard cap for a conversation nothing else references anymore.
+  if (zcodeSid) stopPollersForSession(zcodeSid);
   // Evict the backend's resident runtime so the conversation truly stops (no
   // background turn keeps it alive); the session file stays on disk and
   // session/list / a later resume still work. Best-effort — a bridge with no

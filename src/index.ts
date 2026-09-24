@@ -42,6 +42,7 @@ import { loadEarlier } from "./handlers/replay.js";
 import { resendPendingInteractions } from "./handlers/server-requests.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
+import { filterWorkflowCommands } from "./config/workflow-gate.js";
 import { trackConnections } from "./remote/broadcast.js";
 import { parseRemoteConfig } from "./remote/config.js";
 import { startRemoteEndpoint, type RemoteEndpointHandle } from "./remote/endpoint.js";
@@ -165,7 +166,11 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/new", async (ctx) => {
         const result = await newSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(result.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
+          sendAvailableCommandsDeferred(
+            server.clients,
+            sid,
+            filterWorkflowCommands(server, allCommands),
+          );
         }
         return result;
       })
@@ -179,7 +184,11 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
         // updates keep fanning out via prompt()'s broadcast cx.
         const result = await resumeSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
+          sendAvailableCommandsDeferred(
+            server.clients,
+            sid,
+            filterWorkflowCommands(server, allCommands),
+          );
         }
         // A client that (re)connects catches up via resume/load; any interaction
         // request still waiting for an answer is re-sent to it so a question
@@ -191,7 +200,11 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
         // Targeted replay — see the session/resume comment above.
         const result = await loadSession(server, ctx.params, ctx.client);
         for (const sid of server.sessionAliases(ctx.params.sessionId)) {
-          sendAvailableCommandsDeferred(server.clients, sid, allCommands);
+          sendAvailableCommandsDeferred(
+            server.clients,
+            sid,
+            filterWorkflowCommands(server, allCommands),
+          );
         }
         resendPendingInteractions(server, ctx.client, ctx.params.sessionId);
         return result;

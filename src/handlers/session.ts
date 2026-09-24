@@ -48,6 +48,7 @@ import { buildProviderRegistry } from "../config/provider-registry.js";
 import { pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
+import { rememberGate } from "../config/workflow-gate.js";
 import { messages } from "../i18n.js";
 import {
   lookupLazySession,
@@ -95,6 +96,50 @@ import { handleServerRequests } from "./server-requests.js";
 function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: string } {
   const p = cwd || process.cwd();
   return { workspacePath: p, workspaceKey: p };
+}
+
+/**
+ * Dynamic-workflow session flag (desktop-host parity, server.backendWorkflowGate):
+ * `{dynamicWorkflowEnabled:true}` rides every session/create·resume when the
+ * gate resolved enabled; otherwise NOTHING is written — the backend's zod
+ * schemas are strict, and the flag-absent default is exactly fail-closed.
+ * Awaiting the gate on the hot path is free (the verdict resolved at backend
+ * spawn); the cold-path bound is the gate fetch's 6s timeout, well under a
+ * backend boot. Fork and sub-agent sessions copy the flag inside the backend
+ * — no bridge-side injection point for those.
+ */
+async function workflowFlag(
+  server: ZcodeAcpServer,
+): Promise<{ dynamicWorkflowEnabled: true } | Record<string, never>> {
+  const promise = server.backendWorkflowGate;
+  if (!promise) return {};
+  const gate = await promise;
+  // Belt-and-braces vs captureGate (ensureBackend): an awaited verdict becomes
+  // synchronously readable immediately, so the send-time menu filter that runs
+  // right after create/resume sees it on its FIRST call.
+  rememberGate(promise, gate);
+  return gate.enabled ? { dynamicWorkflowEnabled: true } : {};
+}
+
+/**
+ * Shared `session/resume` params builder: {sessionId, workspace} + optional
+ * session-lifetime mcpServers + the conditional dynamic-workflow flag. Every
+ * resume construction site (session/resume, /resume adoption, session/load,
+ * eviction/respawn reload) goes through here so the param shape cannot drift.
+ */
+async function resumeParams(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  cwd: string,
+  mcpServers?: acp.McpServer[],
+): Promise<Record<string, unknown>> {
+  const params: Record<string, unknown> = {
+    sessionId: zcodeSid,
+    workspace: workspaceFor(cwd),
+    ...(await workflowFlag(server)),
+  };
+  if (mcpServers) params.mcpServers = mcpServers;
+  return params;
 }
 
 /**
@@ -648,6 +693,9 @@ export async function ensureRealSession(
       // ZCODE_ACP_MODE; the default stays "yolo" (unrestricted), which is
       // what the bridge always used.
       mode: initialSessionMode(),
+      // Dynamic-workflow enable rides create only when the gate says so —
+      // workflowFlag writes nothing otherwise (strict zod).
+      ...(await workflowFlag(server)),
     };
     if (pending.mcpServers && pending.mcpServers.length > 0) {
       createParams.mcpServers = pending.mcpServers;
@@ -943,17 +991,17 @@ export async function resumeSession(
     // the faithful resume fails outright). The params deliberately carry NO
     // apiKey either (the backend's schema rejects it; it resolves auth from
     // its own config/OAuth store).
-    const zcParams: Record<string, unknown> = {
-      sessionId: zcodeSid,
-      workspace: workspaceFor(cwd),
-    };
     // ACP session/resume may also carry mcpServers; the backend's resume
     // schema accepts the same array shape (verified: an unknown key would be
     // rejected before the session lookup). Remembered as session-lifetime
     // state so later reloads keep re-sending them (#193).
     rememberSessionMcpServers(server, acpSid, params.mcpServers);
-    const storedMcp = server.sessionMcpServers.get(acpSid);
-    if (storedMcp) zcParams.mcpServers = storedMcp;
+    const zcParams = await resumeParams(
+      server,
+      zcodeSid,
+      cwd,
+      server.sessionMcpServers.get(acpSid),
+    );
     // Push the provider registry BEFORE resume: a resumed session may carry a
     // third-party model in its history, and the backend needs the provider
     // registered to even process the resume turn.
@@ -1092,14 +1140,11 @@ export async function resumeIntoSession(
   let settledHistory: ZcodeMessage[] | undefined;
   try {
     await syncProviderRegistry(server, cwd);
-    const outcome = await resumePreservingModel(server, {
-      sessionId: zcodeTarget,
-      workspace: workspaceFor(cwd),
+    const outcome = await resumePreservingModel(
+      server,
       // Session-lifetime MCP set keeps riding every resume (#193).
-      ...(server.sessionMcpServers.get(acpSid)
-        ? { mcpServers: server.sessionMcpServers.get(acpSid) }
-        : {}),
-    });
+      await resumeParams(server, zcodeTarget, cwd, server.sessionMcpServers.get(acpSid)),
+    );
     settledHistory = outcome.history;
     server.markBackendLoaded(acpSid);
     await repairUnavailableModel(server, zcodeTarget);
@@ -1180,15 +1225,15 @@ export async function loadSession(
   let settledHistory: ZcodeMessage[] | undefined;
 
   if (!alreadyLive) {
-    const zcParams: Record<string, unknown> = {
-      sessionId: zcodeSid,
-      workspace: workspaceFor(cwd),
-    };
     // Same mcpServers contract as resume: the client may re-declare them on
     // load; a stored set keeps riding along when it doesn't (#193).
     rememberSessionMcpServers(server, acpSid, params.mcpServers);
-    const storedMcp = server.sessionMcpServers.get(acpSid);
-    if (storedMcp) zcParams.mcpServers = storedMcp;
+    const zcParams = await resumeParams(
+      server,
+      zcodeSid,
+      cwd,
+      server.sessionMcpServers.get(acpSid),
+    );
     // Push the provider registry BEFORE resume: a loaded session may carry a
     // third-party model in its history, and the backend needs the provider
     // registered to process it.
@@ -2853,17 +2898,13 @@ export async function reloadBackendSession(
   zcodeSid: string,
 ): Promise<void> {
   const cwd = server.sessionCwds.get(acpSid) ?? process.cwd();
-  const zcParams: Record<string, unknown> = {
-    sessionId: zcodeSid,
-    workspace: workspaceFor(cwd),
-  };
   // Eviction/respawn reload: the backend lost the per-load mcpServers runtime
   // config with its resident session — re-send or the tools vanish (#193).
   const reloadMcp = server.sessionMcpServers.get(acpSid);
   if (reloadMcp) {
-    zcParams.mcpServers = reloadMcp;
     log(`session/resume (reload) carrying ${reloadMcp.length} client MCP server(s)`);
   }
+  const zcParams = await resumeParams(server, zcodeSid, cwd, reloadMcp);
   // Same pre-resume steps as the ACP resume/load handlers: register the
   // provider registry (a resumed session's history references a model the
   // fresh backend can't process until its provider is registered — sends

@@ -60,6 +60,7 @@ vi.mock("node:fs", async () => {
 
 // Import after mocks.
 import { loadPluginCommands } from "../src/config/plugin-commands.js";
+import { messages } from "../src/i18n.js";
 import { handleSlashCommand } from "../src/handlers/slash.js";
 
 function resetMocks(): void {
@@ -369,11 +370,19 @@ describe("handleSlashCommand — unsupported TUI commands", () => {
     expect(result?.stopReason).toBe("end_turn");
   });
 
-  it("returns friendly error for /workflow", async () => {
-    const { cx } = mockContext();
+  it("intercepts /workflow with the gated disabled notice (no gate resolved)", async () => {
+    // /workflow left the TUI-only set: it is gated by the dynamic-workflow
+    // verdict instead. With no gate resolved (backend never spawned) the
+    // fail-closed branch intercepts with workflowDisabled — still an `ok`
+    // interception, never raw text to the model.
+    const { cx, sent } = mockContext();
     const server = makeServer();
     const result = await handleSlashCommand(server, cx, SID, SID, "/workflow");
     expect(result?.stopReason).toBe("end_turn");
+    expect(sent).toHaveLength(1);
+    const chunk = sent[0] as { sessionUpdate: string; content: { text: string } };
+    expect(chunk.sessionUpdate).toBe("agent_message_chunk");
+    expect(chunk.content.text).toBe(messages().workflowDisabled);
   });
 });
 

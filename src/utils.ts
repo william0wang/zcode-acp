@@ -150,6 +150,14 @@ export const SLASH_COMMANDS = [
   { name: "resume", description: "Resume a past session into this thread (picker popup)" },
   { name: "mcp", description: "List available MCP servers" },
   { name: "init", description: "Create or update workspace AGENTS.md instructions" },
+  // Gated commands (dynamic-workflow verdict): advertised only when the gate
+  // is enabled — index.ts filters them out at every send site.
+  {
+    name: "workflow",
+    description: "Describe a dynamic multi-step workflow for the model to run",
+    input: { hint: "<workflow description>" },
+  },
+  { name: "workflows", description: "List saved workflows and recent runs" },
 ] as const;
 
 /** Static metadata for the configOptions selects (model/mode/thought). */

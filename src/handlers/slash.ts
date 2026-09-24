@@ -11,8 +11,13 @@
  * `session/send` and the backend resolves them before the model sees them.
  *
  * Commands that require the ZCode TUI (plugins/login/logout/new/resume/
- * locale/expert/workflow/workflows/effort/help) return a friendly error
- * instead of passing raw text to the model (which would confuse it).
+ * locale/expert/effort/help) return a friendly error instead of passing raw
+ * text to the model (which would confuse it).
+ *
+ * `/workflow` and `/workflows` are gated by the dynamic-workflow verdict
+ * (src/config/workflow-gate.ts): disabled/pending → friendly notice; enabled
+ * → the former passes through to the backend's builtin prompt expansion and
+ * the latter renders a local saved-workflows/runs listing.
  *
  * `/mcp` lists all configured MCP servers (from config.json + plugins),
  * showing the user exactly what's available without needing the TUI. When the
@@ -48,9 +53,11 @@ import {
 import { loadPluginCommands } from "../config/plugin-commands.js";
 import { loadSkillCommands } from "../config/skill-discovery.js";
 import { goalModeIsBackend } from "../config/settings.js";
+import { workflowGateNow } from "../config/workflow-gate.js";
 import { messages } from "../i18n.js";
 import { formatQuota, queryQuota } from "../quota/index.js";
 import { CONFIG_DISPATCH, SLASH_COMMANDS, warn } from "../utils.js";
+import type { ZcodeResponse } from "../backend/types.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 import { compact, fork, goal } from "./extensions.js";
@@ -74,6 +81,10 @@ function resumeLabel(
  * UI (selection panels, login flows, etc.). They cannot work in app-server
  * mode, so we return a friendly error instead of passing raw `/cmd` text to
  * the model (which would produce confusing output).
+ *
+ * (`workflow`/`workflows` are NOT here anymore: `/workflow` passes through to
+ * the backend's builtin prompt expansion and `/workflows` is a local listing,
+ * both gated by the dynamic-workflow verdict — see the cases below.)
  */
 const UNSUPPORTED_TUI_COMMANDS = new Set([
   "plugins",
@@ -82,8 +93,6 @@ const UNSUPPORTED_TUI_COMMANDS = new Set([
   "new",
   "locale",
   "expert",
-  "workflow",
-  "workflows",
   "effort",
   "help",
 ]);
@@ -281,6 +290,112 @@ async function fetchMcpStatuses(
   }
 }
 
+/** `/workflows` run-row timestamp: epoch ms → "YYYY-MM-DD HH:mm" (UTC). */
+function runTimestamp(updatedAt: number | undefined): string {
+  if (typeof updatedAt !== "number" || !Number.isFinite(updatedAt)) return "?";
+  return new Date(updatedAt).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/** Fold an allSettled outcome into a response shape (rejection → error resp). */
+function outcomeResponse(outcome: PromiseSettledResult<ZcodeResponse>): ZcodeResponse {
+  if (outcome.status === "fulfilled") return outcome.value;
+  const reason: unknown = outcome.reason;
+  return {
+    id: 0,
+    error: { message: reason instanceof Error ? reason.message : String(reason) },
+  };
+}
+
+/** Per-RPC bound for the `/workflows` listing (parallel — this is the prompt path). */
+const WORKFLOWS_RPC_TIMEOUT_MS = 8000;
+
+/**
+ * `/workflows` body: saved workflows (`workflows/list`) plus recent runs
+ * (`workflows/runs`) — the backend's session-less workspace-level RPCs, so
+ * the listing costs zero model turns. The two calls are INDEPENDENT and run
+ * in parallel (Promise.allSettled, 8s each) so a hung backend stalls the
+ * prompt at most one bound, not two serial ones. Both blocks stay
+ * best-effort: a runs failure appends an error note without hiding the
+ * workflow list, and vice versa. Result shapes per upstream zcode-protocol
+ * (index.ts:2723-2905).
+ */
+async function workflowsListText(server: ZcodeAcpServer, acpSid: string): Promise<string> {
+  const cwd = server.sessionCwds.get(acpSid) ?? server.projectCwd();
+  const workspace = { workspacePath: cwd, workspaceKey: cwd };
+  const backend = await server.ensureBackend();
+  const blocks: string[] = [];
+
+  const [listOutcome, runsOutcome] = await Promise.allSettled([
+    backend.request(server.nextId(), "workflows/list", { workspace }, WORKFLOWS_RPC_TIMEOUT_MS),
+    backend.request(
+      server.nextId(),
+      "workflows/runs",
+      { workspace, limit: 10 },
+      WORKFLOWS_RPC_TIMEOUT_MS,
+    ),
+  ]);
+
+  const listResp = outcomeResponse(listOutcome);
+  if (listResp.error) {
+    blocks.push(`⚠ workflows/list failed: ${listResp.error.message ?? "error"}`);
+  } else {
+    const result = listResp.result as {
+      workflows?: Array<{ name?: unknown; description?: unknown; scope?: unknown }>;
+      invalid?: Array<{ path?: unknown; reason?: unknown }>;
+    } | null;
+    const entries = (result?.workflows ?? []).filter(
+      (w): w is { name: string; description?: unknown; scope?: unknown } =>
+        typeof w?.name === "string" && w.name.length > 0,
+    );
+    const lines = entries.map((w) => {
+      const scope = typeof w.scope === "string" ? ` (${w.scope})` : "";
+      const desc =
+        typeof w.description === "string" && w.description.trim()
+          ? ` — ${w.description.trim()}`
+          : "";
+      return `- ${w.name}${scope}${desc}`;
+    });
+    blocks.push(
+      lines.length > 0
+        ? `Saved workflows (${entries.length}):\n${lines.join("\n")}`
+        : "No saved workflows.",
+    );
+    const invalidCount = result?.invalid?.length ?? 0;
+    if (invalidCount > 0) blocks.push(`(invalid: ${invalidCount})`);
+  }
+
+  const runsResp = outcomeResponse(runsOutcome);
+  if (runsResp.error) {
+    blocks.push(`⚠ workflows/runs failed: ${runsResp.error.message ?? "error"}`);
+  } else {
+    const result = runsResp.result as {
+      runs?: Array<{
+        runId?: unknown;
+        name?: unknown;
+        status?: unknown;
+        updatedAt?: unknown;
+        parentSessionId?: unknown;
+      }>;
+      truncated?: unknown;
+    } | null;
+    const rows = (result?.runs ?? []).map((r) => {
+      const name = typeof r.name === "string" && r.name ? r.name : (r.runId ?? "?");
+      const status = typeof r.status === "string" ? r.status : "?";
+      const when = runTimestamp(typeof r.updatedAt === "number" ? r.updatedAt : undefined);
+      // Parent session hint (short suffix only — raw ids stay out of the UI).
+      const parent =
+        typeof r.parentSessionId === "string" && r.parentSessionId
+          ? ` · from …${r.parentSessionId.slice(-8)}`
+          : "";
+      return `- ${name} · ${status} · ${when}${parent}`;
+    });
+    const more = result?.truncated === true ? " …" : "";
+    blocks.push(rows.length > 0 ? `Recent runs:\n${rows.join("\n")}${more}` : "No recent runs.");
+  }
+
+  return blocks.join("\n\n");
+}
+
 /**
  * Try to intercept a slash command. Returns a PromptResponse when handled, null otherwise.
  *
@@ -474,6 +589,26 @@ export async function handleSlashCommand(
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, cmd);
         if (cmd === "mode") server.lastMode.set(acpSid, arg);
         return ok(`✓ ${cmd} = ${arg}`);
+      }
+      case "workflow": {
+        // Gate first (desktop-host parity, fail-closed): disabled or still
+        // pending → friendly notice instead of passing raw text to the model.
+        if (!workflowGateNow(server)?.enabled) {
+          return ok(messages().workflowDisabled);
+        }
+        // Enabled → PASSTHROUGH: the backend's builtin prompt resolver
+        // expands /workflow on the session/send path (a pure prompt — the
+        // model decides topology and calls CreateWorkflow). Never pre-expand
+        // bridge-side.
+        return null;
+      }
+      case "workflows": {
+        // Local listing (zero model cost): saved workflows + recent runs
+        // straight from the backend's session-less workflows/* RPCs.
+        if (!workflowGateNow(server)?.enabled) {
+          return ok(messages().workflowDisabled);
+        }
+        return ok(await workflowsListText(server, acpSid));
       }
       default:
         // Known passthrough commands (skill/init/plugin commands) → let the

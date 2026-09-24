@@ -30,6 +30,10 @@ export const TOOL_KIND_MAP: Record<string, ToolKind> = {
   // "execute" so the editor shows a generic call card rather than a shell.
   Agent: "other",
   Task: "other",
+  // Dynamic-workflow launch (3.14+): a structured multi-step run, not a shell
+  // call — "other" keeps the generic card the workflow progress poller appends
+  // its tool_call_update lines onto (snapshot path already defaults to other).
+  CreateWorkflow: "other",
 };
 
 /** Max length for single-field title summaries (not Bash command — kept full). */

@@ -18,6 +18,12 @@ import {
   ZcodeBackend,
 } from "./backend/index.js";
 import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
+import {
+  captureGate,
+  pushDynamicWorkflowPolicy,
+  resolveWorkflowGate,
+  type WorkflowGate,
+} from "./config/workflow-gate.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
@@ -25,6 +31,7 @@ import { answerProviderRuntimeHeaders } from "./handlers/server-requests.js";
 import { SessionTitleListener } from "./handlers/session-titles.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { envWithLoginShell } from "./remote/login-shell-env.js";
+import { stopAllWorkflowRunPollers } from "./workflow/poller.js";
 import { AGENT_INFO, clientConnectionRoot, PROTOCOL_VERSION, log, warn } from "./utils.js";
 
 /** Client capabilities advertised in the initialize request. */
@@ -226,6 +233,16 @@ export class ZcodeAcpServer {
    * evidence only — no version sniffing. Reset on backend respawn.
    */
   observedSendBusyReject = false;
+  /**
+   * Dynamic-workflow gate verdict for the CURRENT backend generation
+   * (desktop-host parity, src/config/workflow-gate.ts): an anonymous remote
+   * read resolved ONCE per backend spawn and pinned to that instance — a
+   * server-side mode flip lands at the next respawn. session/create·resume
+   * params await it (workflowFlag in handlers/session.ts); the process-wide
+   * policy push chains off it in ensureBackend. Null before the first spawn
+   * reads as disabled (fail-closed).
+   */
+  backendWorkflowGate: Promise<WorkflowGate> | null = null;
   /**
    * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
    * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
@@ -472,6 +489,15 @@ export class ZcodeAcpServer {
    * short command with no progress, so the result emits output once).
    */
   readonly terminalSentData = new Map<string, string>();
+  /**
+   * Backend toolCallIds whose ACP tool card has been dispatched to clients
+   * (backend callId → acp card id; identical on the live dispatch path). Feeds
+   * the workflow-run guard in BackgroundTaskListener: a workflow background
+   * task folds its progress into the CreateWorkflow card only when that card
+   * is actually visible — otherwise the generic [background] card remains.
+   * Bounded FIFO (old ids age out; callIds are never reused by the backend).
+   */
+  readonly dispatchedToolCalls = new Map<string, string>();
   /** Monotonic id counter; base 10_000_000 to avoid collisions with zcode-originated ids. */
   private msgCounter = 10_000_000;
 
@@ -494,6 +520,20 @@ export class ZcodeAcpServer {
   }
 
   /**
+   * Record that the ACP card for a backend tool call was dispatched (called
+   * from dispatchEvent's ToolCallNew branch). Bounded: when the cap is hit the
+   * oldest id ages out — a workflow run arms its poller within seconds of the
+   * card appearing, so stale entries are irrelevant.
+   */
+  noteDispatchedToolCall(backendCallId: string, acpCallId: string): void {
+    this.dispatchedToolCalls.set(backendCallId, acpCallId);
+    if (this.dispatchedToolCalls.size > 2048) {
+      const oldest = this.dispatchedToolCalls.keys().next().value;
+      if (oldest !== undefined) this.dispatchedToolCalls.delete(oldest);
+    }
+  }
+
+  /**
    * Lazily spawn the zcode backend on first use (initialize doesn't need it).
    * With the sandbox armed (ZCODE_ACP_SANDBOX=1 globally, or any live
    * workspace's .zcode/acp/sandbox.json — ADR-0011), the spawn is wrapped in
@@ -508,6 +548,25 @@ export class ZcodeAcpServer {
    */
   async ensureBackend(): Promise<ZcodeBackend> {
     if (this.backend && !this.backend.isDead) return this.backend;
+    // Dynamic-workflow gate (desktop-host parity): kick the remote verdict off
+    // FIRST so the fetch parallels the login-shell probe and the spawn; the
+    // verdict is pinned to THIS backend generation. The assignment happens
+    // only in this spawn branch (re-entry on a live backend returns above),
+    // so exactly one gate resolution — and one policy push (below) — exists
+    // per backend instance. resolveWorkflowGate is fail-closed by design; the
+    // catch is belt-and-braces so the field can never hold a rejected
+    // promise (create/resume params await it). captureGate attaches the
+    // settled-value collector AT CREATION so the first workflowGateNow read
+    // after settlement sees the verdict (a read-time collector would be one
+    // microtask late — enough to filter the first `/` menu of a session).
+    const workflowGate = captureGate(
+      resolveWorkflowGate().catch((): WorkflowGate => ({
+        mode: "unknown",
+        enabled: false,
+        source: "default",
+      })),
+    );
+    this.backendWorkflowGate = workflowGate;
     // builtinProviderEnv injects the CLI's built-in provider table the way the
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
     // zcodeDataBaseDirEnv translates the bridge's ZCODE_HOME into the CLI's
@@ -558,6 +617,16 @@ export class ZcodeAcpServer {
     // …and the send-semantics evidence: the respawned process may be an
     // older build that still accepts mid-turn sends as steer.
     this.observedSendBusyReject = false;
+    // First enable channel for an ENABLED gate: push the process-wide
+    // dynamic-workflow policy once, fire-and-forget — never awaited here (the
+    // per-session create/resume flag is the second channel and must not
+    // depend on this flight). A backend that dies before the gate resolves
+    // just fails the push best-effort inside the helper.
+    void workflowGate.then((gate) => {
+      if (gate.enabled) {
+        void pushDynamicWorkflowPolicy(backend, () => this.nextId(), process.cwd());
+      }
+    });
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the
@@ -781,6 +850,9 @@ export class ZcodeAcpServer {
    * in_progress forever (#194). Best-effort; called from shutdown paths.
    */
   async emitBackgroundTaskShutdownRecords(): Promise<void> {
+    // Workflow-run pollers poll the backend — stop them before the pipe
+    // closes (mirrors the listener records below).
+    stopAllWorkflowRunPollers();
     for (const listener of this.backgroundListeners.values()) {
       try {
         await listener.emitShutdownRecords();

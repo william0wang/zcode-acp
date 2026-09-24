@@ -205,6 +205,8 @@ export interface Messages {
   /** Editor slash-command menu: localized descriptions for the static
    *  commands (names and argument hints stay as-is — they are tokens). */
   slashCommandDescriptions: Record<string, string>;
+  /** /workflow · /workflows with the dynamic-workflow gate disabled/pending. */
+  workflowDisabled: string;
   /** Auto-compaction status lines. */
   autoCompactStart: (used: string, threshold: string) => string;
   autoCompactTimeout: string;
@@ -360,7 +362,10 @@ const zh: Messages = {
     resume: "在当前线程接续一个历史会话（弹窗选择）",
     mcp: "列出可用的 MCP 服务器",
     init: "创建或更新工作区 AGENTS.md 指令",
+    workflow: "描述一个动态多步工作流，交给模型执行",
+    workflows: "列出已保存的工作流与最近的运行",
   },
+  workflowDisabled: "⚠ 工作流功能当前未开放",
   autoCompactStart: (used, threshold) =>
     `🔄 自动压缩: 上下文用量 ${used} ≥ 阈值 ${threshold},正在压缩…`,
   autoCompactTimeout: "⚠ 自动压缩超时（300s）——后端可能仍在处理",
@@ -511,7 +516,10 @@ const en: Messages = {
     resume: "Resume a past session into this thread (picker popup)",
     mcp: "List available MCP servers",
     init: "Create or update workspace AGENTS.md instructions",
+    workflow: "Describe a dynamic multi-step workflow for the model to run",
+    workflows: "List saved workflows and recent runs",
   },
+  workflowDisabled: "⚠ Dynamic workflows are not available on this account yet",
   autoCompactStart: (used, threshold) =>
     `🔄 auto-compact: context usage ${used} ≥ threshold ${threshold}, compressing…`,
   autoCompactTimeout: "⚠ auto-compact timed out (300s) — backend may still be processing",
