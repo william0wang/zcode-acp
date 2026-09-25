@@ -10,6 +10,7 @@ export {
   type ServerRequest,
 } from "./adapter.js";
 export { ZcodeBackend } from "./client.js";
+export { JsonRpcChild, type JsonRpcChildOptions } from "./jsonrpc-child.js";
 export { EventStreamListener, TurnMonitor, type NextId } from "./listener.js";
 export { resolveZcodeCommand, builtinProviderEnv, zcodeDataBaseDirEnv } from "./resolve.js";
 export { loadZcodeCredentials, mergeEnvWithCreds, type ZcodeCredentials } from "./credentials.js";

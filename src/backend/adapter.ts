@@ -149,9 +149,7 @@ export interface ServerRequest {
   id: number | string;
   method: string;
   params:
-    | ZcodeInteractionPermissionParams
-    | ZcodeInteractionUserInputParams
-    | Record<string, unknown>;
+    ZcodeInteractionPermissionParams | ZcodeInteractionUserInputParams | Record<string, unknown>;
 }
 
 /** Listener for backend event pushes on a given session. */
