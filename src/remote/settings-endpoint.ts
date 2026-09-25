@@ -24,6 +24,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { backendCapabilities } from "../backend/adapter.js";
 import { loadAllModels } from "../config/options.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
@@ -288,6 +289,24 @@ async function route(
   server: ZcodeAcpServer | null,
 ): Promise<void> {
   const method = req.method ?? "GET";
+
+  // Capability gates (ADR-0023): a backend kind without a surface gets 404 —
+  // the route does not exist for it. The machine-level mount (no server)
+  // proxies per-instance bridges, which enforce their own kind's table.
+  const caps = backendCapabilities(server?.backendKind ?? "zcode");
+  const workflowRoute =
+    path === "/settings/workflows" ||
+    path === "/settings/workflow-create-prompt" ||
+    path === "/settings/workflow-runs" ||
+    path.startsWith("/settings/workflows/") ||
+    path.startsWith("/settings/workflow-runs/");
+  if (workflowRoute && !caps.workflowRoutes) return sendError(res, 404, "not found");
+  if (path === "/settings/backend/restart" && !caps.backendRestart) {
+    return sendError(res, 404, "not found");
+  }
+  if (!workflowRoute && path !== "/settings/backend/restart" && !caps.settings) {
+    return sendError(res, 404, "not found");
+  }
 
   // ---- reads ----
   if (method === "GET") {

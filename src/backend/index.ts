@@ -1,6 +1,15 @@
 /** Backend layer barrel: ZCode subprocess client + listener + resolve + credentials. */
 
-export { ZcodeBackend, type ServerRequest, type EventListener } from "./client.js";
+export {
+  backendCapabilities,
+  type BackendAdapter,
+  type BackendCapabilities,
+  type BackendKind,
+  type EventListener,
+  parseBackendKind,
+  type ServerRequest,
+} from "./adapter.js";
+export { ZcodeBackend } from "./client.js";
 export { EventStreamListener, TurnMonitor, type NextId } from "./listener.js";
 export { resolveZcodeCommand, builtinProviderEnv, zcodeDataBaseDirEnv } from "./resolve.js";
 export { loadZcodeCredentials, mergeEnvWithCreds, type ZcodeCredentials } from "./credentials.js";

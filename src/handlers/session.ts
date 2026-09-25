@@ -18,6 +18,7 @@ import { realpathSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
+import { backendCapabilities } from "../backend/adapter.js";
 import type { ZcodeBackend } from "../backend/client.js";
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
 import { resolveReal } from "../backend/sandbox.js";
@@ -364,7 +365,10 @@ export async function newSession(
   // connection is martty. Identity is per-connection — recorded at the
   // connection's own initialize (server.ts), never the sticky process flag,
   // so a phone app's session/new must not become a quota-dock target.
-  if (server.marttyConnectionRoots.has(clientConnectionRoot(client))) {
+  if (
+    backendCapabilities(server.backendKind).quota &&
+    server.marttyConnectionRoots.has(clientConnectionRoot(client))
+  ) {
     startQuotaRefresher(server);
   }
   // Hub session-create binding (remote create, ADR-0016): adopt the hub's
@@ -406,7 +410,10 @@ export async function newSession(
     // Per-connection martty identity, NOT the sticky process flag: the phone
     // claims this same bind below, and a sticky-gated arm re-pointed the
     // handshake at the phone — the TUI's trigger then reached the model.
-    if (server.marttyConnectionRoots.has(bindRoot)) {
+    if (
+      backendCapabilities(server.backendKind).bootResumeHandshake &&
+      server.marttyConnectionRoots.has(bindRoot)
+    ) {
       server.bootResumeTriggerConnection = bindRoot;
     }
     const modes = await buildModes(server, null);
@@ -444,7 +451,10 @@ export async function newSession(
       // into its transcript. The chunks sit BEHIND martty's welcome banner
       // until text is submitted — the DSH_TUI_AUTOPROMPT handshake armed
       // below drops the banner for the user.
-      if (server.marttyConnectionRoots.has(clientConnectionRoot(client))) {
+      if (
+        backendCapabilities(server.backendKind).bootResumeHandshake &&
+        server.marttyConnectionRoots.has(clientConnectionRoot(client))
+      ) {
         // Scope the handshake to THIS connection: a phone app attached to the
         // same bridge may prompt during the boot window and must not disarm it.
         // Per-connection martty identity, NOT the sticky process flag — an
@@ -2063,6 +2073,7 @@ async function runPrompt(
     // trigger verbatim is that handshake; a phone typing the same words is
     // real input (marttyConnectionRoots does not contain it) and goes to the
     // model as typed.
+    backendCapabilities(server.backendKind).bootResumeHandshake &&
     server.bootResumeTriggerConnection === null &&
     text === BOOT_RESUME_TRIGGER &&
     server.marttyConnectionRoots.has(promptRoot) &&

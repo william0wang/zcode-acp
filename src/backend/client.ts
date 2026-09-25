@@ -20,31 +20,18 @@ import { createInterface } from "node:readline";
 import process from "node:process";
 
 import { log, warn } from "../utils.js";
-import type {
-  ZcodeEvent,
-  ZcodeInbound,
-  ZcodeInteractionPermissionParams,
-  ZcodeInteractionUserInputParams,
-  ZcodeResponse,
-} from "./types.js";
+import type { EventListener, ServerRequest } from "./adapter.js";
+import type { ZcodeEvent, ZcodeInbound, ZcodeResponse } from "./types.js";
+
+// The generic wire vocabulary (ServerRequest, EventListener) lives in
+// adapter.ts now; re-exported here so existing `backend/client.js` import
+// paths keep working.
+export type { EventListener, ServerRequest } from "./adapter.js";
 
 /** Pending request resolver. Stored under the request id. */
 interface PendingRequest {
   resolve: (resp: ZcodeResponse) => void;
   timer: ReturnType<typeof setTimeout>;
-}
-
-/** A server→client request that we must reply to. */
-export interface ServerRequest {
-  id: number | string;
-  method: string;
-  params:
-    ZcodeInteractionPermissionParams | ZcodeInteractionUserInputParams | Record<string, unknown>;
-}
-
-/** Listener for `session/event` pushes on a given session. */
-export interface EventListener {
-  handleEvent(event: ZcodeEvent): void;
 }
 
 export class ZcodeBackend {

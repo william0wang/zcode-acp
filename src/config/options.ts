@@ -13,6 +13,7 @@
 import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
+import { backendCapabilities } from "../backend/adapter.js";
 import type { ZcodeReadResult } from "../backend/types.js";
 import { recordModelChoice } from "../lazy-sessions.js";
 import {
@@ -613,6 +614,7 @@ export async function buildConfigOptions(
   // Gated on the RECEIVER's connection identity, not process state — a
   // non-martty client must never see the spec-external string option.
   if (
+    backendCapabilities(server.backendKind).quota &&
     server.quotaDock &&
     receiverRoot !== undefined &&
     server.marttyConnectionRoots.has(receiverRoot)
