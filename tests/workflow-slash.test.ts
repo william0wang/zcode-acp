@@ -21,9 +21,28 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { captureGate, filterWorkflowCommands } from "../src/config/workflow-gate.js";
 import { messages } from "../src/i18n.js";
+import { resendMenuAfterGateSettled } from "../src/handlers/session.js";
 import { handleSlashCommand } from "../src/handlers/slash.js";
 import { SLASH_COMMANDS } from "../src/utils.js";
 import { ZcodeAcpServer } from "../src/server.js";
+
+// Menu catch-up recorder: the deferred `/` menu send is captured instead of
+// scheduled (only sendAvailableCommandsDeferred is replaced; everything else
+// in io.js stays real so slash feedback paths are unaffected).
+const menuSends = vi.hoisted(() => [] as Array<{ sid: string; names: string[] }>);
+vi.mock("../src/handlers/io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/handlers/io.js")>();
+  return {
+    ...actual,
+    sendAvailableCommandsDeferred: (
+      _registry: unknown,
+      sid: string,
+      commands: Array<{ name: string }>,
+    ) => {
+      menuSends.push({ sid, names: commands.map((c) => c.name) });
+    },
+  };
+});
 
 // Pin the language: asserted feedback text is compared against messages(),
 // which stays deterministic under the pinned env.
@@ -293,5 +312,48 @@ describe("advertised command menu filter", () => {
     const names = filterWorkflowCommands(server, SLASH_COMMANDS).map((c) => c.name);
     expect(names).not.toContain("workflow");
     expect(names).not.toContain("workflows");
+  });
+});
+
+describe("resendMenuAfterGateSettled (cold-bridge menu catch-up)", () => {
+  it("enabled gate + allCommands → re-sends the filtered menu for the session's aliases", async () => {
+    const server = makeServer();
+    await enableGate(server);
+    server.registerSession(SID, "zsid_wf");
+    server.allCommands = [
+      { name: "workflow", description: "Dynamic workflow" },
+      { name: "workflows", description: "List workflows" },
+      { name: "quota", description: "Quota" },
+    ];
+    menuSends.length = 0;
+
+    resendMenuAfterGateSettled(server, SID);
+
+    const send = menuSends.find((s) => s.sid === SID);
+    expect(send).toBeDefined();
+    expect(send?.names).toEqual(["workflow", "workflows", "quota"]);
+  });
+
+  it("settled DISABLED gate → no send", async () => {
+    const server = makeServer();
+    const gate = captureGate(
+      Promise.resolve({ mode: "disabled", enabled: false, source: "remote" }),
+    );
+    server.backendWorkflowGate = gate;
+    await gate;
+    server.allCommands = [{ name: "workflow", description: "Dynamic workflow" }];
+    menuSends.length = 0;
+
+    resendMenuAfterGateSettled(server, SID);
+    expect(menuSends).toHaveLength(0);
+  });
+
+  it("allCommands unset (null) → no send", async () => {
+    const server = makeServer();
+    await enableGate(server);
+    menuSends.length = 0;
+
+    resendMenuAfterGateSettled(server, SID);
+    expect(menuSends).toHaveLength(0);
   });
 });

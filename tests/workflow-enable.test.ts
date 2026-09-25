@@ -56,6 +56,24 @@ vi.mock("../src/lazy-sessions.js", () => ({
   lookupModelChoiceByZcodeSid: () => undefined,
 }));
 
+// Menu catch-up recorder: the deferred `/` menu re-send (cold-bridge gate
+// catch-up in ensureRealSession) is captured instead of scheduled — the
+// send-time filter output is what the assertions pin.
+const menuSends = vi.hoisted(() => [] as Array<{ sid: string; names: string[] }>);
+vi.mock("../src/handlers/io.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/handlers/io.js")>();
+  return {
+    ...actual,
+    sendAvailableCommandsDeferred: (
+      _registry: unknown,
+      sid: string,
+      commands: Array<{ name: string }>,
+    ) => {
+      menuSends.push({ sid, names: commands.map((c) => c.name) });
+    },
+  };
+});
+
 const GATE_ENABLED = Promise.resolve({
   mode: "alwaysOn" as const,
   enabled: true,
@@ -137,6 +155,37 @@ describe("dynamic-workflow flag injection (gate enabled)", () => {
       workspace: { workspacePath: "/tmp/ws", workspaceKey: "/tmp/ws" },
       dynamicWorkflowEnabled: true,
     });
+  });
+
+  it("materialization re-sends the / menu after the gate settles enabled (cold-bridge catch-up)", async () => {
+    const { server } = makeServer();
+    server.backendWorkflowGate = GATE_ENABLED;
+    server.allCommands = [
+      { name: "workflow", description: "Dynamic workflow" },
+      { name: "workflows", description: "List workflows" },
+      { name: "quota", description: "Quota" },
+    ];
+    server.pendingSessions.set("sess_menu", { cwd: "/tmp/ws" });
+    menuSends.length = 0;
+
+    await expect(ensureRealSession(server, "sess_menu")).resolves.toBe("sess_created_1");
+
+    const send = menuSends.find((s) => s.sid === "sess_menu");
+    expect(send).toBeDefined();
+    expect(send?.names).toContain("workflow");
+    expect(send?.names).toContain("workflows");
+    expect(send?.names).toContain("quota");
+  });
+
+  it("disabled gate → materialization sends no menu catch-up", async () => {
+    const { server } = makeServer();
+    server.backendWorkflowGate = GATE_DISABLED;
+    server.allCommands = [{ name: "workflow", description: "Dynamic workflow" }];
+    server.pendingSessions.set("sess_menu2", { cwd: "/tmp/ws" });
+    menuSends.length = 0;
+
+    await expect(ensureRealSession(server, "sess_menu2")).resolves.toBe("sess_created_1");
+    expect(menuSends).toHaveLength(0);
   });
 
   it("session/resume carries dynamicWorkflowEnabled:true", async () => {

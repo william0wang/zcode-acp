@@ -244,6 +244,14 @@ export class ZcodeAcpServer {
    */
   backendWorkflowGate: Promise<WorkflowGate> | null = null;
   /**
+   * The full slash-command list (set once by buildAgentApp in index.ts).
+   * Read by the gate-aware menu catch-up (resendMenuAfterGateSettled in
+   * handlers/session.ts): a cold bridge's session/new snapshot predates the
+   * workflow verdict, so the materialization path re-sends the menu once the
+   * gate has settled.
+   */
+  allCommands: Array<{ name: string; description: string; input?: { hint: string } }> | null = null;
+  /**
    * Sandbox dynamic-allow state (ADR-0011): realpaths granted for this
    * bridge lifetime ("仅此一次" answers) — folded into the Seatbelt profile
    * on the next backend respawn in ensureBackend().

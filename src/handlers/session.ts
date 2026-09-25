@@ -48,7 +48,7 @@ import { buildProviderRegistry } from "../config/provider-registry.js";
 import { pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
-import { rememberGate } from "../config/workflow-gate.js";
+import { filterWorkflowCommands, rememberGate, workflowGateNow } from "../config/workflow-gate.js";
 import { messages } from "../i18n.js";
 import {
   lookupLazySession,
@@ -70,7 +70,13 @@ import type { InternalEvent } from "../translators/index.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
-import { emitSessionTurnState, sendSessionUpdate, sendTextChunk, withReplayBatch } from "./io.js";
+import {
+  emitSessionTurnState,
+  sendAvailableCommandsDeferred,
+  sendSessionUpdate,
+  sendTextChunk,
+  withReplayBatch,
+} from "./io.js";
 import type { FetchMessagesOptions, ReplaySlice } from "./replay.js";
 import {
   EDIT_DIFF_READ_LIMIT,
@@ -119,6 +125,27 @@ async function workflowFlag(
   // right after create/resume sees it on its FIRST call.
   rememberGate(promise, gate);
   return gate.enabled ? { dynamicWorkflowEnabled: true } : {};
+}
+
+/**
+ * Cold-bridge menu catch-up: the `/` menu snapshot sent at session/new is
+ * filtered against the workflow gate, and on a COLD bridge (lazy session/new,
+ * no backend yet) that snapshot was taken while the gate was still
+ * pending/absent — the two workflow commands get dropped for that whole
+ * session. By the time a lazy session MATERIALIZES the gate has necessarily
+ * settled (create/resume params awaited it), so re-send the menu here.
+ * Overwrite semantics + the deferred helper's timer cancellation make this
+ * idempotent and correctly ordered (a late settle supersedes the stale send).
+ */
+export function resendMenuAfterGateSettled(server: ZcodeAcpServer, acpSid: string): void {
+  if (!server.allCommands || !workflowGateNow(server)?.enabled) return;
+  for (const sid of server.sessionAliases(acpSid)) {
+    sendAvailableCommandsDeferred(
+      server.clients,
+      sid,
+      filterWorkflowCommands(server, server.allCommands),
+    );
+  }
 }
 
 /**
@@ -655,6 +682,9 @@ export async function ensureRealSession(
       if (opts.ensureResident !== false) {
         await ensureBackendResident(server, acpSid, record.zcodeSid);
       }
+      // Materialization (resume flight) settled the gate — refresh a menu
+      // snapshot that may predate the verdict (see resendMenuAfterGateSettled).
+      resendMenuAfterGateSettled(server, acpSid);
       return record.zcodeSid;
     }
     if (record) {
@@ -744,6 +774,9 @@ export async function ensureRealSession(
     recordMaterializedSession(acpSid, sid, pending.cwd);
     log(`session/new ${acpSid} → created ${sid} (lazy, on first use)`);
     await server.ensureBackgroundListener(sid);
+    // Cold-bridge catch-up: the session/new menu snapshot was filtered on a
+    // pending gate; the create above settled it — re-send for this session.
+    resendMenuAfterGateSettled(server, acpSid);
 
     // Sync to the App's tasks-index.sqlite so the App UI shows this session.
     // Best-effort; failures are logged inside upsertSessionTask and swallowed.

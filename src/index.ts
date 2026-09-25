@@ -156,6 +156,9 @@ export async function main(): Promise<void> {
  * one build, two transports.
  */
 function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof buildAllCommands>) {
+  // Exposed for the gate-aware menu catch-up (resendMenuAfterGateSettled in
+  // handlers/session.ts) — a cold bridge's menu snapshot predates the verdict.
+  server.allCommands = allCommands;
   /** Passthrough params parser for the ZCode-specific extension methods. */
   const extParams = z.object({ sessionId: z.string() }).passthrough();
 
