@@ -57,8 +57,10 @@ source evidence (`file:line`), not bundle probes.
 src/
 ├── index.ts              Entry point — wires server to stdio ACP stream
 ├── server.ts             ZcodeAcpServer — shared state + handler registration
-├── backend/              ZCode subprocess client (JSON-RPC over stdio)
-│   ├── client.ts         Spawns + communicates with zcode app-server
+├── backend/              Backend subprocess layer (ADR-0023 BackendAdapter seam)
+│   ├── adapter.ts        BackendKind + capability table (single gate source), BackendAdapter interface
+│   ├── jsonrpc-child.ts  Shared stdio JSON-RPC transport (read-loop mux, watchdog, dialect hooks)
+│   ├── client.ts         ZcodeBackend — zcode dialect (bare frames, arrival responders)
 │   ├── credentials.ts    Reads ~/.zcode/v2/config.json for GLM API key
 │   ├── listener.ts       EventStreamListener — subscribes to session/events
 │   └── types.ts          ZCode protocol types

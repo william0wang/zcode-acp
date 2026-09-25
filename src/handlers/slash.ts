@@ -42,6 +42,7 @@ import { randomUUID } from "node:crypto";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { RequestError } from "@agentclientprotocol/sdk";
+import { backendCapabilities } from "../backend/adapter.js";
 import { applyModelSwitch } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
 import {
@@ -591,9 +592,13 @@ export async function handleSlashCommand(
         return ok(`✓ ${cmd} = ${arg}`);
       }
       case "workflow": {
-        // Gate first (desktop-host parity, fail-closed): disabled or still
-        // pending → friendly notice instead of passing raw text to the model.
-        if (!workflowGateNow(server)?.enabled) {
+        // Gate first (backend capability + desktop-host remote verdict,
+        // fail-closed): unsupported kind, disabled or still pending →
+        // friendly notice instead of passing raw text to the model.
+        if (
+          !backendCapabilities(server.backendKind).workflowCommands ||
+          !workflowGateNow(server)?.enabled
+        ) {
           return ok(messages().workflowDisabled);
         }
         // Enabled → PASSTHROUGH: the backend's builtin prompt resolver
@@ -605,7 +610,10 @@ export async function handleSlashCommand(
       case "workflows": {
         // Local listing (zero model cost): saved workflows + recent runs
         // straight from the backend's session-less workflows/* RPCs.
-        if (!workflowGateNow(server)?.enabled) {
+        if (
+          !backendCapabilities(server.backendKind).workflowCommands ||
+          !workflowGateNow(server)?.enabled
+        ) {
           return ok(messages().workflowDisabled);
         }
         return ok(await workflowsListText(server, acpSid));

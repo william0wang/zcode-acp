@@ -11,6 +11,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import {
   builtinProviderEnv,
+  type BackendKind,
   loadZcodeCredentials,
   mergeEnvWithCreds,
   resolveZcodeCommand,
@@ -107,6 +108,13 @@ export const BACKEND_RESIDENT_TTL_MS = 5 * 60_000;
 export class ZcodeAcpServer {
   /** The ZCode subprocess client (lazy — spawned on first use). */
   backend: ZcodeBackend | null = null;
+  /**
+   * Backend kind this bridge serves (ADR-0023): fixed "zcode" until the dsh
+   * adapter lands (its port wires --backend / ZCODE_ACP_BACKEND selection).
+   * Capability gates read `backendCapabilities(backendKind)` — the single
+   * enforcement point — so flipping the kind flips every gated surface.
+   */
+  readonly backendKind: BackendKind = "zcode";
   /** acp_sid → zcode session id (usually identical, but kept for clarity). */
   readonly sessionMap = new Map<string, string>();
   /**
