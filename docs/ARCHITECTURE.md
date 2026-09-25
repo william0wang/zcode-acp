@@ -153,11 +153,13 @@ API only because the ZCode backend itself sends them for inference.
 
 ### `backend/` — ZCode process communication
 
-| File          | Responsibility                                                                                  |
-| ------------- | ----------------------------------------------------------------------------------------------- |
-| `client.ts`   | Spawn/manage the zcode subprocess, reader-loop, request/response multiplexing, process watchdog |
-| `listener.ts` | EventStreamListener (subscribe/consume the event stream) and TurnMonitor (snapshot polling)     |
-| `types.ts`    | ZCode JSON-RPC message type definitions                                                         |
+| File               | Responsibility                                                                                              |
+| ------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `adapter.ts`       | `BackendAdapter` seam (ADR-0023): `BackendKind`, the capability table (single gate source), wire vocabulary |
+| `jsonrpc-child.ts` | Shared stdio JSON-RPC transport: spawn, reader-loop, request multiplexing, watchdog, dialect hooks          |
+| `client.ts`        | `ZcodeBackend` — the zcode dialect over `JsonRpcChild` (bare frames, arrival responders)                    |
+| `listener.ts`      | EventStreamListener (subscribe/consume the event stream) and TurnMonitor (snapshot polling)                 |
+| `types.ts`         | ZCode JSON-RPC message type definitions                                                                     |
 
 ### `translators/` — Event translation
 
@@ -476,7 +478,7 @@ when the bridge exits cleanly enough for its signal handlers to fire
 crash, OOM), the handler never runs and the zcode subprocess group is
 orphaned.
 
-The watchdog (`backend/client.ts:startWatchdog`) closes that gap. It is a tiny
+The watchdog (`backend/jsonrpc-child.ts:startWatchdog`) closes that gap. It is a tiny
 detached child that polls the bridge pid every 2s and, once the bridge is
 gone, sends SIGKILL to the zcode process group, then exits. It is its own
 process-group leader and `unref`'d, so it never holds the event loop open and
