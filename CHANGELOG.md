@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.0](https://github.com/william0wang/zcode-acp/compare/v0.47.10...v0.48.0) (2026-09-25)
+
+
+### Features
+
+* full dynamic-workflow support with desktop-host-aligned remote gate ([#261](https://github.com/william0wang/zcode-acp/issues/261)) ([6412d0d](https://github.com/william0wang/zcode-acp/commit/6412d0d545bfe81e2d7f582729f8587a383cccd0))
+
 ## [0.47.10](https://github.com/william0wang/zcode-acp/compare/v0.47.9...v0.47.10) (2026-09-23)
 
 
