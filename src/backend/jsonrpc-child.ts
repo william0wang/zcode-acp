@@ -253,11 +253,6 @@ export abstract class JsonRpcChild implements BackendAdapter {
     return false;
   }
 
-  /** Queue a (possibly transformed) server→client request for the interaction layer. */
-  protected pushServerRequest(req: ServerRequest): void {
-    this.serverRequests.push(req);
-  }
-
   /** Adapt an outbound frame to the backend's wire dialect. */
   protected decorateOutbound(msg: Record<string, unknown>): Record<string, unknown> {
     return msg;
@@ -361,6 +356,11 @@ export abstract class JsonRpcChild implements BackendAdapter {
       this.pending.set(id, { resolve, timer });
     });
     try {
+      // Fast-fail a closed pipe BEFORE the pending wait: writeFrame only
+      // warns and drops (fire-and-forget semantics), which would leave this
+      // request hanging until timeoutMs with readerDead unset.
+      const stdin = this.proc.stdin;
+      if (!stdin || stdin.destroyed) throw new Error("stdin closed");
       this.writeFrame({ id, method, params: params ?? {} });
     } catch (e) {
       this.pending.delete(id);
