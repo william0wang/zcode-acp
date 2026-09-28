@@ -7,6 +7,15 @@
 via JSON-RPC over stdio. Translates ACP protocol requests into ZCode session
 methods and streams events back as ACP `session/update` notifications.
 
+## Related project directories (one product family, this machine)
+
+| Path                               | What it is                                                                                                                                                                                                                                               |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `~/Develop/tools/zcode-acp-server` | This bridge — the coordinator                                                                                                                                                                                                                            |
+| `~/Develop/tools/zcode-acp-app`    | The mobile app (npm package `zcode-acp-remote`). Its cross-repo requirement specs + ADRs live in that repo's `.zcode/docs/` (e.g. `workflow-parity-backend-requirements.md`, `push-backend-requirements.md`) — read specs from there, not from this repo |
+| `~/Develop/tools/zcode-acp-martty` | Source of the Rust `martty` TUI (this bridge's CLI frontend dependency)                                                                                                                                                                                  |
+| `~/Develop/NoBackup/ZCode`         | Open-source ZCode upstream (see the next section)                                                                                                                                                                                                        |
+
 ## ZCode upstream source (open-sourced 2026-09)
 
 ZCode went open source (Apache-2.0): a local checkout lives at
