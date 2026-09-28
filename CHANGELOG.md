@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.50.0](https://github.com/william0wang/zcode-acp/compare/v0.49.2...v0.50.0) (2026-09-28)
+
+
+### Features
+
+* serve the web client same-origin from the hub via remote.webDir ([9fb2e01](https://github.com/william0wang/zcode-acp/commit/9fb2e016264c04ed9683d367fdaacec1ba74689a))
+
 ## [0.49.2](https://github.com/william0wang/zcode-acp/compare/v0.49.1...v0.49.2) (2026-09-28)
 
 
