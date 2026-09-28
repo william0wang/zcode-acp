@@ -682,6 +682,313 @@ describe("workflow settings — resume", () => {
   });
 });
 
+describe("workflow settings — run settings amendment", () => {
+  it("accepted in-place change (maxConcurrency only) answers 200 with the same run and no supersededRunId", async () => {
+    const { server, calls } = makeBridge(GATE_ON, {
+      ack: {
+        status: "accepted",
+        result: { type: "amendWorkflowRunSettings", runId: "run-9", toolCallId: "settings-1" },
+      },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      maxConcurrency: 4,
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ ok: true, runId: "run-9", toolCallId: "settings-1" });
+    expect("supersededRunId" in body).toBe(false);
+
+    const command = calls.find((c) => c.method === "v4/command")!;
+    expect(command.params).toMatchObject({
+      sessionId: "sess_zcode_app",
+      type: "amendWorkflowRunSettings",
+      payload: { workId: "run-9", maxConcurrency: 4 },
+    });
+    // Absent keys stay absent — omission is the "keep" state.
+    expect(command.params).not.toHaveProperty("payload.subagentModel");
+  });
+
+  it("accepted supersede (subagentModel on a flying run) returns the NEW run plus supersededRunId", async () => {
+    const { server, calls } = makeBridge(GATE_ON, {
+      ack: {
+        status: "accepted",
+        result: {
+          type: "amendWorkflowRunSettings",
+          runId: "run-10",
+          toolCallId: "settings-2",
+          supersededRunId: "run-9",
+        },
+      },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      subagentModel: "account/bigmodel-individual-coding-plan/GLM-5.3$high",
+    });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: true,
+      runId: "run-10",
+      toolCallId: "settings-2",
+      supersededRunId: "run-9",
+    });
+    expect(calls.find((c) => c.method === "v4/command")!.params).toMatchObject({
+      type: "amendWorkflowRunSettings",
+      payload: {
+        workId: "run-9",
+        subagentModel: "account/bigmodel-individual-coding-plan/GLM-5.3$high",
+      },
+    });
+  });
+
+  it("`null` is a real value (clears), not an omission — three-state on the wire", async () => {
+    const { server, calls } = makeBridge(GATE_ON, {
+      ack: {
+        status: "accepted",
+        result: { type: "amendWorkflowRunSettings", runId: "run-9", toolCallId: "settings-3" },
+      },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      subagentModel: null,
+      maxConcurrency: null,
+    });
+    expect(res.status).toBe(200);
+    const command = calls.find((c) => c.method === "v4/command")!;
+    expect(command.params).toMatchObject({
+      payload: { workId: "run-9", subagentModel: null, maxConcurrency: null },
+    });
+  });
+
+  it("an empty delta answers 422 unchanged without any backend RPC", async () => {
+    const { server, calls } = makeBridge(GATE_ON);
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {});
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ ok: false, error: "unchanged" });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("maps each rejection token to its fixed §2.2 status", async () => {
+    const cases: Array<[string, number]> = [
+      ["not_found", 404],
+      ["not_configurable", 409],
+      ["unchanged", 409],
+      ["missing_boundaries", 409],
+      ["model_unavailable", 422],
+      ["script_missing", 422],
+      ["compile_failed", 422],
+      ["start_failed", 502],
+    ];
+    for (const [token, status] of cases) {
+      const { server } = makeBridge(GATE_ON, {
+        ack: {
+          status: "rejected",
+          reasonCode: `fault.command.workflowRunSettingsRejected.${token}`,
+          message: `amend ${token}`,
+        },
+      });
+      provideSession(server);
+      const port = await serveSettings(server);
+      const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+        maxConcurrency: 2,
+      });
+      expect(res.status, token).toBe(status);
+      await expect(res.json(), token).resolves.toMatchObject({ ok: false, error: token });
+    }
+  }, 20_000);
+
+  it("an accepted ack missing runId/toolCallId answers 502 — the app must never lose its re-point target", async () => {
+    const { server } = makeBridge(GATE_ON, { ack: { status: "accepted" } });
+    provideSession(server);
+    const port = await serveSettings(server);
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      maxConcurrency: 2,
+    });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error: string }).error).toBe("command_failed");
+  });
+
+  it("capability absence answers 501 like resume (V4CapabilityUnsupportedError wire form)", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      ack: { status: "failed", reasonCode: "fault.command.capabilityUnsupported" },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+    const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      maxConcurrency: 2,
+    });
+    expect(res.status).toBe(501);
+    expect(((await res.json()) as { error: string }).error).toBe("capabilityUnsupported");
+  });
+
+  it("a missing sessionId answers 400 invalid_query", async () => {
+    const { server } = makeBridge(GATE_ON);
+    const port = await serveSettings(server);
+    const res = await send(port, "POST", "workflow-runs/run-9/settings", { maxConcurrency: 2 });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_query");
+  });
+
+  it("malformed values answer 400 invalid_request before any RPC", async () => {
+    const { server, calls } = makeBridge(GATE_ON);
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    for (const bad of [{ subagentModel: "" }, { subagentModel: 7 }, { maxConcurrency: 0 }]) {
+      const res = await send(port, "POST", "workflow-runs/run-9/settings?sessionId=sess_app", bad);
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("is registered for POST only (PUT falls through to 404)", async () => {
+    const { server } = makeBridge(GATE_ON);
+    provideSession(server);
+    const port = await serveSettings(server);
+    const res = await send(port, "PUT", "workflow-runs/run-9/settings?sessionId=sess_app", {
+      maxConcurrency: 2,
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("workflow settings — parity passthrough (lineage + run settings)", () => {
+  // §3.1/§3.2 of the workflow-parity requirements: the bridge serves both run
+  // surfaces RAW. These tests pin the five parity fields end-to-end with the
+  // FUTURE backend shapes, so a bridge change that starts filtering/reshaping
+  // rows (e.g. a zod re-parse that strips unknown keys) fails here before the
+  // App ever sees its lineage chips or settings sheet break.
+  it("conversation summary rows serve all five parity fields untouched", async () => {
+    const rows = [
+      {
+        runId: "r-new",
+        toolCallId: "call-2",
+        label: "deploy",
+        updatedAt: 1759000000000,
+        status: "running",
+        resumedFrom: "r-old",
+        resumable: false,
+        subagentModel: "account/bigmodel-individual-coding-plan/GLM-5.3$high",
+        maxConcurrency: 4,
+        concurrencyCeiling: 8,
+      },
+      {
+        runId: "r-old",
+        toolCallId: "call-1",
+        status: "stopped",
+        stopReason: "superseded",
+        supersededBy: "r-new",
+        resumable: true,
+      },
+    ];
+    const { server } = makeBridge(GATE_ON, {
+      results: { "v4/conversation/workflowRuns": { runs: rows } },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const body = (await (await get(port, "workflow-runs?sessionId=sess_app")).json()) as {
+      runs: unknown[];
+    };
+    expect(body.runs).toEqual(rows);
+  });
+
+  it("history rows keep resumedFrom/supersededBy when the backend provides them", async () => {
+    const rows = [
+      {
+        runId: "h1",
+        name: "deploy",
+        status: "stopped",
+        stopReason: "superseded",
+        supersededBy: "h2",
+        createdAt: 1759000000000,
+        updatedAt: 1759000001000,
+      },
+      { runId: "h2", name: "deploy", status: "running", resumedFrom: "h1" },
+    ];
+    const { server } = makeBridge(GATE_ON, {
+      results: { "workflows/runs": { runs: rows } },
+    });
+    const port = await serveSettings(server);
+
+    const body = (await (await get(port, "workflows/runs")).json()) as { runs: unknown[] };
+    expect(body.runs).toEqual(rows);
+  });
+
+  it("supersededBy is never served without stopReason superseded (either run surface)", async () => {
+    // §4 criterion 4 — the invariant the App's lineage chips rely on. The
+    // bridge serves rows raw, so it cannot fix bad backend data; what this
+    // pins is that the passthrough does not BREAK the pairing (a future row
+    // projection that dropped stopReason while keeping supersededBy fails
+    // here). Fixtures are well-formed; the check runs on what was served.
+    const rows = [
+      {
+        runId: "r-new",
+        status: "running",
+        resumedFrom: "r-old",
+        resumable: false,
+      },
+      {
+        runId: "r-old",
+        status: "stopped",
+        stopReason: "superseded",
+        supersededBy: "r-new",
+        resumable: true,
+      },
+      {
+        runId: "r-cancelled",
+        status: "stopped",
+        stopReason: "cancelled",
+        resumable: true,
+      },
+    ];
+    const { server } = makeBridge(GATE_ON, {
+      results: {
+        "v4/conversation/workflowRuns": { runs: rows },
+        "workflows/runs": {
+          runs: [
+            {
+              runId: "h-old",
+              name: "deploy",
+              status: "stopped",
+              stopReason: "superseded",
+              supersededBy: "h-new",
+            },
+            { runId: "h-new", name: "deploy", status: "running", resumedFrom: "h-old" },
+          ],
+        },
+      },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const served = (await (await get(port, "workflow-runs?sessionId=sess_app")).json()) as {
+      runs: Array<{ supersededBy?: string; stopReason?: string }>;
+    };
+    for (const row of served.runs) {
+      expect(row.supersededBy === undefined || row.stopReason === "superseded").toBe(true);
+    }
+
+    // Same check on the history surface.
+    const history = (await (await get(port, "workflows/runs")).json()) as {
+      runs: Array<{ supersededBy?: string; stopReason?: string }>;
+    };
+    for (const row of history.runs) {
+      expect(row.supersededBy === undefined || row.stopReason === "superseded").toBe(true);
+    }
+  });
+});
+
 describe("workflow settings — create prompt", () => {
   it("returns the frozen desktop text (stable, non-empty, scope-aware)", async () => {
     const { server } = makeBridge(GATE_ON);

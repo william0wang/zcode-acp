@@ -76,6 +76,7 @@ import {
 } from "../settings/app-update.js";
 import { readUsageStats, type UsageRange } from "../settings/usage-stats.js";
 import {
+  amendRunSettings,
   conversationRuns,
   deleteWorkflow,
   getWorkflow,
@@ -508,6 +509,17 @@ async function route(
         return sendError(res, 400, "expected /settings/workflow-runs/{runId}/resume");
       }
       return void (await handleWorkflowResume(res, server, runId, body));
+    }
+    if (
+      method === "POST" &&
+      path.startsWith("/settings/workflow-runs/") &&
+      path.endsWith("/settings")
+    ) {
+      const runId = segment(path.slice("/settings/workflow-runs/".length, -"/settings".length));
+      if (!runId || runId.includes("/")) {
+        return sendError(res, 400, "expected /settings/workflow-runs/{runId}/settings");
+      }
+      return void (await handleRunSettingsAmend(res, server, runId, body, url));
     }
     return sendError(res, 404, "not found");
   }
@@ -1571,6 +1583,58 @@ async function handleWorkflowResume(
       ...(name ? { name } : {}),
     });
     return { ok: true as const };
+  });
+}
+
+/**
+ * Amend a run's settings (three-state per field: absent = keep, `null` =
+ * revert to default, value = set). The body carries ONLY the settings delta —
+ * the session is addressed by `?sessionId=`, the run by the path segment
+ * (the run-query family on this prefix). The response's `runId` is the run
+ * that continues the work; `supersededRunId` appears only when the amendment
+ * stopped and replaced a flying run, and the client re-points its view then.
+ */
+async function handleRunSettingsAmend(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  runId: string,
+  body: Record<string, unknown>,
+  url: URL,
+): Promise<void> {
+  const sessionId = url.searchParams.get("sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) throw new WorkflowApiError(400, "invalid_query", "sessionId is required");
+    // Three-state extraction is by KEY PRESENCE — reading through str()/num()
+    // would map the documented `null` clears to "absent" and make them unreachable.
+    const hasModel = "subagentModel" in body;
+    const hasConcurrency = "maxConcurrency" in body;
+    const model = body["subagentModel"];
+    const concurrency = body["maxConcurrency"];
+    if (hasModel && model !== null && (typeof model !== "string" || model.length === 0)) {
+      throw new WorkflowApiError(
+        400,
+        "invalid_request",
+        "subagentModel must be a non-empty string or null",
+      );
+    }
+    if (
+      hasConcurrency &&
+      concurrency !== null &&
+      (typeof concurrency !== "number" || !Number.isInteger(concurrency) || concurrency < 1)
+    ) {
+      throw new WorkflowApiError(
+        400,
+        "invalid_request",
+        "maxConcurrency must be an integer >= 1 or null",
+      );
+    }
+    const amended = await amendRunSettings(srv, {
+      runId,
+      acpSessionId: sessionId,
+      ...(hasModel ? { subagentModel: model as string | null } : {}),
+      ...(hasConcurrency ? { maxConcurrency: concurrency as number | null } : {}),
+    });
+    return { ok: true as const, ...amended };
   });
 }
 

@@ -435,12 +435,13 @@ function reasonToken(reasonCode: string, status: unknown): string {
  * Send one v4 command envelope and await the terminal ack. `request()` (not
  * `send()`) is deliberate: the gateway resolves the RPC only after the side
  * effect settles, so a compile failure is reported HERE instead of surfacing
- * as a run that never starts. Neither startSavedWorkflow nor resumeWorkflowRun
- * requires a baseRevision (workflowRuns is revision-exempt upstream).
+ * as a run that never starts. None of startSavedWorkflow / resumeWorkflowRun /
+ * amendWorkflowRunSettings carries a baseRevision (workflowRuns is
+ * revision-exempt upstream).
  */
 async function sendCommand(
   server: ZcodeAcpServer,
-  type: "startSavedWorkflow" | "resumeWorkflowRun",
+  type: "startSavedWorkflow" | "resumeWorkflowRun" | "amendWorkflowRunSettings",
   zcodeSid: string,
   payload: Record<string, unknown>,
 ): Promise<CommandAck> {
@@ -641,6 +642,106 @@ export async function resumeWorkflowRun(
     ...(input.name ? { name: input.name } : {}),
   });
   if (ack.status !== "accepted") throwAckRejection(ack, "resumeWorkflowRun");
+}
+
+// ---------- run settings amendment (v4/command, same family as resume) ----------
+
+/**
+ * Fixed HTTP statuses for the amend command's rejection tokens (the command's
+ * own semantics decide the class): not_found is addressing; the three state
+ * conflicts are 409s; the three value problems are 422s; start_failed is the
+ * port/submit fault, a backend-side failure. Tokens NOT in this table —
+ * capabilityUnsupported above all — keep the generic command mapping
+ * (`codeForCommandReason`: capability absence is 501, exactly what
+ * resumeWorkflowRun answers today).
+ */
+const AMEND_REJECTION_STATUS: Record<string, number> = {
+  not_found: 404,
+  not_configurable: 409,
+  unchanged: 409,
+  missing_boundaries: 409,
+  model_unavailable: 422,
+  script_missing: 422,
+  compile_failed: 422,
+  start_failed: 502,
+};
+
+export interface AmendRunSettingsInput {
+  runId: string;
+  acpSessionId: string;
+  /** `provider/model[$level]`; `null` = back to the session model; absent = keep. */
+  subagentModel?: string | null;
+  /** The run's own bound; `null` = clear it (back to the machine ceiling); absent = keep. */
+  maxConcurrency?: number | null;
+}
+
+export interface AmendRunSettingsResult {
+  /**
+   * The run that continues the work — SAME id for an in-place change, the NEW
+   * run after a supersede.
+   */
+  runId: string;
+  toolCallId: string;
+  /** Present only when the amendment stopped and superseded a flying run. */
+  supersededRunId?: string;
+}
+
+/**
+ * Amend a run's settings through the v4 `amendWorkflowRunSettings` command.
+ * The stop-and-supersede (script/subagent-model change on a flying run) is
+ * the COMMAND's own semantics — this handler never adds a stop step, and it
+ * never creates or discards a session (the run lives in the caller's).
+ */
+export async function amendRunSettings(
+  server: ZcodeAcpServer,
+  input: AmendRunSettingsInput,
+): Promise<AmendRunSettingsResult> {
+  await requireWorkflowEnabled(server);
+  if (input.subagentModel === undefined && input.maxConcurrency === undefined) {
+    throw new WorkflowApiError(
+      422,
+      "unchanged",
+      "nothing to amend — send subagentModel and/or maxConcurrency",
+    );
+  }
+  const zcodeSid = await mapProvidedSession(server, input.acpSessionId);
+  const ack = await sendCommand(server, "amendWorkflowRunSettings", zcodeSid, {
+    workId: input.runId,
+    ...(input.subagentModel !== undefined ? { subagentModel: input.subagentModel } : {}),
+    ...(input.maxConcurrency !== undefined ? { maxConcurrency: input.maxConcurrency } : {}),
+  });
+  if (ack.status !== "accepted") {
+    const reasonCode = typeof ack.reasonCode === "string" ? ack.reasonCode : "";
+    const token = reasonToken(reasonCode, ack.status);
+    const status = AMEND_REJECTION_STATUS[token];
+    if (status !== undefined) {
+      throw new WorkflowApiError(
+        status,
+        token,
+        typeof ack.message === "string" && ack.message ? ack.message : undefined,
+      );
+    }
+    throwAckRejection(ack, "amendWorkflowRunSettings");
+  }
+  const result = (ack.result ?? {}) as {
+    runId?: unknown;
+    toolCallId?: unknown;
+    supersededRunId?: unknown;
+  };
+  if (typeof result.runId !== "string" || typeof result.toolCallId !== "string") {
+    throw new WorkflowApiError(
+      502,
+      "command_failed",
+      "amend ack is missing runId/toolCallId — the app cannot re-point its run view",
+    );
+  }
+  return {
+    runId: result.runId,
+    toolCallId: result.toolCallId,
+    ...(typeof result.supersededRunId === "string"
+      ? { supersededRunId: result.supersededRunId }
+      : {}),
+  };
 }
 
 // ---------- create prompt (frozen desktop copy) ----------
