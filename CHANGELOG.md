@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.49.2](https://github.com/william0wang/zcode-acp/compare/v0.49.1...v0.49.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* effort picker shows the switched model's levels (zcode-acp-martty 0.2.39-zcode.6) ([bff817e](https://github.com/william0wang/zcode-acp/commit/bff817e4fd392b17c429304e04a334269857b998))
+
 ## [0.49.1](https://github.com/william0wang/zcode-acp/compare/v0.49.0...v0.49.1) (2026-09-28)
 
 
