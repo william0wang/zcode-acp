@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.48.1](https://github.com/william0wang/zcode-acp/compare/v0.48.0...v0.48.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* treat personal model list as authoritative for custom providers ([66168dd](https://github.com/william0wang/zcode-acp/commit/66168ddcbc7885e766638c5842ba076c5f8ce8a5))
+
 ## [0.48.0](https://github.com/william0wang/zcode-acp/compare/v0.47.10...v0.48.0) (2026-09-25)
 
 
