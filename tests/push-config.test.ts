@@ -44,6 +44,7 @@ describe("resolvePushConfig", () => {
       secret: "s3cret",
       toUser: "@all",
       contentDetail: "full",
+      notify: { turn: true, goal: true, run: true, task: true },
     });
   });
 
@@ -97,7 +98,22 @@ describe("resolvePushConfig", () => {
       secret: "file-secret",
       toUser: "william",
       contentDetail: "minimal",
+      notify: { turn: true, goal: true, run: true, task: true },
     });
+  });
+
+  it("defaults every notify kind ON; the file switches them individually", () => {
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        notify: { turn: false },
+      },
+    });
+    const cfg = resolvePushConfig({});
+    expect(cfg?.notify).toEqual({ turn: false, goal: true, run: true, task: true });
   });
 
   it("lets env fill fields the file leaves out", () => {

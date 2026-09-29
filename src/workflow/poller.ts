@@ -27,7 +27,7 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 
-import { pushIfOffline } from "../push/push.js";
+import { pushSettled, pushSourceLabel } from "../push/push.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log } from "../utils.js";
 
@@ -176,12 +176,13 @@ function teardown(run: ActiveRun): void {
   if (activeRuns.get(run.runId) === run) activeRuns.delete(run.runId);
 }
 
-/** Offline-push payload for a run's terminal state (§5.2 — four convergence
+/** Settled-push payload for a run's terminal state (§5.2 — four convergence
  * points, this is their shared renderer). */
 function pushRunSettled(run: ActiveRun, status: string): void {
-  pushIfOffline(run.server, {
+  pushSettled(run.server, {
     kind: "run",
-    title: `Workflow ${run.name ?? `run ${run.runId.slice(0, 8)}`}`,
+    label: pushSourceLabel(run.server),
+    title: `workflow ${run.name ?? `run ${run.runId.slice(0, 8)}`}`,
     body: `run settled: ${status}`,
   });
 }

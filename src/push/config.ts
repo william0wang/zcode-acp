@@ -24,6 +24,14 @@ export interface PushRelayConfig {
   token: string;
 }
 
+/** Per-kind switches for settled-event push (§5.2) — default all ON. */
+export interface PushNotifyConfig {
+  turn: boolean;
+  goal: boolean;
+  run: boolean;
+  task: boolean;
+}
+
 export interface PushConfig {
   corpId: string;
   agentId: number;
@@ -32,6 +40,8 @@ export interface PushConfig {
   contentDetail: "full" | "minimal";
   /** Static-IP relay for the WeCom API (企业可信IP needs a stable source). */
   relay?: PushRelayConfig;
+  /** Settled-event switches, file-only (`push.notify`), every kind default true. */
+  notify: PushNotifyConfig;
 }
 
 /** Same truthy set as `remoteEnabledLive` (remote/config.ts). */
@@ -57,6 +67,12 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
   }
   const relayUrl = trimTrailingSlashes(file.relay?.url ?? env.ZCODE_ACP_PUSH_RELAY_URL ?? "");
   const relayToken = file.relay?.token ?? (env.ZCODE_ACP_PUSH_RELAY_TOKEN ?? "").trim();
+  const notify = {
+    turn: file.notify?.turn !== false,
+    goal: file.notify?.goal !== false,
+    run: file.notify?.run !== false,
+    task: file.notify?.task !== false,
+  };
   if (relayUrl && relayToken) {
     return {
       corpId,
@@ -65,6 +81,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
       toUser,
       contentDetail: file.contentDetail ?? "full",
       relay: { url: relayUrl, token: relayToken },
+      notify,
     };
   }
   if (relayUrl || relayToken) {
@@ -73,7 +90,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
         "ZCODE_ACP_PUSH_RELAY_* env) — pushing direct from this host",
     );
   }
-  return { corpId, agentId, secret, toUser, contentDetail: file.contentDetail ?? "full" };
+  return { corpId, agentId, secret, toUser, contentDetail: file.contentDetail ?? "full", notify };
 }
 
 function trimTrailingSlashes(s: string): string {

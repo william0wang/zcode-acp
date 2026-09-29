@@ -6,9 +6,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { basename } from "node:path";
 
 const h = vi.hoisted(() => ({
-  cfg: null as { contentDetail: "full" | "minimal" } | null,
+  cfg: null as { contentDetail: "full" | "minimal"; notify?: Record<string, boolean> } | null,
 }));
 vi.mock("../src/push/config.js", async (orig) => {
   const actual = await orig<typeof import("../src/push/config.js")>();
@@ -22,6 +23,8 @@ vi.mock("../src/push/config.js", async (orig) => {
 const {
   pushIfOffline,
   pushInteractionIfOffline,
+  pushSettled,
+  pushSourceLabel,
   renderPushContent,
   resetPushSenderForTests,
   sendTestPush,
@@ -92,6 +95,44 @@ describe("pushIfOffline gating", () => {
   });
 });
 
+describe("pushSettled (§5.2 — settled events ignore client presence)", () => {
+  const NOTIFY_ALL = { turn: true, goal: true, run: true, task: true };
+
+  it("sends even while a client is online", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
+    const server = new ZcodeAcpServer();
+    server.clients.add({ notify: async () => {}, request: async () => undefined });
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual(["[turn] turn completed"]);
+  });
+
+  it("never sends while push is inactive", () => {
+    const server = new ZcodeAcpServer();
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual([]);
+  });
+
+  it("suppresses a kind switched off via push.notify", () => {
+    h.cfg = { contentDetail: "full", notify: { ...NOTIFY_ALL, turn: false } };
+    const server = new ZcodeAcpServer();
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    pushSettled(server, { kind: "goal", title: "goal paused", body: "cancelled" });
+    expect(sent).toEqual(["[goal] goal paused\ncancelled"]);
+  });
+
+  it("renders a label in the leading bracket in place of the kind", () => {
+    h.cfg = { contentDetail: "minimal", notify: NOTIFY_ALL };
+    const server = new ZcodeAcpServer();
+    pushSettled(server, {
+      kind: "turn",
+      label: "myproj / fix auth flow",
+      title: "turn completed",
+      body: "stripped under minimal",
+    });
+    expect(sent).toEqual(["[myproj / fix auth flow] turn completed"]);
+  });
+});
+
 describe("pushInteractionIfOffline (§5.1)", () => {
   it("derives permission with the toolCall title as body", () => {
     h.cfg = { contentDetail: "full" };
@@ -128,6 +169,16 @@ describe("renderPushContent", () => {
     expect(renderPushContent({ contentDetail: "full" }, { kind: "test", title: "T" })).toBe(
       "[test] T",
     );
+  });
+});
+
+describe("pushSourceLabel", () => {
+  it("joins the project dir with the session title; project alone without one", () => {
+    const server = new ZcodeAcpServer();
+    const bare = pushSourceLabel(server);
+    expect(bare).toBe(basename(process.cwd())); // projectCwd() falls back to cwd
+    server.sessionTitles.set("s1", "fix auth flow");
+    expect(pushSourceLabel(server, "s1")).toBe(`${bare} / fix auth flow`);
   });
 });
 

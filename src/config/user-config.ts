@@ -150,6 +150,14 @@ export interface PushRelayUserConfig {
   token?: string;
 }
 
+/** The `notify` sub-section of `push`: per-kind settled-event switches. */
+export interface PushNotifyUserConfig {
+  turn?: boolean;
+  goal?: boolean;
+  run?: boolean;
+  task?: boolean;
+}
+
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
 export interface PushUserConfig {
   /** true = push ACTIVE once credentials are complete (default false). */
@@ -162,6 +170,7 @@ export interface PushUserConfig {
   /** "minimal" strips business strings from bodies (content transits Tencent). */
   contentDetail?: "full" | "minimal";
   relay?: PushRelayUserConfig;
+  notify?: PushNotifyUserConfig;
 }
 
 export interface UserConfig {
@@ -374,6 +383,22 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
           if (typeof v === "string" && v.trim()) r[key] = v.trim();
         }
         if (Object.keys(r).length > 0) p.relay = r;
+      }
+    }
+    const notify = body["notify"];
+    if (notify !== undefined) {
+      if (!isPlainObject(notify)) {
+        warn(`config: ${label}.notify in ${file} is not an object — ignoring`);
+      } else {
+        const n: PushNotifyUserConfig = {};
+        for (const key of ["turn", "goal", "run", "task"] as const) {
+          const v = notify[key];
+          if (v === undefined) continue;
+          if (typeof v === "boolean") n[key] = v;
+          else
+            warn(`config: ${label}.notify.${key}=${JSON.stringify(v)} is not a boolean — ignoring`);
+        }
+        if (Object.keys(n).length > 0) p.notify = n;
       }
     }
     return p;

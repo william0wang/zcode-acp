@@ -28,6 +28,7 @@ import {
 } from "../handlers/session.js";
 import { sendTextChunk } from "../handlers/io.js";
 import { messages } from "../i18n.js";
+import { pushSettled, pushSourceLabel } from "../push/push.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { waitForAutoCompactIdle } from "../config/auto-compact.js";
@@ -476,6 +477,14 @@ export class GoalLoopDriver {
     this.settleHolds(note ?? messages().goalPaused(reason));
     this.persist();
     if (status === "stopped") clearGoalState(this.server.projectCwd(), this.zcodeSid);
+    // Settled-event push (§5.2): loop stop points only, never per round —
+    // a 40-round loop must not cost 40 notifications.
+    pushSettled(this.server, {
+      kind: "goal",
+      label: pushSourceLabel(this.server, this.acpSid),
+      title: `goal ${status}`,
+      body: reason,
+    });
     await this.announce(note ?? messages().goalPaused(reason));
     log(`goal-loop: ${this.zcodeSid.slice(0, 8)} → ${status} (${reason})`);
   }

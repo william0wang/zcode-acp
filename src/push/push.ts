@@ -6,17 +6,42 @@
  * reach the event path.
  */
 
+import path from "node:path";
+
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
-import { pushConfig } from "./config.js";
+import { pushConfig, type PushConfig } from "./config.js";
 import { createWeComSender, type WeComSender } from "./wecom.js";
 
-export type PushKind = "permission" | "question" | "run" | "task" | "test";
+export type PushKind = "permission" | "question" | "run" | "task" | "test" | "turn" | "goal";
+
+/** Settled kinds routed through {@link pushSettled} (§5.2 — per-kind switches). */
+export type PushSettledKind = Extract<PushKind, "turn" | "goal" | "run" | "task">;
+
+/**
+ * "<project> / <session-title>" source label for settled pushes. It rides the
+ * leading bracket (never the body — `contentDetail: "minimal"` strips bodies),
+ * replacing the kind prefix whose information the title tail already carries.
+ * TOTAL (never throws): the push path is fire-and-forget by contract, and the
+ * server handle may be a partial object in tests.
+ */
+export function pushSourceLabel(server: ZcodeAcpServer, acpSid?: string): string {
+  const project = path.basename(server.projectCwd?.() ?? process.cwd());
+  const title = acpSid !== undefined ? server.sessionTitles?.get(acpSid) : undefined;
+  return title ? `${project} / ${title}` : project;
+}
 
 export interface PushEventData {
   kind: PushKind;
   title: string;
   body?: string;
+  /**
+   * Source label (`<project> / <session>`, see {@link pushSourceLabel}). When
+   * present it REPLACES the kind in the leading bracket — `[kind] title`
+   * would duplicate what the title tail already says (e.g. "turn completed"),
+   * and the bracket is the one slot minimal mode never strips.
+   */
+  label?: string;
 }
 
 /** undefined = not yet built; null = push inactive. */
@@ -41,16 +66,28 @@ export function setPushSenderForTests(s: WeComSender | null): void {
 }
 
 /**
- * Render the contracted WeCom text: `[<kind>] <title>` + optional body line.
- * Under `contentDetail: "minimal"` the body carries no business strings (§4 —
- * content transits Tencent) — the kind prefix + title identify the event.
+ * Render the contracted WeCom text: `[<kind or label>] <title>` + optional
+ * body line. A `label` replaces the kind in the leading bracket (see
+ * {@link PushEventData.label}). Under `contentDetail: "minimal"` the body
+ * carries no business strings (§4 — content transits Tencent) — the bracket
+ * prefix + title identify the event.
  */
 export function renderPushContent(
   cfg: { contentDetail: "full" | "minimal" },
   data: PushEventData,
 ): string {
   const body = cfg.contentDetail === "minimal" ? undefined : data.body;
-  return body ? `[${data.kind}] ${data.title}\n${body}` : `[${data.kind}] ${data.title}`;
+  const prefix = `[${data.label ?? data.kind}]`;
+  return body ? `${prefix} ${data.title}\n${body}` : `${prefix} ${data.title}`;
+}
+
+/** Fire-and-forget send tail shared by both dispatch helpers. */
+function dispatchPush(cfg: PushConfig, s: WeComSender, data: PushEventData): void {
+  const content = renderPushContent(cfg, data);
+  s.sendText(content).then(
+    () => log(`push: ${data.kind} "${data.title}" sent via WeCom`),
+    (e: unknown) => warn(`push: WeCom send failed: ${e instanceof Error ? e.message : String(e)}`),
+  );
 }
 
 /** §5: the single gated dispatch helper — offline + ACTIVE or nothing. */
@@ -60,11 +97,26 @@ export function pushIfOffline(server: ZcodeAcpServer, data: PushEventData): void
   if (!cfg) return;
   const s = pushSender();
   if (!s) return;
-  const content = renderPushContent(cfg, data);
-  s.sendText(content).then(
-    () => log(`push: ${data.kind} "${data.title}" sent via WeCom`),
-    (e: unknown) => warn(`push: WeCom send failed: ${e instanceof Error ? e.message : String(e)}`),
-  );
+  dispatchPush(cfg, s, data);
+}
+
+/**
+ * §5.2 settled-event dispatch (turn end / goal loop stop / workflow run /
+ * background task): NO client-presence gate — an online client renders the
+ * event live but cannot wake the user's phone, and the settled event itself
+ * IS the "come back" signal. Each kind is individually switchable via
+ * `push.notify.<kind>` (default on); the shared ACTIVE predicate still applies.
+ */
+export function pushSettled(
+  server: ZcodeAcpServer,
+  data: PushEventData & { kind: PushSettledKind },
+): void {
+  void server; // presence deliberately NOT checked (see above)
+  const cfg = pushConfig();
+  if (!cfg || !cfg.notify[data.kind]) return;
+  const s = pushSender();
+  if (!s) return;
+  dispatchPush(cfg, s, data);
 }
 
 /**

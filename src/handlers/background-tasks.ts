@@ -39,7 +39,7 @@ import { messages } from "../i18n.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { armWorkflowRunPoller, stopWorkflowRunPoller } from "../workflow/poller.js";
-import { pushIfOffline } from "../push/push.js";
+import { pushSettled, pushSourceLabel } from "../push/push.js";
 
 /** Shape of a `session.updated` payload that reports a background task state. */
 interface TaskStatusPayload {
@@ -340,9 +340,10 @@ export class BackgroundTaskListener implements EventListener {
   ): void {
     if (task.terminalPushed || p.taskKind === "workflow") return;
     task.terminalPushed = true;
-    pushIfOffline(this.server, {
+    pushSettled(this.server, {
       kind: "task",
-      title: "Background task done",
+      label: pushSourceLabel(this.server),
+      title: "background task done",
       body: exitCode !== undefined ? `exit ${exitCode} · ${acpStatus}` : acpStatus,
     });
   }

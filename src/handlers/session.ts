@@ -45,6 +45,7 @@ import {
   scheduleQuotaDockBackstop,
   startQuotaRefresher,
 } from "../quota/live.js";
+import { pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
@@ -2253,18 +2254,39 @@ async function runPrompt(
   // client must not fail the turn.
   await emitSessionTurnState(server, params.sessionId, true, cx);
 
-  return runOneTurn(server, {
-    backend,
-    cx,
-    acpSid: params.sessionId,
-    zcodeSid,
-    requestId,
-    turn,
-    preempted,
-    sendText,
-    attachments,
-    continuationRound,
-  });
+  // Settled-event push (§5.2): one notification per user turn. Client presence
+  // is deliberately irrelevant — the turn ending IS the "come back" signal.
+  // Goal-loop rounds never reach here (parked prompts resolve via the driver;
+  // loop stops push their own `goal` notification at endLoop).
+  try {
+    const result = await runOneTurn(server, {
+      backend,
+      cx,
+      acpSid: params.sessionId,
+      zcodeSid,
+      requestId,
+      turn,
+      preempted,
+      sendText,
+      attachments,
+      continuationRound,
+    });
+    pushSettled(server, {
+      kind: "turn",
+      label: pushSourceLabel(server, params.sessionId),
+      title:
+        result.stopReason === "end_turn" ? "turn completed" : `turn ended (${result.stopReason})`,
+    });
+    return result;
+  } catch (e) {
+    pushSettled(server, {
+      kind: "turn",
+      label: pushSourceLabel(server, params.sessionId),
+      title: "turn failed",
+      body: e instanceof Error ? e.message : String(e),
+    });
+    throw e;
+  }
 }
 
 /** How long after a cancel a new prompt's attribution gate stays armed (the
