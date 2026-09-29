@@ -225,4 +225,36 @@ describe("loadUserConfig", () => {
     );
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ sandbox: { enabled: false } });
   });
+
+  it("parses the push section incl. the relay sub-section (trimmed, blanks dropped)", () => {
+    writeConfig(
+      JSON.stringify({
+        push: {
+          enabled: true,
+          corpId: " ww-corp ",
+          agentId: 1000009,
+          secret: " s ",
+          toUser: " william ",
+          contentDetail: "minimal",
+          relay: { url: " https://relay.example.com/wecom/ ", token: " relay-tok ", junk: 1 },
+        },
+      }),
+    );
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      push: {
+        enabled: true,
+        corpId: "ww-corp",
+        agentId: 1000009,
+        secret: "s",
+        toUser: "william",
+        contentDetail: "minimal",
+        relay: { url: "https://relay.example.com/wecom/", token: "relay-tok" },
+      },
+    });
+  });
+
+  it("non-object push.relay drops with the rest of push intact", () => {
+    writeConfig(JSON.stringify({ push: { enabled: true, relay: "junk" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ push: { enabled: true } });
+  });
 });

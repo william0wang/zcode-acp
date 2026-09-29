@@ -6,7 +6,9 @@
  * ~/.config/zcode-acp/config.json wins over the ZCODE_ACP_PUSH_* env vars.
  * ACTIVE = enabled AND complete credentials (corpId/agentId/secret) — a push
  * that cannot summon anyone must not hold an offline interaction either, so
- * `pushIfOffline` and the interaction hold read the SAME predicate.
+ * `pushIfOffline` and the interaction hold read the SAME predicate. An
+ * OPTIONAL relay (static-IP proxy for the WeCom API) rides along when both
+ * url+token are present; a half-configured relay warns once and pushes direct.
  *
  * Resolved lazily ONCE per process: an enabled-but-incomplete setup logs one
  * warning at first resolution and every hook then no-ops (silent degradation).
@@ -15,12 +17,21 @@
 import { loadUserConfig } from "../config/user-config.js";
 import { warn } from "../utils.js";
 
+export interface PushRelayConfig {
+  /** Base URL (trailing slashes stripped); calls go to `${url}/cgi-bin/…`. */
+  url: string;
+  /** Shared secret sent as `x-relay-token` on every relayed call. */
+  token: string;
+}
+
 export interface PushConfig {
   corpId: string;
   agentId: number;
   secret: string;
   toUser: string;
   contentDetail: "full" | "minimal";
+  /** Static-IP relay for the WeCom API (企业可信IP needs a stable source). */
+  relay?: PushRelayConfig;
 }
 
 /** Same truthy set as `remoteEnabledLive` (remote/config.ts). */
@@ -44,7 +55,29 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     );
     return null;
   }
+  const relayUrl = trimTrailingSlashes(file.relay?.url ?? env.ZCODE_ACP_PUSH_RELAY_URL ?? "");
+  const relayToken = file.relay?.token ?? (env.ZCODE_ACP_PUSH_RELAY_TOKEN ?? "").trim();
+  if (relayUrl && relayToken) {
+    return {
+      corpId,
+      agentId,
+      secret,
+      toUser,
+      contentDetail: file.contentDetail ?? "full",
+      relay: { url: relayUrl, token: relayToken },
+    };
+  }
+  if (relayUrl || relayToken) {
+    warn(
+      "push: relay needs BOTH url and token (config file push.relay or " +
+        "ZCODE_ACP_PUSH_RELAY_* env) — pushing direct from this host",
+    );
+  }
   return { corpId, agentId, secret, toUser, contentDetail: file.contentDetail ?? "full" };
+}
+
+function trimTrailingSlashes(s: string): string {
+  return s.trim().replace(/\/+$/, "");
 }
 
 /** undefined = not yet resolved; null = resolved inactive. */

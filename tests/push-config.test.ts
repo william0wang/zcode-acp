@@ -109,6 +109,51 @@ describe("resolvePushConfig", () => {
     expect(cfg).toMatchObject({ corpId: "ww-file", agentId: 7, secret: "env-secret" });
   });
 
+  it("resolves the relay from env with trailing slashes stripped", () => {
+    const cfg = resolvePushConfig({
+      ...FULL_ENV,
+      ZCODE_ACP_PUSH_RELAY_URL: " https://relay.example.com/wecom/ ",
+      ZCODE_ACP_PUSH_RELAY_TOKEN: " relay-tok ",
+    });
+    expect(cfg?.relay).toEqual({ url: "https://relay.example.com/wecom", token: "relay-tok" });
+  });
+
+  it("carries the file relay over env (slash-stripped too)", () => {
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        relay: { url: "https://r.example.com/x/", token: "file-tok" },
+      },
+    });
+    const cfg = resolvePushConfig({
+      ZCODE_ACP_PUSH_RELAY_URL: "https://env-relay.example.com",
+      ZCODE_ACP_PUSH_RELAY_TOKEN: "env-tok",
+    });
+    expect(cfg?.relay).toEqual({ url: "https://r.example.com/x", token: "file-tok" });
+  });
+
+  it("warns and pushes direct when only half the relay is present", () => {
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const halfUrl = resolvePushConfig({
+        ...FULL_ENV,
+        ZCODE_ACP_PUSH_RELAY_URL: "https://relay.example.com/w",
+      });
+      expect(halfUrl?.relay).toBeUndefined();
+      const halfToken = resolvePushConfig({ ...FULL_ENV, ZCODE_ACP_PUSH_RELAY_TOKEN: "tok" });
+      expect(halfToken?.relay).toBeUndefined();
+      const warnings = err.mock.calls
+        .map((c) => String(c[0]))
+        .filter((s) => s.includes("relay needs BOTH"));
+      expect(warnings.length).toBe(2);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
   it("ignores a non-object push section (loader posture)", () => {
     fakeFile.content = JSON.stringify({ push: "junk" });
     expect(resolvePushConfig(FULL_ENV)).not.toBeNull(); // env fallback keeps it alive

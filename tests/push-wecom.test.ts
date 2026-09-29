@@ -10,6 +10,7 @@ import { createWeComSender, truncateUtf8, type WeComFetch } from "../src/push/we
 
 interface Call {
   url: string;
+  headers?: Record<string, string>;
   body?: string;
 }
 
@@ -24,9 +25,9 @@ function makeFetch() {
     expires_in: 7200,
   };
   const impl: WeComFetch = async (url, init) => {
-    calls.push({ url, body: init?.body });
+    calls.push({ url, headers: init?.headers, body: init?.body });
     let payload: Record<string, unknown>;
-    if (url.startsWith("https://qyapi.weixin.qq.com/cgi-bin/gettoken")) {
+    if (url.includes("/cgi-bin/gettoken")) {
       tokenCount++;
       payload = { errmsg: "ok", ...tokenAnswer };
     } else {
@@ -134,6 +135,38 @@ describe("createWeComSender", () => {
     f.nextToken("tok-2");
     await sender.sendText("second");
     expect(f.tokenCount()).toBe(2);
+  });
+
+  it("routes both calls through the relay with the shared token header", async () => {
+    const f = makeFetch();
+    f.queueSend({ errcode: 0 });
+    const sender = createWeComSender(
+      { ...CFG, relay: { url: "https://relay.example.com/wecom", token: "relay-tok" } },
+      f.impl,
+    );
+    await sender.sendText("[test] via relay");
+    expect(f.calls[0]!.url).toBe(
+      "https://relay.example.com/wecom/cgi-bin/gettoken?corpid=ww-corp&corpsecret=s3cret",
+    );
+    expect(
+      f.calls[1]!.url.startsWith(
+        "https://relay.example.com/wecom/cgi-bin/message/send?access_token=",
+      ),
+    ).toBe(true);
+    for (const c of f.calls) {
+      expect(c.headers).toEqual({ "x-relay-token": "relay-tok" });
+    }
+  });
+
+  it("sends no relay header on the direct route", async () => {
+    const f = makeFetch();
+    f.queueSend({ errcode: 0 });
+    const sender = createWeComSender(CFG, f.impl);
+    await sender.sendText("direct");
+    expect(f.calls[0]!.url).toContain("https://qyapi.weixin.qq.com/cgi-bin/gettoken");
+    for (const c of f.calls) {
+      expect(c.headers).toBeUndefined();
+    }
   });
 
   it("truncates oversized content at the byte cap without splitting UTF-8", async () => {

@@ -9,6 +9,10 @@
  * is cached with a 5-minute expiry margin; errcode 40014/42001 (invalid /
  * expired token) triggers ONE refresh + ONE send retry — a second failure is
  * final for that push. Callers are fire-and-forget and only warn.
+ *
+ * With `relay` configured both calls go through that base URL instead (with an
+ * `x-relay-token` header) — a reverse proxy on a static-IP host, so WeCom's
+ * 企业可信IP check (errcode 60020) only ever sees that host's egress IP.
  */
 
 export interface WeComSender {
@@ -19,7 +23,7 @@ export interface WeComSender {
 export interface WeComFetch {
   (
     url: string,
-    init?: { method?: string; body?: string },
+    init?: { method?: string; headers?: Record<string, string>; body?: string },
   ): Promise<{
     ok: boolean;
     status: number;
@@ -27,8 +31,7 @@ export interface WeComFetch {
   }>;
 }
 
-const TOKEN_URL = "https://qyapi.weixin.qq.com/cgi-bin/gettoken";
-const SEND_URL = "https://qyapi.weixin.qq.com/cgi-bin/message/send";
+const API_BASE = "https://qyapi.weixin.qq.com";
 /** Refresh before expiry so a send never rides a token about to die. */
 const TOKEN_MARGIN_MS = 5 * 60_000;
 /** errcode 40014 = invalid token, 42001 = expired — both mean "refresh once". */
@@ -37,9 +40,18 @@ const INVALID_TOKEN_CODES = new Set([40014, 42001]);
 const MAX_CONTENT_BYTES = 2048;
 
 export function createWeComSender(
-  cfg: { corpId: string; agentId: number; secret: string; toUser: string },
+  cfg: {
+    corpId: string;
+    agentId: number;
+    secret: string;
+    toUser: string;
+    /** Route both API calls through a static-IP relay (see file header). */
+    relay?: { url: string; token: string };
+  },
   fetchImpl: WeComFetch = fetch as WeComFetch,
 ): WeComSender {
+  const base = cfg.relay?.url ?? API_BASE;
+  const relayHeaders = cfg.relay ? { "x-relay-token": cfg.relay.token } : undefined;
   let token: { value: string; expiresAt: number } | null = null;
 
   interface TokenResp {
@@ -63,9 +75,9 @@ export function createWeComSender(
 
   async function fetchToken(): Promise<string> {
     const url =
-      `${TOKEN_URL}?corpid=${encodeURIComponent(cfg.corpId)}` +
+      `${base}/cgi-bin/gettoken?corpid=${encodeURIComponent(cfg.corpId)}` +
       `&corpsecret=${encodeURIComponent(cfg.secret)}`;
-    const body = await readJson(await fetchImpl(url));
+    const body = await readJson(await fetchImpl(url, { headers: relayHeaders }));
     if (body.errcode !== undefined && body.errcode !== 0) {
       throw new Error(`wecom gettoken failed: ${body.errcode} ${body.errmsg ?? ""}`.trim());
     }
@@ -84,15 +96,19 @@ export function createWeComSender(
   }
 
   async function postSend(t: string, content: string): Promise<SendResp> {
-    const resp = await fetchImpl(`${SEND_URL}?access_token=${encodeURIComponent(t)}`, {
-      method: "POST",
-      body: JSON.stringify({
-        touser: cfg.toUser,
-        msgtype: "text",
-        agentid: cfg.agentId,
-        text: { content },
-      }),
-    });
+    const resp = await fetchImpl(
+      `${base}/cgi-bin/message/send?access_token=${encodeURIComponent(t)}`,
+      {
+        method: "POST",
+        headers: relayHeaders,
+        body: JSON.stringify({
+          touser: cfg.toUser,
+          msgtype: "text",
+          agentid: cfg.agentId,
+          text: { content },
+        }),
+      },
+    );
     return readJson(resp);
   }
 

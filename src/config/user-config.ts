@@ -142,6 +142,14 @@ export interface SandboxUserConfig {
   enabled?: boolean;
 }
 
+/** The `relay` sub-section of `push`: static-IP proxy for the WeCom API. */
+export interface PushRelayUserConfig {
+  /** Base URL — the push client calls `${url}/cgi-bin/…` through it. */
+  url?: string;
+  /** Shared secret sent as `x-relay-token` on every relayed call. */
+  token?: string;
+}
+
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
 export interface PushUserConfig {
   /** true = push ACTIVE once credentials are complete (default false). */
@@ -153,6 +161,7 @@ export interface PushUserConfig {
   toUser?: string;
   /** "minimal" strips business strings from bodies (content transits Tencent). */
   contentDetail?: "full" | "minimal";
+  relay?: PushRelayUserConfig;
 }
 
 export interface UserConfig {
@@ -353,6 +362,19 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
         warn(
           `config: ${label}.contentDetail=${JSON.stringify(detail)} is not "full"/"minimal" — ignoring`,
         );
+    }
+    const relay = body["relay"];
+    if (relay !== undefined) {
+      if (!isPlainObject(relay)) {
+        warn(`config: ${label}.relay in ${file} is not an object — ignoring`);
+      } else {
+        const r: PushRelayUserConfig = {};
+        for (const key of ["url", "token"] as const) {
+          const v = relay[key];
+          if (typeof v === "string" && v.trim()) r[key] = v.trim();
+        }
+        if (Object.keys(r).length > 0) p.relay = r;
+      }
     }
     return p;
   });
