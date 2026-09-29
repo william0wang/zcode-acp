@@ -48,6 +48,13 @@ interface RaceWinner {
 }
 
 /**
+ * A request fired with zero connected clients. The offline-interaction hold
+ * (server-requests.ts §6) classifies on this type: with push ACTIVE the race
+ * stays pending instead of rejecting into the auto-decline path.
+ */
+export class NoClientsError extends Error {}
+
+/**
  * Registry of connected ACP clients (stdio editor + remote WebSocket clients).
  * Membership is managed by the entry point via the SDK's per-connection
  * lifecycle; the broadcast proxy reads membership live on every call.
@@ -69,6 +76,15 @@ export class ClientRegistry {
   get size(): number {
     return this.clients.size;
   }
+
+  /**
+   * Fired when a request finds ZERO connected clients (just before the
+   * NoClientsError throw): the offline-push hook (§5.1). Wired by the server
+   * at construction — remote-layer code must not import the push module
+   * directly (keeps the layer cycle-free). Fire-and-forget: observer throws
+   * are swallowed, the throw path always proceeds.
+   */
+  noClientsObserver?: (method: string, params?: unknown) => void;
 
   /**
    * Record a connection's `initialize` clientInfo name, keyed by the SDK's
@@ -234,7 +250,12 @@ async function requestAny(
 ): Promise<unknown> {
   const clients = registry.snapshot();
   if (clients.length === 0) {
-    throw new Error(`broadcast: no connected clients (${method})`);
+    try {
+      registry.noClientsObserver?.(method, params);
+    } catch {
+      // fire-and-forget hook; never block the throw
+    }
+    throw new NoClientsError(`broadcast: no connected clients (${method})`);
   }
   const controllers = clients.map(() => new AbortController());
   // Link a caller-provided signal: aborting it cancels EVERY inner request.

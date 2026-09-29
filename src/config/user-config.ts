@@ -142,6 +142,19 @@ export interface SandboxUserConfig {
   enabled?: boolean;
 }
 
+/** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
+export interface PushUserConfig {
+  /** true = push ACTIVE once credentials are complete (default false). */
+  enabled?: boolean;
+  corpId?: string;
+  agentId?: number;
+  secret?: string;
+  /** WeCom message recipient (user id, "@all", or a |-joined list). Default "@all". */
+  toUser?: string;
+  /** "minimal" strips business strings from bodies (content transits Tencent). */
+  contentDetail?: "full" | "minimal";
+}
+
 export interface UserConfig {
   remote?: RemoteUserConfig;
   quota?: QuotaUserConfig;
@@ -155,6 +168,7 @@ export interface UserConfig {
   interaction?: InteractionUserConfig;
   sandbox?: SandboxUserConfig;
   tui?: TuiUserConfig;
+  push?: PushUserConfig;
 }
 
 /** Resolve the config file path: $XDG_CONFIG_HOME/zcode-acp or ~/.config/zcode-acp. */
@@ -311,8 +325,36 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     const stats = body["stats"];
     if (stats === undefined) return {};
     if (typeof stats === "string") return { stats };
-    warn(`config: ${label}.stats=${JSON.stringify(stats)} in ${file} is not a string — ignoring`);
+    warn(`config: ${label}.stats=${JSON.stringify(stats)} is not a string — ignoring`);
     return {};
+  });
+
+  result.push = parseSection(parsed, "push", file, (body, label) => {
+    const p: PushUserConfig = {};
+    if (body["enabled"] === undefined) {
+      // absent — fine
+    } else if (typeof body["enabled"] === "boolean") {
+      p.enabled = body["enabled"];
+    } else {
+      warn(
+        `config: ${label}.enabled=${JSON.stringify(body["enabled"])} is not a boolean — ignoring`,
+      );
+    }
+    for (const key of ["corpId", "secret", "toUser"] as const) {
+      const v = body[key];
+      if (typeof v === "string" && v.trim()) p[key] = v.trim();
+    }
+    const agentId = parseIntField(body["agentId"], 1, `${label}.agentId`, file);
+    if (agentId !== undefined) p.agentId = agentId;
+    const detail = body["contentDetail"];
+    if (detail !== undefined) {
+      if (detail === "full" || detail === "minimal") p.contentDetail = detail;
+      else
+        warn(
+          `config: ${label}.contentDetail=${JSON.stringify(detail)} is not "full"/"minimal" — ignoring`,
+        );
+    }
+    return p;
   });
 
   // Drop the empty section shells so consumers' `??` fallbacks stay honest.

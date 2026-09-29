@@ -2206,6 +2206,53 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       req.pipe(upstream);
       return;
     }
+    // POST /api/instances/{id}/push/test — the push-channel verification route
+    // (push-backend-requirements §7): strip the instance prefix, forward the
+    // /push/test suffix to the bridge's loopback endpoint. Same
+    // forward-and-relay shape as the session close/rename block above; the hub
+    // parses no body and holds no push state.
+    const pushMatch = url.pathname.match(/^\/api\/instances\/([^/]+)\/(push\/test)$/);
+    if (pushMatch && req.method === "POST") {
+      const [, instId, suffix] = pushMatch;
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const entry = instances.get(instId!);
+      if (!entry) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("unknown instance");
+        return;
+      }
+      const upstream = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: entry.port,
+          path: `/${suffix}`,
+          method: "POST",
+        },
+        (up) => {
+          const headers = { ...up.headers };
+          delete headers["transfer-encoding"];
+          delete headers.connection;
+          res.writeHead(up.statusCode ?? 502, headers);
+          up.pipe(res);
+        },
+      );
+      upstream.on("error", () => {
+        if (res.headersSent) res.destroy();
+        else {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end("bridge unreachable");
+        }
+      });
+      res.on("close", () => {
+        if (!res.writableEnded) upstream.destroy();
+      });
+      req.pipe(upstream);
+      return;
+    }
     if (
       (url.pathname === "/api/register" || url.pathname === "/api/unregister") &&
       req.method === "POST"

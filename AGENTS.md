@@ -106,6 +106,14 @@ src/
 │   ├── file-endpoint.ts  Read-only /fs/list + /fs/file, session-root scoped (ADR-0004)
 │   └── hub-server.ts     Hub daemon: auth, discovery, byte-level proxy (ACP WS + /fs files), ?probe=1 liveness
 ├── quota/                GLM Coding Plan usage API client (/quota command)
+├── push/                 Offline WeCom push (spec: zcode-acp-app
+│                         .zcode/docs/push-backend-requirements.md; channel
+│                         decision ADR-0010 there): config.ts = the single
+│                         ACTIVE predicate (enabled && corpId/agentId/secret),
+│                         wecom.ts = zero-dep HTTP client (token cache +
+│                         40014/42001 one-retry), push.ts = pushIfOffline
+│                         dispatch (fires only at clients.size === 0) and the
+│                         §6 interaction-hold predicate
 ├── cli.ts                Unified CLI entry (`zcode-acp`): subcommand dispatch
 │                         (bare invocation → Martty TUI) (ADR-0007, ADR-0020)
 ├── tui.ts                Martty launcher: spawn `martty --agent node

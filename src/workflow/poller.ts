@@ -27,6 +27,7 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 
+import { pushIfOffline } from "../push/push.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log } from "../utils.js";
 
@@ -60,6 +61,8 @@ interface ActiveRun {
   server: ZcodeAcpServer;
   zcodeSid: string;
   runId: string;
+  /** Workflow display name (settings-launched runs carry one; used in push titles). */
+  name?: string;
   /** ACP tool_call_id of the CreateWorkflow card the lines attach to. */
   toolCallId: string;
   /** Journal cursor: last event sequence already folded (starts 0). */
@@ -169,7 +172,18 @@ function teardown(run: ActiveRun): void {
   if (run.timer) clearTimeout(run.timer);
   run.timer = null;
   run.stopped = true;
+  run.server.workflowRunNames.delete(run.runId);
   if (activeRuns.get(run.runId) === run) activeRuns.delete(run.runId);
+}
+
+/** Offline-push payload for a run's terminal state (§5.2 — four convergence
+ * points, this is their shared renderer). */
+function pushRunSettled(run: ActiveRun, status: string): void {
+  pushIfOffline(run.server, {
+    kind: "run",
+    title: `Workflow ${run.name ?? `run ${run.runId.slice(0, 8)}`}`,
+    body: `run settled: ${status}`,
+  });
 }
 
 function scheduleNext(run: ActiveRun): void {
@@ -192,6 +206,7 @@ async function pollTick(run: ActiveRun): Promise<void> {
     if (Date.now() - run.startedAt > WORKFLOW_POLL_HARD_TIMEOUT_MS) {
       log(`workflow poller: run ${run.runId.slice(-8)} hit the 10min hard cap — stopping`);
       await emitCardUpdate(run, "[progress polling stopped: timeout]");
+      pushRunSettled(run, "timeout");
       teardown(run);
       return;
     }
@@ -233,6 +248,11 @@ async function pollTick(run: ActiveRun): Promise<void> {
         }
         if (ev.type === "run-settled") {
           await emitCardUpdate(run);
+          const status =
+            typeof (ev.payload ?? {}).status === "string"
+              ? ((ev.payload as Record<string, unknown>).status as string)
+              : "unknown";
+          pushRunSettled(run, status);
           log(`workflow poller: run ${run.runId.slice(-8)} settled — stopping`);
           teardown(run);
           return;
@@ -269,6 +289,7 @@ async function handleError(
       `workflow poller: backend has no v4/conversation/workflowRunEvents — ` +
         `stopping run ${run.runId.slice(-8)}`,
     );
+    pushRunSettled(run, "unsupported");
     teardown(run);
     return;
   }
@@ -279,6 +300,7 @@ async function handleError(
         `stopping run ${run.runId.slice(-8)}`,
     );
     await emitCardUpdate(run, "[progress polling stopped: repeated errors]");
+    pushRunSettled(run, "abandoned");
     teardown(run);
     return;
   }
@@ -293,7 +315,7 @@ async function handleError(
 export function armWorkflowRunPoller(
   server: ZcodeAcpServer,
   zcodeSid: string,
-  opts: { runId: string; toolCallId: string; intervalMs?: number },
+  opts: { runId: string; toolCallId: string; name?: string; intervalMs?: number },
 ): void {
   const { runId, toolCallId } = opts;
   if (!runId || !toolCallId) return;
@@ -302,6 +324,7 @@ export function armWorkflowRunPoller(
     server,
     zcodeSid,
     runId,
+    ...(opts.name ? { name: opts.name } : {}),
     toolCallId,
     afterSequence: 0,
     lines: [],

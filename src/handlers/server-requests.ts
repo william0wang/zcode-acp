@@ -48,7 +48,8 @@ import { codingPlanRequestAuthFor } from "../config/account-provider.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
-import type { ClientLike } from "../remote/broadcast.js";
+import { pushActive } from "../push/config.js";
+import { NoClientsError, type ClientLike } from "../remote/broadcast.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendSessionUpdate } from "./io.js";
@@ -209,6 +210,15 @@ function fireInteractionAttempt(
       entry.controllers.delete(ctrl);
       if (entry.firstError === undefined) entry.firstError = err;
       if (!entry.settled && entry.inFlight === 0) {
+        if (err instanceof NoClientsError && pushActive()) {
+          // Offline interaction with push ACTIVE (§6): do NOT settle — leave
+          // the race pending so resendPendingInteractions re-sends at the next
+          // client attach; the turn-cancel racer / connection close / optional
+          // timeoutMs remain the escapes (requestWithTimeout's cleanup still
+          // deregisters the entry if one of those wins).
+          log(`  ⏸ ${entry.label} unanswered with no clients — holding (push active)`);
+          return;
+        }
         entry.settled = true;
         entry.reject(entry.firstError);
       }
@@ -900,7 +910,9 @@ type InteractionResult = unknown | typeof INTERRUPTED;
  * dismiss them (the SDK ignores cancellationSignal, so the abort alone never
  * reaches the wire).
  */
-async function requestWithTimeout(
+// Exported for the offline-push hold tests (§6); production callers are all
+// in this module.
+export async function requestWithTimeout(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   method: string,

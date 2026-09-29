@@ -30,6 +30,7 @@ import { enqueueSessionSend } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import { answerProviderRuntimeHeaders } from "./handlers/server-requests.js";
 import { SessionTitleListener } from "./handlers/session-titles.js";
+import { pushInteractionIfOffline } from "./push/push.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { envWithLoginShell } from "./remote/login-shell-env.js";
 import { stopAllWorkflowRunPollers } from "./workflow/poller.js";
@@ -207,6 +208,15 @@ export class ZcodeAcpServer {
    * settle bound instead of failing.
    */
   readonly autoCompactInFlight = new Set<string>();
+
+  /**
+   * Workflow display names for run-settle push titles (runId → name). Set at
+   * launch time (settings/workflow.ts — the launch request knows the name);
+   * read by the background-task arm sites and cleared by the poller's
+   * teardown. Model-launched runs carry no name (title falls back to the run
+   * id prefix).
+   */
+  readonly workflowRunNames = new Map<string, string>();
   /**
    * Last compact terminal state per backend session id, recorded from the
    * backend's `state.updated` notification (reasons `session_compacted` /
@@ -529,6 +539,11 @@ export class ZcodeAcpServer {
 
   constructor(opts: { serveMode?: boolean } = {}) {
     this.serveMode = opts.serveMode === true;
+    // Offline-push hook (§5.1): fires inside requestAny's zero-clients branch.
+    // The gate (clients.size / ACTIVE) lives in the push module; this wiring is
+    // the only connection between the remote layer and the push module.
+    this.clients.noClientsObserver = (method, params) =>
+      pushInteractionIfOffline(this, method, params);
   }
 
   /** Next JSON-RPC id for messages we send to zcode. */

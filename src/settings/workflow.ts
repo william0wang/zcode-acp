@@ -619,6 +619,11 @@ export async function startSavedWorkflow(
     throwAckRejection(ack, "startSavedWorkflow");
   }
   const result = (ack.result ?? {}) as { runId?: unknown; toolCallId?: unknown };
+  if (typeof result.runId === "string" && result.runId && input.name) {
+    // Offline push titles read the workflow name at run-settle time
+    // (server.workflowRunNames → armWorkflowRunPoller → pushRunSettled).
+    server.workflowRunNames.set(result.runId, input.name);
+  }
   return {
     acpSessionId: input.acpSessionId ?? createdAcpSid!,
     ...(typeof result.runId === "string" ? { runId: result.runId } : {}),
@@ -642,6 +647,7 @@ export async function resumeWorkflowRun(
     ...(input.name ? { name: input.name } : {}),
   });
   if (ack.status !== "accepted") throwAckRejection(ack, "resumeWorkflowRun");
+  if (input.name) server.workflowRunNames.set(input.runId, input.name);
 }
 
 // ---------- run settings amendment (v4/command, same family as resume) ----------

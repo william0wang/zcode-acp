@@ -39,12 +39,14 @@ function makeServer(): TestServer {
     calls,
     terminalSentData: new Map<string, string>(),
     notifyTurnActiveSince: new Map<string, number>(),
+    // pushTaskTerminal reads the live client count (offline-push gate).
+    clients: { size: 0 },
     async notifyByZcodeSid(zcodeSid: string, update: Record<string, unknown>): Promise<boolean> {
       calls.push({ zcodeSid, update });
       return true;
     },
   };
-  return server as TestServer;
+  return server as unknown as TestServer;
 }
 
 function zcodeEvent(
