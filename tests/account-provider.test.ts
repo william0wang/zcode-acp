@@ -132,8 +132,15 @@ describe("provider id mapping", () => {
       "builtin:bigmodel-coding-plan",
     );
     expect(configProviderIdFor("account:zai-team-coding-plan")).toBe("builtin:zai-coding-plan");
+    // start-plan keeps its own legacy spelling (frozen upstream, migration
+    // 0020: builtin:<f>-start-plan ↔ account:<f>-start-plan).
+    expect(configProviderIdFor("account:zai-start-plan")).toBe("builtin:zai-start-plan");
     // Unknown account shapes still pass through unchanged.
     expect(configProviderIdFor("account:mystery-plan")).toBe("account:mystery-plan");
+    // off-peak has no legacy builtin spelling — pass through, never invent one.
+    expect(configProviderIdFor("account:zai-offpeak-idle-plan")).toBe(
+      "account:zai-offpeak-idle-plan",
+    );
   });
 
   it("passes unknown / third-party ids through unchanged", () => {

@@ -47,7 +47,7 @@ import {
 } from "../quota/live.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
-import { pushAccountProviderConfig } from "../config/account-provider.js";
+import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
 import { filterWorkflowCommands, rememberGate, workflowGateNow } from "../config/workflow-gate.js";
@@ -3286,11 +3286,14 @@ async function fetchMessagesForReplay(
  * After a faithful resume the session keeps its own last model; when that
  * model no longer belongs to an enabled provider in config.json (deleted or
  * revoked elsewhere), the first send would fail with the backend's
- * stale-history-model error. Repair proactively: switch to the default
- * (first enabled) model. Best-effort — a failed check leaves the model
- * untouched.
+ * stale-history-model error. Repair proactively: switch to the configured
+ * pin (ZCODE_PROVIDER/ZCODE_MODEL) or the first enabled model. Best-effort —
+ * a failed check leaves the model untouched.
  */
-async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
+export async function repairUnavailableModel(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+): Promise<void> {
   try {
     const backend = await server.ensureBackend();
     const resp = await backend.request(
@@ -3310,8 +3313,23 @@ async function repairUnavailableModel(server: ZcodeAcpServer, zcodeSid: string):
     const cur = settings?.model?.current;
     if (!cur?.providerId || !cur.modelId) return;
     const available = loadAllModels();
-    if (available.some((m) => m.providerId === cur.providerId && m.modelId === cur.modelId)) return;
-    const fallback = available[0];
+    // The backend persists the current model under the registry's `account:*`
+    // spelling while loadAllModels() speaks config.json's `builtin:*` —
+    // normalize before comparing, or every resume misreads an enabled model
+    // as gone and silently switches (#270).
+    const curPid = configProviderIdFor(cur.providerId);
+    if (available.some((m) => m.providerId === curPid && m.modelId === cur.modelId)) return;
+    // Genuine repair: fall back to the configured pin, not list order —
+    // available[0] is config-file order, not the user's choice (#270).
+    const pinnedProvider = process.env.ZCODE_PROVIDER;
+    const pinnedModel = process.env.ZCODE_MODEL;
+    const fallback =
+      pinnedProvider && pinnedModel
+        ? (available.find(
+            (m) =>
+              m.providerId === configProviderIdFor(pinnedProvider) && m.modelId === pinnedModel,
+          ) ?? available[0])
+        : available[0];
     if (!fallback) return;
     warn(
       `session ${zcodeSid} model ${cur.providerId}/${cur.modelId} is no longer enabled; switching to ${fallback.providerId}/${fallback.modelId}`,

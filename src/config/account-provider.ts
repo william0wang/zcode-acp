@@ -148,12 +148,17 @@ export function configProviderIdFor(providerId: string): string {
     return `builtin:${family}-${plan}`;
   }
   // Table-absent fallback (headless Linux: no desktop app bundle to read).
-  // The account/config id spellings are a stable convention —
-  // `account:<family>-(individual-|team-|start-)?coding-plan` →
-  // `builtin:<family>-coding-plan` — so model-limit lookups keep working
-  // without the table. Unknown shapes pass through unchanged.
-  const m = /^account:([a-z0-9]+)-(?:(?:individual|team|start)-)?coding-plan$/.exec(providerId);
-  return m ? `builtin:${m[1]}-coding-plan` : providerId;
+  // The pairs are frozen upstream (session-store migration 0020 +
+  // legacy-model-provider-identity.ts; the table's zhipu rules also spell
+  // `account:<f>-start-plan`): `account:<f>-start-plan` →
+  // `builtin:<f>-start-plan`, and `account:<f>-[(individual|team)-]coding-plan`
+  // → `builtin:<f>-coding-plan` (team shares the family's legacy key — it has
+  // no builtin spelling of its own). Unknown shapes (off-peak, custom ids)
+  // pass through unchanged so model-limit lookups keep working without the
+  // table.
+  const m = /^account:([a-z0-9]+)-(start-plan|(?:individual-|team-)?coding-plan)$/.exec(providerId);
+  if (m) return `builtin:${m[1]}-${m[2] === "start-plan" ? "start-plan" : "coding-plan"}`;
+  return providerId;
 }
 
 /**
