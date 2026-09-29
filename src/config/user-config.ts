@@ -156,6 +156,7 @@ export interface PushNotifyUserConfig {
   goal?: boolean;
   run?: boolean;
   task?: boolean;
+  compact?: boolean;
 }
 
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
@@ -169,6 +170,8 @@ export interface PushUserConfig {
   toUser?: string;
   /** "minimal" strips business strings from bodies (content transits Tencent). */
   contentDetail?: "full" | "minimal";
+  /** Settled-push quiet window in ms after a user prompt/cancel (0 = always push). */
+  quietMs?: number;
   relay?: PushRelayUserConfig;
   notify?: PushNotifyUserConfig;
 }
@@ -372,6 +375,8 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
           `config: ${label}.contentDetail=${JSON.stringify(detail)} is not "full"/"minimal" — ignoring`,
         );
     }
+    const quietMs = parseIntField(body["quietMs"], 0, `${label}.quietMs`, file);
+    if (quietMs !== undefined) p.quietMs = quietMs;
     const relay = body["relay"];
     if (relay !== undefined) {
       if (!isPlainObject(relay)) {
@@ -391,7 +396,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
         warn(`config: ${label}.notify in ${file} is not an object — ignoring`);
       } else {
         const n: PushNotifyUserConfig = {};
-        for (const key of ["turn", "goal", "run", "task"] as const) {
+        for (const key of ["turn", "goal", "run", "task", "compact"] as const) {
           const v = notify[key];
           if (v === undefined) continue;
           if (typeof v === "boolean") n[key] = v;

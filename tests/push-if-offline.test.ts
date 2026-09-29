@@ -9,7 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { basename } from "node:path";
 
 const h = vi.hoisted(() => ({
-  cfg: null as { contentDetail: "full" | "minimal"; notify?: Record<string, boolean> } | null,
+  cfg: null as {
+    contentDetail: "full" | "minimal";
+    notify?: Record<string, boolean>;
+    quietMs?: number;
+  } | null,
   diary: [] as string[],
 }));
 vi.mock("../src/push/config.js", async (orig) => {
@@ -29,6 +33,7 @@ vi.mock("../src/crash-guards.js", async (orig) => {
 });
 
 const {
+  noteUserActivity,
   pushIfOffline,
   pushInteractionIfOffline,
   pushSettled,
@@ -105,7 +110,7 @@ describe("pushIfOffline gating", () => {
 });
 
 describe("pushSettled (§5.2 — settled events ignore client presence)", () => {
-  const NOTIFY_ALL = { turn: true, goal: true, run: true, task: true };
+  const NOTIFY_ALL = { turn: true, goal: true, run: true, task: true, compact: true };
 
   it("sends even while a client is online", () => {
     h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
@@ -129,6 +134,18 @@ describe("pushSettled (§5.2 — settled events ignore client presence)", () => 
     expect(sent).toEqual(["[goal] goal paused\ncancelled"]);
   });
 
+  it("routes the compact kind through the same gate", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
+    const server = new ZcodeAcpServer();
+    pushSettled(server, { kind: "compact", title: "auto-compact completed" });
+    expect(sent).toEqual(["[compact] auto-compact completed"]);
+
+    sent.length = 0;
+    h.cfg = { contentDetail: "full", notify: { ...NOTIFY_ALL, compact: false } };
+    pushSettled(server, { kind: "compact", title: "auto-compact completed" });
+    expect(sent).toEqual([]);
+  });
+
   it("renders a label in the leading bracket in place of the kind", () => {
     h.cfg = { contentDetail: "minimal", notify: NOTIFY_ALL };
     const server = new ZcodeAcpServer();
@@ -139,6 +156,52 @@ describe("pushSettled (§5.2 — settled events ignore client presence)", () => 
       body: "stripped under minimal",
     });
     expect(sent).toEqual(["[myproj / fix auth flow] turn completed"]);
+  });
+});
+
+describe("pushSettled quiet window (§5.2 — user active ⇒ no ping)", () => {
+  const NOTIFY_ALL = { turn: true, goal: true, run: true, task: true, compact: true };
+
+  it("suppresses a settle inside the window after user activity, and diaries why", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL, quietMs: 30_000 };
+    const server = new ZcodeAcpServer();
+    noteUserActivity(server);
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual([]);
+    expect(h.diary).toHaveLength(1);
+    expect(h.diary[0]).toContain(`push: turn "turn completed" suppressed`);
+  });
+
+  it("pushes once the window has elapsed since the last activity", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL, quietMs: 30_000 };
+    const server = new ZcodeAcpServer();
+    server.lastUserActivityAt = Date.now() - 31_000;
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual(["[turn] turn completed"]);
+  });
+
+  it("quietMs 0 disables the window entirely", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL, quietMs: 0 };
+    const server = new ZcodeAcpServer();
+    noteUserActivity(server);
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual(["[turn] turn completed"]);
+  });
+
+  it("a config without quietMs is unwindowed (absent ≠ default)", () => {
+    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
+    const server = new ZcodeAcpServer();
+    noteUserActivity(server);
+    pushSettled(server, { kind: "turn", title: "turn completed" });
+    expect(sent).toEqual(["[turn] turn completed"]);
+  });
+
+  it("leaves offline interaction pushes unwindowed — recency there means the connection died", () => {
+    h.cfg = { contentDetail: "full", quietMs: 30_000 };
+    const server = new ZcodeAcpServer();
+    noteUserActivity(server); // prompted seconds ago, then the client dropped
+    pushIfOffline(server, { kind: "permission", title: "Approval requested" });
+    expect(sent).toEqual(["[permission] Approval requested"]);
   });
 });
 

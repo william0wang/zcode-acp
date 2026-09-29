@@ -45,7 +45,7 @@ import {
   scheduleQuotaDockBackstop,
   startQuotaRefresher,
 } from "../quota/live.js";
-import { pushSettled, pushSourceLabel } from "../push/push.js";
+import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
@@ -1441,6 +1441,10 @@ export async function prompt(
   requestId: number | string,
   client?: acp.AgentContext,
 ): Promise<acp.PromptResponse> {
+  // USER entry point: stamp presence for the push quiet window. The sandbox
+  // continuation loop below must NOT re-stamp (bridge-internal rounds are not
+  // the user being at the desk).
+  noteUserActivity(server);
   let result = await runPrompt(server, params, cx, requestId, false, client);
   // Sandbox-allow continuation chaining, BOUNDED: each batched restart
   // cancels the in-flight round and queues a continuation for prompt() to
@@ -2370,6 +2374,9 @@ export async function cancel(
   server: ZcodeAcpServer,
   params: acp.CancelNotification,
 ): Promise<void> {
+  // ESC is the user at the keyboard — stamp presence for the push quiet
+  // window (the "turn ended (cancelled)" settle right after must not ping).
+  noteUserActivity(server);
   const zcodeSid = server.resolveSid(params.sessionId);
   if (!zcodeSid) return;
   // Cancel ALL matching turns for this session (not just the first). While a

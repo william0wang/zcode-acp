@@ -14,10 +14,11 @@ import { log, warn } from "../utils.js";
 import { pushConfig, type PushConfig } from "./config.js";
 import { createWeComSender, type WeComSender } from "./wecom.js";
 
-export type PushKind = "permission" | "question" | "run" | "task" | "test" | "turn" | "goal";
+export type PushKind =
+  "permission" | "question" | "run" | "task" | "test" | "turn" | "goal" | "compact";
 
 /** Settled kinds routed through {@link pushSettled} (§5.2 — per-kind switches). */
-export type PushSettledKind = Extract<PushKind, "turn" | "goal" | "run" | "task">;
+export type PushSettledKind = Extract<PushKind, "turn" | "goal" | "run" | "task" | "compact">;
 
 /**
  * "<project> / <session-title>" source label for settled pushes. It rides the
@@ -108,19 +109,45 @@ export function pushIfOffline(server: ZcodeAcpServer, data: PushEventData): void
 }
 
 /**
+ * Stamp a USER-originated action (session/prompt, session/cancel) as bridge
+ * presence — the anchor of {@link pushSettled}'s quiet window. Only real user
+ * entry points may call this: bridge-internal rounds (sandbox allow-restart
+ * continuations, goal-loop rounds) must NOT refresh the stamp, or a settle
+ * minutes after the user left would be misread as "user still at the desk".
+ */
+export function noteUserActivity(server: ZcodeAcpServer): void {
+  server.lastUserActivityAt = Date.now();
+}
+
+/**
  * §5.2 settled-event dispatch (turn end / goal loop stop / workflow run /
- * background task): NO client-presence gate — an online client renders the
- * event live but cannot wake the user's phone, and the settled event itself
- * IS the "come back" signal. Each kind is individually switchable via
- * `push.notify.<kind>` (default on); the shared ACTIVE predicate still applies.
+ * background task / auto-compact settle): NO client-presence gate — an online
+ * client renders the event live but cannot wake the user's phone, and the
+ * settled event itself IS the "come back" signal. Each kind is individually
+ * switchable via `push.notify.<kind>` (default on); the shared ACTIVE
+ * predicate still applies.
+ *
+ * Quiet window: a settle within `quietMs` (default 30s, 0 disables) of the
+ * last user prompt/cancel is suppressed — the user is still at the desk, the
+ * ping would be noise (a turn that completes seconds after its prompt never
+ * needs a phone). Offline interaction pushes (§5.1) are NOT windowed: they
+ * fire only with zero connected clients, where recency means the connection
+ * DIED, not that the user is watching.
  */
 export function pushSettled(
   server: ZcodeAcpServer,
   data: PushEventData & { kind: PushSettledKind },
 ): void {
-  void server; // presence deliberately NOT checked (see above)
   const cfg = pushConfig();
   if (!cfg || !cfg.notify[data.kind]) return;
+  const quietMs = cfg.quietMs ?? 0;
+  const activeAgo = Date.now() - (server.lastUserActivityAt ?? 0);
+  if (quietMs > 0 && activeAgo < quietMs) {
+    appendDiary(
+      `push: ${data.kind} "${data.title}" suppressed (user active ${Math.round(activeAgo / 1000)}s ago)`,
+    );
+    return;
+  }
   const s = pushSender();
   if (!s) return;
   dispatchPush(cfg, s, data);

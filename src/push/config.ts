@@ -30,7 +30,11 @@ export interface PushNotifyConfig {
   goal: boolean;
   run: boolean;
   task: boolean;
+  compact: boolean;
 }
+
+/** Default quiet window for settled pushes (§5.2): user active → no ping. */
+export const PUSH_QUIET_WINDOW_MS = 30_000;
 
 export interface PushConfig {
   corpId: string;
@@ -42,6 +46,12 @@ export interface PushConfig {
   relay?: PushRelayConfig;
   /** Settled-event switches, file-only (`push.notify`), every kind default true. */
   notify: PushNotifyConfig;
+  /**
+   * Suppress a settled push within this many ms of the last user
+   * prompt/cancel (§5.2 quiet window); 0 disables. File-only, default
+   * {@link PUSH_QUIET_WINDOW_MS}.
+   */
+  quietMs: number;
 }
 
 /** Same truthy set as `remoteEnabledLive` (remote/config.ts). */
@@ -72,7 +82,10 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     goal: file.notify?.goal !== false,
     run: file.notify?.run !== false,
     task: file.notify?.task !== false,
+    compact: file.notify?.compact !== false,
   };
+  const quietMs =
+    file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;
   if (relayUrl && relayToken) {
     return {
       corpId,
@@ -82,6 +95,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
       contentDetail: file.contentDetail ?? "full",
       relay: { url: relayUrl, token: relayToken },
       notify,
+      quietMs,
     };
   }
   if (relayUrl || relayToken) {
@@ -90,7 +104,15 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
         "ZCODE_ACP_PUSH_RELAY_* env) — pushing direct from this host",
     );
   }
-  return { corpId, agentId, secret, toUser, contentDetail: file.contentDetail ?? "full", notify };
+  return {
+    corpId,
+    agentId,
+    secret,
+    toUser,
+    contentDetail: file.contentDetail ?? "full",
+    notify,
+    quietMs,
+  };
 }
 
 function trimTrailingSlashes(s: string): string {

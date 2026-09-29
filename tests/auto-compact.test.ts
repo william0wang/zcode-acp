@@ -23,6 +23,15 @@ vi.mock("../src/handlers/extensions.js", () => ({
   compact: (...args: unknown[]) => compactMock(...args),
 }));
 
+// --- spy pushSettled so the §5.2 completion push is observable without the
+// WeCom send machinery (send mechanics live in push-if-offline.test.ts) ---
+
+const pushSettledMock = vi.fn();
+vi.mock("../src/push/push.js", async (orig) => {
+  const actual = await orig<typeof import("../src/push/push.js")>();
+  return { ...actual, pushSettled: (...args: unknown[]) => pushSettledMock(...args) };
+});
+
 // Import AFTER mocks are registered.
 import {
   autoCompactThreshold,
@@ -80,6 +89,7 @@ function makeServerWithProjection(contextUsed: number | null): {
 // (a real zh ~/.zcode/v2/setting.json would flip them on a zh-locale machine).
 beforeEach(() => {
   vi.stubEnv("ZCODE_ACP_LANG", "en");
+  pushSettledMock.mockReset();
 });
 
 afterEach(() => {
@@ -265,6 +275,67 @@ describe("maybeAutoCompact", () => {
     const notifySpy = vi.fn().mockResolvedValue(undefined);
     await maybeAutoCompact(server, mockContext(notifySpy), "acp_1", "zc_1");
     expect(chunkTexts(notifySpy)).toHaveLength(0);
+  });
+});
+
+describe("auto-compact completion push (§5.2 settled kind: compact)", () => {
+  it("pushes once on success, after the done chunk", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
+    expect(pushSettledMock).toHaveBeenCalledTimes(1);
+    expect(pushSettledMock).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({ kind: "compact", title: "auto-compact completed" }),
+    );
+  });
+
+  it("carries the timeout outcome in the title", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockResolvedValueOnce({ __lockTimeout: true });
+    await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
+    expect(pushSettledMock).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({ kind: "compact", title: "auto-compact timed out" }),
+    );
+  });
+
+  it("pushes the backend-swallowed failure with a body", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockResolvedValueOnce({ __compactFailed: true });
+    await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
+    expect(pushSettledMock).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({
+        kind: "compact",
+        title: "auto-compact failed",
+        body: expect.any(String),
+      }),
+    );
+  });
+
+  it("pushes a thrown compact failure with the error as the body", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(150_000);
+    compactMock.mockRejectedValueOnce(new Error("compact failed: backend error"));
+    await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
+    expect(pushSettledMock).toHaveBeenCalledWith(
+      server,
+      expect.objectContaining({
+        kind: "compact",
+        title: "auto-compact failed",
+        body: "compact failed: backend error",
+      }),
+    );
+  });
+
+  it("never pushes when the threshold is not crossed (nothing settled)", async () => {
+    process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD = "100000";
+    const { server } = makeServerWithProjection(50_000);
+    await maybeAutoCompact(server, mockContext(), "acp_1", "zc_1");
+    expect(pushSettledMock).not.toHaveBeenCalled();
   });
 });
 

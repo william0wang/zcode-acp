@@ -261,11 +261,19 @@ describe("loadUserConfig", () => {
   it("parses push.notify switches; non-booleans drop, siblings survive", () => {
     writeConfig(
       JSON.stringify({
-        push: { enabled: true, notify: { turn: false, goal: true, run: "yes", task: false } },
+        push: {
+          enabled: true,
+          quietMs: 5000,
+          notify: { turn: false, goal: true, run: "yes", task: false, compact: true },
+        },
       }),
     );
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
-      push: { enabled: true, notify: { turn: false, goal: true, task: false } },
+      push: {
+        enabled: true,
+        quietMs: 5000,
+        notify: { turn: false, goal: true, task: false, compact: true },
+      },
     });
     writeConfig(JSON.stringify({ push: { enabled: true, notify: "junk" } }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ push: { enabled: true } });

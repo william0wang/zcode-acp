@@ -44,7 +44,8 @@ describe("resolvePushConfig", () => {
       secret: "s3cret",
       toUser: "@all",
       contentDetail: "full",
-      notify: { turn: true, goal: true, run: true, task: true },
+      notify: { turn: true, goal: true, run: true, task: true, compact: true },
+      quietMs: 30_000,
     });
   });
 
@@ -98,8 +99,49 @@ describe("resolvePushConfig", () => {
       secret: "file-secret",
       toUser: "william",
       contentDetail: "minimal",
-      notify: { turn: true, goal: true, run: true, task: true },
+      notify: { turn: true, goal: true, run: true, task: true, compact: true },
+      quietMs: 30_000,
     });
+  });
+
+  it("resolves quietMs from the file; 0 keeps the window off, junk falls back", () => {
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        quietMs: 5000,
+      },
+    });
+    expect(resolvePushConfig({})?.quietMs).toBe(5000);
+
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        quietMs: 0,
+      },
+    });
+    expect(resolvePushConfig({})?.quietMs).toBe(0);
+
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      fakeFile.content = JSON.stringify({
+        push: {
+          enabled: true,
+          corpId: "ww-file",
+          agentId: 42,
+          secret: "file-secret",
+          quietMs: "soon",
+        },
+      });
+      expect(resolvePushConfig({})?.quietMs).toBe(30_000);
+    } finally {
+      err.mockRestore();
+    }
   });
 
   it("defaults every notify kind ON; the file switches them individually", () => {
@@ -109,11 +151,11 @@ describe("resolvePushConfig", () => {
         corpId: "ww-file",
         agentId: 42,
         secret: "file-secret",
-        notify: { turn: false },
+        notify: { turn: false, compact: false },
       },
     });
     const cfg = resolvePushConfig({});
-    expect(cfg?.notify).toEqual({ turn: false, goal: true, run: true, task: true });
+    expect(cfg?.notify).toEqual({ turn: false, goal: true, run: true, task: true, compact: false });
   });
 
   it("lets env fill fields the file leaves out", () => {

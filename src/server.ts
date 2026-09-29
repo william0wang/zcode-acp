@@ -501,6 +501,15 @@ export class ZcodeAcpServer {
    */
   readonly notifyTurnActiveSince = new Map<string, number>();
   /**
+   * Last USER-originated action (session/prompt or session/cancel, stamped via
+   * noteUserActivity) on this bridge, epoch ms. Read by pushSettled's quiet
+   * window: a settle within `push.quietMs` of it means the user is still at
+   * the desk and the "come back" ping would be noise. Bridge-internal rounds
+   * (sandbox continuations, goal-loop rounds) never stamp, so a settle long
+   * after the user left still pushes.
+   */
+  lastUserActivityAt = 0;
+  /**
    * Sessions (acpSid) whose title was set by MANUAL user intent (the remote
    * rename endpoint, or a `session.titleUpdated` push with source "custom"
    * from another surface). The backend's later `generated` title pushes must
