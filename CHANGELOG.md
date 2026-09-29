@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.51.0](https://github.com/william0wang/zcode-acp/compare/v0.50.0...v0.51.0) (2026-09-29)
+
+
+### Features
+
+* expand a leading ~ in remote.webDir to the home dir ([139ea9b](https://github.com/william0wang/zcode-acp/commit/139ea9bb26dfad5f203679a4afb950ee77bece45))
+* route WeCom push through an optional static-IP relay ([3ca2e77](https://github.com/william0wang/zcode-acp/commit/3ca2e773d7738f9e0488805672a4bf249e321f6d))
+
 ## [0.50.0](https://github.com/william0wang/zcode-acp/compare/v0.49.2...v0.50.0) (2026-09-28)
 
 
