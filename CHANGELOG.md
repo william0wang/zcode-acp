@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.52.0](https://github.com/william0wang/zcode-acp/compare/v0.51.1...v0.52.0) (2026-09-29)
+
+
+### Features
+
+* add auto-compact push and a 30s user-presence quiet window ([#275](https://github.com/william0wang/zcode-acp/issues/275)) ([5a9c457](https://github.com/william0wang/zcode-acp/commit/5a9c45769b3273ec43abe245c9164e28cbd0536c))
+
 ## [0.51.1](https://github.com/william0wang/zcode-acp/compare/v0.51.0...v0.51.1) (2026-09-29)
 
 
