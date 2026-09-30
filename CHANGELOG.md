@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.54.0](https://github.com/william0wang/zcode-acp/compare/v0.53.3...v0.54.0) (2026-09-30)
+
+
+### Features
+
+* revive soft-deleted projects when reopened from CLI or editor ([#285](https://github.com/william0wang/zcode-acp/issues/285)) ([8f44790](https://github.com/william0wang/zcode-acp/commit/8f4479080c0f1cda516d1c66b6f37134a1196973))
+
 ## [0.53.3](https://github.com/william0wang/zcode-acp/compare/v0.53.2...v0.53.3) (2026-09-30)
 
 
