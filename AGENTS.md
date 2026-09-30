@@ -695,6 +695,31 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   restart channel from inside such a session is an `open` one (e.g. Warp's
   `warp://action/new_tab?path=<restart.command>`), which hands execution to a
   clean user shell.
+- **Plan mode is INVISIBLE to every v3 read — the bridge tracks it from events
+  (2026-09-30, source-verified)**: EnterPlanMode/ExitPlanMode flip the runtime
+  execution state's `planEnabled` WITHOUT touching `runtime.config.mode`
+  (`session-mode-port.ts` passes `{planEnabled}` only; `execution-state.ts:62`
+  writes config.mode from the UNCHANGED resolved mode), so `session/read`'s
+  `settings.mode.current` (= `app.getMode()`, `mapSessionSettings`) and every
+  `state.updated` settings patch keep reporting the UNDERLYING mode (yolo/build)
+  forever — the App/editor mode indicator could never follow an auto plan entry
+  ("mode 不跟随", reported twice). Upstream's own display fold is
+  `planEnabled ?? mode === "plan"` (product-projection.ts:3785-3797); the bridge
+  mirrors it: `server.sessionPlanActive` (zcodeSid set) is fed from
+  SessionModeChanged events — which ride the v3 wire as a GENERIC
+  `session.updated` with the RAW `{mode, planEnabled, source, toolCallId}`
+  payload (the mapper has no dedicated type; payload passthrough) — in the
+  translator (turn path → ConfigChanged with the folded effective mode +
+  broadcast) and BackgroundTaskListener (out-of-turn, set only);
+  `buildModes`/`buildConfigOptions`/`dispatchConfigChanged` fold the flag into
+  every advertised mode; `setMode`//`/mode` mirror the runtime's own
+  execution-state fold (`"plan"` enables the flag, anything else disables it —
+  resolveExecutionState) so their emissions aren't racing the event. Known
+  hole: a COLD resume of a plan-active session starts with an empty set (the
+  backend restores planEnabled from its store but replays no event) — the
+  display shows the underlying mode until the first transition event/setMode;
+  do NOT "fix" the fold away, and do not read the mode from settings expecting
+  "plan".
 - **Start Plan providers are desktop-only — do NOT "fix" this with an
   unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
   session only the desktop renderer can provide; the bridge answers

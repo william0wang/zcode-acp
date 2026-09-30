@@ -324,6 +324,12 @@ export async function setMode(
   ).request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
   if (resp.error) throw new Error(`setMode failed: ${resp.error.message}`);
   log(`session/setMode → ${mode}`);
+  // Mirror the runtime's own execution-state fold NOW (mode "plan" enables
+  // the plan flag, any other mode disables it — resolveExecutionState): the
+  // SessionModeChanged event may arrive after this RPC response, and the
+  // emission below must not advertise the pre-transition value.
+  if (mode === "plan") server.sessionPlanActive.add(zcodeSid);
+  else server.sessionPlanActive.delete(zcodeSid);
   // Re-build configOptions (settings.mode.current is now updated) and emit
   // config_option_update + current_mode_update to EVERY attached client, so
   // the editor UI reflects it no matter which connection switched.

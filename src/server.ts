@@ -455,6 +455,18 @@ export class ZcodeAcpServer {
   /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
   readonly lastMode = new Map<string, string>();
   /**
+   * Backend sessions (zcodeSid) whose runtime plan flag is ON. EnterPlanMode/
+   * ExitPlanMode flip the execution state's `planEnabled` WITHOUT touching
+   * `runtime.config.mode`, so every v3 read (session/read settings, state
+   * patches) keeps reporting the underlying mode — plan is invisible there
+   * (verified in upstream source: session-mode-port.ts sets only the flag;
+   * mapSessionSettings reads app.getMode()). Tracked here from the
+   * SessionModeChanged events (v3 wire: generic `session.updated` with a raw
+   * {mode, planEnabled} payload) and folded into every mode the bridge
+   * displays or advertises.
+   */
+  readonly sessionPlanActive = new Set<string>();
+  /**
    * Timestamp of the last cancel (user stop or preempt), keyed by zcodeSid.
    * Set in cancel() and preemptInFlightTurn(); read in runEventTurn's stall
    * reconciliation to fast-fail turns that collide with the backend's

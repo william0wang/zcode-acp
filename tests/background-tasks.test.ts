@@ -39,6 +39,8 @@ function makeServer(): TestServer {
     calls,
     terminalSentData: new Map<string, string>(),
     notifyTurnActiveSince: new Map<string, number>(),
+    // Mirrors ZcodeAcpServer.sessionPlanActive (out-of-turn mode transitions).
+    sessionPlanActive: new Set<string>(),
     // pushTaskTerminal reads the live client count (offline-push gate).
     clients: { size: 0 },
     async notifyByZcodeSid(zcodeSid: string, update: Record<string, unknown>): Promise<boolean> {
@@ -64,6 +66,22 @@ function zcodeEvent(
 }
 
 describe("BackgroundTaskListener", () => {
+  it("tracks out-of-turn plan transitions on the server's plan set", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("session.updated", { mode: "yolo", planEnabled: true, source: "tool" }),
+    );
+    expect(server.sessionPlanActive.has("sess_test")).toBe(true);
+    l.handleEvent(
+      zcodeEvent("session.updated", { mode: "yolo", planEnabled: false, source: "tool" }),
+    );
+    expect(server.sessionPlanActive.has("sess_test")).toBe(false);
+    // No card/notification is dispatched for a mode transition.
+    await Promise.resolve();
+    expect(server.calls).toHaveLength(0);
+  });
+
   it("emits a tool_call card on the first running session.updated(taskId)", async () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");

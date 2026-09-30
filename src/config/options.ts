@@ -441,6 +441,14 @@ export async function buildModes(
     } catch {
       // keep default
     }
+    // The runtime's plan tools (EnterPlanMode/ExitPlanMode) flip the execution
+    // state's planEnabled WITHOUT touching settings.mode — the v3 read keeps
+    // reporting the underlying mode (verified upstream: mapSessionSettings
+    // reads app.getMode()). Fold the tracked flag so the advertised mode
+    // matches what the session actually runs.
+    if (server.sessionPlanActive.has(zcodeSid) && currentMode !== "plan") {
+      currentMode = "plan";
+    }
   }
   return {
     currentModeId: currentMode,
@@ -575,6 +583,11 @@ export async function buildConfigOptions(
       }
     } catch {
       // keep defaults
+    }
+    // Same plan-flag fold as buildModes: a plan-active runtime still reports
+    // the underlying mode in settings, and the dropdown must show "plan".
+    if (server.sessionPlanActive.has(zcodeSid) && currentMode !== "plan") {
+      currentMode = "plan";
     }
   }
 

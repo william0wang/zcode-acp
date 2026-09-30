@@ -146,6 +146,19 @@ export class BackgroundTaskListener implements EventListener {
           // taskId is verified string above; cast to the full shape (other
           // fields are optional and read defensively inside onTaskStatus).
           void this.onTaskStatus(raw as TaskStatusPayload);
+          return;
+        }
+        // Out-of-turn mode transitions (SessionModeChanged rides this generic
+        // wire type with a raw {mode, planEnabled} payload): keep the tracked
+        // plan flag truthful for the read paths. No broadcast from here — the
+        // turn-path dispatcher owns client notification; this only feeds
+        // buildModes/buildConfigOptions.
+        const p = (raw ?? {}) as Record<string, unknown>;
+        if (typeof p["mode"] === "string" && typeof p["planEnabled"] === "boolean") {
+          const planEnabled = p["planEnabled"] === true;
+          if (planEnabled) this.server.sessionPlanActive.add(this.zcodeSid);
+          else this.server.sessionPlanActive.delete(this.zcodeSid);
+          log(`  [bg] mode transition: ${p["mode"]} plan=${planEnabled}`);
         }
         return;
       }

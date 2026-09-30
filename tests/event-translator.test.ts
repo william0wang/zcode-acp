@@ -229,6 +229,42 @@ describe("EventTranslator", () => {
     expect(out).toEqual([{ kind: "UsageDelta", used: 1234, size: 200000 }]);
   });
 
+  it("folds a SessionModeChanged session.updated into the effective mode (plan)", () => {
+    // EnterPlanMode flips only the runtime plan flag — the payload's `mode`
+    // stays the underlying session mode; the advertised mode must be "plan".
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("session.updated", {
+        mode: "yolo",
+        planEnabled: true,
+        previousMode: "yolo",
+        previousPlanEnabled: false,
+        source: "tool",
+      }),
+    );
+    expect(out).toEqual([{ kind: "ConfigChanged", mode: "plan", planEnabled: true }]);
+  });
+
+  it("a mode transition out of plan reports the underlying mode", () => {
+    const t = new EventTranslator();
+    const out = t.translate(
+      ev("session.updated", {
+        mode: "yolo",
+        planEnabled: false,
+        previousMode: "yolo",
+        previousPlanEnabled: true,
+        source: "tool",
+      }),
+    );
+    expect(out).toEqual([{ kind: "ConfigChanged", mode: "yolo", planEnabled: false }]);
+  });
+
+  it("background-task session.updated payloads are not mode transitions", () => {
+    const t = new EventTranslator();
+    const out = t.translate(ev("session.updated", { taskId: "agent_1", status: "running" }));
+    expect(out).toEqual([]);
+  });
+
   it("translates state.updated patch → ConfigChanged (mode/model/thought)", () => {
     const t = new EventTranslator();
     const out = t.translate(
