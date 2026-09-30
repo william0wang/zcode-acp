@@ -22,11 +22,20 @@
 
 import { randomUUID } from "node:crypto";
 
-import { rememberGate, type WorkflowGate } from "../config/workflow-gate.js";
+import { userConfigPath } from "../config/user-config.js";
+import {
+  DYNAMIC_WORKFLOW_MODES,
+  type DynamicWorkflowMode,
+  ensureWorkflowPolicyPushed,
+  rememberGate,
+  workflowOverrideNow,
+  type WorkflowGate,
+} from "../config/workflow-gate.js";
 import { ensureRealSession } from "../handlers/session.js";
 import { lookupLazySession, rememberLazySession } from "../lazy-sessions.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
+import { writeJsonAtomic } from "./atomic-write.js";
 
 /** Workflow scope vocabulary (upstream workflows/* `scope`). */
 export type WorkflowScope = "project" | "global";
@@ -69,25 +78,75 @@ function messageOf(error: unknown): string {
 }
 
 /**
- * Await the per-backend gate verdict and refuse when the feature is off.
- * The upstream v4 start/resume commands are NOT gated by the backend policy
- * (port presence is their only gate), so the bridge guards itself — a
- * headless backend would otherwise happily run workflows the remote config
- * disabled. A null gate means NO backend was ever spawned (an App-only flow
- * that never chatted): spawn one — ensureBackend starts the gate fetch — and
- * await the fresh verdict, so a cold bridge reports the real answer instead
- * of a false 403. An actual fetch failure still settles disabled
- * (fail-closed, like the gate itself).
+ * Await the effective gate verdict and refuse when the feature is off. The
+ * local override (App settings toggle / env) short-circuits FIRST — no backend
+ * spawn, no network (upstream folds the override ahead of every network
+ * action), so a cold App-only bridge answers from the switch alone. The
+ * upstream v4 start/resume commands are NOT gated by the backend policy (port
+ * presence is their only gate), so the bridge guards itself — a headless
+ * backend would otherwise happily run workflows the gate disabled. A null
+ * remote verdict means NO backend was ever spawned (an App-only flow that
+ * never chatted): spawn one — ensureBackend starts the gate fetch — and await
+ * the fresh verdict, so a cold bridge reports the real answer instead of a
+ * false 403. An actual fetch failure still settles disabled (fail-closed,
+ * like the gate itself). The 403 message carries mode+source so a client can
+ * tell "server pulled the flag" (disabled/default) from "the fetch is broken"
+ * (unknown/default) without probing /settings/all.
  */
 export async function requireWorkflowEnabled(server: ZcodeAcpServer): Promise<WorkflowGate> {
+  const override = workflowOverrideNow();
+  if (override) {
+    ensureWorkflowPolicyPushed(server);
+    return override;
+  }
   if (!server.backendWorkflowGate) {
     await server.ensureBackend().catch((): undefined => undefined);
   }
   const promise = server.backendWorkflowGate;
   const gate = promise ? await promise : null;
   if (promise && gate) rememberGate(promise, gate);
-  if (!gate?.enabled) throw new WorkflowApiError(403, "workflow_disabled");
+  if (!gate?.enabled) {
+    throw new WorkflowApiError(
+      403,
+      "workflow_disabled",
+      `gate mode=${gate?.mode ?? "unknown"} source=${gate?.source ?? "default"}`,
+    );
+  }
   return gate;
+}
+
+/** Settings value for the gate switch: a concrete mode, or "auto" (follow remote). */
+export type WorkflowGateModeSetting = "auto" | DynamicWorkflowMode;
+
+/** The valid non-auto settings vocabulary, for route validation. */
+export const WORKFLOW_GATE_SETTINGS: readonly WorkflowGateModeSetting[] = [
+  "auto",
+  ...DYNAMIC_WORKFLOW_MODES,
+];
+
+/**
+ * Persist/clear the machine-level workflow gate override in the user config
+ * (`workflow.mode`): the App settings toggle's write half. "auto" DELETES the
+ * key (follow the remote verdict). Raw read-modify-write under the config
+ * lock — the file carries sections owned by other writers, which must survive
+ * byte-for-byte. The next gate read sees the change live (no bridge restart);
+ * existing sessions keep their toolset until re-created/resumed (upstream
+ * "affects only records created/resumed afterwards" semantics).
+ */
+export async function setWorkflowGateMode(mode: WorkflowGateModeSetting): Promise<void> {
+  await writeJsonAtomic(userConfigPath(), (current) => {
+    const next = { ...current };
+    const workflow = {
+      ...(typeof next["workflow"] === "object" && next["workflow"] !== null
+        ? (next["workflow"] as Record<string, unknown>)
+        : {}),
+    };
+    if (mode === "auto") delete workflow["mode"];
+    else workflow["mode"] = mode;
+    if (Object.keys(workflow).length > 0) next["workflow"] = workflow;
+    else delete next["workflow"];
+    return next;
+  });
 }
 
 /** Workspace ref for session-less `workflows/*` calls (collectSessions shape). */

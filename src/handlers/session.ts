@@ -50,7 +50,12 @@ import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
-import { filterWorkflowCommands, rememberGate, workflowGateNow } from "../config/workflow-gate.js";
+import {
+  effectiveWorkflowGate,
+  effectiveWorkflowGateNow,
+  ensureWorkflowPolicyPushed,
+  filterWorkflowCommands,
+} from "../config/workflow-gate.js";
 import { messages } from "../i18n.js";
 import {
   lookupLazySession,
@@ -107,26 +112,25 @@ function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: stri
 }
 
 /**
- * Dynamic-workflow session flag (desktop-host parity, server.backendWorkflowGate):
+ * Dynamic-workflow session flag (desktop-host parity, src/config/workflow-gate.ts):
  * `{dynamicWorkflowEnabled:true}` rides every session/create·resume when the
- * gate resolved enabled; otherwise NOTHING is written — the backend's zod
- * schemas are strict, and the flag-absent default is exactly fail-closed.
- * Awaiting the gate on the hot path is free (the verdict resolved at backend
- * spawn); the cold-path bound is the gate fetch's 6s timeout, well under a
- * backend boot. Fork and sub-agent sessions copy the flag inside the backend
- * — no bridge-side injection point for those.
+ * EFFECTIVE gate (local override first, else the pinned remote verdict) is
+ * enabled; otherwise NOTHING is written — the backend's zod schemas are
+ * strict, and the flag-absent default is exactly fail-closed. The override is
+ * re-read live, so an App settings toggle flip reaches the NEXT create/resume
+ * without a bridge restart. Awaiting the remote verdict on the hot path is
+ * free (it resolved at backend spawn); the cold-path bound is the gate fetch's
+ * 6s timeout, well under a backend boot. Fork and sub-agent sessions copy the
+ * flag inside the backend — no bridge-side injection point for those.
  */
 async function workflowFlag(
   server: ZcodeAcpServer,
 ): Promise<{ dynamicWorkflowEnabled: true } | Record<string, never>> {
-  const promise = server.backendWorkflowGate;
-  if (!promise) return {};
-  const gate = await promise;
-  // Belt-and-braces vs captureGate (ensureBackend): an awaited verdict becomes
-  // synchronously readable immediately, so the send-time menu filter that runs
-  // right after create/resume sees it on its FIRST call.
-  rememberGate(promise, gate);
-  return gate.enabled ? { dynamicWorkflowEnabled: true } : {};
+  // A local override flipped on since spawn also owes the backend its policy
+  // push (once per generation; a boolean check on this hot path).
+  ensureWorkflowPolicyPushed(server);
+  const gate = await effectiveWorkflowGate(server);
+  return gate?.enabled ? { dynamicWorkflowEnabled: true } : {};
 }
 
 /**
@@ -140,7 +144,7 @@ async function workflowFlag(
  * idempotent and correctly ordered (a late settle supersedes the stale send).
  */
 export function resendMenuAfterGateSettled(server: ZcodeAcpServer, acpSid: string): void {
-  if (!server.allCommands || !workflowGateNow(server)?.enabled) return;
+  if (!server.allCommands || !effectiveWorkflowGateNow(server)?.enabled) return;
   for (const sid of server.sessionAliases(acpSid)) {
     sendAvailableCommandsDeferred(
       server.clients,

@@ -157,6 +157,8 @@ export interface PushNotifyUserConfig {
   run?: boolean;
   task?: boolean;
   compact?: boolean;
+  /** Pending interaction asks (permission/question): zero-client push + unanswered watchdog. */
+  ask?: boolean;
 }
 
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
@@ -172,8 +174,20 @@ export interface PushUserConfig {
   contentDetail?: "full" | "minimal";
   /** Settled-push quiet window in ms after a user prompt/cancel (0 = always push). */
   quietMs?: number;
+  /** Unanswered-ask watchdog delay in ms (0 = push at dispatch time; default 120s). */
+  askDelayMs?: number;
   relay?: PushRelayUserConfig;
   notify?: PushNotifyUserConfig;
+}
+
+/** The `workflow` section: dynamic-workflow gate override (the App settings toggle). */
+export interface WorkflowUserConfig {
+  /**
+   * Local override of the dynamic-workflow remote gate. Domain mirrors upstream
+   * `ZCODE_DYNAMIC_WORKFLOW_MODE` (shared/dynamic-workflow-feature.ts); absent
+   * = follow the remote verdict. Written via PUT /settings/workflow-gate.
+   */
+  mode?: "disabled" | "onDemand" | "alwaysOn";
 }
 
 export interface UserConfig {
@@ -190,6 +204,7 @@ export interface UserConfig {
   sandbox?: SandboxUserConfig;
   tui?: TuiUserConfig;
   push?: PushUserConfig;
+  workflow?: WorkflowUserConfig;
 }
 
 /** Resolve the config file path: $XDG_CONFIG_HOME/zcode-acp or ~/.config/zcode-acp. */
@@ -204,6 +219,14 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** The session modes the backend's own mode select offers (mirrors CONFIG_META). */
 const SESSION_MODES = new Set(["plan", "build", "edit", "yolo", "auto"]);
+
+/**
+ * Dynamic-workflow gate override domain — mirrors upstream DYNAMIC_WORKFLOW_MODES
+ * (config/workflow-gate.ts). Duplicated instead of imported: user-config must
+ * not import utils-adjacent modules (see the warn() note above — the import
+ * graph stays acyclic by hand).
+ */
+const WORKFLOW_MODES = new Set(["disabled", "onDemand", "alwaysOn"]);
 
 /** Normalized language pick: "zh*"/"en*" prefixes accepted, else undefined. */
 function parseLang(v: unknown): "zh" | "en" | undefined {
@@ -350,6 +373,17 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     return {};
   });
 
+  result.workflow = parseSection(parsed, "workflow", file, (body, label) => {
+    const w: WorkflowUserConfig = {};
+    const mode = body["mode"];
+    if (mode !== undefined) {
+      const m = typeof mode === "string" ? mode.trim() : "";
+      if (WORKFLOW_MODES.has(m)) w.mode = m as WorkflowUserConfig["mode"];
+      else warn(`config: ${label}.mode=${JSON.stringify(mode)} is not a workflow mode — ignoring`);
+    }
+    return w;
+  });
+
   result.push = parseSection(parsed, "push", file, (body, label) => {
     const p: PushUserConfig = {};
     if (body["enabled"] === undefined) {
@@ -377,6 +411,8 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     }
     const quietMs = parseIntField(body["quietMs"], 0, `${label}.quietMs`, file);
     if (quietMs !== undefined) p.quietMs = quietMs;
+    const askDelayMs = parseIntField(body["askDelayMs"], 0, `${label}.askDelayMs`, file);
+    if (askDelayMs !== undefined) p.askDelayMs = askDelayMs;
     const relay = body["relay"];
     if (relay !== undefined) {
       if (!isPlainObject(relay)) {
@@ -396,7 +432,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
         warn(`config: ${label}.notify in ${file} is not an object — ignoring`);
       } else {
         const n: PushNotifyUserConfig = {};
-        for (const key of ["turn", "goal", "run", "task", "compact"] as const) {
+        for (const key of ["turn", "goal", "run", "task", "compact", "ask"] as const) {
           const v = notify[key];
           if (v === undefined) continue;
           if (typeof v === "boolean") n[key] = v;

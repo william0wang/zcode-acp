@@ -711,16 +711,30 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   call site (see `handlers/server-requests.ts`) when sending server→client
   requests; the SDK types also require the `toolCall` field on permission
   requests (Zed renders the popup against it).
-- **Dynamic workflow availability is the REMOTE verdict — there is no
-  bridge-side switch** (ADR-0029, 2026-09-24): the bridge mirrors the desktop
-  host by anonymously fetching `/api/v1/client/configs`
-  (`dynamicWorkflow.mode`, fail-closed) once per backend spawn
-  (`server.backendWorkflowGate`, `src/config/workflow-gate.ts`) and enabling
-  via the dual channel (policy push + `dynamicWorkflowEnabled` on every
+- **Dynamic workflow availability = LOCAL override > remote verdict** (ADR-0029,
+  revised 2026-09-29): the REMOTE half mirrors the desktop host by anonymously
+  fetching `/api/v1/client/configs` (`dynamicWorkflow.mode`, fail-closed) once
+  per backend spawn (`server.backendWorkflowGate`,
+  `src/config/workflow-gate.ts`). On top sits a LOCAL override read LIVE per
+  consumption — config-file `workflow.mode`
+  (~/.config/zcode-acp/config.json, written by the App settings toggle via
+  `PUT /settings/workflow-gate {mode: auto|disabled|onDemand|alwaysOn}`,
+  per-instance mount only) over the upstream env
+  `ZCODE_DYNAMIC_WORKFLOW_MODE`; a hit folds to `source:"override"` and
+  short-circuits before any network/backend spawn, and a flip to enabled
+  re-fires the per-generation policy push (`ensureWorkflowPolicyPushed`).
+  This is NOT a drift from upstream: the shared contract's headless-host tier
+  (`dynamic-workflow-feature.ts`) explicitly reads the env directly — only
+  the packaged desktop production tier strips it. Do NOT "fix away" the
+  switch (the pre-2026-09-29 "no bridge-side switch" stance is superseded);
+  equally do NOT make the override the default — unset means the remote
+  verdict stays the whole story. Fail-closed observability split: 200 without
+  the key = `{mode:"disabled", source:"default"}` (upstream: pulling the key
+  IS off), fetch failure = `{mode:"unknown", source:"default"}`; the 403 body
+  carries `gate mode=… source=…` in its message. Enabling still goes through
+  the dual channel (policy push + `dynamicWorkflowEnabled` on every
   create/resume — the `session/requestRuntimePreferences` schema still cannot
-  carry the flag). Do NOT add a config/env toggle: the desktop has none
-  (production strips the env override), and a second decision source would
-  drift from the grad system. Wire facts that bite: v3 STRIPS
+  carry the flag). Wire facts that bite: v3 STRIPS
   `dynamic_workflow_run_progress` (`session-mapper.ts:366-373`) — per-actor
   progress only exists via `v4/conversation/workflowRunEvents` (the poller,
   `src/workflow/poller.ts`, armed by `taskKind:"workflow"` background tasks;
