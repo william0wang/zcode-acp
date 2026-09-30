@@ -192,12 +192,12 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   `ZCODE_ACP_HUB_TERMINAL_COMMAND` (a shell command; `{script}` is replaced
   by the quoted script path) wins over `ZCODE_ACP_HUB_TERMINAL_APP`, which
   is matched against built-in launch recipes: Terminal and iTerm run the
-  script via `open -a` (both execute `.command`); WezTerm, kitty, Alacritty,
-  and Ghostty are driven by their own CLI (`open -na <app> --args … -e …`);
-  any other name passes through to `open -a` as-is. Default: Terminal.app.
-  Warp cannot execute scripts or commands programmatically at all
-  (warpdotdev/warp#1917, #3959, #9083) — naming it warns, and the flow
-  degrades to the headless bridge after the register timeout.
+  script via `open -a` (both execute `.command`); WezTerm, kitty, and
+  Alacritty are driven by their own CLI (`open -na <app> --args … -e …`);
+  Ghostty opens an AppleScript tab in the project directory that types the
+  script into the default shell (auto-closes when the CLI exits); Warp opens its
+  `warp://action/new_tab?path=…` URI. Any other name passes through to
+  `open -a` as-is. Default: Terminal.app.
 - Create NEVER reuses a live serve-origin instance (ADR-0016 amendment):
   the App flow lists project history first, which incubates a headless serve
   bridge, and reuse meant the promised terminal window could never open once
