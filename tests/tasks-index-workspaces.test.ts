@@ -17,6 +17,7 @@ interface FakeRow {
   workspace_key: string;
   workspace_path: string;
   deleted: number;
+  archived?: number;
   updated_at: number;
 }
 
@@ -37,11 +38,12 @@ vi.mock("node:sqlite", () => {
       if (/^SELECT workspace_path AS p/i.test(sql)) {
         return {
           all() {
-            // Mirror GROUP BY workspace_key + ORDER BY MAX(updated_at) DESC:
-            // aggregate per key, newest first.
+            // Mirror WHERE deleted=0 AND archived=0 + GROUP BY workspace_key
+            // + ORDER BY MAX(updated_at) DESC: aggregate per key, newest
+            // first, over visible rows only.
             const groups = new Map<string, FakeRow[]>();
             for (const r of rows) {
-              if (r.deleted !== 0) continue;
+              if (r.deleted !== 0 || r.archived === 1) continue;
               const list = groups.get(r.workspace_key) ?? [];
               list.push(r);
               groups.set(r.workspace_key, list);
@@ -260,6 +262,46 @@ describe("listKnownWorkspaces", () => {
     openedPaths.length = 0;
     await listKnownWorkspaces("/fake/fixture.sqlite");
     expect(openedPaths).toEqual(["/fake/fixture.sqlite"]);
+  });
+
+  it("a workspace whose every row is archived is not listed (nothing to resume)", async () => {
+    // The App archives whole projects this way; the session listing hides
+    // archived rows, so such a project rendered as an empty list entry.
+    rows = [
+      {
+        workspace_key: "/Users/dev/Develop/proj-a",
+        workspace_path: "/Users/dev/Develop/proj-a",
+        deleted: 0,
+        archived: 1,
+        updated_at: 900,
+      },
+      {
+        workspace_key: "/Users/dev/Develop/proj-a",
+        workspace_path: "/Users/dev/Develop/proj-a",
+        deleted: 1,
+        archived: 0,
+        updated_at: 800,
+      },
+      {
+        workspace_key: "/Users/dev/Develop/proj-b",
+        workspace_path: "/Users/dev/Develop/proj-b",
+        deleted: 0,
+        archived: 1,
+        updated_at: 700,
+      },
+      {
+        workspace_key: "/Users/dev/Develop/proj-b",
+        workspace_path: "/Users/dev/Develop/proj-b",
+        deleted: 0,
+        updated_at: 600,
+      },
+    ];
+    const list = await listKnownWorkspaces("/fake/db.sqlite");
+    // proj-a: all rows hidden (archived or deleted) → gone. proj-b keeps one
+    // visible row, and the sessions COUNT only counts that visible row.
+    expect(list).toEqual([
+      { workspacePath: "/Users/dev/Develop/proj-b", sessions: 1, lastActive: 600 },
+    ]);
   });
 
   it("softDeleteWorkspaceTasks removes the project from the list (project delete)", async () => {

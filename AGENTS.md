@@ -763,7 +763,12 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   a tombstone — the backend process owns that store, and upstream keeps the
   bytes by design (undelete = a future flag flip). Live conversations are
   refused (409); a session live on ANOTHER bridge just disappears when it
-  next closes and re-lists.
+  next closes and re-lists. `listKnownWorkspaces` (the /api/projects source)
+  likewise filters `deleted=0 AND archived=0` (2026-09-30): a workspace whose
+  every row is archived rendered as an EMPTY project entry ("没有会话的项目"
+  in the remote history list) because the session listing hides archived rows
+  while the workspace list kept the group — the sessions count now counts
+  only visible rows too.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish
