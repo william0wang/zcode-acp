@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
     contentDetail: "full" | "minimal";
     notify?: Record<string, boolean>;
     quietMs?: number;
+    askDelayMs?: number;
   } | null,
   diary: [] as string[],
 }));
@@ -33,12 +34,15 @@ vi.mock("../src/crash-guards.js", async (orig) => {
 });
 
 const {
+  armAskWatchdog,
+  clearAskWatchdog,
   noteUserActivity,
   pushIfOffline,
   pushInteractionIfOffline,
   pushSettled,
   pushSourceLabel,
   renderPushContent,
+  resetAskWatchdogForTests,
   resetPushSenderForTests,
   sendTestPush,
   setPushSenderForTests,
@@ -51,6 +55,7 @@ beforeEach(() => {
   h.cfg = null;
   h.diary.length = 0;
   sent.length = 0;
+  resetAskWatchdogForTests();
   setPushSenderForTests({
     sendText: async (c) => {
       sent.push(c);
@@ -207,7 +212,7 @@ describe("pushSettled quiet window (§5.2 — user active ⇒ no ping)", () => {
 
 describe("pushInteractionIfOffline (§5.1)", () => {
   it("derives permission with the toolCall title as body", () => {
-    h.cfg = { contentDetail: "full" };
+    h.cfg = { contentDetail: "full", notify: { ask: true } };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, "session/request_permission", {
       sessionId: "s1",
@@ -218,7 +223,7 @@ describe("pushInteractionIfOffline (§5.1)", () => {
   });
 
   it("derives question from elicitation with the message as body", () => {
-    h.cfg = { contentDetail: "full" };
+    h.cfg = { contentDetail: "full", notify: { ask: true } };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, "elicitation/create", {
       sessionId: "s1",
@@ -228,11 +233,83 @@ describe("pushInteractionIfOffline (§5.1)", () => {
   });
 
   it("falls back to bare titles when params carry nothing readable", () => {
-    h.cfg = { contentDetail: "full" };
+    h.cfg = { contentDetail: "full", notify: { ask: true } };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, "session/request_permission", {});
     pushInteractionIfOffline(server, "elicitation/create", {});
     expect(sent).toEqual(["[permission] Approval requested", "[question] Agent question"]);
+  });
+
+  it("respects the notify.ask switch (off)", () => {
+    h.cfg = { contentDetail: "full", notify: { ask: false } };
+    const server = new ZcodeAcpServer();
+    pushInteractionIfOffline(server, "session/request_permission", {
+      toolCall: { title: "Bash: npm install" },
+    });
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
+  const PERMISSION = "session/request_permission";
+  const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("pushes an ask still pending after askDelayMs even with a client CONNECTED", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    const server = new ZcodeAcpServer();
+    server.clients.add({ notify: async () => {}, request: async () => undefined });
+    void server; // presence is irrelevant for the watchdog — the delay is the grace
+    armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: npm install" } });
+    await tick(50);
+    expect(sent).toEqual(["[permission] Approval requested\nBash: npm install"]);
+    clearAskWatchdog();
+  });
+
+  it("a settled (answered) ask never pushes", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    armAskWatchdog(PERMISSION, {});
+    clearAskWatchdog(); // answered before the delay
+    await tick(50);
+    expect(sent).toEqual([]);
+  });
+
+  it("coalesces concurrent asks into ONE notification until all settle", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    armAskWatchdog(PERMISSION, { toolCall: { title: "one" } });
+    armAskWatchdog("elicitation/create", { message: "two" });
+    armAskWatchdog(PERMISSION, { toolCall: { title: "three" } });
+    await tick(50);
+    expect(sent).toEqual(["[permission] Approval requested\none"]);
+    clearAskWatchdog(); // one settles — the slot stays held for the rest
+    armAskWatchdog(PERMISSION, { toolCall: { title: "late ask" } });
+    await tick(50);
+    expect(sent).toHaveLength(1); // still coalesced
+    clearAskWatchdog();
+    clearAskWatchdog();
+    clearAskWatchdog(); // all settled — slot reset
+    armAskWatchdog("elicitation/create", { message: "next round" });
+    await tick(50);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe("[question] Agent question\nnext round");
+    clearAskWatchdog();
+  });
+
+  it("the zero-clients immediate push satisfies the slot (no duplicate)", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    const server = new ZcodeAcpServer();
+    pushInteractionIfOffline(server, PERMISSION, { toolCall: { title: "Bash: rm" } });
+    armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } }); // funnel arms after dispatch
+    await tick(50);
+    expect(sent).toEqual(["[permission] Approval requested\nBash: rm"]);
+    clearAskWatchdog();
+  });
+
+  it("notify.ask false disables the watchdog too", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: false }, askDelayMs: 20 };
+    armAskWatchdog(PERMISSION, {});
+    await tick(50);
+    expect(sent).toEqual([]);
+    clearAskWatchdog();
   });
 });
 
