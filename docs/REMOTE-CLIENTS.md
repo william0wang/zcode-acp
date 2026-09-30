@@ -53,10 +53,12 @@ ACP editor ────── stdio ──────────┘
 | `GET /api/instances/{id}/status`                       | required | Real-time per-session running status of one bridge.                                                                                                               |
 | `POST /api/instances/{id}/sessions/{sessionId}/close`  | required | Retire a session from remote discovery — see [Closing a session](#closing-a-session).                                                                             |
 | `POST /api/instances/{id}/sessions/{sessionId}/rename` | required | Rename a session — see [Renaming a session](#renaming-a-session).                                                                                                 |
+| `POST /api/instances/{id}/sessions/{sessionId}/delete` | required | Soft-delete (hide) a session from every listing — see [Deleting a project or session](#deleting-a-project-or-session).                                            |
 | `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                                                                      |
 | `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                                |
 | `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                                 |
 | `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                                   |
+| `POST /api/projects/delete {workspacePath}`            | required | Soft-delete a project and all its sessions (hidden from every listing) — see [Deleting a project or session](#deleting-a-project-or-session).                     |
 | `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal TUI window (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
 
 HTTP auth: `Authorization: Bearer <token>` or `?token=<token>`.
@@ -801,6 +803,46 @@ all-whitespace title is rejected with `400`.
 Errors: `400` missing/empty title or oversized body (>4 KB), `401` bad token,
 `404` unknown session (or instance), `502` bridge unreachable. Renaming during
 a running turn is allowed — titles are no longer turn-coupled.
+
+## Deleting a project or session
+
+```text
+POST {hub}/api/projects/delete
+     body: { "workspacePath": "/Users/me/proj" }          → 200 { "ok": true, "deletedTasks": 12 }
+
+POST {hub}/api/instances/{id}/sessions/{sessionId}/delete → 200 { "ok": true, "deleted": true }
+```
+
+Both are **soft deletes** (tombstones), matching the ZCode App's own delete
+semantics: the tasks-index rows get `deleted=1`, every listing hides them, and
+the backend's session store keeps the conversation bytes — nothing is purged,
+and a delete is reversible by clearing the flag (no undelete API yet).
+
+What hides, from where:
+
+- **Project delete** flips every tasks row of the workspace. The project
+  vanishes from `GET /api/projects`, `POST /api/instances` then refuses it
+  (`403 unknown project`), and all its sessions disappear from every listing.
+- **Session delete** tombstones one row (creating a minimal one for sessions
+  that predate tasks-index sync). The session disappears from
+  `GET /api/projects/sessions`, from ACP `session/list`, and from the CLI
+  `/resume` picker. The desktop App's sidebar reads the same index — deleted
+  items hide there too (machine-wide consistency).
+- Sessions **archived** in the desktop App (`archived=1`) are hidden from the
+  same listings — the remote default list mirrors the App's default list.
+
+A NEW session created in a deleted project re-adds a fresh row and the project
+reappears — a hide, not a ban. Deleting does not stop anything: live or
+running conversations are refused with `409` (stop or close them first), and
+resuming a tombstoned session id via `POST /api/instances` answers `404
+session deleted` (a stale client cannot resurrect it; a bogus id still gets
+its honest window).
+
+Errors: `400` missing `workspacePath` or malformed session id, `401` bad
+token, `404` unknown instance / deleted-on-resume, `409` session is live on
+this bridge, `502` bridge unreachable, `503` tasks index unavailable
+(session delete only — never a silent success). Project delete is idempotent:
+an unknown or already-deleted project answers `200` with `deletedTasks: 0`.
 
 ## Hub self-upgrade
 

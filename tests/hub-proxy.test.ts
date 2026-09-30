@@ -17,11 +17,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The session-create endpoints read the known-project whitelist from
 // tasks-index; mock the module so no real sqlite/App store is touched.
-const { listKnownWorkspacesMock } = vi.hoisted(() => ({
+// isTaskDeleted (resume tombstone guard) defaults to false — resume paths
+// must behave exactly as before unless a test opts into a tombstone.
+const { isTaskDeletedMock, listKnownWorkspacesMock } = vi.hoisted(() => ({
   listKnownWorkspacesMock: vi.fn(),
+  isTaskDeletedMock: vi.fn(async () => false),
 }));
 vi.mock("../src/tasks-index.js", () => ({
   listKnownWorkspaces: listKnownWorkspacesMock,
+  isTaskDeleted: isTaskDeletedMock,
 }));
 
 import {

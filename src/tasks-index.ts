@@ -228,9 +228,13 @@ export async function renameSessionTask(taskId: string, title: string): Promise<
   if (!trimmed) return false;
   try {
     const result = await withSqliteRetry((con) => {
-      const row = con.prepare("SELECT meta_json FROM tasks WHERE task_id=?").get(taskId) as
-        { meta_json: string } | undefined;
-      if (!row) return false;
+      const row = con
+        .prepare("SELECT deleted, meta_json FROM tasks WHERE task_id=?")
+        .get(taskId) as { deleted: number; meta_json: string } | undefined;
+      // Deleted rows stay tombstoned: a rename racing a delete must not
+      // refresh updated_at and keep the row looking alive (upstream
+      // applyAgentPatch returns null on deleted rows for the same reason).
+      if (!row || row.deleted === 1) return false;
       let metaJson: string;
       try {
         const meta = JSON.parse(row.meta_json ?? "{}") as Record<string, unknown>;
@@ -286,9 +290,10 @@ export async function updateSessionTitle(
   try {
     const result = await withSqliteRetry((con) => {
       const row = con
-        .prepare("SELECT title_overridden, meta_json FROM tasks WHERE task_id=?")
-        .get(taskId) as { title_overridden: number; meta_json: string } | undefined;
-      if (!row) return false;
+        .prepare("SELECT deleted, title_overridden, meta_json FROM tasks WHERE task_id=?")
+        .get(taskId) as
+        { deleted: number; title_overridden: number; meta_json: string } | undefined;
+      if (!row || row.deleted === 1) return false;
 
       if (row.title_overridden === 1) {
         // User renamed manually → the displayed title (title column AND
@@ -325,6 +330,173 @@ export async function updateSessionTitle(
     return result ?? false;
   } catch (e) {
     warn(`tasks-index title update skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+// ---------- soft delete (tombstones, upstream deleteTask semantics) ----------
+
+/**
+ * Soft-delete one session — the upstream App's own delete semantics
+ * ("将已持久化 task 标记为列表不可见；CLI session 内容继续保留"): the tasks
+ * row gets deleted=1, every reader (this bridge's listings, the hub's project
+ * list, the desktop App sidebar) hides it, and the backend store keeps the
+ * conversation intact. Reversible by clearing the flag; there is no
+ * physical-delete path.
+ *
+ * A session with no tasks row yet (pre-sync era, App never reindexed) gets a
+ * minimal tombstone row first — INSERT OR IGNORE never touches an existing
+ * row's title/overrides; the UPDATE then flips the flag (idempotent).
+ */
+export async function softDeleteTask(opts: {
+  taskId: string;
+  workspacePath: string;
+  title?: string;
+}): Promise<boolean> {
+  if (!existsSync(TASKS_INDEX_PATH)) return false;
+  const nowMs = Date.now();
+  const { providerId, modelRef } = resolveProviderModel();
+  const title = (opts.title ?? "").trim().slice(0, 80) || "deleted session";
+  const meta = {
+    taskId: opts.taskId,
+    traceId: opts.taskId,
+    title,
+    titleOverridden: false,
+    workspacePath: opts.workspacePath,
+    createdAt: nowMs,
+    updatedAt: nowMs,
+    mode: "build",
+    model: modelRef,
+    provider: providerId,
+    status: "completed",
+    target: null,
+  };
+  let metaJson: string;
+  try {
+    metaJson = JSON.stringify(meta);
+  } catch {
+    return false;
+  }
+  try {
+    const result = await withSqliteRetry((con) => {
+      // Insert ONLY when no row carries the task id anywhere: an existing row
+      // may spell its workspace_key differently (desktop-created, another
+      // bridge cwd), and a blind INSERT OR IGNORE would add a duplicate
+      // instead of ignoring. The flip below is task_id-scoped either way.
+      const existing = con.prepare("SELECT 1 FROM tasks WHERE task_id=?").get(opts.taskId);
+      if (!existing) {
+        con
+          .prepare(
+            "INSERT OR IGNORE INTO tasks " +
+              "(workspace_key, workspace_path, workspace_identity, task_id, " +
+              " title, task_status, provider, mode, model, " +
+              " created_at, updated_at, unread_at, pinned, archived, deleted, " +
+              " title_overridden, meta_json, searchable_text) " +
+              "VALUES (?, ?, NULL, ?, ?, 'completed', ?, 'build', ?, ?, ?, NULL, 0, 0, 1, 0, ?, ?)",
+          )
+          .run(
+            opts.workspacePath,
+            opts.workspacePath,
+            opts.taskId,
+            title,
+            providerId,
+            modelRef,
+            nowMs,
+            nowMs,
+            metaJson,
+            title,
+          );
+      }
+      con
+        .prepare("UPDATE tasks SET deleted=1, updated_at=? WHERE task_id=? AND deleted=0")
+        .run(nowMs, opts.taskId);
+      return true;
+    });
+    // null = node:sqlite unavailable (withSqliteRetry ran nothing) — the
+    // tombstone was NOT written; never report success (503 at the endpoint).
+    return result ?? false;
+  } catch (e) {
+    warn(`tasks-index soft delete skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/**
+ * Soft-delete EVERY task row of a workspace — "delete the project" is just
+ * "delete its sessions" en masse: the hub's project list derives from
+ * deleted=0 rows, so the project disappears until a new session runs there
+ * again (a hide, not a ban). Idempotent; returns the number of rows flipped.
+ */
+export async function softDeleteWorkspaceTasks(
+  workspacePath: string,
+  dbPath: string = TASKS_INDEX_PATH,
+): Promise<number> {
+  if (!existsSync(dbPath)) return 0;
+  try {
+    const flipped = await withSqliteRetry(
+      (con) =>
+        Number(
+          con
+            .prepare(
+              "UPDATE tasks SET deleted=1, updated_at=? WHERE workspace_path=? AND deleted=0",
+            )
+            .run(Date.now(), workspacePath).changes,
+        ),
+      dbPath,
+    );
+    return flipped ?? 0;
+  } catch (e) {
+    warn(`tasks-index workspace delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    return 0;
+  }
+}
+
+/**
+ * Task-ids whose tasks rows are list-hidden (deleted or archived tombstones).
+ * The sessions listing consults this BEFORE sorting/pagination so pages stay
+ * dense and cursors keep naming the exact next row. Silent best-effort: any
+ * failure (no index, sqlite unavailable) means "nothing hidden" — listings
+ * degrade to showing everything rather than erroring.
+ */
+export async function hiddenTaskIds(dbPath: string = TASKS_INDEX_PATH): Promise<Set<string>> {
+  if (!existsSync(dbPath)) return new Set();
+  try {
+    const rows = await withSqliteRetry(
+      (con) =>
+        con
+          .prepare("SELECT task_id AS id FROM tasks WHERE deleted=1 OR archived=1")
+          .all() as Array<{ id: unknown }>,
+      dbPath,
+    );
+    const out = new Set<string>();
+    for (const r of rows ?? []) {
+      if (typeof r.id === "string") out.add(r.id);
+    }
+    return out;
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Whether a session's tasks row carries the deleted tombstone — guards the
+ * hub's resume path so a stale client cannot resurrect a deleted thread.
+ * False when the row or index is absent (unknown ≠ deleted).
+ */
+export async function isTaskDeleted(
+  taskId: string,
+  dbPath: string = TASKS_INDEX_PATH,
+): Promise<boolean> {
+  if (!existsSync(dbPath)) return false;
+  try {
+    const row = await withSqliteRetry(
+      (con) =>
+        con.prepare("SELECT deleted FROM tasks WHERE task_id=?").get(taskId) as
+          { deleted: number } | undefined,
+      dbPath,
+    );
+    return row?.deleted === 1;
+  } catch {
     return false;
   }
 }

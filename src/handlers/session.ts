@@ -834,12 +834,23 @@ export async function listSessions(
   if (resp.error) throw new Error(`zcode list failed: ${resp.error.message ?? ""}`);
 
   const result = (resp.result ?? {}) as ZcodeListResult;
-  const sessions = (result.sessions ?? []).map((s) => ({
+  let sessions = (result.sessions ?? []).map((s) => ({
     sessionId: s.sessionId ?? "",
     cwd: s.workspace?.workspacePath ?? "",
     title: s.title,
     updatedAt: toIso(s.updatedAt),
   }));
+  // Tombstone filter (upstream deleteTask semantics): sessions the user
+  // deleted or archived stay hidden from EVERY listing — ACP session/list,
+  // the /sessions history endpoint, martty's /resume picker. Silent
+  // best-effort: no index / read failure → list unfiltered.
+  try {
+    const { hiddenTaskIds } = await import("../tasks-index.js");
+    const hidden = await hiddenTaskIds();
+    if (hidden.size > 0) sessions = sessions.filter((s) => !hidden.has(s.sessionId));
+  } catch {
+    // tasks-index unavailable — show everything.
+  }
   log(`session/list → ${sessions.length} sessions`);
   return { sessions };
 }

@@ -77,7 +77,7 @@ import {
 import { queryQuota } from "../quota/index.js";
 import { queryOcUsage } from "../quota/ollama-cloud/index.js";
 import { queryGoUsage } from "../quota/opencode-go/index.js";
-import { listKnownWorkspaces } from "../tasks-index.js";
+import { isTaskDeleted, listKnownWorkspaces, softDeleteWorkspaceTasks } from "../tasks-index.js";
 
 export interface HubOptions {
   port: number;
@@ -1751,6 +1751,33 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.end(JSON.stringify(projects));
       return;
     }
+    // POST /api/projects/delete — soft-delete a project (tombstones, not a
+    // purge): every tasks row of the workspace gets deleted=1, so the project
+    // vanishes from GET /api/projects and POST /api/instances above (unknown
+    // project), its sessions from every listing, and the desktop App's
+    // sidebar too (same index). The backend store keeps all conversation
+    // bytes; a NEW session in that project re-adds a fresh row and the
+    // project reappears — a hide, not a ban. Idempotent: 0 rows flipped is
+    // still ok (already deleted / never known).
+    if (url.pathname === "/api/projects/delete" && req.method === "POST") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const body = await readJson(req);
+      const rawPath = (body as { workspacePath?: unknown } | undefined)?.workspacePath;
+      const workspacePath = typeof rawPath === "string" ? rawPath.trim() : "";
+      if (!workspacePath) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("workspacePath required");
+        return;
+      }
+      const deletedTasks = await softDeleteWorkspaceTasks(workspacePath, projectsDbPath);
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify({ ok: true, deletedTasks }));
+      return;
+    }
     // GET /api/projects/sessions?workspacePath=… — the project's backend
     // session store (ADR-0015), including closed ones no bridge advertises.
     // Discovery stays running-scoped by design; this is the deliberate
@@ -1882,6 +1909,15 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       if (!known.some((p) => p.workspacePath === workspacePath)) {
         res.writeHead(403, { "Content-Type": "text/plain" });
         res.end("unknown project");
+        return;
+      }
+      // A tombstoned session is not resumable: the listing never offers it,
+      // so an id arriving here comes from a stale client cache. Refusing
+      // keeps the delete sticky; a BOGUS id still gets its honest window
+      // (unknown ≠ deleted — isTaskDeleted is false without a row).
+      if (resumeSid && (await isTaskDeleted(resumeSid, projectsDbPath))) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("session deleted");
         return;
       }
       if (resumeSid) {
@@ -2151,13 +2187,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.end(JSON.stringify({ ok: true }));
       return;
     }
-    // POST /api/instances/{id}/sessions/{sid}/close|rename — the remote HTTP
-    // write surface (ADR-0006): forward-and-relay to the bridge's loopback
-    // route. The hub still routes by instance id only; semantics (running
-    // guard / discovery retirement, title validation + pinning + broadcast)
-    // stay in the bridge. Any request body pipes through untouched.
+    // POST /api/instances/{id}/sessions/{sid}/close|rename|delete — the
+    // remote HTTP write surface (ADR-0006): forward-and-relay to the bridge's
+    // loopback route. The hub still routes by instance id only; semantics
+    // (running guard / discovery retirement, title validation + pinning +
+    // broadcast, delete tombstoning + live refusal) stay in the bridge. Any
+    // request body pipes through untouched.
     const sessionOpMatch = url.pathname.match(
-      /^\/api\/instances\/([^/]+)\/sessions\/([^/]+)\/(close|rename)$/,
+      /^\/api\/instances\/([^/]+)\/sessions\/([^/]+)\/(close|rename|delete)$/,
     );
     if (sessionOpMatch && req.method === "POST") {
       const [, instId, sid, op] = sessionOpMatch;

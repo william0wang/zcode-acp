@@ -58,7 +58,7 @@ function makeStatement(sql: string) {
   // The production SQL embeds literal 'build' for mode and NULL for unread_at
   // plus 0 for pinned/archived/deleted/title_overridden. We bind the remaining
   // placeholders positionally in the exact order tasks-index.ts emits them.
-  if (/^INSERT OR IGNORE/i.test(sql)) {
+  if (/^INSERT OR IGNORE/i.test(sql) && !sql.includes("'completed'")) {
     return {
       // prettier-ignore
       run(...params: unknown[]) {
@@ -105,19 +105,167 @@ function makeStatement(sql: string) {
       },
     };
   }
-  // SELECT title_overridden, meta_json FROM tasks WHERE task_id=?
-  if (/^SELECT title_overridden/i.test(sql)) {
+  // INSERT OR IGNORE for the softDeleteTask tombstone: status 'completed' and
+  // deleted=1 are literals, so only 10 placeholders bind.
+  if (/^INSERT OR IGNORE/i.test(sql)) {
+    return {
+      // prettier-ignore
+      run(...params: unknown[]) {
+        // 0 workspacePath, 1 workspacePath(key), 2 taskId, 3 title,
+        // 4 providerId, 5 model, 6 nowMs(created), 7 nowMs(updated),
+        // 8 metaJson, 9 title(searchable_text)
+        const [
+          workspacePath,
+          _key,
+          taskId,
+          title,
+          providerId,
+          model,
+          nowMs,
+          _nowMs2,
+          metaJson,
+          searchable,
+        ] = params as [string, string, string, string, string, string, number, number, string, string];
+        const pk = `${workspacePath}\u0000${taskId}`;
+        if (rows.has(pk)) return { changes: 0 }; // OR IGNORE — existing row wins.
+        rows.set(pk, {
+          workspace_key: workspacePath,
+          workspace_path: workspacePath,
+          workspace_identity: null,
+          task_id: taskId,
+          title,
+          task_status: "completed", // literal in SQL
+          provider: providerId,
+          mode: "build", // literal in SQL
+          model,
+          created_at: nowMs,
+          updated_at: nowMs,
+          unread_at: null, // literal NULL in SQL
+          pinned: 0,
+          archived: 0,
+          deleted: 1, // literal in SQL — the row is born tombstoned
+          title_overridden: 0, // literal 0 in SQL
+          meta_json: metaJson,
+          searchable_text: searchable,
+        });
+        return { changes: 1 };
+      },
+    };
+  }
+  // SELECT 1 FROM tasks WHERE task_id=? (softDeleteTask existence probe)
+  if (/^SELECT 1 FROM tasks/i.test(sql)) {
+    return {
+      get(taskId: string) {
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) return { "1": 1 } as const;
+        }
+        return undefined;
+      },
+    };
+  }
+  // SELECT deleted, meta_json FROM tasks WHERE task_id=? (renameSessionTask)
+  if (/^SELECT deleted, meta_json/i.test(sql)) {
+    return {
+      get(taskId: string) {
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) {
+            return { deleted: r.deleted, meta_json: r.meta_json } as const;
+          }
+        }
+        return undefined;
+      },
+    };
+  }
+  // SELECT deleted, title_overridden, meta_json FROM tasks WHERE task_id=?
+  // (updateSessionTitle)
+  if (/^SELECT deleted, title_overridden/i.test(sql)) {
     return {
       get(taskId: string) {
         for (const r of rows.values()) {
           if (r.task_id === taskId) {
             return {
+              deleted: r.deleted,
               title_overridden: r.title_overridden,
               meta_json: r.meta_json,
             } as const;
           }
         }
         return undefined;
+      },
+    };
+  }
+  // SELECT deleted FROM tasks WHERE task_id=? (isTaskDeleted)
+  if (/^SELECT deleted FROM tasks/i.test(sql)) {
+    return {
+      get(taskId: string) {
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) return { deleted: r.deleted } as const;
+        }
+        return undefined;
+      },
+    };
+  }
+  // SELECT task_id AS id FROM tasks WHERE deleted=1 OR archived=1
+  // (hiddenTaskIds)
+  if (/^SELECT task_id AS id/i.test(sql)) {
+    return {
+      all() {
+        const out: Array<{ id: string }> = [];
+        for (const r of rows.values()) {
+          if (r.deleted === 1 || r.archived === 1) out.push({ id: r.task_id });
+        }
+        return out;
+      },
+    };
+  }
+  // UPDATE tasks SET deleted=1, updated_at=? WHERE task_id=? AND deleted=0
+  if (/^UPDATE tasks SET deleted=1.*WHERE task_id/i.test(sql)) {
+    return {
+      run(updatedAt: number, taskId: string) {
+        let changes = 0;
+        for (const r of rows.values()) {
+          if (r.task_id === taskId && r.deleted === 0) {
+            r.deleted = 1;
+            r.updated_at = updatedAt;
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
+  // UPDATE tasks SET deleted=1, updated_at=? WHERE workspace_path=? AND deleted=0
+  if (/^UPDATE tasks SET deleted=1.*WHERE workspace_path/i.test(sql)) {
+    return {
+      run(updatedAt: number, workspacePath: string) {
+        let changes = 0;
+        for (const r of rows.values()) {
+          if (r.workspace_path === workspacePath && r.deleted === 0) {
+            r.deleted = 1;
+            r.updated_at = updatedAt;
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
+  // UPDATE tasks SET title=?, title_overridden=1, updated_at=?, meta_json=?
+  // WHERE task_id=? (renameSessionTask — pins the manual rename)
+  if (/^UPDATE tasks SET title=\?, title_overridden=1/i.test(sql)) {
+    return {
+      run(title: string, updatedAt: number, metaJson: string, taskId: string) {
+        let changes = 0;
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) {
+            r.title = title;
+            r.title_overridden = 1;
+            r.updated_at = updatedAt;
+            r.meta_json = metaJson;
+            changes++;
+          }
+        }
+        return { changes };
       },
     };
   }
@@ -197,7 +345,15 @@ vi.mock("node:fs", async () => {
   };
 });
 
-import { upsertSessionTask, updateSessionTitle } from "../src/tasks-index.js";
+import {
+  hiddenTaskIds,
+  isTaskDeleted,
+  renameSessionTask,
+  softDeleteTask,
+  softDeleteWorkspaceTasks,
+  updateSessionTitle,
+  upsertSessionTask,
+} from "../src/tasks-index.js";
 
 describe("tasks-index session sync", () => {
   beforeEach(() => {
@@ -401,6 +557,18 @@ describe("tasks-index session sync", () => {
       expect(rows.size).toBe(0);
     });
 
+    it("returns false when the row is deleted — no title refresh on tombstones", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_del_t", title: "keep me" });
+      await softDeleteTask({ taskId: "sess_del_t", workspacePath: "/ws" });
+      const ok = await updateSessionTitle("sess_del_t", "late title");
+      expect(ok).toBe(false);
+      // The tombstoned row must stay byte-identical (upstream applyAgentPatch
+      // returns null on deleted rows for the same reason).
+      const r = rows.get("/ws\u0000sess_del_t")!;
+      expect(r.title).toBe("keep me");
+      expect(JSON.parse(r.meta_json).title).toBe("keep me");
+    });
+
     it("regression: meta_json.title is updated so the App shows the new title", async () => {
       // The ZCode App reads title from meta_json first, falling back to the
       // title column only when meta_json is unparseable. At session/create the
@@ -448,6 +616,139 @@ describe("tasks-index session sync", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe("softDeleteTask", () => {
+    it("flips deleted=1 on an existing row and keeps its title/overrides", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_d1", title: "real title" });
+      const row = rows.get("/ws\u0000sess_d1")!;
+      row.title_overridden = 1;
+
+      const ok = await softDeleteTask({ taskId: "sess_d1", workspacePath: "/ws" });
+      expect(ok).toBe(true);
+      expect(row.deleted).toBe(1);
+      expect(row.title).toBe("real title");
+      expect(row.title_overridden).toBe(1);
+    });
+
+    it("inserts a born-tombstoned row for a session that never had one", async () => {
+      const ok = await softDeleteTask({
+        taskId: "sess_legacy",
+        workspacePath: "/old/proj",
+        title: "legacy session",
+      });
+      expect(ok).toBe(true);
+      expect(rows.size).toBe(1);
+      const r = rows.get("/old/proj\u0000sess_legacy")!;
+      expect(r.deleted).toBe(1);
+      expect(r.title).toBe("legacy session");
+      expect(r.task_status).toBe("completed");
+      // The workspace attribution lets a later project delete sweep it up.
+      expect(r.workspace_path).toBe("/old/proj");
+    });
+
+    it("defaults the tombstone title when none is given", async () => {
+      await softDeleteTask({ taskId: "sess_notitle", workspacePath: "/ws" });
+      expect(rows.get("/ws\u0000sess_notitle")!.title).toBe("deleted session");
+    });
+
+    it("does not duplicate a row whose workspace_key spells differently", async () => {
+      // A desktop-created row may key the workspace differently than the
+      // deleting bridge's projectCwd(); the existence probe must keep the
+      // tombstone a flip on the REAL row, not a second INSERT.
+      await upsertSessionTask({ workspaceKey: "/real/key", taskId: "sess_dk", title: "t" });
+      const ok = await softDeleteTask({ taskId: "sess_dk", workspacePath: "/other/cwd" });
+      expect(ok).toBe(true);
+      expect(rows.size).toBe(1);
+      expect(rows.get("/real/key\u0000sess_dk")!.deleted).toBe(1);
+      expect(rows.get("/real/key\u0000sess_dk")!.workspace_key).toBe("/real/key");
+    });
+
+    it("is idempotent — a second delete succeeds and keeps the row single", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_d2", title: "t" });
+      await softDeleteTask({ taskId: "sess_d2", workspacePath: "/ws" });
+      const firstAt = rows.get("/ws\u0000sess_d2")!.updated_at;
+
+      const ok = await softDeleteTask({ taskId: "sess_d2", workspacePath: "/ws" });
+      expect(ok).toBe(true);
+      expect(rows.size).toBe(1);
+      expect(rows.get("/ws\u0000sess_d2")!.deleted).toBe(1);
+      // The INSERT OR IGNORE branch did not reset the row; only the UPDATE's
+      // updated_at refresh may differ.
+      expect(rows.get("/ws\u0000sess_d2")!.updated_at).toBeGreaterThanOrEqual(firstAt);
+    });
+  });
+
+  describe("softDeleteWorkspaceTasks", () => {
+    it("flips every non-deleted row of the workspace and returns the count", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s2", title: "" });
+      await upsertSessionTask({ workspaceKey: "/other", taskId: "s3", title: "" });
+
+      const flipped = await softDeleteWorkspaceTasks("/proj");
+      expect(flipped).toBe(2);
+      expect(rows.get("/proj\u0000s1")!.deleted).toBe(1);
+      expect(rows.get("/proj\u0000s2")!.deleted).toBe(1);
+      // Other workspaces untouched.
+      expect(rows.get("/other\u0000s3")!.deleted).toBe(0);
+    });
+
+    it("is idempotent — already-deleted rows are not counted again", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+      expect(await softDeleteWorkspaceTasks("/proj")).toBe(0);
+    });
+  });
+
+  describe("hiddenTaskIds / isTaskDeleted", () => {
+    it("collects deleted AND archived rows (desktop archive hides too)", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_del", title: "" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_arch", title: "" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_live", title: "" });
+      await softDeleteTask({ taskId: "s_del", workspacePath: "/ws" });
+      rows.get("/ws\u0000s_arch")!.archived = 1;
+
+      const hidden = await hiddenTaskIds();
+      expect(hidden.has("s_del")).toBe(true);
+      expect(hidden.has("s_arch")).toBe(true);
+      expect(hidden.has("s_live")).toBe(false);
+      expect(hidden.size).toBe(2);
+    });
+
+    it("isTaskDeleted: true only for deleted rows, false for absent ones", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_ok", title: "" });
+      await softDeleteTask({ taskId: "s_gone", workspacePath: "/ws" });
+      // An ARCHIVED row is hidden but not deleted — resume may still refuse
+      // there, but the tombstone predicate itself must stay precise.
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_arch2", title: "" });
+      rows.get("/ws\u0000s_arch2")!.archived = 1;
+
+      expect(await isTaskDeleted("s_gone")).toBe(true);
+      expect(await isTaskDeleted("s_ok")).toBe(false);
+      expect(await isTaskDeleted("s_arch2")).toBe(false);
+      // Absent row: unknown ≠ deleted (bogus resume ids keep their honest window).
+      expect(await isTaskDeleted("never_created")).toBe(false);
+    });
+  });
+
+  describe("renameSessionTask", () => {
+    it("refuses to rename a deleted row (tombstone stays sticky)", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_rd", title: "old" });
+      await softDeleteTask({ taskId: "sess_rd", workspacePath: "/ws" });
+
+      const ok = await renameSessionTask("sess_rd", "new name");
+      expect(ok).toBe(false);
+      expect(rows.get("/ws\u0000sess_rd")!.title).toBe("old");
+      expect(rows.get("/ws\u0000sess_rd")!.title_overridden).toBe(0);
+    });
+
+    it("renames normally on a live row", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_rn", title: "old" });
+      const ok = await renameSessionTask("sess_rn", "new name");
+      expect(ok).toBe(true);
+      expect(rows.get("/ws\u0000sess_rn")!.title).toBe("new name");
+      expect(rows.get("/ws\u0000sess_rn")!.title_overridden).toBe(1);
     });
   });
 });

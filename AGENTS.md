@@ -747,6 +747,23 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   workflow channel. Launch creates a REAL registered session
   (`{acpSessionId, runId, toolCallId}`) and closes it only when the bridge
   itself created it and the ack was not accepted.
+- **Project/session delete is a tasks-index TOMBSTONE — there is no physical
+  delete path, and none may be added** (ADR-0031, 2026-09-29): upstream's own
+  `deleteTask` sets the App tasks-index row `deleted=1` and keeps the CLI
+  store intact ("标记为列表不可见；CLI session 内容继续保留"), and the v3
+  protocol has no delete RPC at all (`session/close` only releases the
+  runtime). The bridge mirrors exactly that: `POST /api/projects/delete` and
+  `POST /api/instances/{id}/sessions/{sid}/delete` write tombstones
+  (`src/tasks-index.ts` softDelete* — a session with no tasks row gets a
+  born-tombstoned INSERT), `listSessions` filters `deleted=1 OR archived=1`
+  BEFORE sorting/pagination (desktop-archived sessions hide from the remote
+  lists too; pages stay dense), title writes guard `deleted=0`, and the hub
+  refuses to resume a tombstoned id (404; bogus ids keep their honest window
+  — unknown ≠ deleted). Do NOT "clean up" CLI db.sqlite rows or files behind
+  a tombstone — the backend process owns that store, and upstream keeps the
+  bytes by design (undelete = a future flag flip). Live conversations are
+  refused (409); a session live on ANOTHER bridge just disappears when it
+  next closes and re-lists.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish
