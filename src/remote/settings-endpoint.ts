@@ -113,6 +113,11 @@ import {
   type ResetType,
 } from "../settings/coding-plan.js";
 import { queryQuota } from "../quota/index.js";
+import {
+  isPlatformUsageRange,
+  readPlatformUsage,
+  type PlatformUsageRange,
+} from "../quota/platform-usage.js";
 import { zcodeCliConfigPath, zcodePersonalProviderPath } from "../utils.js";
 
 /** Body size cap. Settings payloads are small; hooks are the largest. */
@@ -324,6 +329,7 @@ async function route(
     if (path === "/settings/agents") return void (await handleAgents(res));
     if (path === "/settings/backups") return void (await handleBackups(res));
     if (path === "/settings/usage") return void (await handleUsage(res, url));
+    if (path === "/settings/usage-platform") return void (await handleUsagePlatform(res, url));
     if (path === "/settings/quota") return void (await handleQuota(res));
     if (path === "/settings/reset-cards") return void (await handleResetCards(res, url));
     if (path === "/settings/pending-restart") return void (await handlePendingRestart(res, server));
@@ -1109,6 +1115,23 @@ async function handleUsage(res: ServerResponse, url: URL): Promise<void> {
   await guard(res, async () => ({
     ok: true as const,
     usage: await readUsageStats(requested as UsageRange),
+  }));
+}
+
+/**
+ * Platform usage (the account-level monitor data behind the desktop app's
+ * Coding Plan usage tab). The module owns its error states, so the handler is
+ * a pure translation like handleQuota.
+ */
+async function handleUsagePlatform(res: ServerResponse, url: URL): Promise<void> {
+  const requested = url.searchParams.get("range") ?? "7d";
+  if (!isPlatformUsageRange(requested)) {
+    sendError(res, 400, "range must be one of today, 7d, 30d");
+    return;
+  }
+  await guard(res, async () => ({
+    ok: true as const,
+    platformUsage: await readPlatformUsage(requested as PlatformUsageRange),
   }));
 }
 
