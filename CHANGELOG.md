@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.3](https://github.com/william0wang/zcode-acp/compare/v0.53.2...v0.53.3) (2026-09-30)
+
+
+### Bug Fixes
+
+* make Ghostty TUI tabs auto-close on exit and start in the project directory ([#283](https://github.com/william0wang/zcode-acp/issues/283)) ([821c401](https://github.com/william0wang/zcode-acp/commit/821c4019de670c750765f0eb1a91c9e4e3439016))
+
 ## [0.53.2](https://github.com/william0wang/zcode-acp/compare/v0.53.1...v0.53.2) (2026-09-30)
 
 
