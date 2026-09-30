@@ -148,12 +148,12 @@ export function parseLimit(limit: RawLimit): QuotaItem | null {
 }
 
 /** Auth-failure detection from the business-layer `msg` (zh/en keywords). */
-function isAuthFailureMessage(msg: unknown): boolean {
+export function isAuthFailureMessage(msg: unknown): boolean {
   return typeof msg === "string" && /authorization|auth|token|鉴权|授权|未登录/i.test(msg);
 }
 
 /** Rate-limit detection from the business-layer `msg` (zh/en keywords). */
-function isRateLimitedMessage(msg: unknown): boolean {
+export function isRateLimitedMessage(msg: unknown): boolean {
   return (
     typeof msg === "string" &&
     /rate\s*limit|too many requests|too frequent|frequency|限流|频率|过于频繁|稍后再试/i.test(msg)
