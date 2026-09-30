@@ -236,6 +236,19 @@ export class EventTranslator {
       if (typeof used === "number") {
         results.push({ kind: "UsageDelta", used, size });
       }
+      // SessionModeChanged rides the generic session.updated with its RAW
+      // payload (the v3 mapper has no dedicated wire type). Discriminator:
+      // both `mode` and `planEnabled` present (background-task payloads carry
+      // taskId instead). `mode` is the UNDERLYING session mode — the runtime's
+      // plan tools flip only `planEnabled` — so fold the effective display
+      // mode here and let the dispatcher track the flag for the read paths.
+      if (typeof payload["mode"] === "string" && typeof payload["planEnabled"] === "boolean") {
+        results.push({
+          kind: "ConfigChanged",
+          mode: payload["planEnabled"] ? "plan" : (payload["mode"] as string),
+          planEnabled: payload["planEnabled"] === true,
+        });
+      }
     } else if (etype === "state.updated") {
       // Session settings changed (model/mode/thoughtLevel switch, incl.
       // mid-turn). The backend notification carries the authoritative full

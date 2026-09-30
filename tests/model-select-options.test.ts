@@ -53,7 +53,7 @@ vi.mock("node:fs", async () => {
   };
 });
 
-const { buildConfigOptions, formatModelValue, loadAllModels, parseModelValue } =
+const { buildConfigOptions, buildModes, formatModelValue, loadAllModels, parseModelValue } =
   await import("../src/config/options.js");
 
 afterEach(() => {
@@ -177,5 +177,44 @@ describe("thought option display clamp", () => {
     const options = await buildConfigOptions(server, "zc-clamp-2");
     const thought = options.find((option) => option.id === "thought");
     expect(thought?.currentValue).toBe("enabled");
+  });
+});
+
+describe("plan-mode display fold", () => {
+  // The runtime's EnterPlanMode flips the execution state's planEnabled
+  // WITHOUT touching settings.mode — session/read keeps reporting the
+  // underlying mode (verified upstream). The tracked plan flag must force
+  // every advertised mode to "plan" while it is on.
+  function planServer(): ZcodeAcpServer {
+    const server = new ZcodeAcpServer();
+    server.backend = {
+      isDead: false,
+      request: async () => ({
+        result: {
+          settings: {
+            mode: { current: "yolo" },
+            model: { current: { providerId: "builtin:zai-coding-plan", modelId: "GLM-5.3" } },
+            thoughtLevel: { current: "max" },
+          },
+        },
+      }),
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+    return server;
+  }
+
+  it("buildModes advertises plan while the flag is tracked", async () => {
+    const server = planServer();
+    server.sessionPlanActive.add("zc-plan-1");
+    expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("plan");
+    server.sessionPlanActive.delete("zc-plan-1");
+    expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("yolo");
+  });
+
+  it("buildConfigOptions sets the mode dropdown to plan while the flag is tracked", async () => {
+    const server = planServer();
+    server.sessionPlanActive.add("zc-plan-2");
+    const options = await buildConfigOptions(server, "zc-plan-2");
+    const mode = options.find((option) => option.id === "mode");
+    expect(mode?.currentValue).toBe("plan");
   });
 });

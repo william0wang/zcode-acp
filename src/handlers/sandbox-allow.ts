@@ -25,7 +25,7 @@ import {
   resolveReal,
 } from "../backend/sandbox.js";
 import { messages } from "../i18n.js";
-import { armAskWatchdog, clearAskWatchdog } from "../push/push.js";
+import { armAskWatchdog, clearAskWatchdog, pushSourceLabel } from "../push/push.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
@@ -396,10 +396,13 @@ export async function handleSandboxDenial(
   // Same unanswered-ask watchdog as requestWithTimeout (§5.1 v1.3): this grant
   // popup bypasses that funnel (own timeout path), but it is still a
   // user-facing ask — it must notify when nobody answers. The derived payload
-  // only reads toolCall.title.
-  armAskWatchdog("session/request_permission", {
-    toolCall: { title: m.sandboxPopupTitle(targetReal) },
-  });
+  // only reads toolCall.title; the label (project / session) comes from the
+  // handler's own context because the synthetic params carry no sessionId.
+  armAskWatchdog(
+    "session/request_permission",
+    { toolCall: { title: m.sandboxPopupTitle(targetReal) } },
+    pushSourceLabel(server, acpSid),
+  );
   try {
     // Wire name is session/request_permission (snake_case — the camelCase
     // form is silently method-not-found on real clients). The schema has no

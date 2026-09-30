@@ -155,16 +155,19 @@ export function pushSettled(
 
 /**
  * Derive the permission/question payload from the wire method+params (§4/§5.1)
- * — shared by the zero-clients push and the unanswered-ask watchdog.
+ * — shared by the zero-clients push and the unanswered-ask watchdog. `label`
+ * is the `<project> / <session>` source tag every other push carries; without
+ * it the bracket degrades to the bare kind ("[question] Agent question"),
+ * which tells the user nothing about WHERE the ask is waiting.
  */
-function interactionPushData(method: string, params?: unknown): PushEventData {
+function interactionPushData(method: string, params?: unknown, label?: string): PushEventData {
   const p = (params ?? {}) as { toolCall?: { title?: string }; message?: string };
   if (method === "session/request_permission") {
     const detail = typeof p.toolCall?.title === "string" ? p.toolCall.title.trim() : "";
-    return { kind: "permission", title: "Approval requested", body: detail || undefined };
+    return { kind: "permission", label, title: "Approval requested", body: detail || undefined };
   }
   const question = typeof p.message === "string" ? p.message.trim() : "";
-  return { kind: "question", title: "Agent question", body: question || undefined };
+  return { kind: "question", label, title: "Agent question", body: question || undefined };
 }
 
 // ---------- unanswered-ask watchdog (§5.1 v1.3) ----------
@@ -188,10 +191,10 @@ let askNotified = false;
  * at `askDelayMs` (default 120s) with the ask still pending and nothing yet
  * notified, push the same derived payload — clients connected or not.
  */
-export function armAskWatchdog(method: string, params?: unknown): void {
+export function armAskWatchdog(method: string, params?: unknown, label?: string): void {
   askPending++;
   if (askTimer || askNotified) return;
-  const data = interactionPushData(method, params);
+  const data = interactionPushData(method, params, label);
   askTimer = setTimeout(() => {
     askTimer = null;
     if (askPending <= 0 || askNotified) return;
@@ -245,7 +248,19 @@ export function pushInteractionIfOffline(
   const s = pushSender();
   if (!s) return;
   askNotified = true;
-  dispatchPush(cfg, s, interactionPushData(method, params));
+  // Every server→client ask carries the ACP sessionId — the same key
+  // sessionTitles is indexed by, so the label lands without plumbing a new
+  // hook signature through the broadcast observer.
+  const sid = (params as { sessionId?: unknown } | undefined)?.sessionId;
+  dispatchPush(
+    cfg,
+    s,
+    interactionPushData(
+      method,
+      params,
+      pushSourceLabel(server, typeof sid === "string" ? sid : undefined),
+    ),
+  );
 }
 
 /**

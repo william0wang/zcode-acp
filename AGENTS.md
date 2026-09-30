@@ -695,6 +695,31 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   restart channel from inside such a session is an `open` one (e.g. Warp's
   `warp://action/new_tab?path=<restart.command>`), which hands execution to a
   clean user shell.
+- **Plan mode is INVISIBLE to every v3 read — the bridge tracks it from events
+  (2026-09-30, source-verified)**: EnterPlanMode/ExitPlanMode flip the runtime
+  execution state's `planEnabled` WITHOUT touching `runtime.config.mode`
+  (`session-mode-port.ts` passes `{planEnabled}` only; `execution-state.ts:62`
+  writes config.mode from the UNCHANGED resolved mode), so `session/read`'s
+  `settings.mode.current` (= `app.getMode()`, `mapSessionSettings`) and every
+  `state.updated` settings patch keep reporting the UNDERLYING mode (yolo/build)
+  forever — the App/editor mode indicator could never follow an auto plan entry
+  ("mode 不跟随", reported twice). Upstream's own display fold is
+  `planEnabled ?? mode === "plan"` (product-projection.ts:3785-3797); the bridge
+  mirrors it: `server.sessionPlanActive` (zcodeSid set) is fed from
+  SessionModeChanged events — which ride the v3 wire as a GENERIC
+  `session.updated` with the RAW `{mode, planEnabled, source, toolCallId}`
+  payload (the mapper has no dedicated type; payload passthrough) — in the
+  translator (turn path → ConfigChanged with the folded effective mode +
+  broadcast) and BackgroundTaskListener (out-of-turn, set only);
+  `buildModes`/`buildConfigOptions`/`dispatchConfigChanged` fold the flag into
+  every advertised mode; `setMode`//`/mode` mirror the runtime's own
+  execution-state fold (`"plan"` enables the flag, anything else disables it —
+  resolveExecutionState) so their emissions aren't racing the event. Known
+  hole: a COLD resume of a plan-active session starts with an empty set (the
+  backend restores planEnabled from its store but replays no event) — the
+  display shows the underlying mode until the first transition event/setMode;
+  do NOT "fix" the fold away, and do not read the mode from settings expecting
+  "plan".
 - **Start Plan providers are desktop-only — do NOT "fix" this with an
   unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
   session only the desktop renderer can provide; the bridge answers
@@ -763,7 +788,12 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   a tombstone — the backend process owns that store, and upstream keeps the
   bytes by design (undelete = a future flag flip). Live conversations are
   refused (409); a session live on ANOTHER bridge just disappears when it
-  next closes and re-lists.
+  next closes and re-lists. `listKnownWorkspaces` (the /api/projects source)
+  likewise filters `deleted=0 AND archived=0` (2026-09-30): a workspace whose
+  every row is archived rendered as an EMPTY project entry ("没有会话的项目"
+  in the remote history list) because the session listing hides archived rows
+  while the workspace list kept the group — the sessions count now counts
+  only visible rows too.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish

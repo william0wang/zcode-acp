@@ -588,7 +588,13 @@ export async function handleSlashCommand(
         // the change — slash commands return end_turn and bypass the turn-
         // completion reconciliation in prompt().
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, cmd);
-        if (cmd === "mode") server.lastMode.set(acpSid, arg);
+        if (cmd === "mode") {
+          server.lastMode.set(acpSid, arg);
+          // Same execution-state fold as the setMode extension: "plan" enables
+          // the runtime plan flag, anything else disables it.
+          if (arg === "plan") server.sessionPlanActive.add(zcodeSid);
+          else server.sessionPlanActive.delete(zcodeSid);
+        }
         return ok(`✓ ${cmd} = ${arg}`);
       }
       case "workflow": {

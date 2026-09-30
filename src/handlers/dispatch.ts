@@ -138,6 +138,16 @@ async function dispatchConfigChanged(
     // Fall back to null (defaults) only if the session mapping isn't live yet —
     // events routed through a registered turn loop always have it.
     const zcodeSid = server.resolveSid(acpSid) ?? null;
+    // Track the runtime plan flag FIRST — read paths (buildModes/
+    // buildConfigOptions) fold it, and a later plan-blind state.updated patch
+    // must not regress the display while the flag is on.
+    if (ev.planEnabled !== undefined && zcodeSid !== null) {
+      if (ev.planEnabled) server.sessionPlanActive.add(zcodeSid);
+      else server.sessionPlanActive.delete(zcodeSid);
+    }
+    const planActive = zcodeSid !== null && server.sessionPlanActive.has(zcodeSid);
+    const mode =
+      ev.mode === undefined ? undefined : planActive && ev.mode !== "plan" ? "plan" : ev.mode;
     const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
     // Find by id — the array order buildConfigOptions returns is not a
     // contract; index-based writes would silently hit the wrong option if
@@ -149,7 +159,7 @@ async function dispatchConfigChanged(
     if (ev.model) {
       setById("model", formatModelValue(ev.model.providerId, ev.model.modelId));
     }
-    if (ev.mode !== undefined) setById("mode", ev.mode);
+    if (mode !== undefined) setById("mode", mode);
     if (ev.thought !== undefined) setById("thought", ev.thought);
     const configUpdate: acp.SessionUpdate = {
       sessionUpdate: "config_option_update",
@@ -161,13 +171,13 @@ async function dispatchConfigChanged(
     // reached everyone with the send above — an "others" leg on it would
     // double-deliver (it has no connectionContext to exclude anyone by).
     if (!isBroadcastSource(cx)) sendSessionUpdateToOthers(server, cx, acpSid, configUpdate);
-    if (ev.mode !== undefined) {
+    if (mode !== undefined) {
       // Mirror the advertised mode so turn-completion reconciliation
       // (emitModeIfChanged) doesn't re-emit the same value.
-      server.lastMode.set(acpSid, ev.mode);
+      server.lastMode.set(acpSid, mode);
       const modeUpdate: acp.SessionUpdate = {
         sessionUpdate: "current_mode_update",
-        currentModeId: ev.mode,
+        currentModeId: mode,
       };
       await sendSessionUpdate(cx, acpSid, modeUpdate);
       if (!isBroadcastSource(cx)) sendSessionUpdateToOthers(server, cx, acpSid, modeUpdate);

@@ -553,12 +553,18 @@ export function isSelectableWorkspace(p: string): boolean {
 }
 
 /**
- * Every project workspace the tasks index has ever recorded a session for —
- * the machine's known-projects list. Serves the hub's remote session-create
- * API: the list gates which projects POST /api/instances accepts. A
- * convenience bound, not a security boundary — bridge-side session
+ * Every project workspace the tasks index has ever recorded a VISIBLE session
+ * for — the machine's known-projects list. Serves the hub's remote
+ * session-create API: the list gates which projects POST /api/instances
+ * accepts. A convenience bound, not a security boundary — bridge-side session
  * materialization writes rows too, and a token holder can drive an
  * editor-bridge session in any cwd (the real boundary is the token).
+ *
+ * Rows the session listing hides (deleted OR archived tombstones) do not make
+ * a workspace known: a project whose every row is archived renders as an
+ * empty entry in the remote project list (nothing to resume), so it stays off
+ * the list until a new unarchived session records it again — same hide-≠-ban
+ * semantics as the delete tombstones.
  *
  * Read-only and best-effort: node:sqlite unavailable → empty list; lock
  * contention retries via withSqliteRetry; other failures warn and return
@@ -574,7 +580,7 @@ export async function listKnownWorkspaces(
         con
           .prepare(
             "SELECT workspace_path AS p, COUNT(*) AS n, MAX(updated_at) AS t " +
-              "FROM tasks WHERE deleted=0 GROUP BY workspace_key ORDER BY t DESC",
+              "FROM tasks WHERE deleted=0 AND archived=0 GROUP BY workspace_key ORDER BY t DESC",
           )
           .all() as Array<{ p: unknown; n: unknown; t: unknown }>,
       dbPath,
