@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.2](https://github.com/william0wang/zcode-acp/compare/v0.53.1...v0.53.2) (2026-09-30)
+
+
+### Bug Fixes
+
+* hide archived-only projects, label interaction pushes, follow plan mode ([#281](https://github.com/william0wang/zcode-acp/issues/281)) ([9f66a24](https://github.com/william0wang/zcode-acp/commit/9f66a24c6151999768a1a23a727641e420f61509))
+
 ## [0.53.1](https://github.com/william0wang/zcode-acp/compare/v0.53.0...v0.53.1) (2026-09-30)
 
 
