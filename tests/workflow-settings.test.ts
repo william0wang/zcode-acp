@@ -351,6 +351,22 @@ describe("workflow settings — gate switch (PUT /settings/workflow-gate)", () =
     expect(calls.find((c) => c.method === "workspace/updateDynamicWorkflowPolicy")).toBeTruthy();
   });
 
+  it("PUT disabled refuses every workflow route even under a GATE_ON remote", async () => {
+    const { server } = makeBridge(GATE_ON); // remote verdict says enabled…
+    const port = await serveSettings(server);
+
+    const put = await send(port, "PUT", "workflow-gate", { mode: "disabled" });
+    expect(put.status).toBe(200);
+
+    // …but the explicit local OFF wins: same 403 shape, override-sourced
+    // message (the App maps source=override to "switched off locally").
+    const list = await get(port, "workflows");
+    expect(list.status).toBe(403);
+    const body = (await list.json()) as { error: string; message?: string };
+    expect(body.error).toBe("workflow_disabled");
+    expect(body.message).toBe("gate mode=disabled source=override");
+  });
+
   it("an override-on launch carries dynamicWorkflowEnabled on session/create (workflowFlag path)", async () => {
     const { server, calls } = makeBridge(GATE_OFF);
     const port = await serveSettings(server);

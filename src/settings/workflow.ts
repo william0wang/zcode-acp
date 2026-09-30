@@ -81,7 +81,9 @@ function messageOf(error: unknown): string {
  * Await the effective gate verdict and refuse when the feature is off. The
  * local override (App settings toggle / env) short-circuits FIRST — no backend
  * spawn, no network (upstream folds the override ahead of every network
- * action), so a cold App-only bridge answers from the switch alone. The
+ * action), so a cold App-only bridge answers from the switch alone. An
+ * explicit override=disabled refuses with the same 403 shape — an upstream
+ * re-add of the flag cannot re-enable what the operator switched off. The
  * upstream v4 start/resume commands are NOT gated by the backend policy (port
  * presence is their only gate), so the bridge guards itself — a headless
  * backend would otherwise happily run workflows the gate disabled. A null
@@ -96,6 +98,13 @@ function messageOf(error: unknown): string {
 export async function requireWorkflowEnabled(server: ZcodeAcpServer): Promise<WorkflowGate> {
   const override = workflowOverrideNow();
   if (override) {
+    if (!override.enabled) {
+      throw new WorkflowApiError(
+        403,
+        "workflow_disabled",
+        `gate mode=${override.mode} source=override`,
+      );
+    }
     ensureWorkflowPolicyPushed(server);
     return override;
   }
