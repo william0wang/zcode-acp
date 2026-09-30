@@ -31,10 +31,15 @@ export interface PushNotifyConfig {
   run: boolean;
   task: boolean;
   compact: boolean;
+  /** Pending interaction asks (§5.1): zero-client push + the unanswered watchdog. */
+  ask: boolean;
 }
 
 /** Default quiet window for settled pushes (§5.2): user active → no ping. */
 export const PUSH_QUIET_WINDOW_MS = 30_000;
+
+/** Default unanswered-ask watchdog delay (§5.1 v1.3): push if still pending. */
+export const PUSH_ASK_WATCHDOG_MS = 120_000;
 
 export interface PushConfig {
   corpId: string;
@@ -52,6 +57,12 @@ export interface PushConfig {
    * {@link PUSH_QUIET_WINDOW_MS}.
    */
   quietMs: number;
+  /**
+   * Unanswered-ask watchdog delay (§5.1 v1.3): push a pending interaction ask
+   * after this many ms with no answer, clients connected or not; 0 pushes at
+   * dispatch time. File-only, default {@link PUSH_ASK_WATCHDOG_MS}.
+   */
+  askDelayMs: number;
 }
 
 /** Same truthy set as `remoteEnabledLive` (remote/config.ts). */
@@ -83,9 +94,12 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     run: file.notify?.run !== false,
     task: file.notify?.task !== false,
     compact: file.notify?.compact !== false,
+    ask: file.notify?.ask !== false,
   };
   const quietMs =
     file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;
+  const askDelayMs =
+    file.askDelayMs !== undefined && file.askDelayMs >= 0 ? file.askDelayMs : PUSH_ASK_WATCHDOG_MS;
   if (relayUrl && relayToken) {
     return {
       corpId,
@@ -96,6 +110,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
       relay: { url: relayUrl, token: relayToken },
       notify,
       quietMs,
+      askDelayMs,
     };
   }
   if (relayUrl || relayToken) {
@@ -112,6 +127,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     contentDetail: file.contentDetail ?? "full",
     notify,
     quietMs,
+    askDelayMs,
   };
 }
 

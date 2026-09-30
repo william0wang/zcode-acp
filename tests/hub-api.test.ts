@@ -28,6 +28,29 @@ vi.mock("../src/quota/index.js", () => ({ queryQuota: queryQuotaMock }));
 const { queryOcUsageMock } = vi.hoisted(() => ({ queryOcUsageMock: vi.fn() }));
 vi.mock("../src/quota/ollama-cloud/index.js", () => ({ queryOcUsage: queryOcUsageMock }));
 
+// tasks-index surface the delete routes consult. Defaults mirror the real
+// module under a hermetic HOME (no index): no known workspaces, nothing
+// deleted — existing tests behave exactly as before.
+const tasksIndexMock = vi.hoisted(() => ({
+  workspaces: [] as Array<{ workspacePath: string; sessions: number; lastActive: number }>,
+  deletedSids: new Set<string>(),
+  workspaceDeletes: [] as Array<{ workspacePath: string; dbPath?: string }>,
+}));
+vi.mock("../src/tasks-index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/tasks-index.js")>();
+  return {
+    ...actual,
+    listKnownWorkspaces: async () => tasksIndexMock.workspaces,
+    isTaskDeleted: async (taskId: string) => tasksIndexMock.deletedSids.has(taskId),
+    softDeleteWorkspaceTasks: async (workspacePath: string, dbPath?: string) => {
+      tasksIndexMock.workspaceDeletes.push({ workspacePath, dbPath });
+      return tasksIndexMock.workspaces
+        .filter((w) => w.workspacePath === workspacePath)
+        .reduce((n, w) => n + w.sessions, 0);
+    },
+  };
+});
+
 import {
   resetDockCacheForTest,
   resetQuotaCacheForTest,
@@ -700,6 +723,112 @@ describe("hub session rename proxy", () => {
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ ok: true, title: "renamed" });
     expect(bridge.seen).toEqual([{ sid: "s1", body: '{"title":"my name"}' }]);
+  });
+});
+
+describe("hub project/session delete", () => {
+  /** Register a bridge under the canonical test instance id. */
+  async function registerBridge(hub: HubHandle, port: number): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(registerBody({ port })),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  beforeEach(() => {
+    tasksIndexMock.workspaces = [];
+    tasksIndexMock.deletedSids = new Set();
+    tasksIndexMock.workspaceDeletes = [];
+  });
+
+  describe("POST /api/projects/delete", () => {
+    it("tombstones the workspace's rows and reports the flipped count", async () => {
+      tasksIndexMock.workspaces = [
+        { workspacePath: "/proj/a", sessions: 3, lastActive: 900 },
+        { workspacePath: "/proj/b", sessions: 1, lastActive: 100 },
+      ];
+      const hub = await startTestHub();
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: "/proj/a" }),
+      });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ ok: true, deletedTasks: 3 });
+      expect(tasksIndexMock.workspaceDeletes).toEqual([
+        { workspacePath: "/proj/a", dbPath: undefined },
+      ]);
+    });
+
+    it("is idempotent — an unknown/already-deleted project still answers ok", async () => {
+      const hub = await startTestHub();
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: "/proj/never" }),
+      });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ ok: true, deletedTasks: 0 });
+    });
+
+    it("guards auth and body shape", async () => {
+      const hub = await startTestHub();
+      const call = (token: string | null, body?: unknown) =>
+        fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+          method: "POST",
+          ...(token ? { headers: { Authorization: `Bearer ${token}` } } : {}),
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+      expect((await call(null)).status).toBe(401);
+      expect((await call("wrong")).status).toBe(401);
+      expect((await call(TOKEN)).status).toBe(400); // no body
+      expect((await call(TOKEN, {})).status).toBe(400); // no workspacePath
+      expect(tasksIndexMock.workspaceDeletes).toEqual([]);
+    });
+  });
+
+  it("refuses to resume a tombstoned session (404, before any incubation)", async () => {
+    tasksIndexMock.workspaces = [{ workspacePath: "/proj/a", sessions: 1, lastActive: 1 }];
+    tasksIndexMock.deletedSids.add("sess_deleted");
+    const hub = await startTestHub();
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ workspacePath: "/proj/a", sessionId: "sess_deleted" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("session deleted");
+  });
+
+  it("relays the session delete POST to the bridge's loopback route", async () => {
+    const seen: string[] = [];
+    const bridge = track(
+      await new Promise<{ server: Server; port: number }>((resolve) => {
+        const server = createServer((req, res) => {
+          seen.push(`${req.method} ${req.url ?? ""}`);
+          req.resume();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end('{"ok":true,"deleted":true}');
+        });
+        server.listen(0, "127.0.0.1", () => {
+          const addr = server.address();
+          resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+        });
+      }),
+      ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+    );
+    const hub = await startTestHub();
+    await registerBridge(hub, bridge.port);
+
+    const res = await fetch(
+      `http://127.0.0.1:${hub.port}/api/instances/inst-1/sessions/s1/delete`,
+      { method: "POST", headers: { Authorization: `Bearer ${TOKEN}` } },
+    );
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ ok: true, deleted: true });
+    expect(seen).toEqual(["POST /sessions/s1/delete"]);
   });
 });
 

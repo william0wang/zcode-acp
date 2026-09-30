@@ -11,7 +11,16 @@
 
 import { createServer, type Server } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Tombstones: listSessions consults hiddenTaskIds() (deleted/archived rows in
+// the App's tasks index) before sorting. Mock only that function — the rest
+// of tasks-index stays real (its module graph is imported by the server).
+const hiddenMock = vi.hoisted(() => ({ ids: new Set<string>() }));
+vi.mock("../src/tasks-index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/tasks-index.js")>();
+  return { ...actual, hiddenTaskIds: async () => hiddenMock.ids };
+});
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import {
@@ -24,6 +33,7 @@ import { ZcodeAcpServer } from "../src/server.js";
 const cleanups: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
+  hiddenMock.ids = new Set();
   while (cleanups.length) {
     const stop = cleanups.pop()!;
     await stop();
@@ -106,6 +116,31 @@ describe("session history endpoint", () => {
     expect(typeof body.sessions[0]!.updatedAt).toBe("string");
     // Fewer rows than the page size — no continuation.
     expect(body.nextCursor).toBeNull();
+  });
+
+  it("hides tombstoned (deleted/archived) sessions before sorting and pagination", async () => {
+    // Delete sess_004 + sess_002: pages must stay DENSE (hidden rows never
+    // occupy a slot) and cursors keep naming the exact next visible row.
+    hiddenMock.ids = new Set(["sess_004", "sess_002"]);
+    const server = new ZcodeAcpServer();
+    server.backend = listBackend(fixture(5));
+    const base = await bootList(server);
+    type Cursor = { before: number; beforeId: string } | null;
+
+    const page1 = (await (await fetch(`${base}/sessions?limit=2`)).json()) as {
+      sessions: Array<{ sessionId: string }>;
+      nextCursor: Cursor;
+    };
+    expect(page1.sessions.map((s) => s.sessionId)).toEqual(["sess_003", "sess_001"]);
+    expect(page1.nextCursor).toEqual({ before: 1_001, beforeId: "sess_001" });
+
+    const page2 = (await (
+      await fetch(
+        `${base}/sessions?limit=2&before=${page1.nextCursor!.before}&beforeId=${page1.nextCursor!.beforeId}`,
+      )
+    ).json()) as { sessions: Array<{ sessionId: string }>; nextCursor: Cursor };
+    expect(page2.sessions.map((s) => s.sessionId)).toEqual(["sess_000"]);
+    expect(page2.nextCursor).toBeNull();
   });
 
   it("sorts newest-first (id desc tiebreak) and paginates with the composite cursor", async () => {

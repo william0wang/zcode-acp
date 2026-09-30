@@ -49,6 +49,7 @@ import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
 import { pushActive } from "../push/config.js";
+import { armAskWatchdog, clearAskWatchdog } from "../push/push.js";
 import { NoClientsError, type ClientLike } from "../remote/broadcast.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
@@ -999,6 +1000,11 @@ export async function requestWithTimeout(
     );
   }
 
+  // Unanswered-ask watchdog (§5.1 v1.3): one slot for this ask — pushes after
+  // push.askDelayMs when nobody answers (clients connected or not; the
+  // zero-clients push only judges at dispatch). Cleared when the race settles
+  // below; setup code above cannot throw past an un-armed slot.
+  armAskWatchdog(method, params);
   const winner = await Promise.race(racers);
   // Mark settled BEFORE disposing: a non-primary racer can win while the
   // interaction race is still open, and a later `closed.then(fire)` would
@@ -1026,6 +1032,7 @@ export async function requestWithTimeout(
     entry.controllers.clear();
   }
   emitAskSettled(server, method, params);
+  clearAskWatchdog();
   return winner;
 }
 

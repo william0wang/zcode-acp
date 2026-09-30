@@ -25,6 +25,9 @@ vi.mock("../src/push/config.js", async (orig) => {
             secret: "s",
             toUser: "@all",
             contentDetail: "full" as const,
+            notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
+            quietMs: 30_000,
+            askDelayMs: 120_000,
           }
         : null,
   };
@@ -34,7 +37,7 @@ const { requestWithTimeout, resendPendingInteractions } =
   await import("../src/handlers/server-requests.js");
 const { NoClientsError } = await import("../src/remote/broadcast.js");
 const { ZcodeAcpServer } = await import("../src/server.js");
-const { setPushSenderForTests } = await import("../src/push/push.js");
+const { resetAskWatchdogForTests, setPushSenderForTests } = await import("../src/push/push.js");
 
 /** Silences the failure warns from deliberately-failed interactions. */
 let warnSpy: ReturnType<typeof vi.spyOn> | null = null;
@@ -42,6 +45,9 @@ let warnSpy: ReturnType<typeof vi.spyOn> | null = null;
 beforeEach(() => {
   h.active = false;
   warnSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  // A held interaction (scenario 1) never settles, so its watchdog slot must
+  // not leak into the next case.
+  resetAskWatchdogForTests();
   setPushSenderForTests({ sendText: async () => {} });
 });
 afterEach(() => {

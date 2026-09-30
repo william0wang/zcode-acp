@@ -28,6 +28,11 @@
  * suite's file-config reads at their real config — e.g. a real
  * `sandbox.enabled: true` would flip "sandbox stays off by default" tests.
  *
+ * ZCODE_DYNAMIC_WORKFLOW_MODE is DELETED for the same reason: it is the
+ * workflow-gate local override, and a developer exporting it (the headless
+ * power-user switch) would flip every workflow-gate test to the override
+ * verdict instead of the pinned remote one.
+ *
  * ZCODE_MODEL / ANTHROPIC_API_KEY are DELETED for the same reason: a vitest
  * run started from inside a bridge session (ZCODE_PROVIDER/ZCODE_MODEL pin,
  * key export) inherits them, and `mergeEnvWithCreds` deliberately lets the
@@ -45,6 +50,7 @@ const home = mkdtempSync(path.join(tmpdir(), "zacp-test-home-"));
 process.env.HOME = home;
 delete process.env.ZCODE_HOME;
 delete process.env.XDG_CONFIG_HOME;
+delete process.env.ZCODE_DYNAMIC_WORKFLOW_MODE;
 delete process.env.ZCODE_MODEL;
 delete process.env.ANTHROPIC_API_KEY;
 delete process.env.ZCODE_ACP_REMOTE_ORIGIN;

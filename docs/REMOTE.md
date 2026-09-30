@@ -148,6 +148,23 @@ the project's serve bridge on first listing and reuses it after. Resume is
 the normal attach flow with `session/load` on a listed backend id. See
 `docs/REMOTE-CLIENTS.md` ("Resuming a closed session") for the client contract.
 
+**Remote project/session delete** (ADR-0031). Both are soft deletes
+(tombstones in the App's tasks-index, upstream `deleteTask` semantics — the
+backend store keeps every conversation byte):
+
+```text
+POST /api/projects/delete {workspacePath}              → {ok, deletedTasks}
+POST /api/instances/{id}/sessions/{sid}/delete         → {ok, deleted}
+```
+
+A deleted project leaves `GET /api/projects` (and the session-create
+whitelist); a deleted session leaves every listing (`/api/projects/sessions`,
+ACP `session/list`, the CLI `/resume` picker, the desktop App sidebar).
+Sessions archived in the desktop App hide the same way. Deleting never stops
+anything: live conversations are refused (`409`), tombstoned resume ids get
+`404`, and a new session in a deleted project recreates its row. See
+`docs/REMOTE-CLIENTS.md` ("Deleting a project or session").
+
 `sessions` lists the project's **currently running** conversations (live
 editor tabs and remote attachments) under the same ACP session ids the
 editor uses — attaching by id joins the conversation's live notification

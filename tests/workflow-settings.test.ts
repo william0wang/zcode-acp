@@ -16,7 +16,7 @@
  */
 
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -301,6 +301,127 @@ describe("workflow settings — gate and mount guards", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { workflows: Array<{ name: string }> };
     expect(body.workflows[0]!.name).toBe("deploy");
+  });
+
+  it("a 403 body carries the verdict's mode and source (pulled vs broken fetch)", async () => {
+    const { server } = makeBridge(GATE_OFF);
+    const port = await serveSettings(server);
+    const res = await get(port, "workflows");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; message?: string };
+    expect(body.error).toBe("workflow_disabled");
+    expect(body.message).toBe("gate mode=disabled source=remote");
+  });
+});
+
+describe("workflow settings — gate switch (PUT /settings/workflow-gate)", () => {
+  /** The per-test temp home's user config path (HOME is stubbed per test). */
+  function configPath(): string {
+    return path.join(home, ".config", "zcode-acp", "config.json");
+  }
+
+  it("PUT alwaysOn persists workflow.mode and answers the override verdict", async () => {
+    const { server } = makeBridge(GATE_OFF); // pinned remote says disabled…
+    const port = await serveSettings(server);
+
+    const res = await send(port, "PUT", "workflow-gate", { mode: "alwaysOn" });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      gate: { enabled: true, mode: "alwaysOn", source: "override", override: "alwaysOn" },
+    });
+    const saved = JSON.parse(await readFile(configPath(), "utf8")) as {
+      workflow?: { mode?: string };
+    };
+    expect(saved.workflow?.mode).toBe("alwaysOn");
+
+    // …and the override now wins live: the same GATE_OFF bridge serves the
+    // workflow surface, and the policy push reaches the backend process.
+    const list = await get(port, "workflows");
+    expect(list.status).toBe(200);
+  });
+
+  it("a local override on a disabled gate also fires the per-generation policy push", async () => {
+    const { server, calls } = makeBridge(GATE_OFF, {
+      results: { "workflows/list": { workflows: [], invalid: [], dir: "/d" } },
+    });
+    const port = await serveSettings(server);
+    await send(port, "PUT", "workflow-gate", { mode: "alwaysOn" });
+    await get(port, "workflows");
+    expect(calls.find((c) => c.method === "workspace/updateDynamicWorkflowPolicy")).toBeTruthy();
+  });
+
+  it("an override-on launch carries dynamicWorkflowEnabled on session/create (workflowFlag path)", async () => {
+    const { server, calls } = makeBridge(GATE_OFF);
+    const port = await serveSettings(server);
+    await send(port, "PUT", "workflow-gate", { mode: "alwaysOn" });
+
+    const res = await send(port, "POST", "workflows/project/deploy/start", {});
+    expect(res.status).toBe(200);
+    expect(calls.find((c) => c.method === "session/create")!.params).toMatchObject({
+      dynamicWorkflowEnabled: true,
+    });
+  });
+
+  it("PUT auto deletes the key — the gate falls back to the pinned remote verdict", async () => {
+    const { server } = makeBridge(GATE_OFF);
+    const port = await serveSettings(server);
+    await send(port, "PUT", "workflow-gate", { mode: "alwaysOn" });
+
+    const res = await send(port, "PUT", "workflow-gate", { mode: "auto" });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      gate: { enabled: false, mode: "disabled", source: "remote" },
+    });
+    const saved = JSON.parse(await readFile(configPath(), "utf8")) as Record<string, unknown>;
+    expect(saved.workflow).toBeUndefined();
+
+    const list = await get(port, "workflows");
+    expect(list.status).toBe(403);
+  });
+
+  it("PUT auto on a config with sibling keys preserves them (raw read-modify-write)", async () => {
+    const { server } = makeBridge(GATE_ON);
+    const port = await serveSettings(server);
+    await send(port, "PUT", "workflow-gate", { mode: "disabled" });
+    await send(port, "PUT", "workflow-gate", { mode: "auto" });
+    const saved = JSON.parse(await readFile(configPath(), "utf8")) as Record<string, unknown>;
+    expect(saved.workflow).toBeUndefined();
+    expect(saved.junk).toBeUndefined(); // nothing else was written; the leaf is gone
+  });
+
+  it("an invalid mode answers 400 and writes nothing", async () => {
+    const { server } = makeBridge(GATE_ON);
+    const port = await serveSettings(server);
+    const res = await send(port, "PUT", "workflow-gate", { mode: "yes" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_mode");
+    await expect(readFile(configPath(), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("the machine-level (hub) mount answers 409 (per-instance only)", async () => {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/settings/workflow-gate`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "alwaysOn" }),
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("/settings/all reports the override verdict with the override field", async () => {
+    const { server } = makeBridge(GATE_OFF);
+    const port = await serveSettings(server);
+    await send(port, "PUT", "workflow-gate", { mode: "onDemand" });
+    const body = (await (await get(port, "all")).json()) as {
+      workflow: { enabled: boolean; mode: string; source: string; override?: string };
+    };
+    expect(body.workflow).toEqual({
+      enabled: true,
+      mode: "onDemand",
+      source: "override",
+      override: "onDemand",
+    });
   });
 });
 

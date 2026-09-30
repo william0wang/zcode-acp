@@ -56,6 +56,23 @@ vi.mock("node:sqlite", () => {
           },
         };
       }
+      // UPDATE tasks SET deleted=1, updated_at=? WHERE workspace_path=? AND
+      // deleted=0 (softDeleteWorkspaceTasks — the project-delete write path)
+      if (/^UPDATE tasks SET deleted=1.*WHERE workspace_path/i.test(sql)) {
+        return {
+          run(updatedAt: number, workspacePath: string) {
+            let changes = 0;
+            for (const r of rows) {
+              if (r.workspace_path === workspacePath && r.deleted === 0) {
+                r.deleted = 1;
+                r.updated_at = updatedAt;
+                changes++;
+              }
+            }
+            return { changes };
+          },
+        };
+      }
       throw new Error(`unexpected SQL in workspaces test fake: ${sql}`);
     }
     close() {
@@ -84,7 +101,11 @@ vi.mock("node:fs", async () => {
   };
 });
 
-import { isSelectableWorkspace, listKnownWorkspaces } from "../src/tasks-index.js";
+import {
+  isSelectableWorkspace,
+  listKnownWorkspaces,
+  softDeleteWorkspaceTasks,
+} from "../src/tasks-index.js";
 
 // The workspace exclusion uses zcodeHomeDir(), which reads HOME from the env
 // (not node:os) — pin it to the same fake home the node:os mock reports.
@@ -239,5 +260,28 @@ describe("listKnownWorkspaces", () => {
     openedPaths.length = 0;
     await listKnownWorkspaces("/fake/fixture.sqlite");
     expect(openedPaths).toEqual(["/fake/fixture.sqlite"]);
+  });
+
+  it("softDeleteWorkspaceTasks removes the project from the list (project delete)", async () => {
+    rows = [
+      {
+        workspace_key: "/Users/dev/Develop/proj-a",
+        workspace_path: "/Users/dev/Develop/proj-a",
+        deleted: 0,
+        updated_at: 300,
+      },
+      {
+        workspace_key: "/Users/dev/Develop/proj-b",
+        workspace_path: "/Users/dev/Develop/proj-b",
+        deleted: 0,
+        updated_at: 200,
+      },
+    ];
+    const flipped = await softDeleteWorkspaceTasks("/Users/dev/Develop/proj-a", "/fake/db.sqlite");
+    expect(flipped).toBe(1);
+    const list = await listKnownWorkspaces("/fake/db.sqlite");
+    expect(list).toEqual([
+      { workspacePath: "/Users/dev/Develop/proj-b", sessions: 1, lastActive: 200 },
+    ]);
   });
 });

@@ -21,7 +21,7 @@ import {
 import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
 import {
   captureGate,
-  pushDynamicWorkflowPolicy,
+  ensureWorkflowPolicyPushed,
   resolveWorkflowGate,
   type WorkflowGate,
 } from "./config/workflow-gate.js";
@@ -261,6 +261,13 @@ export class ZcodeAcpServer {
    * reads as disabled (fail-closed).
    */
   backendWorkflowGate: Promise<WorkflowGate> | null = null;
+  /**
+   * Per-backend-generation marker for the dynamic-workflow policy push: set
+   * when `workspace/updateDynamicWorkflowPolicy` has been sent (spawn-time for
+   * an enabled verdict, or on the first gate consumption after a local
+   * override flips on — ensureWorkflowPolicyPushed). Reset at every spawn.
+   */
+  workflowPolicyPushed = false;
   /**
    * The full slash-command list (set once by buildAgentApp in index.ts).
    * Read by the gate-aware menu catch-up (resendMenuAfterGateSettled in
@@ -608,6 +615,9 @@ export class ZcodeAcpServer {
       })),
     );
     this.backendWorkflowGate = workflowGate;
+    // Fresh backend generation: the policy-push marker from the previous
+    // instance is void (its push went to a dead process).
+    this.workflowPolicyPushed = false;
     // builtinProviderEnv injects the CLI's built-in provider table the way the
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
     // zcodeDataBaseDirEnv translates the bridge's ZCODE_HOME into the CLI's
@@ -658,15 +668,19 @@ export class ZcodeAcpServer {
     // …and the send-semantics evidence: the respawned process may be an
     // older build that still accepts mid-turn sends as steer.
     this.observedSendBusyReject = false;
-    // First enable channel for an ENABLED gate: push the process-wide
-    // dynamic-workflow policy once, fire-and-forget — never awaited here (the
-    // per-session create/resume flag is the second channel and must not
-    // depend on this flight). A backend that dies before the gate resolves
-    // just fails the push best-effort inside the helper.
+    // Verdict observability (one line per spawn — a dark gate was previously
+    // indistinguishable from an enabled one in the logs) plus the first enable
+    // channel: the process-wide policy push, fire-and-forget through the
+    // flip-aware helper (never awaited here — the per-session create/resume
+    // flag is the second channel and must not depend on this flight). A
+    // backend that dies before the gate resolves just fails the push
+    // best-effort inside the helper.
     void workflowGate.then((gate) => {
-      if (gate.enabled) {
-        void pushDynamicWorkflowPolicy(backend, () => this.nextId(), process.cwd());
+      log(`workflow-gate: remote verdict mode=${gate.mode} source=${gate.source}`);
+      if (gate.mode === "unknown") {
+        warn("workflow-gate: client-config fetch failed — gate reads disabled (fail-closed)");
       }
+      ensureWorkflowPolicyPushed(this);
     });
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,

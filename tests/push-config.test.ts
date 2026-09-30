@@ -44,8 +44,9 @@ describe("resolvePushConfig", () => {
       secret: "s3cret",
       toUser: "@all",
       contentDetail: "full",
-      notify: { turn: true, goal: true, run: true, task: true, compact: true },
+      notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
       quietMs: 30_000,
+      askDelayMs: 120_000,
     });
   });
 
@@ -99,8 +100,9 @@ describe("resolvePushConfig", () => {
       secret: "file-secret",
       toUser: "william",
       contentDetail: "minimal",
-      notify: { turn: true, goal: true, run: true, task: true, compact: true },
+      notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
       quietMs: 30_000,
+      askDelayMs: 120_000,
     });
   });
 
@@ -151,11 +153,52 @@ describe("resolvePushConfig", () => {
         corpId: "ww-file",
         agentId: 42,
         secret: "file-secret",
-        notify: { turn: false, compact: false },
+        notify: { turn: false, compact: false, ask: false },
       },
     });
     const cfg = resolvePushConfig({});
-    expect(cfg?.notify).toEqual({ turn: false, goal: true, run: true, task: true, compact: false });
+    expect(cfg?.notify).toEqual({
+      turn: false,
+      goal: true,
+      run: true,
+      task: true,
+      compact: false,
+      ask: false,
+    });
+  });
+
+  it("resolves askDelayMs from the file; 0 keeps the watchdog immediate, junk falls back", () => {
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        askDelayMs: 5000,
+      },
+    });
+    expect(resolvePushConfig({})?.askDelayMs).toBe(5000);
+
+    fakeFile.content = JSON.stringify({
+      push: { enabled: true, corpId: "ww-file", agentId: 42, secret: "file-secret", askDelayMs: 0 },
+    });
+    expect(resolvePushConfig({})?.askDelayMs).toBe(0);
+
+    const err = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      fakeFile.content = JSON.stringify({
+        push: {
+          enabled: true,
+          corpId: "ww-file",
+          agentId: 42,
+          secret: "file-secret",
+          askDelayMs: -5,
+        },
+      });
+      expect(resolvePushConfig({})?.askDelayMs).toBe(120_000);
+    } finally {
+      err.mockRestore();
+    }
   });
 
   it("lets env fill fields the file leaves out", () => {

@@ -711,16 +711,30 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   call site (see `handlers/server-requests.ts`) when sending server→client
   requests; the SDK types also require the `toolCall` field on permission
   requests (Zed renders the popup against it).
-- **Dynamic workflow availability is the REMOTE verdict — there is no
-  bridge-side switch** (ADR-0029, 2026-09-24): the bridge mirrors the desktop
-  host by anonymously fetching `/api/v1/client/configs`
-  (`dynamicWorkflow.mode`, fail-closed) once per backend spawn
-  (`server.backendWorkflowGate`, `src/config/workflow-gate.ts`) and enabling
-  via the dual channel (policy push + `dynamicWorkflowEnabled` on every
+- **Dynamic workflow availability = LOCAL override > remote verdict** (ADR-0029,
+  revised 2026-09-29): the REMOTE half mirrors the desktop host by anonymously
+  fetching `/api/v1/client/configs` (`dynamicWorkflow.mode`, fail-closed) once
+  per backend spawn (`server.backendWorkflowGate`,
+  `src/config/workflow-gate.ts`). On top sits a LOCAL override read LIVE per
+  consumption — config-file `workflow.mode`
+  (~/.config/zcode-acp/config.json, written by the App settings toggle via
+  `PUT /settings/workflow-gate {mode: auto|disabled|onDemand|alwaysOn}`,
+  per-instance mount only) over the upstream env
+  `ZCODE_DYNAMIC_WORKFLOW_MODE`; a hit folds to `source:"override"` and
+  short-circuits before any network/backend spawn, and a flip to enabled
+  re-fires the per-generation policy push (`ensureWorkflowPolicyPushed`).
+  This is NOT a drift from upstream: the shared contract's headless-host tier
+  (`dynamic-workflow-feature.ts`) explicitly reads the env directly — only
+  the packaged desktop production tier strips it. Do NOT "fix away" the
+  switch (the pre-2026-09-29 "no bridge-side switch" stance is superseded);
+  equally do NOT make the override the default — unset means the remote
+  verdict stays the whole story. Fail-closed observability split: 200 without
+  the key = `{mode:"disabled", source:"default"}` (upstream: pulling the key
+  IS off), fetch failure = `{mode:"unknown", source:"default"}`; the 403 body
+  carries `gate mode=… source=…` in its message. Enabling still goes through
+  the dual channel (policy push + `dynamicWorkflowEnabled` on every
   create/resume — the `session/requestRuntimePreferences` schema still cannot
-  carry the flag). Do NOT add a config/env toggle: the desktop has none
-  (production strips the env override), and a second decision source would
-  drift from the grad system. Wire facts that bite: v3 STRIPS
+  carry the flag). Wire facts that bite: v3 STRIPS
   `dynamic_workflow_run_progress` (`session-mapper.ts:366-373`) — per-actor
   progress only exists via `v4/conversation/workflowRunEvents` (the poller,
   `src/workflow/poller.ts`, armed by `taskKind:"workflow"` background tasks;
@@ -733,6 +747,23 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   workflow channel. Launch creates a REAL registered session
   (`{acpSessionId, runId, toolCallId}`) and closes it only when the bridge
   itself created it and the ack was not accepted.
+- **Project/session delete is a tasks-index TOMBSTONE — there is no physical
+  delete path, and none may be added** (ADR-0031, 2026-09-29): upstream's own
+  `deleteTask` sets the App tasks-index row `deleted=1` and keeps the CLI
+  store intact ("标记为列表不可见；CLI session 内容继续保留"), and the v3
+  protocol has no delete RPC at all (`session/close` only releases the
+  runtime). The bridge mirrors exactly that: `POST /api/projects/delete` and
+  `POST /api/instances/{id}/sessions/{sid}/delete` write tombstones
+  (`src/tasks-index.ts` softDelete* — a session with no tasks row gets a
+  born-tombstoned INSERT), `listSessions` filters `deleted=1 OR archived=1`
+  BEFORE sorting/pagination (desktop-archived sessions hide from the remote
+  lists too; pages stay dense), title writes guard `deleted=0`, and the hub
+  refuses to resume a tombstoned id (404; bogus ids keep their honest window
+  — unknown ≠ deleted). Do NOT "clean up" CLI db.sqlite rows or files behind
+  a tombstone — the backend process owns that store, and upstream keeps the
+  bytes by design (undelete = a future flag flip). Live conversations are
+  refused (409); a session live on ANOTHER bridge just disappears when it
+  next closes and re-lists.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish

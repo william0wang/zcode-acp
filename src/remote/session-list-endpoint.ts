@@ -90,6 +90,22 @@ function sendText(res: ServerResponse, code: number, message: string): void {
   res.end(message);
 }
 
+/**
+ * Backend sids this bridge currently holds live — a turn in flight or a
+ * hasActivity session summary. The history listing excludes these rows (they
+ * are discovery's subject), and the delete endpoint refuses them (409):
+ * deleting history is its job, stopping a live conversation is stop's.
+ */
+export function liveZcodeSids(server: ZcodeAcpServer): Set<string> {
+  const live = runningZcodeSids(server);
+  for (const [acpSid, summary] of server.sessionSummaries) {
+    if (!summary.hasActivity) continue;
+    const zcodeSid = server.resolveSid(acpSid);
+    if (zcodeSid) live.add(zcodeSid);
+  }
+  return live;
+}
+
 async function handleList(server: ZcodeAcpServer, req: IncomingMessage, res: ServerResponse) {
   // Consume any request body so the client's connection drains cleanly.
   req.resume();
@@ -106,14 +122,8 @@ async function handleList(server: ZcodeAcpServer, req: IncomingMessage, res: Ser
   // sessions (discovery membership, hasActivity-gated) and its in-flight
   // turns are excluded BEFORE sorting and windowing, so pages stay dense and
   // every cursor keeps naming the exact next row.
-  const running = runningZcodeSids(server);
-  const live = new Set<string>();
-  for (const [acpSid, summary] of server.sessionSummaries) {
-    if (!summary.hasActivity) continue;
-    const zcodeSid = server.resolveSid(acpSid);
-    if (zcodeSid) live.add(zcodeSid);
-  }
-  const resumable = sessions.filter((s) => !live.has(s.sessionId) && !running.has(s.sessionId));
+  const live = liveZcodeSids(server);
+  const resumable = sessions.filter((s) => !live.has(s.sessionId));
   // Newest first; the id tiebreak makes the order total, and the composite
   // cursor names the exact last row, so pages never repeat or skip rows —
   // even when a single millisecond holds more rows than a page.

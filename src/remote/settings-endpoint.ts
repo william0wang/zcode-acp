@@ -92,12 +92,16 @@ import {
   runEvents,
   runNodeResult,
   runWorkspace,
+  setWorkflowGateMode,
   startSavedWorkflow,
   updateWorkflowMeta,
   workflowCreatePrompt,
   WorkflowApiError,
+  WORKFLOW_GATE_SETTINGS,
+  type WorkflowGateModeSetting,
   type WorkflowScope,
 } from "../settings/workflow.js";
+import { workflowOverrideNow } from "../config/workflow-gate.js";
 import {
   codingPlanProviderIds,
   isCodingPlanProvider,
@@ -297,6 +301,7 @@ async function route(
   const caps = backendCapabilities(server?.backendKind ?? "zcode");
   const workflowRoute =
     path === "/settings/workflows" ||
+    path === "/settings/workflow-gate" ||
     path === "/settings/workflow-create-prompt" ||
     path === "/settings/workflow-runs" ||
     path.startsWith("/settings/workflows/") ||
@@ -380,6 +385,9 @@ async function route(
       }
     }
 
+    if (method === "PUT" && path === "/settings/workflow-gate") {
+      return void (await handleWorkflowGateSet(res, server, body));
+    }
     if (method === "PUT" && path.startsWith("/settings/providers/")) {
       const id = segment(path.slice("/settings/providers/".length));
       return void (await handleUpdateProvider(res, id, body));
@@ -635,8 +643,21 @@ async function readWorkflowGateBlock(server: ZcodeAcpServer): Promise<{
   enabled: boolean;
   mode: string;
   source: string;
+  override?: "disabled" | "onDemand" | "alwaysOn";
 }> {
   try {
+    // Local override first: it answers WITHOUT a backend (a cold App-only
+    // bridge must not boot one just to report its own switch), and the
+    // `override` field tells the App which toggle position produced this.
+    const override = workflowOverrideNow();
+    if (override) {
+      return {
+        enabled: override.enabled,
+        mode: override.mode,
+        source: override.source,
+        override: override.mode,
+      };
+    }
     if (!server.backendWorkflowGate) {
       await server.ensureBackend().catch((): undefined => undefined);
     }
@@ -645,6 +666,53 @@ async function readWorkflowGateBlock(server: ZcodeAcpServer): Promise<{
   } catch {
     return { enabled: false, mode: "unknown", source: "default" };
   }
+}
+
+/**
+ * PUT /settings/workflow-gate — the App settings toggle's write half (per
+ * instance mount only; the machine-level hub answers 409 via workflowGuard):
+ * persist `workflow.mode` in the user config ("auto" = delete the key, follow
+ * the remote verdict) and answer the effective verdict the NEXT gate read
+ * sees. The config is machine-level — every bridge instance on the machine
+ * picks the flip up live on its next gate consumption.
+ */
+async function handleWorkflowGateSet(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  body: Record<string, unknown>,
+): Promise<void> {
+  if (!server) {
+    // Machine-level mount: the config write itself is machine-level, but the
+    // response folds the bridge's pinned remote verdict — point the client at
+    // the per-instance spelling instead of the generic workflows hint.
+    sendError(
+      res,
+      409,
+      "workflow-gate set is per-bridge — use /api/instances/{id}/settings/workflow-gate",
+    );
+    return;
+  }
+  await workflowGuard(res, server, async (srv) => {
+    const raw = body["mode"];
+    const mode = typeof raw === "string" ? raw.trim() : "";
+    if (!WORKFLOW_GATE_SETTINGS.includes(mode as WorkflowGateModeSetting)) {
+      throw new WorkflowApiError(
+        400,
+        "invalid_mode",
+        "mode must be one of: auto, disabled, onDemand, alwaysOn",
+      );
+    }
+    try {
+      await setWorkflowGateMode(mode as WorkflowGateModeSetting);
+    } catch (e) {
+      throw new WorkflowApiError(
+        500,
+        "config_write_failed",
+        `workflow-gate config write failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    return { ok: true as const, gate: await readWorkflowGateBlock(srv) };
+  });
 }
 
 /**

@@ -264,7 +264,8 @@ describe("loadUserConfig", () => {
         push: {
           enabled: true,
           quietMs: 5000,
-          notify: { turn: false, goal: true, run: "yes", task: false, compact: true },
+          askDelayMs: 45000,
+          notify: { turn: false, goal: true, run: "yes", task: false, compact: true, ask: false },
         },
       }),
     );
@@ -272,10 +273,27 @@ describe("loadUserConfig", () => {
       push: {
         enabled: true,
         quietMs: 5000,
-        notify: { turn: false, goal: true, task: false, compact: true },
+        askDelayMs: 45000,
+        notify: { turn: false, goal: true, task: false, compact: true, ask: false },
       },
     });
     writeConfig(JSON.stringify({ push: { enabled: true, notify: "junk" } }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ push: { enabled: true } });
+  });
+
+  it("parses the workflow gate override mode; invalid values drop with a warn", () => {
+    writeConfig(JSON.stringify({ workflow: { mode: "alwaysOn" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      workflow: { mode: "alwaysOn" },
+    });
+
+    writeConfig(JSON.stringify({ workflow: { mode: "on-demand" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+
+    writeConfig(JSON.stringify({ workflow: { mode: 42 } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+
+    writeConfig(JSON.stringify({ workflow: "junk" }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });
 });

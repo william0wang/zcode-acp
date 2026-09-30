@@ -11,7 +11,7 @@ import path from "node:path";
 import { appendDiary } from "../crash-guards.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
-import { pushConfig, type PushConfig } from "./config.js";
+import { PUSH_ASK_WATCHDOG_MS, pushConfig, type PushConfig } from "./config.js";
 import { createWeComSender, type WeComSender } from "./wecom.js";
 
 export type PushKind =
@@ -154,31 +154,98 @@ export function pushSettled(
 }
 
 /**
+ * Derive the permission/question payload from the wire method+params (§4/§5.1)
+ * — shared by the zero-clients push and the unanswered-ask watchdog.
+ */
+function interactionPushData(method: string, params?: unknown): PushEventData {
+  const p = (params ?? {}) as { toolCall?: { title?: string }; message?: string };
+  if (method === "session/request_permission") {
+    const detail = typeof p.toolCall?.title === "string" ? p.toolCall.title.trim() : "";
+    return { kind: "permission", title: "Approval requested", body: detail || undefined };
+  }
+  const question = typeof p.message === "string" ? p.message.trim() : "";
+  return { kind: "question", title: "Agent question", body: question || undefined };
+}
+
+// ---------- unanswered-ask watchdog (§5.1 v1.3) ----------
+//
+// The zero-clients push only judges at DISPATCH: an ask fired while a client
+// was connected (phone app backgrounded but holding the socket, an editor
+// window open) stayed silent forever when nobody answered — observed 2026-09-29
+// as "AskUserQuestion 没有通知". Single-slot bookkeeping:
+//   - one timer for the FIRST outstanding ask (a permission storm notifies
+//     once), re-armed only after every ask settles;
+//   - `askNotified` is set by EITHER the zero-clients push or the watchdog,
+//     suppressing duplicates until all asks settle.
+
+let askPending = 0;
+let askTimer: NodeJS.Timeout | null = null;
+let askNotified = false;
+
+/**
+ * Arm the watchdog for one dispatched user-facing ask (permission,
+ * elicitation, AskUserQuestion, plan approval, sandbox grant). Fire-and-forget:
+ * at `askDelayMs` (default 120s) with the ask still pending and nothing yet
+ * notified, push the same derived payload — clients connected or not.
+ */
+export function armAskWatchdog(method: string, params?: unknown): void {
+  askPending++;
+  if (askTimer || askNotified) return;
+  const data = interactionPushData(method, params);
+  askTimer = setTimeout(() => {
+    askTimer = null;
+    if (askPending <= 0 || askNotified) return;
+    const cfg = pushConfig();
+    if (!cfg || !cfg.notify.ask) return;
+    const s = pushSender();
+    if (!s) return;
+    askNotified = true;
+    dispatchPush(cfg, s, data);
+  }, pushConfig()?.askDelayMs ?? PUSH_ASK_WATCHDOG_MS);
+  askTimer.unref?.();
+}
+
+/** Settle one ask: clear the timer and reset the notification slot once none remain. */
+export function clearAskWatchdog(): void {
+  askPending = Math.max(0, askPending - 1);
+  if (askPending === 0) {
+    if (askTimer) {
+      clearTimeout(askTimer);
+      askTimer = null;
+    }
+    askNotified = false;
+  }
+}
+
+/** Test hook: drop the whole watchdog slot (pending count, timer, notified flag). */
+export function resetAskWatchdogForTests(): void {
+  if (askTimer) {
+    clearTimeout(askTimer);
+    askTimer = null;
+  }
+  askPending = 0;
+  askNotified = false;
+}
+
+/**
  * §5.1: derive the permission/question payload at the zero-clients branch of
  * `requestAny` (broadcast.ts) — the single hook covering permission requests,
- * AskUserQuestion, and elicitation.
+ * AskUserQuestion, and elicitation. Gated by `notify.ask` (default on); a
+ * dispatched push marks the notification slot so the watchdog does not
+ * duplicate it.
  */
 export function pushInteractionIfOffline(
   server: ZcodeAcpServer,
   method: string,
   params?: unknown,
 ): void {
-  const p = (params ?? {}) as { toolCall?: { title?: string }; message?: string };
-  if (method === "session/request_permission") {
-    const detail = typeof p.toolCall?.title === "string" ? p.toolCall.title.trim() : "";
-    pushIfOffline(server, {
-      kind: "permission",
-      title: "Approval requested",
-      body: detail || undefined,
-    });
-    return;
-  }
-  const question = typeof p.message === "string" ? p.message.trim() : "";
-  pushIfOffline(server, {
-    kind: "question",
-    title: "Agent question",
-    body: question || undefined,
-  });
+  const cfg = pushConfig();
+  if (!cfg || !cfg.notify.ask) return;
+  if (server.clients.size > 0) return;
+  const s = pushSender();
+  if (!s) return;
+  askNotified = true;
+  dispatchPush(cfg, s, interactionPushData(method, params));
 }
 
 /**
