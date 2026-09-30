@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.53.0](https://github.com/william0wang/zcode-acp/compare/v0.52.0...v0.53.0) (2026-09-30)
+
+
+### Features
+
+* workflow-gate switch, unanswered-ask push, and project/session soft delete ([#277](https://github.com/william0wang/zcode-acp/issues/277)) ([3f542de](https://github.com/william0wang/zcode-acp/commit/3f542de28f1ddd8a4093dc5bb3c47815144607ad))
+
 ## [0.52.0](https://github.com/william0wang/zcode-acp/compare/v0.51.1...v0.52.0) (2026-09-29)
 
 
