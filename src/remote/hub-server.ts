@@ -457,9 +457,10 @@ export type TerminalLaunch =
   /** Ghostty: `-e` trips its "Allow Ghostty to Execute" security prompt on
    * EVERY launch (GHSA-q9fg-cpmh-c78x — upstream refuses a disable switch),
    * so the hub drives its AppleScript dictionary instead (Ghostty ≥1.3.0):
-   * a `new tab` in the front window reuses an existing window, and `command`
-   * on a surface configuration runs the script without the prompt. Only a
-   * one-time macOS Automation (TCC) grant for the hub is required. */
+   * a `new tab` in the front window reuses an existing window, and
+   * `initial input` types the script into the default shell without the
+   * prompt. Only a one-time macOS Automation (TCC) grant for the hub is
+   * required. */
   | { kind: "ghosttyScript"; app: string }
   /** Warp: refuses `.command` files and its CLI is agent-only, but its URI
    * scheme EXECUTES a script handed to action/new_tab's path param
@@ -614,11 +615,22 @@ function appleScriptString(s: string): string {
 /**
  * The AppleScript source that opens the TUI script as a NEW TAB in Ghostty's
  * front window (a new window only when none exists). See the ghosttyScript
- * launcher: `command` on a surface configuration is Ghostty's trusted,
- * prompt-free path to run a program — unlike `-e`, which trips its
- * "Allow Ghostty to Execute" security gate on every launch.
+ * launcher: surface configuration `initial working directory` starts the tab's
+ * shell IN the project (a bare new tab inherits Ghostty's default cwd — the
+ * in-script `cd` only moves the child `sh`, so the terminal itself — prompt,
+ * OSC 7, later tabs' inherited cwd — would sit at `~`), and `initial input`
+ * then types "/bin/sh <script>; exit" into it — prompt-free, unlike `-e`
+ * ("Allow Ghostty to Execute" gate), and auto-closing: a `command` surface
+ * force-enables wait-after-command ONE-WAY (libghostty embedded.zig; ghostty
+ * discussion #13167), so after the CLI tree exits the tab would sit on "Press
+ * any key to close" forever and windows would pile up. `; exit` mirrors
+ * Ghostty's own open-a-script path (AppDelegate): the shell exits with the
+ * tree and the surface then closes itself.
  */
-export function ghosttyTabAppleScript(app: string, scriptPath: string): string {
+export function ghosttyTabAppleScript(app: string, scriptPath: string, cwd: string): string {
+  // Typed into the tab's default shell: single-quoted for the shell, then
+  // escaped for the AppleScript literal.
+  const typedInput = `/bin/sh ${shQuote(scriptPath)}; exit`;
   return [
     `tell application ${appleScriptString(app)}`,
     // activate requires live GUI-session focus — while the screen is LOCKED it
@@ -634,7 +646,8 @@ export function ghosttyTabAppleScript(app: string, scriptPath: string): string {
     "set tgt to front window",
     "end if",
     "set cfg to new surface configuration",
-    `set command of cfg to "/bin/sh " & ${appleScriptString(scriptPath)}`,
+    `set initial working directory of cfg to ${appleScriptString(cwd)}`,
+    `set initial input of cfg to ${appleScriptString(typedInput)} & linefeed`,
     "new tab in tgt with configuration cfg",
     "end tell",
   ].join("\n");
@@ -706,7 +719,7 @@ async function spawnTerminalTui(opts: {
   } else if (launch.kind === "ghosttyScript") {
     // osascript talks to the running app — a non-zero exit (pre-1.3 Ghostty,
     // denied Automation permission) falls through to the headless bridge.
-    argv = ["osascript", "-e", ghosttyTabAppleScript(launch.app, script)];
+    argv = ["osascript", "-e", ghosttyTabAppleScript(launch.app, script, opts.cwd)];
   } else if (launch.kind === "warpUri") {
     // new_tab = Warp's default open mode (like Cmd+T: a tab in the focused
     // window; Warp opens a window first if none exists).

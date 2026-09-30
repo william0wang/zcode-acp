@@ -1272,8 +1272,12 @@ describe("terminal launch resolution (ADR-0016)", () => {
     });
   });
 
-  it("ghostty rides AppleScript: new tab in the front window, prompt-free command", () => {
-    const src = ghosttyTabAppleScript("Ghostty", '/ws/.zcode/tmp/tui-ab12"cd.command');
+  it("ghostty rides AppleScript: new tab in the front window, auto-closing typed input", () => {
+    const src = ghosttyTabAppleScript(
+      "Ghostty",
+      '/ws/.zcode/tmp/tui-ab12"cd.command',
+      "/Users/me/proj",
+    );
     expect(src).toContain('tell application "Ghostty"');
     // activate is best-effort (try): on a LOCKED screen it fails with a
     // permission violation and would otherwise abort the whole tell block.
@@ -1281,10 +1285,19 @@ describe("terminal launch resolution (ADR-0016)", () => {
     // No windows → a fresh one; otherwise reuse the front window (no -n spawn).
     expect(src).toContain("if (count of windows) = 0 then");
     expect(src).toContain("set tgt to front window");
-    // The script runs via a surface configuration command — never `-e`, which
-    // trips Ghostty's per-launch "Allow Ghostty to Execute" gate.
+    // The tab's shell starts IN the project — the in-script `cd` only moves
+    // the child `sh`, never the terminal itself (prompt, OSC 7, inherited cwd).
+    expect(src).toContain('set initial working directory of cfg to "/Users/me/proj"');
+    // The script is TYPED into the default shell via surface configuration
+    // initial input — never `-e` (per-launch "Allow Ghostty to Execute" gate)
+    // and never `command` (force-enables wait-after-command one-way, so the
+    // tab would sit on "Press any key to close" and windows would pile up).
     expect(src).not.toContain("-e ");
-    expect(src).toContain('set command of cfg to "/bin/sh " &');
+    expect(src).not.toContain("set command of cfg");
+    expect(src).toContain('set initial input of cfg to "/bin/sh ');
+    // `; exit` + linefeed: the shell quits with the CLI tree, and the surface
+    // then closes itself (Ghostty's own open-a-script pattern).
+    expect(src).toContain("'; exit\" & linefeed");
     // AppleScript string escaping: backslash and double-quote survive.
     expect(src).toContain('\\"cd.command');
   });
