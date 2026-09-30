@@ -27,7 +27,12 @@ import { ZcodeAcpServer } from "../src/server.js";
 // materialization (never at session/new). The real module writes the App's
 // ~/.zcode/v2/tasks-index.sqlite and must not be touched by tests.
 const mockUpsertCalls: Array<Record<string, unknown>> = [];
+const mockReviveCalls: Array<Record<string, unknown>> = [];
 vi.mock("../src/tasks-index.js", () => ({
+  reviveTombstonesOnActivity: async (opts: Record<string, unknown>) => {
+    mockReviveCalls.push(opts);
+    return 0;
+  },
   upsertSessionTask: async (opts: Record<string, unknown>) => {
     mockUpsertCalls.push(opts);
     return true;
@@ -72,6 +77,8 @@ vi.mock("../src/lazy-sessions.js", () => ({
 
 beforeEach(() => {
   mockStore.clear();
+  mockUpsertCalls.length = 0;
+  mockReviveCalls.length = 0;
   // Keep the create-mode assertions deterministic on a machine that exports
   // ZCODE_ACP_MODE; the per-test stub below still overrides this.
   vi.stubEnv("ZCODE_ACP_MODE", "");
@@ -155,6 +162,10 @@ describe("session/new lazy creation", () => {
     expect(server.pendingSessions.get(resp.sessionId)).toEqual({ cwd: "/tmp/ws" });
     expect(server.resolveSid(resp.sessionId)).toBeUndefined();
     expect(mockUpsertCalls).toHaveLength(0);
+    // But the PROJECT-OPEN revival fires at session/new (ADR-0031 amendment):
+    // opening a workspace cancels its project-delete hide so the /resume
+    // picker is never empty — no backend, no materialization needed.
+    expect(mockReviveCalls).toEqual([{ workspacePath: "/tmp/ws" }]);
     // Fresh sessions stay auto-title-eligible on first end_turn.
     expect(server.titleEligibleSessions.has(resp.sessionId)).toBe(true);
   });
@@ -189,6 +200,9 @@ describe("ensureRealSession", () => {
     });
     expect(mockUpsertCalls).toHaveLength(1);
     expect(mockUpsertCalls[0]).toMatchObject({ workspaceKey: "/tmp/ws", taskId: sid });
+    // The project-open revival fired once at session/new; lazy
+    // materialization does not fire it again.
+    expect(mockReviveCalls).toEqual([{ workspacePath: "/tmp/ws" }]);
 
     // Idempotent: a second call reuses the mapping, no new create.
     await expect(ensureRealSession(server, resp.sessionId)).resolves.toBe(sid);

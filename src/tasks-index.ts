@@ -452,6 +452,73 @@ export async function softDeleteWorkspaceTasks(
 }
 
 /**
+ * Clear delete tombstones when their sessions become USED again (ADR-0031's
+ * amendment: a delete is a list-hide, and touching the project/session again
+ * cancels it — "undelete = a flag flip", now automatic).
+ *
+ * Workspace scope: when EVERY row of the workspace is list-hidden (no
+ * deleted=0 AND archived=0 row — the state a project delete leaves), any
+ * session activity in it revives ALL its deleted rows at once: reopening a
+ * project with the CLI/editor and touching any conversation (or creating a
+ * new one) brings the whole project back. Runs BEFORE the task-scope flip —
+ * reviving the one used session first would make the workspace visible again
+ * and suppress the project-wide revival.
+ *
+ * Task scope: a single tombstoned session that is used again (load with
+ * history, resume, a prompt turn) revives itself — the same self-heal
+ * doctrine as discovery retirement (ADR-0006). Individually deleted sessions
+ * of a VISIBLE workspace stay deleted: the workspace branch runs only at full
+ * invisibility, and this branch touches exactly one task id.
+ *
+ * Archived rows are never revived — `archived=1` is the desktop App's own
+ * archive marker (un-deleting would not even unhide them).
+ *
+ * Returns the number of rows revived (0 when there is nothing to revive, no
+ * index, or the write fails — best-effort, never throws).
+ */
+export async function reviveTombstonesOnActivity(
+  opts: { taskId?: string; workspacePath?: string },
+  dbPath: string = TASKS_INDEX_PATH,
+): Promise<number> {
+  if (!existsSync(dbPath)) return 0;
+  try {
+    const revived = await withSqliteRetry((con) => {
+      let flipped = 0;
+      const now = Date.now();
+      if (opts.workspacePath) {
+        const visible = con
+          .prepare(
+            "SELECT COUNT(*) AS n FROM tasks WHERE workspace_path=? AND deleted=0 AND archived=0",
+          )
+          .get(opts.workspacePath) as { n: number } | undefined;
+        if ((visible?.n ?? 0) === 0) {
+          flipped += Number(
+            con
+              .prepare(
+                "UPDATE tasks SET deleted=0, updated_at=? " +
+                  "WHERE workspace_path=? AND deleted=1 AND archived=0",
+              )
+              .run(now, opts.workspacePath).changes,
+          );
+        }
+      }
+      if (opts.taskId) {
+        flipped += Number(
+          con
+            .prepare("UPDATE tasks SET deleted=0, updated_at=? WHERE task_id=? AND deleted=1")
+            .run(now, opts.taskId).changes,
+        );
+      }
+      return flipped;
+    }, dbPath);
+    return revived ?? 0;
+  } catch (e) {
+    warn(`tasks-index tombstone revival skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return 0;
+  }
+}
+
+/**
  * Task-ids whose tasks rows are list-hidden (deleted or archived tombstones).
  * The sessions listing consults this BEFORE sorting/pagination so pages stay
  * dense and cursors keep naming the exact next row. Silent best-effort: any

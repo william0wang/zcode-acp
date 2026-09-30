@@ -831,12 +831,18 @@ What hides, from where:
 - Sessions **archived** in the desktop App (`archived=1`) are hidden from the
   same listings — the remote default list mirrors the App's default list.
 
-A NEW session created in a deleted project re-adds a fresh row and the project
-reappears — a hide, not a ban. Deleting does not stop anything: live or
-running conversations are refused with `409` (stop or close them first), and
-resuming a tombstoned session id via `POST /api/instances` answers `404
-session deleted` (a stale client cannot resurrect it; a bogus id still gets
-its honest window).
+Deletes are also **self-healing** — a hide, not a ban: opening the project
+anywhere (the CLI/editor `/resume` picker itself, or a new tab in it) revives
+a FULLY deleted project's conversations in the same listing, and a tombstoned
+session that is used again (loaded with history, resumed, or prompted through
+any CLI/editor tab) has its tombstone cancelled. Individually deleted sessions
+of a project that still
+has visible conversations stay deleted, and desktop-archived rows are never
+revived (archive is the App's own marker). Resuming a tombstoned session id
+via `POST /api/instances` still answers `404 session deleted` — a stale
+client cannot resurrect anything; only real bridge-side usage does. Deleting
+does not stop anything else either: live or running conversations are refused
+with `409` (stop or close them first).
 
 Errors: `400` missing `workspacePath` or malformed session id, `401` bad
 token, `404` unknown instance / deleted-on-resume, `409` session is live on
