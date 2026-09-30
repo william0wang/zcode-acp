@@ -162,8 +162,10 @@ whitelist); a deleted session leaves every listing (`/api/projects/sessions`,
 ACP `session/list`, the CLI `/resume` picker, the desktop App sidebar).
 Sessions archived in the desktop App hide the same way. Deleting never stops
 anything: live conversations are refused (`409`), tombstoned resume ids get
-`404`, and a new session in a deleted project recreates its row. See
-`docs/REMOTE-CLIENTS.md` ("Deleting a project or session").
+`404`, and deletes are self-healing — opening the project anywhere (the CLI's
+`/resume` picker, an editor tab) or using any session again cancels the hide;
+a fully deleted project comes back whole the moment it is reopened.
+See `docs/REMOTE-CLIENTS.md` ("Deleting a project or session").
 
 `sessions` lists the project's **currently running** conversations (live
 editor tabs and remote attachments) under the same ACP session ids the

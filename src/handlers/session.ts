@@ -519,6 +519,19 @@ export async function newSession(
   server.titleEligibleSessions.add(acpSid);
   refreshTerminalTabTitle(server, acpSid);
   log(`session/new (lazy) → ${acpSid} cwd=${cwd}`);
+  // Opening the project cancels its project-delete hide (ADR-0031 amendment):
+  // a fully-invisible workspace revives at session/new — the CLI's /resume
+  // picker must not come back empty just because the remote App deleted the
+  // project. Fire-and-forget; listSessions awaits the same revival before
+  // reading the tombstone filter, so even a racing picker self-heals. The
+  // catch also covers test suites that mock tasks-index partially (vitest
+  // mock factories throw on reading an export they do not define).
+  try {
+    const tasksIndexAtNew = await import("../tasks-index.js");
+    void tasksIndexAtNew.reviveTombstonesOnActivity({ workspacePath: cwd }).catch(() => {});
+  } catch {
+    // tasks-index unavailable — revival is best-effort.
+  }
 
   // No backend RPC yet: modes/configOptions are built from defaults (the
   // pending session's real values arrive via updates once materialized).
@@ -845,6 +858,21 @@ export async function listSessions(
   // the /sessions history endpoint, martty's /resume picker. Silent
   // best-effort: no index / read failure → list unfiltered.
   try {
+    // Listing a workspace's sessions is itself "the project is open": a fully
+    // invisible (project-deleted) workspace revives BEFORE the filter is
+    // read — the CLI/editor /resume picker must never come back empty just
+    // because the remote App deleted the project (ADR-0031 amendment).
+    // AWAITED so this very listing sees the revived rows. Own catch: a
+    // partially mocked tasks-index (vitest factories throw on undefined
+    // exports) must only skip the revival, never the filter below.
+    if (listCwd && listCwd !== "/") {
+      try {
+        const { reviveTombstonesOnActivity } = await import("../tasks-index.js");
+        await reviveTombstonesOnActivity({ workspacePath: listCwd });
+      } catch {
+        // revival unavailable — filter as-is.
+      }
+    }
     const { hiddenTaskIds } = await import("../tasks-index.js");
     const hidden = await hiddenTaskIds();
     if (hidden.size > 0) sessions = sessions.filter((s) => !hidden.has(s.sessionId));

@@ -250,6 +250,53 @@ function makeStatement(sql: string) {
       },
     };
   }
+  // SELECT COUNT(*) AS n FROM tasks WHERE workspace_path=? AND deleted=0 AND
+  // archived=0 (reviveTombstonesOnActivity invisibility probe)
+  if (/^SELECT COUNT\(\*\) AS n FROM tasks/i.test(sql)) {
+    return {
+      get(workspacePath: string) {
+        let n = 0;
+        for (const r of rows.values()) {
+          if (r.workspace_path === workspacePath && r.deleted === 0 && r.archived === 0) n++;
+        }
+        return { n } as const;
+      },
+    };
+  }
+  // UPDATE tasks SET deleted=0, updated_at=? WHERE workspace_path=? AND
+  // deleted=1 AND archived=0 (reviveTombstonesOnActivity workspace flip)
+  if (/^UPDATE tasks SET deleted=0.*WHERE workspace_path/i.test(sql)) {
+    return {
+      run(updatedAt: number, workspacePath: string) {
+        let changes = 0;
+        for (const r of rows.values()) {
+          if (r.workspace_path === workspacePath && r.deleted === 1 && r.archived === 0) {
+            r.deleted = 0;
+            r.updated_at = updatedAt;
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
+  // UPDATE tasks SET deleted=0, updated_at=? WHERE task_id=? AND deleted=1
+  // (reviveTombstonesOnActivity task flip)
+  if (/^UPDATE tasks SET deleted=0.*WHERE task_id/i.test(sql)) {
+    return {
+      run(updatedAt: number, taskId: string) {
+        let changes = 0;
+        for (const r of rows.values()) {
+          if (r.task_id === taskId && r.deleted === 1) {
+            r.deleted = 0;
+            r.updated_at = updatedAt;
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
   // UPDATE tasks SET title=?, title_overridden=1, updated_at=?, meta_json=?
   // WHERE task_id=? (renameSessionTask — pins the manual rename)
   if (/^UPDATE tasks SET title=\?, title_overridden=1/i.test(sql)) {
@@ -349,6 +396,7 @@ import {
   hiddenTaskIds,
   isTaskDeleted,
   renameSessionTask,
+  reviveTombstonesOnActivity,
   softDeleteTask,
   softDeleteWorkspaceTasks,
   updateSessionTitle,
@@ -698,6 +746,79 @@ describe("tasks-index session sync", () => {
       await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
       await softDeleteWorkspaceTasks("/proj");
       expect(await softDeleteWorkspaceTasks("/proj")).toBe(0);
+    });
+  });
+
+  describe("reviveTombstonesOnActivity", () => {
+    it("revives the whole workspace when every row is hidden (project reopen)", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s2", title: "" });
+      await upsertSessionTask({ workspaceKey: "/other", taskId: "s3", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+      await softDeleteTask({ taskId: "s3", workspacePath: "/other" });
+
+      // Touching ANY one conversation of the deleted project revives all of
+      // them — reopening a project must bring it back whole.
+      const revived = await reviveTombstonesOnActivity({
+        taskId: "s1",
+        workspacePath: "/proj",
+      });
+      expect(revived).toBe(2);
+      expect(rows.get("/proj\u0000s1")!.deleted).toBe(0);
+      expect(rows.get("/proj\u0000s2")!.deleted).toBe(0);
+      // Other workspaces keep their tombstones.
+      expect(rows.get("/other\u0000s3")!.deleted).toBe(1);
+    });
+
+    it("revives nothing project-wide while a visible row remains", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_live", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_gone", title: "" });
+      await softDeleteTask({ taskId: "s_gone", workspacePath: "/proj" });
+
+      // Individually deleted sessions of an ACTIVE project stay deleted…
+      const revived = await reviveTombstonesOnActivity({
+        taskId: "unrelated",
+        workspacePath: "/proj",
+      });
+      expect(revived).toBe(0);
+      expect(rows.get("/proj\u0000s_gone")!.deleted).toBe(1);
+    });
+
+    it("revives a single used session by task id", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_used", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_idle", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+      // A visible row elsewhere in the workspace suppresses the project-wide
+      // branch; only the USED session comes back.
+      rows.get("/proj\u0000s_idle")!.deleted = 0;
+
+      const revived = await reviveTombstonesOnActivity({
+        taskId: "s_used",
+        workspacePath: "/proj",
+      });
+      expect(revived).toBe(1);
+      expect(rows.get("/proj\u0000s_used")!.deleted).toBe(0);
+    });
+
+    it("never revives archived rows (the desktop's own marker)", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_arch", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_del", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+      rows.get("/proj\u0000s_arch")!.archived = 1;
+
+      const revived = await reviveTombstonesOnActivity({ workspacePath: "/proj" });
+      expect(revived).toBe(1);
+      expect(rows.get("/proj\u0000s_del")!.deleted).toBe(0);
+      // Archived stays archived AND deleted — un-deleting would not unhide it.
+      expect(rows.get("/proj\u0000s_arch")!.archived).toBe(1);
+      expect(rows.get("/proj\u0000s_arch")!.deleted).toBe(1);
+    });
+
+    it("is idempotent — a second touch revives nothing", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+      expect(await reviveTombstonesOnActivity({ workspacePath: "/proj" })).toBe(1);
+      expect(await reviveTombstonesOnActivity({ workspacePath: "/proj" })).toBe(0);
     });
   });
 

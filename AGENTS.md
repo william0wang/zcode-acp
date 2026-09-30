@@ -786,7 +786,19 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   refuses to resume a tombstoned id (404; bogus ids keep their honest window
   — unknown ≠ deleted). Do NOT "clean up" CLI db.sqlite rows or files behind
   a tombstone — the backend process owns that store, and upstream keeps the
-  bytes by design (undelete = a future flag flip). Live conversations are
+  bytes by design (undelete is AUTOMATIC since 2026-09-30:
+  `reviveTombstonesOnActivity`, wired at THREE "the project is open" moments
+  — `session/new` (CLI boot / editor attach, fire-and-forget),
+  `session/list` with a cwd (AWAITED before the tombstone filter is read, so
+  a project-deleted workspace's /resume picker is NEVER empty — the reported
+  "恢复会话为空"), and `markSessionActive` (load with history / resume /
+  prompt — the used session revives under its backend id). A FULLY invisible
+  workspace — exactly the state a project delete leaves — revives ALL its
+  deleted rows at any of these, so reopening a project from the CLI brings it
+  back whole. Archived rows are never revived (the desktop's own marker),
+  individually deleted sessions of a still-visible workspace stay deleted,
+  and the hub's tombstoned-resume 404 is unchanged — only real bridge-side
+  opens/usage revive). Live conversations are
   refused (409); a session live on ANOTHER bridge just disappears when it
   next closes and re-lists. `listKnownWorkspaces` (the /api/projects source)
   likewise filters `deleted=0 AND archived=0` (2026-09-30): a workspace whose

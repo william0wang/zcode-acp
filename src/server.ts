@@ -840,6 +840,29 @@ export class ZcodeAcpServer {
       updatedAt: Date.now(),
       hasActivity: true,
     });
+    // Self-heal soft-delete tombstones (ADR-0031 amendment): using a session
+    // again cancels its tombstone — the session itself, and project-wide when
+    // the workspace had gone fully invisible (project delete). Fire-and-forget
+    // best-effort; never blocks or breaks the activity path.
+    void this.reviveTombstonesFor(acpSid);
+  }
+
+  /**
+   * Tombstone revival behind markSessionActive. Guarded, not destructured:
+   * several test suites mock tasks-index PARTIALLY (without this export), and
+   * a missing index or unknown cwd must never surface on the activity path.
+   */
+  private async reviveTombstonesFor(acpSid: string): Promise<void> {
+    try {
+      const tasksIndex = await import("./tasks-index.js");
+      if (typeof tasksIndex.reviveTombstonesOnActivity !== "function") return;
+      await tasksIndex.reviveTombstonesOnActivity({
+        taskId: this.resolveSid(acpSid) ?? acpSid,
+        workspacePath: this.sessionCwds.get(acpSid),
+      });
+    } catch {
+      // best-effort — a tombstone revival failure must never break a turn
+    }
   }
 
   /**
