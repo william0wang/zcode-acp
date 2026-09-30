@@ -49,7 +49,7 @@ import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
 import { pushActive } from "../push/config.js";
-import { armAskWatchdog, clearAskWatchdog } from "../push/push.js";
+import { armAskWatchdog, clearAskWatchdog, pushSourceLabel } from "../push/push.js";
 import { NoClientsError, type ClientLike } from "../remote/broadcast.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
@@ -1003,8 +1003,16 @@ export async function requestWithTimeout(
   // Unanswered-ask watchdog (§5.1 v1.3): one slot for this ask — pushes after
   // push.askDelayMs when nobody answers (clients connected or not; the
   // zero-clients push only judges at dispatch). Cleared when the race settles
-  // below; setup code above cannot throw past an un-armed slot.
-  armAskWatchdog(method, params);
+  // below; setup code above cannot throw past an un-armed slot. The label
+  // (project / session title) is captured NOW — the timer fires with no
+  // request context of its own; the ACP session id rides the request params,
+  // same extraction as pushInteractionIfOffline.
+  const askSid = (params as { sessionId?: unknown } | undefined)?.sessionId;
+  armAskWatchdog(
+    method,
+    params,
+    pushSourceLabel(server, typeof askSid === "string" ? askSid : undefined),
+  );
   const winner = await Promise.race(racers);
   // Mark settled BEFORE disposing: a non-primary racer can win while the
   // interaction race is still open, and a later `closed.then(fire)` would

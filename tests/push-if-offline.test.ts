@@ -49,6 +49,9 @@ const {
 } = await import("../src/push/push.js");
 const { ZcodeAcpServer } = await import("../src/server.js");
 
+// pushSourceLabel on a bare server falls back to basename(process.cwd()).
+const PROJ = basename(process.cwd());
+
 const sent: string[] = [];
 
 beforeEach(() => {
@@ -219,25 +222,26 @@ describe("pushInteractionIfOffline (§5.1)", () => {
       toolCall: { title: "Bash: npm install" },
       options: [],
     });
-    expect(sent).toEqual(["[permission] Approval requested\nBash: npm install"]);
+    expect(sent).toEqual([`[${PROJ}] Approval requested\nBash: npm install`]);
   });
 
-  it("derives question from elicitation with the message as body", () => {
+  it("labels the ask with the project / session title like every other push", () => {
     h.cfg = { contentDetail: "full", notify: { ask: true } };
     const server = new ZcodeAcpServer();
+    server.sessionTitles.set("s1", "Which DB session");
     pushInteractionIfOffline(server, "elicitation/create", {
       sessionId: "s1",
       message: "Which database?",
     });
-    expect(sent).toEqual(["[question] Agent question\nWhich database?"]);
+    expect(sent).toEqual([`[${PROJ} / Which DB session] Agent question\nWhich database?`]);
   });
 
-  it("falls back to bare titles when params carry nothing readable", () => {
+  it("falls back to a project-only label when params carry no readable session", () => {
     h.cfg = { contentDetail: "full", notify: { ask: true } };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, "session/request_permission", {});
     pushInteractionIfOffline(server, "elicitation/create", {});
-    expect(sent).toEqual(["[permission] Approval requested", "[question] Agent question"]);
+    expect(sent).toEqual([`[${PROJ}] Approval requested`, `[${PROJ}] Agent question`]);
   });
 
   it("respects the notify.ask switch (off)", () => {
@@ -294,13 +298,25 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
     clearAskWatchdog();
   });
 
+  it("the watchdog pushes the label captured at arm time", async () => {
+    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    armAskWatchdog(
+      "session/request_permission",
+      { toolCall: { title: "Bash: rm" } },
+      "myproj / fix auth flow",
+    );
+    await tick(50);
+    expect(sent).toEqual(["[myproj / fix auth flow] Approval requested\nBash: rm"]);
+    clearAskWatchdog();
+  });
+
   it("the zero-clients immediate push satisfies the slot (no duplicate)", async () => {
     h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, PERMISSION, { toolCall: { title: "Bash: rm" } });
     armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } }); // funnel arms after dispatch
     await tick(50);
-    expect(sent).toEqual(["[permission] Approval requested\nBash: rm"]);
+    expect(sent).toEqual([`[${PROJ}] Approval requested\nBash: rm`]);
     clearAskWatchdog();
   });
 
