@@ -78,6 +78,7 @@ import { queryQuota } from "../quota/index.js";
 import { queryOcUsage } from "../quota/ollama-cloud/index.js";
 import { queryGoUsage } from "../quota/opencode-go/index.js";
 import { isTaskDeleted, listKnownWorkspaces, softDeleteWorkspaceTasks } from "../tasks-index.js";
+import { buildWorkflowOverview } from "./workflow-overview.js";
 
 export interface HubOptions {
   port: number;
@@ -1702,6 +1703,26 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(list));
+      return;
+    }
+    // GET /api/workflow-overview — the machine-level workflow page payload
+    // (see workflow-overview.ts): one group per WORKSPACE (not per bridge —
+    // a project with an editor + serve bridge must not render twice) plus the
+    // machine-wide active-run list (the journal is shared; a client attached
+    // to one instance must still see another project's flying runs).
+    if (url.pathname === "/api/workflow-overview" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const overview = await buildWorkflowOverview(Array.from(instances.values()));
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        // Live data — the hub holds no cache; clients must not either.
+        "Cache-Control": "no-store",
+      });
+      res.end(JSON.stringify(overview));
       return;
     }
     if (url.pathname === "/api/quota" && req.method === "GET") {
