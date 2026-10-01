@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.60.0](https://github.com/william0wang/zcode-acp/compare/v0.59.0...v0.60.0) (2026-10-01)
+
+
+### Features
+
+* add 60%, 95% and 98% quota push tiers ([967d8b7](https://github.com/william0wang/zcode-acp/commit/967d8b73dd1eaffdee9694defbeacd2ed673f68c))
+* serve machine-level workflow overview from the hub ([36c44a4](https://github.com/william0wang/zcode-acp/commit/36c44a4816aa24399a0e9c904cdc0f90320e0894))
+
 ## [0.59.0](https://github.com/william0wang/zcode-acp/compare/v0.58.1...v0.59.0) (2026-10-01)
 
 
