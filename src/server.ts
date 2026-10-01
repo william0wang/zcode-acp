@@ -28,7 +28,10 @@ import {
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { enqueueSessionSend } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
-import { answerProviderRuntimeHeaders } from "./handlers/server-requests.js";
+import {
+  answerProviderRuntimeHeaders,
+  sweepOrphanedServerRequests,
+} from "./handlers/server-requests.js";
 import { SessionTitleListener } from "./handlers/session-titles.js";
 import { pushInteractionIfOffline } from "./push/push.js";
 import { ClientRegistry } from "./remote/broadcast.js";
@@ -582,6 +585,14 @@ export class ZcodeAcpServer {
     // the only connection between the remote layer and the push module.
     this.clients.noClientsObserver = (method, params) =>
       pushInteractionIfOffline(this, method, params);
+    // Orphaned-interaction sweep (see sweepOrphanedServerRequests): asks no
+    // turn loop will ever poll — above all a background workflow run's — are
+    // forwarded, pushed or settled instead of silently timing out. Unref'd,
+    // never keeps the process alive; a no-op while the queue is empty.
+    const sweep = setInterval(() => {
+      void sweepOrphanedServerRequests(this).catch(() => undefined);
+    }, 2_000);
+    sweep.unref();
   }
 
   /** Next JSON-RPC id for messages we send to zcode. */

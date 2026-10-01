@@ -252,6 +252,11 @@ const ALLOW_OPTION_IDS = new Set(["allow", "allow_once", "allow_always", "allow_
 /** The workflow approval tools upstream gates as session-always-allow. */
 const SESSION_ALWAYS_TOOLS = new Set(["CreateWorkflow", "AmendWorkflow"]);
 
+/** Whether the tool is one of the session-always workflow approval tools. */
+export function isSessionAlwaysTool(toolName: string): boolean {
+  return SESSION_ALWAYS_TOOLS.has(toolName);
+}
+
 /** The injected option's id — v4's own spelling (broker's session-grant key). */
 export const SESSION_ALLOW_OPTION_ID = "allowSession";
 

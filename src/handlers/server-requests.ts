@@ -39,6 +39,7 @@ import {
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
+  isSessionAlwaysTool,
   isSessionAllowPick,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
@@ -51,7 +52,12 @@ import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
 import { pushActive } from "../push/config.js";
-import { armAskWatchdog, clearAskWatchdog, pushSourceLabel } from "../push/push.js";
+import {
+  armAskWatchdog,
+  clearAskWatchdog,
+  pushInteractionIfOffline,
+  pushSourceLabel,
+} from "../push/push.js";
 import { NoClientsError, type ClientLike } from "../remote/broadcast.js";
 import { clientConnectionRoot, log, warn } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
@@ -446,6 +452,109 @@ async function handleOne(
       );
     }
   }
+}
+
+// ---------- orphaned-ask sweep (workflow background interactions) ----------
+
+/**
+ * Claim interaction requests no turn loop will ever poll.
+ *
+ * `handleServerRequests` runs ONLY inside a session's turn loop and claims
+ * only that turn's session (everything else is requeued) — an ask from any
+ * OTHER session, above all a background workflow run's execution, used to sit
+ * in the arrival queue forever: never forwarded, never pushed, until the
+ * backend's ask timeout killed the run (observed 2026-09-30: app-launched
+ * runs died on an unanswered CreateWorkflow permission with no notification
+ * at all — the "errored" rows in the run list).
+ *
+ * Armed on a 2s interval in the server constructor. Per queued request:
+ *   - owned by a running turn (or sid-less while any turn runs — a turn
+ *     claims sid-less asks) → requeued untouched, the turn keeps its claim;
+ *   - session maps to an ACP alias → forwarded through the full ask path
+ *     (client popup + offline hold + watchdog push) under ITS acpSid;
+ *   - unmappable — an internal run session no client can ever answer:
+ *     the workflow-graph tools auto-allow (launch consent covers building
+ *     the run's own graph; there is no human channel to ask), anything
+ *     else is declined fast with an offline push, so the run fails LOUD
+ *     instead of hanging silently.
+ */
+export async function sweepOrphanedServerRequests(server: ZcodeAcpServer): Promise<void> {
+  const backend = server.backend;
+  if (!backend || backend.isDead) return;
+  const all = backend.pollServerRequests();
+  if (all.length === 0) return;
+  // Phase 1 — SYNCHRONOUS classification. Turn-owned requests go back BEFORE
+  // any await: a forwarded ask can hold for as long as nobody answers (§6
+  // offline hold), and an owned request stranded in a local array through
+  // that window would vanish from its turn loop's view — past the dedup
+  // entry's lifetime a requeued reannounce then re-prompts an already
+  // answered ask. Orphans are dispatched INDEPENDENTLY (not sequentially)
+  // for the same reason: one held ask must not queue every later orphan.
+  const owned: ServerRequest[] = [];
+  const orphans: ServerRequest[] = [];
+  for (const req of all) {
+    const sid = ((req.params ?? {}) as Record<string, unknown>)["sessionId"];
+    if (turnOwnsSession(server, sid)) owned.push(req);
+    else orphans.push(req);
+  }
+  if (owned.length > 0) backend.requeueServerRequests(owned);
+  // Phase 2 — settle the orphans; awaiting the sweep (tests) sees them all.
+  await Promise.all(orphans.map((req) => settleOrphan(server, backend, req)));
+}
+
+/** One ownerless request: forward, auto-allow, or decline — never re-queued. */
+async function settleOrphan(
+  server: ZcodeAcpServer,
+  backend: ZcodeBackend,
+  req: ServerRequest,
+): Promise<void> {
+  const params = (req.params ?? {}) as Record<string, unknown>;
+  const sid = params["sessionId"];
+  try {
+    const acpSid = typeof sid === "string" ? server.resolveAcpSid(sid) : undefined;
+    if (acpSid) {
+      log(`  ⟳ orphaned ${req.method}: forwarding under acp sid ${acpSid}`);
+      await handleOne(
+        server,
+        backend,
+        server.clients.broadcast(),
+        acpSid,
+        req,
+        getPendingInteractions(server),
+      );
+      return;
+    }
+    if (isProviderRuntimeHeadersRequest(req.method)) {
+      answerProviderRuntimeHeaders(backend, req.id, req.method, params);
+      return;
+    }
+    if (isPermissionRequest(req.method) && isSessionAlwaysTool(`${params["toolName"] ?? ""}`)) {
+      log(`  ⟳ orphaned ${params["toolName"]} ask (internal run session): auto-allow`);
+      backend.sendReply(req.id, { decision: "allow", reason: "Approved for this session" });
+      return;
+    }
+    warn(`  ⚠ orphaned ${req.method} with no answerable session — declining with offline push`);
+    pushInteractionIfOffline(server, req.method, params);
+    backend.sendReply(req.id, { action: "decline", reason: "no client session to ask" });
+  } catch (e) {
+    // The turn loop wraps handleOne the same way — the sweep must never
+    // throw into the interval callback.
+    warn(`orphaned ${req.method} sweep threw: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Whether a running turn owns this ask: its own session, or (matching the
+ * turn loop's claim rule) any turn at all when the ask carries no sessionId.
+ */
+function turnOwnsSession(server: ZcodeAcpServer, sid: unknown): boolean {
+  if (server.pendingTurns.size === 0) return false;
+  if (sid === undefined) return true;
+  if (typeof sid !== "string") return false;
+  for (const turn of server.pendingTurns.values()) {
+    if (turn.zcodeSid === sid) return true;
+  }
+  return false;
 }
 
 /** Single requestPermission (tool auth / ExitPlanMode). */
