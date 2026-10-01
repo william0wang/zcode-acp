@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.58.0](https://github.com/william0wang/zcode-acp/compare/v0.57.0...v0.58.0) (2026-10-01)
+
+
+### Features
+
+* bridge-side workflow run dismissal with hide-list filtering ([11af5f3](https://github.com/william0wang/zcode-acp/commit/11af5f35cd8590607365e28c194a7f8ee554d1f5))
+
+
+### Bug Fixes
+
+* surface orphaned background asks with forward, auto-allow or push ([405ac49](https://github.com/william0wang/zcode-acp/commit/405ac491d364172dfb3e03e115e75ef9c82cb6c9))
+
 ## [0.57.0](https://github.com/william0wang/zcode-acp/compare/v0.56.0...v0.57.0) (2026-10-01)
 
 
