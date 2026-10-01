@@ -1,13 +1,14 @@
 /**
  * Quota threshold push warnings (push spec §5.7, requested 2026-10-01):
- * the 5-hour and weekly windows each notify ONCE per tier — 80% used, 90%
- * used, exhausted — edge-triggered on a refresh DISCOVERING the first
- * crossing (never level-triggered, precision explicitly not required).
+ * the 5-hour and weekly windows each notify ONCE per tier — 60% used, 80%
+ * used, 90% used, 95% used, 98% used, exhausted — edge-triggered on a
+ * refresh DISCOVERING the first crossing (never level-triggered, precision
+ * explicitly not required).
  *
  * Every fresh `queryQuota()` fetch funnels through here (the martty dock
  * refresher's 60s cadence + turn-end forceRefresh, the hub's dock cache,
  * `/quota`, the settings REST routes), so wherever quota data materializes,
- * thresholds are watched. A drop below 80 re-arms the tiers (new window,
+ * thresholds are watched. A drop below 60 re-arms the tiers (new window,
  * reset card, weekly rollover).
  *
  * The per-key highest-notified tier is PERSISTED next to the user config
@@ -31,8 +32,8 @@ import type { QuotaItem, QuotaResult } from "./types.js";
 /** Windows that count as budget alarms (keys from parse.ts). */
 const WATCHED_KEYS = new Set(["token_5h", "token_week"]);
 
-/** Notify tiers in percent: 80 / 90 / exhausted (100). */
-const TIERS = [80, 90, 100] as const;
+/** Notify tiers in percent: 60 / 80 / 90 / 95 / 98 / exhausted (100). */
+const TIERS = [60, 80, 90, 95, 98, 100] as const;
 
 /** Window display name for the push title. */
 function windowName(item: QuotaItem): string {

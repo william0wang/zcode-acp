@@ -161,7 +161,7 @@ export interface PushNotifyUserConfig {
   ask?: boolean;
   /** Workflow stage transitions (phase entered / node failed): mid-run digest push. */
   workflowStage?: boolean;
-  /** Quota threshold warnings (5h/weekly windows at 80/90/exhausted). */
+  /** Quota threshold warnings (5h/weekly windows at 60/80/90/95/98/exhausted). */
   quota?: boolean;
 }
 

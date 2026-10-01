@@ -1,6 +1,6 @@
 /**
- * Quota threshold push warnings (§5.7): edge-triggered tiers (80/90/100) per
- * watched window, drop-below-80 re-arm, persisted state surviving process
+ * Quota threshold push warnings (§5.7): edge-triggered tiers (60/80/90/95/98/100)
+ * per watched window, drop-below-60 re-arm, persisted state surviving process
  * restarts (module reset = a reborn hub/bridge reading the same file), and
  * the notify switch muting the push without freezing the state.
  */
@@ -83,12 +83,18 @@ afterEach(() => {
 });
 
 describe("quotaTier", () => {
-  it("maps percentages onto the 80/90/100 tiers", () => {
-    expect(quotaTier(79.9)).toBe(0);
+  it("maps percentages onto the 60/80/90/95/98/100 tiers", () => {
+    expect(quotaTier(59.9)).toBe(0);
+    expect(quotaTier(60)).toBe(60);
+    expect(quotaTier(79.9)).toBe(60);
     expect(quotaTier(80)).toBe(80);
     expect(quotaTier(89.9)).toBe(80);
     expect(quotaTier(90)).toBe(90);
-    expect(quotaTier(99.9)).toBe(90);
+    expect(quotaTier(94.9)).toBe(90);
+    expect(quotaTier(95)).toBe(95);
+    expect(quotaTier(97.9)).toBe(95);
+    expect(quotaTier(98)).toBe(98);
+    expect(quotaTier(99.9)).toBe(98);
     expect(quotaTier(100)).toBe(100);
   });
 });
@@ -96,20 +102,27 @@ describe("quotaTier", () => {
 describe("checkQuotaThresholds", () => {
   it("pushes each newly-crossed tier once; a drop re-arms the window", async () => {
     const reset = Date.now() + 3 * 3600_000;
-    await checkQuotaThresholds(result(item("token_5h", 81)));
+    await checkQuotaThresholds(result(item("token_5h", 61))); // tier 60
+    await checkQuotaThresholds(result(item("token_5h", 70))); // same tier — silent
+    await checkQuotaThresholds(result(item("token_5h", 81))); // tier 80
     await checkQuotaThresholds(result(item("token_5h", 85))); // same tier — silent
-    await checkQuotaThresholds(result(item("token_5h", 91, reset)));
-    await checkQuotaThresholds(result(item("token_5h", 95))); // same tier — silent
+    await checkQuotaThresholds(result(item("token_5h", 91, reset))); // tier 90
+    await checkQuotaThresholds(result(item("token_5h", 93))); // same tier — silent
+    await checkQuotaThresholds(result(item("token_5h", 96))); // tier 95
+    await checkQuotaThresholds(result(item("token_5h", 99))); // tier 98
     await checkQuotaThresholds(result(item("token_5h", 100)));
     await checkQuotaThresholds(result(item("token_5h", 12))); // new window — re-arm
     await checkQuotaThresholds(result(item("token_5h", 82))); // fires again
 
-    expect(pushes).toHaveLength(4);
-    expect(pushes[0]).toContain("5h quota 81% used");
-    expect(pushes[1]).toContain("5h quota 91% used");
-    expect(pushes[1]).toContain(`resets `);
-    expect(pushes[2]).toContain("5h quota exhausted");
-    expect(pushes[3]).toContain("5h quota 82% used");
+    expect(pushes).toHaveLength(7);
+    expect(pushes[0]).toContain("5h quota 61% used");
+    expect(pushes[1]).toContain("5h quota 81% used");
+    expect(pushes[2]).toContain("5h quota 91% used");
+    expect(pushes[2]).toContain(`resets `);
+    expect(pushes[3]).toContain("5h quota 96% used");
+    expect(pushes[4]).toContain("5h quota 99% used");
+    expect(pushes[5]).toContain("5h quota exhausted");
+    expect(pushes[6]).toContain("5h quota 82% used");
   });
 
   it("tracks the weekly window independently and ignores non-budget keys", async () => {
