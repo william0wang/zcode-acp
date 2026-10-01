@@ -819,6 +819,45 @@ describe("workflow settings — resume", () => {
   });
 });
 
+describe("workflow settings — stop", () => {
+  it("stop cancelled answers 200 and sends the plain cancel RPC under the backend sid", async () => {
+    const { server, calls } = makeBridge(GATE_ON, {
+      results: { "session/cancelBackgroundTask": { cancelled: true } },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/stop", { sessionId: "sess_app" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { ok: boolean }).ok).toBe(true);
+    // taskId ≡ runId — the same identity equation resume/amend use.
+    expect(calls.find((c) => c.method === "session/cancelBackgroundTask")!.params).toMatchObject({
+      sessionId: "sess_zcode_app",
+      taskId: "run-9",
+    });
+  });
+
+  it("stop on an already-settled run (cancelled:false) answers 409 not_running", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      results: { "session/cancelBackgroundTask": { cancelled: false } },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/run-9/stop", { sessionId: "sess_app" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("not_running");
+  });
+
+  it("stop without a sessionId answers 400", async () => {
+    const { server } = makeBridge(GATE_ON);
+    const port = await serveSettings(server);
+    const res = await send(port, "POST", "workflow-runs/run-9/stop", {});
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
+  });
+});
+
 describe("workflow settings — run settings amendment", () => {
   it("accepted in-place change (maxConcurrency only) answers 200 with the same run and no supersededRunId", async () => {
     const { server, calls } = makeBridge(GATE_ON, {

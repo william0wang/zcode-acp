@@ -13,10 +13,12 @@ import {
   buildAskUserElicitationForm,
   buildPlanApprovalElicitationForm,
   describeToolInput,
+  enrichPermissionOptions,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
+  isSessionAllowPick,
   isUserInputRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
@@ -287,6 +289,74 @@ describe("ACP response → zcode permission", () => {
         [{ optionId: "allow_project", kind: "allow_always", name: "Always allow" }],
       ),
     ).toEqual({ decision: "allow" });
+  });
+
+  // The v3 projection crops BOTH always tiers for the session-always tools
+  // (toLegacyPermissionOptionsPolicy) — the bridge re-offers the session tier
+  // itself so a client can stop re-approving every workflow-design call.
+  // SaveWorkflow stays OUT (upstream allowAlways:false — every save is an
+  // explicit ask even on the desktop).
+  describe("session-always injection (workflow tools)", () => {
+    const v3Ask = (toolName: string) => ({
+      requestId: "perm_1",
+      sessionId: "s1",
+      toolCallId: "c1",
+      toolName,
+      options: [
+        {
+          optionId: "allow_once",
+          kind: "allow_once",
+          name: "Allow once",
+          response: { decision: "allow", reason: "Approved once" },
+        },
+        {
+          optionId: "deny",
+          kind: "deny",
+          name: "Deny",
+          response: { decision: "deny" },
+        },
+      ],
+    });
+
+    it("injects the session-always option for workflow tools cropped by v3", () => {
+      const enriched = enrichPermissionOptions(v3Ask("CreateWorkflow"));
+      expect(enriched.options).toHaveLength(3);
+      const injected = enriched.options![2]!;
+      expect(injected.optionId).toBe("allowSession");
+      expect(injected.kind).toBe("allow_always");
+      expect(injected.name).toBe("Always allow in this session");
+    });
+
+    it("never injects for SaveWorkflow — upstream keeps every save an explicit ask", () => {
+      const saveAsk = v3Ask("SaveWorkflow");
+      expect(enrichPermissionOptions(saveAsk)).toBe(saveAsk);
+    });
+
+    it("leaves other tools and already-always asks untouched", () => {
+      const bashAsk = v3Ask("Bash");
+      expect(enrichPermissionOptions(bashAsk)).toBe(bashAsk);
+      const withAlways = {
+        ...v3Ask("CreateWorkflow"),
+        options: [
+          ...v3Ask("CreateWorkflow").options!,
+          { optionId: "allow_project", kind: "allow_project", name: "Always allow" },
+        ],
+      };
+      expect(enrichPermissionOptions(withAlways)).toBe(withAlways);
+    });
+
+    it("the injected pick maps to a plain allow and is detectable for grant recording", () => {
+      const enriched = enrichPermissionOptions(v3Ask("CreateWorkflow"));
+      const pick = { outcome: { outcome: "selected", optionId: "allowSession" } };
+      expect(isSessionAllowPick(pick)).toBe(true);
+      expect(isSessionAllowPick({ outcome: { outcome: "selected", optionId: "allow_once" } })).toBe(
+        false,
+      );
+      expect(acpPermissionResponseToZcode(pick, enriched.options)).toEqual({
+        decision: "allow",
+        reason: "Approved for this session",
+      });
+    });
   });
 });
 

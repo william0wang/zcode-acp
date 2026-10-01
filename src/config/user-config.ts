@@ -176,6 +176,8 @@ export interface PushUserConfig {
   quietMs?: number;
   /** Unanswered-ask watchdog delay in ms (0 = push at dispatch time; default 120s). */
   askDelayMs?: number;
+  /** Same watchdog for permission asks — a blocked tool call (default 15s). */
+  permissionAskDelayMs?: number;
   relay?: PushRelayUserConfig;
   notify?: PushNotifyUserConfig;
 }
@@ -413,6 +415,13 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     if (quietMs !== undefined) p.quietMs = quietMs;
     const askDelayMs = parseIntField(body["askDelayMs"], 0, `${label}.askDelayMs`, file);
     if (askDelayMs !== undefined) p.askDelayMs = askDelayMs;
+    const permissionAskDelayMs = parseIntField(
+      body["permissionAskDelayMs"],
+      0,
+      `${label}.permissionAskDelayMs`,
+      file,
+    );
+    if (permissionAskDelayMs !== undefined) p.permissionAskDelayMs = permissionAskDelayMs;
     const relay = body["relay"];
     if (relay !== undefined) {
       if (!isPlainObject(relay)) {

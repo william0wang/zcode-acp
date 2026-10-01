@@ -718,6 +718,45 @@ export async function resumeWorkflowRun(
   if (input.name) server.workflowRunNames.set(input.runId, input.name);
 }
 
+/**
+ * Stop a flying run. There is no v4 stop command (the family's stop is the
+ * plain `session/cancelBackgroundTask` RPC the ACP extension forwards,
+ * taskId ≡ runId — the same identity equation as resume/amend), so this is
+ * that RPC reached from the settings route: the management page can stop a
+ * run on ANY hub instance, not just the one its ACP socket is bound to.
+ */
+export async function stopWorkflowRun(
+  server: ZcodeAcpServer,
+  input: { runId: string; acpSessionId: string },
+): Promise<void> {
+  await requireWorkflowEnabled(server);
+  const zcodeSid = await mapProvidedSession(server, input.acpSessionId);
+  let cancelled = false;
+  try {
+    const backend = await server.ensureBackend();
+    const resp = await backend.request(
+      server.nextId(),
+      "session/cancelBackgroundTask",
+      { sessionId: zcodeSid, taskId: input.runId },
+      15_000,
+    );
+    if (resp.error) {
+      throw new WorkflowApiError(502, "command_failed", resp.error.message ?? "unknown error");
+    }
+    cancelled = (resp.result as { cancelled?: boolean } | null)?.cancelled === true;
+  } catch (e) {
+    if (e instanceof WorkflowApiError) throw e;
+    throw new WorkflowApiError(502, "command_failed", messageOf(e));
+  }
+  if (!cancelled) {
+    throw new WorkflowApiError(409, "not_running", "run not found or already settled");
+  }
+  // Reflect the stop on the ACP tool card for whoever has the session open
+  // (same best-effort reflection the extension handler does).
+  const listener = server.backgroundListeners.get(zcodeSid);
+  if (listener) void listener.markCancelled(input.runId).catch((): undefined => undefined);
+}
+
 // ---------- run settings amendment (v4/command, same family as resume) ----------
 
 /**

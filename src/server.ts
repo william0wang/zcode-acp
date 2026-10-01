@@ -218,6 +218,16 @@ export class ZcodeAcpServer {
    */
   readonly workflowRunNames = new Map<string, string>();
   /**
+   * Bridge-side session-scoped "always allow" grants for the workflow
+   * approval tools (SESSION_ALWAYS_TOOLS, src/interaction/adapter.ts):
+   * zcodeSid → tool names the client approved for this session. The v3 wire
+   * crops the backend's own session-always option, so the bridge re-offers
+   * it and mirrors the grant here — the semantic copy of upstream's
+   * in-memory grantSessionPermission, which dies with the backend runtime
+   * (this map therefore clears at every backend respawn).
+   */
+  readonly sessionAutoAllows = new Map<string, Set<string>>();
+  /**
    * Last compact terminal state per backend session id, recorded from the
    * backend's `state.updated` notification (reasons `session_compacted` /
    * `session_compact_cancelled` / `session_compact_failed`) — the RPC ack
@@ -628,8 +638,11 @@ export class ZcodeAcpServer {
     );
     this.backendWorkflowGate = workflowGate;
     // Fresh backend generation: the policy-push marker from the previous
-    // instance is void (its push went to a dead process).
+    // instance is void (its push went to a dead process), and the in-memory
+    // session-always grants mirror the backend's own session ruleset, which
+    // dies with the runtime.
     this.workflowPolicyPushed = false;
+    this.sessionAutoAllows.clear();
     // builtinProviderEnv injects the CLI's built-in provider table the way the
     // desktop host does — a bare .app-bundle CLI cannot find it on its own.
     // zcodeDataBaseDirEnv translates the bridge's ZCODE_HOME into the CLI's

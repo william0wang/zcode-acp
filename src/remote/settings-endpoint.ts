@@ -94,6 +94,7 @@ import {
   runWorkspace,
   setWorkflowGateMode,
   startSavedWorkflow,
+  stopWorkflowRun,
   updateWorkflowMeta,
   workflowCreatePrompt,
   WorkflowApiError,
@@ -523,6 +524,17 @@ async function route(
         return sendError(res, 400, "expected /settings/workflow-runs/{runId}/resume");
       }
       return void (await handleWorkflowResume(res, server, runId, body));
+    }
+    if (
+      method === "POST" &&
+      path.startsWith("/settings/workflow-runs/") &&
+      path.endsWith("/stop")
+    ) {
+      const runId = segment(path.slice("/settings/workflow-runs/".length, -"/stop".length));
+      if (!runId || runId.includes("/")) {
+        return sendError(res, 400, "expected /settings/workflow-runs/{runId}/stop");
+      }
+      return void (await handleWorkflowStop(res, server, runId, body));
     }
     if (
       method === "POST" &&
@@ -1673,6 +1685,27 @@ async function handleWorkflowResume(
       acpSessionId: sessionId,
       ...(name ? { name } : {}),
     });
+    return { ok: true as const };
+  });
+}
+
+/**
+ * Stop a flying run from the management page — `session/cancelBackgroundTask`
+ * reached through the hub so a run on ANY instance is stoppable, not just the
+ * one the client's ACP socket is bound to.
+ */
+async function handleWorkflowStop(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  runId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const sessionId = str(body, "sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) {
+      throw new WorkflowApiError(400, "invalid_request", "sessionId is required");
+    }
+    await stopWorkflowRun(srv, { runId, acpSessionId: sessionId });
     return { ok: true as const };
   });
 }

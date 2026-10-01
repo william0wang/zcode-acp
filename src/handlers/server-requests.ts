@@ -34,10 +34,12 @@ import {
   buildAskUserAcpParams,
   buildAskUserElicitationForm,
   buildPlanApprovalElicitationForm,
+  enrichPermissionOptions,
   exitPlanModeToAcpPermission,
   isAskUserQuestion,
   isExitPlanMode,
   isPermissionRequest,
+  isSessionAllowPick,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
   parsePlanApprovalElicitationResponse,
@@ -458,6 +460,24 @@ async function handleSinglePermission(
   turn?: PendingTurn,
 ): Promise<ZcodeInteractionResponse> {
   const p = params as ZcodeInteractionPermissionParams & ZcodeInteractionUserInputParams;
+  // Session-scoped auto-allow for the workflow approval tools (the bridge
+  // mirror of upstream's grantSessionPermission — the v3 wire cannot carry
+  // the backend's own session tier): an ask for a tool this session already
+  // granted answers here, before any card or client popup.
+  if (perm && !epm) {
+    const grantedTool = p.toolName ?? "";
+    const grantSid = server.resolveSid(acpSid);
+    if (grantedTool && grantSid && server.sessionAutoAllows.get(grantSid)?.has(grantedTool)) {
+      log(`  ⟳ ${grantedTool} auto-allowed (session grant)`);
+      return { decision: "allow", reason: "Approved for this session" };
+    }
+  }
+  // Re-offer the "always allow in this session" tier the v3 projection
+  // cropped (workflow tools only — enrichPermissionOptions is a no-op
+  // otherwise), so the response mapping below sees the injected option.
+  const permParams = perm
+    ? enrichPermissionOptions(p as ZcodeInteractionPermissionParams)
+    : (p as ZcodeInteractionPermissionParams);
   // Emit a tool_call first so Zed renders the popup (it requires the toolCallId
   // to have been emitted before request_permission).
   const toolCallId = p.toolCallId ?? "";
@@ -516,7 +536,7 @@ async function handleSinglePermission(
     if (elicited !== null) return elicited;
   }
   const acpParams = perm
-    ? zcodePermissionToAcp(p as ZcodeInteractionPermissionParams, acpSid)!
+    ? zcodePermissionToAcp(permParams, acpSid)!
     : exitPlanModeToAcpPermission(p as ZcodeInteractionUserInputParams, acpSid);
 
   const acpReqId = server.nextId();
@@ -538,8 +558,20 @@ async function handleSinglePermission(
   if (acpResp === null) {
     return { action: "decline", reason: "declined or cancelled" };
   }
+  // The injected session-always pick (bridge-side tier, adapter.ts): record
+  // the grant so the NEXT ask for this tool in this session auto-allows.
+  if (perm && isSessionAllowPick(acpResp)) {
+    const grantedTool = p.toolName ?? "";
+    const grantSid = server.resolveSid(acpSid);
+    if (grantedTool && grantSid) {
+      const set = server.sessionAutoAllows.get(grantSid) ?? new Set<string>();
+      set.add(grantedTool);
+      server.sessionAutoAllows.set(grantSid, set);
+      log(`  ⟳ ${grantedTool} granted for session (auto-allow armed)`);
+    }
+  }
   return perm
-    ? acpPermissionResponseToZcode(acpResp, (p as ZcodeInteractionPermissionParams).options)
+    ? acpPermissionResponseToZcode(acpResp, permParams.options)
     : acpPermissionResponseToExitPlanMode(acpResp);
 }
 

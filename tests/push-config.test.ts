@@ -47,6 +47,7 @@ describe("resolvePushConfig", () => {
       notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
       quietMs: 30_000,
       askDelayMs: 120_000,
+      permissionAskDelayMs: 15_000,
     });
   });
 
@@ -103,6 +104,7 @@ describe("resolvePushConfig", () => {
       notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
       quietMs: 30_000,
       askDelayMs: 120_000,
+      permissionAskDelayMs: 15_000,
     });
   });
 
@@ -199,6 +201,32 @@ describe("resolvePushConfig", () => {
     } finally {
       err.mockRestore();
     }
+  });
+
+  it("resolves permissionAskDelayMs independently of askDelayMs (default 15s)", () => {
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        askDelayMs: 5000,
+      },
+    });
+    // Untouched permission tier keeps its own default, not askDelayMs.
+    expect(resolvePushConfig({})?.permissionAskDelayMs).toBe(15_000);
+
+    fakeFile.content = JSON.stringify({
+      push: {
+        enabled: true,
+        corpId: "ww-file",
+        agentId: 42,
+        secret: "file-secret",
+        permissionAskDelayMs: 2500,
+      },
+    });
+    expect(resolvePushConfig({})?.permissionAskDelayMs).toBe(2500);
+    expect(resolvePushConfig({})?.askDelayMs).toBe(120_000);
   });
 
   it("lets env fill fields the file leaves out", () => {

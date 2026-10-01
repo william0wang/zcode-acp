@@ -70,6 +70,7 @@ function normalizeKind(kind: string | undefined): PermissionOption["kind"] {
       return kind;
     case "allow":
     case "allow_project":
+    case "allow_session":
       return "allow_always";
     case "reject":
     case "deny":
@@ -231,6 +232,70 @@ export function zcodePermissionToAcp(
  * text defined by the backend, so this set mirrors the backend's naming.
  * Any optionId not in this set is treated as deny (fail-safe). */
 const ALLOW_OPTION_IDS = new Set(["allow", "allow_once", "allow_always", "allow_project"]);
+
+// ---------- bridge-side session-always tier for workflow approvals ----------
+//
+// CreateWorkflow / AmendWorkflow gate on upstream's `session-always-allow`
+// policy: the v4 wire offers "Always allow in this session" and the runtime
+// keeps the grant in memory (grantSessionPermission). The legacy v3 projection
+// CROPS both always tiers (toLegacyPermissionOptionsPolicy,
+// bootstrap/src/permission-options.ts) — through this bridge every ask arrives
+// as bare [allow_once, deny], so a client re-approves every call. The bridge
+// re-offers the session tier itself and mirrors the grant in
+// server.sessionAutoAllows.
+//
+// SaveWorkflow is deliberately NOT here: upstream marks it `allowAlways: false`
+// (save-workflow.ts — every save writes a different file/content, and the
+// desktop re-asks for each one). Session-exempting it would auto-approve
+// arbitrary future workflow writes, a tier the desktop itself never offers.
+
+/** The workflow approval tools upstream gates as session-always-allow. */
+const SESSION_ALWAYS_TOOLS = new Set(["CreateWorkflow", "AmendWorkflow"]);
+
+/** The injected option's id — v4's own spelling (broker's session-grant key). */
+export const SESSION_ALLOW_OPTION_ID = "allowSession";
+
+/**
+ * Inject the "Always allow in this session" option for the session-always
+ * tools when the backend's options carry no always tier (the v3 crop).
+ * Returns the SAME params when nothing is injected. The injected option
+ * carries its own plain-allow `response` — the session grant itself lives
+ * BRIDGE-side (the backend cannot receive it over v3), recorded by the
+ * request handler when the client selects this optionId.
+ */
+export function enrichPermissionOptions(
+  params: ZcodeInteractionPermissionParams,
+): ZcodeInteractionPermissionParams {
+  const toolName = params.toolName ?? "";
+  if (!SESSION_ALWAYS_TOOLS.has(toolName)) return params;
+  const options = params.options ?? [];
+  const hasAlways = options.some(
+    (o) =>
+      o.kind === "allow_always" ||
+      o.kind === "allow_project" ||
+      o.kind === "allow_session" ||
+      o.optionId === SESSION_ALLOW_OPTION_ID,
+  );
+  if (hasAlways) return params;
+  return {
+    ...params,
+    options: [
+      ...options,
+      {
+        optionId: SESSION_ALLOW_OPTION_ID,
+        kind: "allow_always",
+        name: messages().permissionAlwaysSession,
+        response: { decision: "allow", reason: "Approved for this session" },
+      },
+    ],
+  };
+}
+
+/** Is this acp requestPermission response the injected session-always pick? */
+export function isSessionAllowPick(acpResp: unknown): boolean {
+  const optionId = (acpResp as { outcome?: { optionId?: string } } | null)?.outcome?.optionId;
+  return optionId === SESSION_ALLOW_OPTION_ID;
+}
 
 /**
  * Convert an ACP requestPermission response → the zcode interaction response.

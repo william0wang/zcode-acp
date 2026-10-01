@@ -41,6 +41,15 @@ export const PUSH_QUIET_WINDOW_MS = 30_000;
 /** Default unanswered-ask watchdog delay (§5.1 v1.3): push if still pending. */
 export const PUSH_ASK_WATCHDOG_MS = 120_000;
 
+/**
+ * Default unanswered PERMISSION-ask watchdog: a permission ask BLOCKS a
+ * running tool on a human answer — the 120s question window reads as "no
+ * notification" for two full minutes on a popup the user never saw
+ * (observed 2026-10-01 on workflow approvals). Questions (AskUserQuestion)
+ * keep the long window; `permissionAskDelayMs` tunes this tier alone.
+ */
+export const PUSH_PERMISSION_ASK_WATCHDOG_MS = 15_000;
+
 export interface PushConfig {
   corpId: string;
   agentId: number;
@@ -63,6 +72,11 @@ export interface PushConfig {
    * dispatch time. File-only, default {@link PUSH_ASK_WATCHDOG_MS}.
    */
   askDelayMs: number;
+  /**
+   * Same watchdog for PERMISSION asks specifically (a blocked tool call):
+   * file-only, default {@link PUSH_PERMISSION_ASK_WATCHDOG_MS}.
+   */
+  permissionAskDelayMs: number;
 }
 
 /** Same truthy set as `remoteEnabledLive` (remote/config.ts). */
@@ -100,6 +114,10 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;
   const askDelayMs =
     file.askDelayMs !== undefined && file.askDelayMs >= 0 ? file.askDelayMs : PUSH_ASK_WATCHDOG_MS;
+  const permissionAskDelayMs =
+    file.permissionAskDelayMs !== undefined && file.permissionAskDelayMs >= 0
+      ? file.permissionAskDelayMs
+      : PUSH_PERMISSION_ASK_WATCHDOG_MS;
   if (relayUrl && relayToken) {
     return {
       corpId,
@@ -111,6 +129,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
       notify,
       quietMs,
       askDelayMs,
+      permissionAskDelayMs,
     };
   }
   if (relayUrl || relayToken) {
@@ -128,6 +147,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     notify,
     quietMs,
     askDelayMs,
+    permissionAskDelayMs,
   };
 }
 

@@ -11,7 +11,12 @@ import path from "node:path";
 import { appendDiary } from "../crash-guards.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
-import { PUSH_ASK_WATCHDOG_MS, pushConfig, type PushConfig } from "./config.js";
+import {
+  PUSH_ASK_WATCHDOG_MS,
+  PUSH_PERMISSION_ASK_WATCHDOG_MS,
+  pushConfig,
+  type PushConfig,
+} from "./config.js";
 import { createWeComSender, type WeComSender } from "./wecom.js";
 
 export type PushKind =
@@ -183,20 +188,47 @@ function interactionPushData(method: string, params?: unknown, label?: string): 
 
 let askPending = 0;
 let askTimer: NodeJS.Timeout | null = null;
+let askTimerDelayMs = 0;
 let askNotified = false;
+
+/**
+ * Watchdog delay per ask kind: a PERMISSION ask blocks a running tool on a
+ * human answer, so it defaults to the much shorter window (a two-minute
+ * silent block reads as "no notification" — observed 2026-10-01 on workflow
+ * approvals). Each tier has its own file-only delay knob; `??` guards test
+ * configs built from partial PushConfig objects.
+ */
+function askWatchdogDelayMs(method: string): number {
+  const cfg = pushConfig();
+  if (!cfg) return PUSH_ASK_WATCHDOG_MS;
+  return method === "session/request_permission"
+    ? (cfg.permissionAskDelayMs ?? PUSH_PERMISSION_ASK_WATCHDOG_MS)
+    : (cfg.askDelayMs ?? PUSH_ASK_WATCHDOG_MS);
+}
 
 /**
  * Arm the watchdog for one dispatched user-facing ask (permission,
  * elicitation, AskUserQuestion, plan approval, sandbox grant). Fire-and-forget:
- * at `askDelayMs` (default 120s) with the ask still pending and nothing yet
- * notified, push the same derived payload — clients connected or not.
+ * at the kind's delay (see {@link askWatchdogDelayMs}) with the ask still
+ * pending and nothing yet notified, push the same derived payload — clients
+ * connected or not.
  */
 export function armAskWatchdog(method: string, params?: unknown, label?: string): void {
   askPending++;
-  if (askTimer || askNotified) return;
+  if (askNotified) return;
+  const delay = askWatchdogDelayMs(method);
+  // A faster tier arriving behind a slower one re-arms the slot at ITS delay
+  // and payload: a permission ask (15s) queued behind an elicitation (120s)
+  // would otherwise sit silent for the whole slower window — the single-slot
+  // "first ask wins" must never out-wait the most urgent outstanding ask.
+  if (askTimer) {
+    if (delay >= askTimerDelayMs) return;
+    clearTimeout(askTimer);
+  }
   const data = interactionPushData(method, params, label);
   askTimer = setTimeout(() => {
     askTimer = null;
+    askTimerDelayMs = 0;
     if (askPending <= 0 || askNotified) return;
     const cfg = pushConfig();
     if (!cfg || !cfg.notify.ask) return;
@@ -204,7 +236,8 @@ export function armAskWatchdog(method: string, params?: unknown, label?: string)
     if (!s) return;
     askNotified = true;
     dispatchPush(cfg, s, data);
-  }, pushConfig()?.askDelayMs ?? PUSH_ASK_WATCHDOG_MS);
+  }, delay);
+  askTimerDelayMs = delay;
   askTimer.unref?.();
 }
 
@@ -215,6 +248,7 @@ export function clearAskWatchdog(): void {
     if (askTimer) {
       clearTimeout(askTimer);
       askTimer = null;
+      askTimerDelayMs = 0;
     }
     askNotified = false;
   }
@@ -225,6 +259,7 @@ export function resetAskWatchdogForTests(): void {
   if (askTimer) {
     clearTimeout(askTimer);
     askTimer = null;
+    askTimerDelayMs = 0;
   }
   askPending = 0;
   askNotified = false;

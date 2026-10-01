@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
     notify?: Record<string, boolean>;
     quietMs?: number;
     askDelayMs?: number;
+    permissionAskDelayMs?: number;
   } | null,
   diary: [] as string[],
 }));
@@ -259,7 +260,12 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
   const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   it("pushes an ask still pending after askDelayMs even with a client CONNECTED", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 20,
+      permissionAskDelayMs: 20,
+    };
     const server = new ZcodeAcpServer();
     server.clients.add({ notify: async () => {}, request: async () => undefined });
     void server; // presence is irrelevant for the watchdog — the delay is the grace
@@ -270,7 +276,12 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
   });
 
   it("a settled (answered) ask never pushes", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 20,
+      permissionAskDelayMs: 20,
+    };
     armAskWatchdog(PERMISSION, {});
     clearAskWatchdog(); // answered before the delay
     await tick(50);
@@ -278,7 +289,12 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
   });
 
   it("coalesces concurrent asks into ONE notification until all settle", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 20,
+      permissionAskDelayMs: 20,
+    };
     armAskWatchdog(PERMISSION, { toolCall: { title: "one" } });
     armAskWatchdog("elicitation/create", { message: "two" });
     armAskWatchdog(PERMISSION, { toolCall: { title: "three" } });
@@ -298,8 +314,45 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
     clearAskWatchdog();
   });
 
+  it("a permission ask queued behind a slower elicitation re-arms the slot at its own tier", async () => {
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 200,
+      permissionAskDelayMs: 20,
+    };
+    armAskWatchdog("elicitation/create", { message: "slow question" });
+    armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } });
+    await tick(50);
+    // The faster tier's payload wins: the blocker is the permission ask, and
+    // the single slot must never out-wait the most urgent outstanding ask.
+    expect(sent).toEqual(["[permission] Approval requested\nBash: rm"]);
+    clearAskWatchdog();
+    clearAskWatchdog();
+  });
+
+  it("a slower ask behind an armed permission keeps the faster timer and payload", async () => {
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 200,
+      permissionAskDelayMs: 20,
+    };
+    armAskWatchdog(PERMISSION, { toolCall: { title: "fast blocker" } });
+    armAskWatchdog("elicitation/create", { message: "slow question" });
+    await tick(50);
+    expect(sent).toEqual(["[permission] Approval requested\nfast blocker"]);
+    clearAskWatchdog();
+    clearAskWatchdog();
+  });
+
   it("the watchdog pushes the label captured at arm time", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 20,
+      permissionAskDelayMs: 20,
+    };
     armAskWatchdog(
       "session/request_permission",
       { toolCall: { title: "Bash: rm" } },
@@ -311,7 +364,12 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
   });
 
   it("the zero-clients immediate push satisfies the slot (no duplicate)", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true }, askDelayMs: 20 };
+    h.cfg = {
+      contentDetail: "full",
+      notify: { ask: true },
+      askDelayMs: 20,
+      permissionAskDelayMs: 20,
+    };
     const server = new ZcodeAcpServer();
     pushInteractionIfOffline(server, PERMISSION, { toolCall: { title: "Bash: rm" } });
     armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } }); // funnel arms after dispatch

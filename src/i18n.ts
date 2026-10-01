@@ -81,6 +81,9 @@ export interface Messages {
   sandboxOptionAllowOnce: string;
   sandboxOptionRejectOnce: string;
   sandboxOptionRejectAlways: string;
+  /** Injected "always allow" tier for the workflow approval tools (v3 crops
+   *  the backend's own session-always option — interaction/adapter.ts). */
+  permissionAlwaysSession: string;
   sandboxPopupTitle: (path: string) => string;
   sandboxPopupDetails: (path: string) => string;
   /** Island/strictGit denies can never be overridden by an allow. */
@@ -248,6 +251,7 @@ const zh: Messages = {
   sandboxOptionAllowOnce: "仅此一次",
   sandboxOptionRejectOnce: "拒绝一次",
   sandboxOptionRejectAlways: "始终拒绝",
+  permissionAlwaysSession: "本会话始终允许",
   sandboxPopupTitle: (p) => `沙箱写入放行:${p}`,
   sandboxPopupDetails: (p) =>
     `沙箱拒绝了工作区外的写入:${p}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(.zcode/acp/sandbox.json,可编辑撤销)。`,
@@ -393,6 +397,7 @@ const en: Messages = {
   sandboxOptionAllowOnce: "Allow once",
   sandboxOptionRejectOnce: "Reject once",
   sandboxOptionRejectAlways: "Always reject",
+  permissionAlwaysSession: "Always allow in this session",
   sandboxPopupTitle: (p) => `Sandbox write request: ${p}`,
   sandboxPopupDetails: (p) =>
     `The sandbox denied a write outside the workspace: ${p}\n"Always allow" persists to the config's allow list, "Always reject" to its deny list (.zcode/acp/sandbox.json, editable to undo).`,
