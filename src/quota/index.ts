@@ -11,6 +11,7 @@ import { getCached, setCached } from "./cache.js";
 import { fetchQuotaResponse } from "./client.js";
 import { log } from "../utils.js";
 import { parseQuotaEnvelope } from "./parse.js";
+import { checkQuotaThresholds } from "./thresholds.js";
 import type { QuotaResult } from "./types.js";
 
 /**
@@ -37,6 +38,11 @@ export async function queryQuota(): Promise<QuotaResult> {
   }
 
   setCached(result);
+  // Threshold warnings ride the FRESH fetch only (a refresh "discovering" a
+  // first crossing, §5.7) and never block or fail the caller.
+  if (result.kind === "success") {
+    void checkQuotaThresholds(result).catch(() => undefined);
+  }
   return result;
 }
 

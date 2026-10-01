@@ -28,7 +28,8 @@ export type PushKind =
   | "turn"
   | "goal"
   | "compact"
-  | "workflowStage";
+  | "workflowStage"
+  | "quota";
 
 /** Settled kinds routed through {@link pushSettled} (§5.2 — per-kind switches). */
 export type PushSettledKind = Extract<
@@ -164,6 +165,23 @@ export function pushSettled(
     );
     return;
   }
+  const s = pushSender();
+  if (!s) return;
+  dispatchPush(cfg, s, data);
+}
+
+/**
+ * §5.7 quota threshold warnings — WARNING class, not a settle: no client
+ * gate (an online client cannot wake the phone) and NO quiet window — a
+ * threshold crossing happens exactly while the user is burning quota, i.e.
+ * nearly always inside the quiet window, so windowing would silence the
+ * warning precisely when it matters. Gated by `push.notify.quota` (default
+ * on) and the shared ACTIVE predicate like every other kind. Takes no server
+ * handle: quota is account-level, the bracket carries the kind.
+ */
+export function pushQuotaWarning(data: PushEventData & { kind: "quota" }): void {
+  const cfg = pushConfig();
+  if (!cfg || !cfg.notify.quota) return;
   const s = pushSender();
   if (!s) return;
   dispatchPush(cfg, s, data);

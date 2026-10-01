@@ -18,6 +18,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { buildConfigOptions } from "../config/options.js";
 import { parseRemoteConfig } from "../remote/config.js";
+import { pushActive } from "../push/config.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { enqueueSessionSend } from "../handlers/io.js";
@@ -47,10 +48,13 @@ let state: RefresherState | null = null;
 
 /**
  * Start the refresher (idempotent). No-op unless a martty client has been
- * seen — editor-only setups never poll the quota API in the background.
+ * seen OR WeCom push is ACTIVE — editor-only setups never poll the quota API
+ * in the background, but a push-configured bridge must: quota threshold
+ * warnings (§5.7) ride the same 60s refreshes, and the dock emit itself
+ * no-ops without martty connections.
  */
 export function startQuotaRefresher(server: ZcodeAcpServer): void {
-  if (state || !server.marttyClientSeen) return;
+  if (state || (!server.marttyClientSeen && !pushActive())) return;
   const entry: RefresherState = {
     server,
     timer: setInterval(() => void refresh(entry), QUOTA_REFRESH_INTERVAL_MS),

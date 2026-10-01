@@ -35,6 +35,8 @@ export interface PushNotifyConfig {
   ask: boolean;
   /** Workflow stage transitions (phase entered / node failed): mid-run digest push. */
   workflowStage: boolean;
+  /** Quota threshold warnings (5h/weekly windows at 80/90/exhausted). */
+  quota: boolean;
 }
 
 /** Default quiet window for settled pushes (§5.2): user active → no ping. */
@@ -112,6 +114,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     compact: file.notify?.compact !== false,
     ask: file.notify?.ask !== false,
     workflowStage: file.notify?.workflowStage !== false,
+    quota: file.notify?.quota !== false,
   };
   const quietMs =
     file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;

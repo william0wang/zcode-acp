@@ -161,6 +161,8 @@ export interface PushNotifyUserConfig {
   ask?: boolean;
   /** Workflow stage transitions (phase entered / node failed): mid-run digest push. */
   workflowStage?: boolean;
+  /** Quota threshold warnings (5h/weekly windows at 80/90/exhausted). */
+  quota?: boolean;
 }
 
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
@@ -451,6 +453,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
           "compact",
           "ask",
           "workflowStage",
+          "quota",
         ] as const) {
           const v = notify[key];
           if (v === undefined) continue;
