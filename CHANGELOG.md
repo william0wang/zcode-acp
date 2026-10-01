@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.59.0](https://github.com/william0wang/zcode-acp/compare/v0.58.1...v0.59.0) (2026-10-01)
+
+
+### Features
+
+* push quota threshold warnings over WeCom ([9a68bd9](https://github.com/william0wang/zcode-acp/commit/9a68bd927b9e64d9f2adb3bce38eda8c44bd6803))
+* push workflow stage digests over WeCom ([9367454](https://github.com/william0wang/zcode-acp/commit/9367454592bdf19f4e3bfcd2707cc0280b8c0613)), closes [#294](https://github.com/william0wang/zcode-acp/issues/294)
+
 ## [0.58.1](https://github.com/william0wang/zcode-acp/compare/v0.58.0...v0.58.1) (2026-10-01)
 
 
