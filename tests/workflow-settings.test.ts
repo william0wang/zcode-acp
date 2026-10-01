@@ -1220,3 +1220,111 @@ describe("workflow settings — create prompt", () => {
     );
   });
 });
+
+// ---------- run dismissal (bridge-side hide list) ----------
+
+describe("workflow settings — run dismissal", () => {
+  // Factories, not shared constants: stripDismissedRuns mutates the canned
+  // result in place, and a shared object would leak one test's strip into
+  // the next test's canned data.
+  const journalRuns = () => ({
+    runs: [
+      { runId: "r-done", parentSessionId: "sess_zcode_app", status: "completed" },
+      { runId: "r-live", parentSessionId: "sess_zcode_app", status: "running" },
+    ],
+  });
+  const convRuns = () => ({
+    runs: [
+      { runId: "r-done", status: "completed" },
+      { runId: "r-fail", status: "failed" },
+      { runId: "r-live", status: "running" },
+    ],
+  });
+
+  it("dismisses a settled run and hides it from both list paths", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      results: {
+        "workflows/runs": journalRuns(),
+        "v4/conversation/workflowRuns": convRuns(),
+      },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/r-done/dismiss");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, dismissed: true });
+
+    const journal = (await (await get(port, "workflows/runs")).json()) as {
+      runs: Array<{ runId: string }>;
+    };
+    expect(journal.runs.map((r) => r.runId)).toEqual(["r-live"]);
+
+    const conv = (await (await get(port, "workflow-runs?sessionId=sess_app")).json()) as {
+      runs: Array<{ runId: string }>;
+    };
+    expect(conv.runs.map((r) => r.runId)).toEqual(["r-fail", "r-live"]);
+  });
+
+  it("refuses to dismiss a flying run with 409 run_active", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      results: { "workflows/runs": journalRuns() },
+    });
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/r-live/dismiss");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "run_active" });
+    // Nothing was recorded — the row still lists.
+    const journal = (await (await get(port, "workflows/runs")).json()) as {
+      runs: Array<{ runId: string }>;
+    };
+    expect(journal.runs.map((r) => r.runId)).toContain("r-live");
+  });
+
+  it("dismiss-finished hides every settled run of the session, keeping active ones", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      results: { "v4/conversation/workflowRuns": convRuns() },
+    });
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/dismiss-finished", {
+      sessionId: "sess_app",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, dismissed: 2 });
+
+    const conv = (await (await get(port, "workflow-runs?sessionId=sess_app")).json()) as {
+      runs: Array<{ runId: string }>;
+    };
+    expect(conv.runs.map((r) => r.runId)).toEqual(["r-live"]);
+  });
+
+  it("dismiss-finished without a sessionId is a 400", async () => {
+    const { server } = makeBridge(GATE_ON, {});
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/dismiss-finished", {});
+    expect(res.status).toBe(400);
+  });
+
+  it("dismiss-batch skips flying runs and hides the settled ones", async () => {
+    const { server } = makeBridge(GATE_ON, {
+      results: { "workflows/runs": journalRuns() },
+    });
+    const port = await serveSettings(server);
+
+    const res = await send(port, "POST", "workflow-runs/dismiss-batch", {
+      runIds: ["r-done", "r-live", "r-ghost"],
+    });
+    expect(res.status).toBe(200);
+    // r-ghost sits outside the journal window (long settled) → dismissible.
+    expect(await res.json()).toMatchObject({ ok: true, dismissed: 2, skippedActive: 1 });
+
+    const journal = (await (await get(port, "workflows/runs")).json()) as {
+      runs: Array<{ runId: string }>;
+    };
+    expect(journal.runs.map((r) => r.runId)).toEqual(["r-live"]);
+  });
+});

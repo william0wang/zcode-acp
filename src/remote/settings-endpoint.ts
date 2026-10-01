@@ -79,6 +79,9 @@ import {
   amendRunSettings,
   conversationRuns,
   deleteWorkflow,
+  dismissFinishedSessionRuns,
+  dismissWorkflowRun,
+  dismissWorkflowRuns,
   getWorkflow,
   listRuns,
   listWorkflows,
@@ -535,6 +538,24 @@ async function route(
         return sendError(res, 400, "expected /settings/workflow-runs/{runId}/stop");
       }
       return void (await handleWorkflowStop(res, server, runId, body));
+    }
+    // Literal segment FIRST — it would otherwise parse as `{runId}` below.
+    if (method === "POST" && path === "/settings/workflow-runs/dismiss-finished") {
+      return void (await handleWorkflowDismissFinished(res, server, body));
+    }
+    if (method === "POST" && path === "/settings/workflow-runs/dismiss-batch") {
+      return void (await handleWorkflowDismissBatch(res, server, body));
+    }
+    if (
+      method === "POST" &&
+      path.startsWith("/settings/workflow-runs/") &&
+      path.endsWith("/dismiss")
+    ) {
+      const runId = segment(path.slice("/settings/workflow-runs/".length, -"/dismiss".length));
+      if (!runId || runId.includes("/")) {
+        return sendError(res, 400, "expected /settings/workflow-runs/{runId}/dismiss");
+      }
+      return void (await handleWorkflowDismiss(res, server, runId));
     }
     if (
       method === "POST" &&
@@ -1707,6 +1728,49 @@ async function handleWorkflowStop(
     }
     await stopWorkflowRun(srv, { runId, acpSessionId: sessionId });
     return { ok: true as const };
+  });
+}
+
+/**
+ * Hide one settled run from the bridge's run lists (bridge-side hide list —
+ * the journal itself has no delete and stays untouched). 409 while the run
+ * is still flying; see dismissWorkflowRun for the semantics.
+ */
+async function handleWorkflowDismiss(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  runId: string,
+): Promise<void> {
+  await workflowGuard(res, server, async (srv) => dismissWorkflowRun(srv, runId));
+}
+
+/** Hide every SETTLED run of one session (body `{sessionId}`, the ACP id). */
+async function handleWorkflowDismissFinished(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const sessionId = str(body, "sessionId");
+  await workflowGuard(res, server, async (srv) => {
+    if (!sessionId) {
+      throw new WorkflowApiError(400, "invalid_request", "sessionId is required");
+    }
+    return dismissFinishedSessionRuns(srv, sessionId);
+  });
+}
+
+/** Batch hide by explicit ids (body `{runIds}`); still-running ids are skipped. */
+async function handleWorkflowDismissBatch(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const runIds = body["runIds"];
+  await workflowGuard(res, server, async (srv) => {
+    if (!Array.isArray(runIds) || runIds.some((id) => typeof id !== "string")) {
+      throw new WorkflowApiError(400, "invalid_request", "runIds (string[]) is required");
+    }
+    return dismissWorkflowRuns(srv, runIds as string[]);
   });
 }
 

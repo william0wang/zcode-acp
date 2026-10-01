@@ -37,6 +37,7 @@ import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { armWorkflowListWatch } from "../workflow/list-watch.js";
 import { writeJsonAtomic } from "./atomic-write.js";
+import { dismissedRunIds, dismissWorkflowRunIds } from "./workflow-run-dismissals.js";
 
 /** Workflow scope vocabulary (upstream workflows/* `scope`). */
 export type WorkflowScope = "project" | "global";
@@ -324,6 +325,7 @@ export async function listRuns(
     TIMEOUT_FILE_MS,
   );
   attachRunSessionAliases(server, result);
+  stripDismissedRuns(result);
   return result;
 }
 
@@ -347,6 +349,25 @@ function attachRunSessionAliases(server: ZcodeAcpServer, result: Record<string, 
       server.resolveAcpSid(parent) ?? (storeIndex ??= loadAliasesByZcodeSid()).get(parent);
     if (acpSid) (row as { acpSessionId?: string }).acpSessionId = acpSid;
   }
+}
+
+/**
+ * Drop dismissed runs (bridge-side hide list, see workflow-run-dismissals)
+ * from a journal-shaped result in place. Dismissal exists because the journal
+ * has no delete RPC and is not ours to write — every list this bridge serves
+ * filters through here, so a hidden run is hidden consistently.
+ */
+function stripDismissedRuns(result: Record<string, unknown>): void {
+  const runs = result["runs"];
+  if (!Array.isArray(runs)) return;
+  const dismissed = dismissedRunIds();
+  if (dismissed.size === 0) return;
+  const kept = runs.filter((row) => {
+    if (row === null || typeof row !== "object") return true;
+    const id = (row as { runId?: unknown }).runId;
+    return !(typeof id === "string" && dismissed.has(id));
+  });
+  if (kept.length !== runs.length) result["runs"] = kept;
 }
 
 /** Per-session workflow activity joined onto the session-history listing. */
@@ -379,6 +400,7 @@ export async function workflowActivityBySession(
     );
     const runs = result["runs"];
     if (!Array.isArray(runs)) return out;
+    const dismissed = dismissedRunIds();
     for (const row of runs) {
       if (row === null || typeof row !== "object") continue;
       const rec = row as {
@@ -386,7 +408,9 @@ export async function workflowActivityBySession(
         status?: unknown;
         updatedAt?: unknown;
         name?: unknown;
+        runId?: unknown;
       };
+      if (typeof rec.runId === "string" && dismissed.has(rec.runId)) continue;
       if (typeof rec.parentSessionId !== "string" || !rec.parentSessionId) continue;
       const act = out.get(rec.parentSessionId) ?? { active: 0 };
       if (rec.status === "running" || rec.status === "pending") act.active += 1;
@@ -434,12 +458,14 @@ export async function conversationRuns(
   limit?: number,
 ): Promise<Record<string, unknown>> {
   await requireWorkflowEnabled(server);
-  return rpc(
+  const result = await rpc(
     server,
     "v4/conversation/workflowRuns",
     { sessionId: zcodeSid, limit: clampLimit(limit, 64, 64) },
     TIMEOUT_V4_MS,
   );
+  stripDismissedRuns(result);
+  return result;
 }
 
 /** `v4/conversation/workflowRunEvents` — journal events, cursor never expires. */
@@ -839,6 +865,115 @@ export async function stopWorkflowRun(
   // (same best-effort reflection the extension handler does).
   const listener = server.backgroundListeners.get(zcodeSid);
   if (listener) void listener.markCancelled(input.runId).catch((): undefined => undefined);
+}
+
+// ---------- run dismissal (bridge-side hide list) ----------
+
+/**
+ * Hide one settled run from every run list this bridge serves. Refused with
+ * 409 while the journal still shows the run running/pending — stop it first.
+ * A run outside the journal's newest window is long settled and always
+ * dismissible; a journal read that fails fails OPEN (nothing answering means
+ * nothing can be flying, and the stale "running" row a dead bridge leaves
+ * behind is exactly the noise this exists to clear). Idempotent: dismissing
+ * an already-hidden id again is a no-op.
+ */
+export async function dismissWorkflowRun(
+  server: ZcodeAcpServer,
+  runId: string,
+): Promise<{ ok: true; dismissed: true }> {
+  await requireWorkflowEnabled(server);
+  let active = false;
+  try {
+    const result = await rpc(
+      server,
+      "workflows/runs",
+      { workspace: workspaceRef(server), limit: 50 },
+      TIMEOUT_FILE_MS,
+    );
+    const runs = result["runs"];
+    if (Array.isArray(runs)) {
+      active = runs.some(
+        (row) =>
+          typeof row === "object" &&
+          row !== null &&
+          (row as { runId?: unknown }).runId === runId &&
+          ((row as { status?: unknown }).status === "running" ||
+            (row as { status?: unknown }).status === "pending"),
+      );
+    }
+  } catch {
+    // Fail open — see the doc comment.
+  }
+  if (active) {
+    throw new WorkflowApiError(409, "run_active", "stop the run before dismissing it");
+  }
+  dismissWorkflowRunIds([runId]);
+  return { ok: true as const, dismissed: true as const };
+}
+
+/**
+ * Batch dismissal for the management page's "clear finished" action: hide
+ * every given SETTLED run (one journal read decides). Still-running ids are
+ * SKIPPED, not errors — the button clears noise, it does not stop runs.
+ */
+export async function dismissWorkflowRuns(
+  server: ZcodeAcpServer,
+  runIds: string[],
+): Promise<{ ok: true; dismissed: number; skippedActive: number }> {
+  await requireWorkflowEnabled(server);
+  const wanted = new Set(runIds.filter((id) => typeof id === "string" && id.length > 0));
+  if (wanted.size === 0) return { ok: true as const, dismissed: 0, skippedActive: 0 };
+  const active = new Set<string>();
+  try {
+    const result = await rpc(
+      server,
+      "workflows/runs",
+      { workspace: workspaceRef(server), limit: 50 },
+      TIMEOUT_FILE_MS,
+    );
+    const runs = result["runs"];
+    if (Array.isArray(runs)) {
+      for (const row of runs) {
+        if (row === null || typeof row !== "object") continue;
+        const rec = row as { runId?: unknown; status?: unknown };
+        if (typeof rec.runId !== "string" || !wanted.has(rec.runId)) continue;
+        if (rec.status === "running" || rec.status === "pending") active.add(rec.runId);
+      }
+    }
+  } catch {
+    // Fail open — same rule as the single dismiss.
+  }
+  const ids = [...wanted].filter((id) => !active.has(id));
+  return {
+    ok: true as const,
+    dismissed: dismissWorkflowRunIds(ids),
+    skippedActive: active.size,
+  };
+}
+
+/**
+ * Bulk dismissal for the session panel's noise case: hide every SETTLED run
+ * of one session. Active runs stay by construction — they are the list's
+ * live content — and already-dismissed ids add nothing.
+ */
+export async function dismissFinishedSessionRuns(
+  server: ZcodeAcpServer,
+  acpSessionId: string,
+): Promise<{ ok: true; dismissed: number }> {
+  await requireWorkflowEnabled(server);
+  const zcodeSid = await mapProvidedSession(server, acpSessionId);
+  const result = await conversationRuns(server, zcodeSid);
+  const runs = result["runs"];
+  const ids = Array.isArray(runs)
+    ? runs.flatMap((row) => {
+        if (row === null || typeof row !== "object") return [];
+        const rec = row as { runId?: unknown; status?: unknown };
+        if (typeof rec.runId !== "string") return [];
+        return rec.status === "running" || rec.status === "pending" ? [] : [rec.runId];
+      })
+    : [];
+  return { ok: true as const, dismissed: dismissWorkflowRunIds(ids) };
 }
 
 // ---------- run settings amendment (v4/command, same family as resume) ----------

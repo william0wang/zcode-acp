@@ -28,6 +28,7 @@ import {
   DEFAULT_SESSION_LIMIT,
   MAX_SESSION_LIMIT,
 } from "../src/remote/session-list-endpoint.js";
+import { dismissWorkflowRunIds } from "../src/settings/workflow-run-dismissals.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -383,5 +384,52 @@ describe("session history — workflowActivity", () => {
       sessions: Array<{ sessionId: string; workflowActivity?: unknown }>;
     };
     expect(body.sessions[0]!.workflowActivity).toBeUndefined();
+  });
+
+  it("dismissed journal runs drop out of the activity join", async () => {
+    // Dismiss the RUNNING row through the store (the route would 409; the
+    // join only ever sees already-dismissed ids).
+    dismissWorkflowRunIds(["r1"]);
+    const server = new ZcodeAcpServer();
+    server.backendWorkflowGate = Promise.resolve({
+      mode: "alwaysOn",
+      enabled: true,
+      source: "override",
+    } satisfies import("../src/config/workflow-gate.js").WorkflowGate);
+    server.backend = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        if (method === "session/list") {
+          return {
+            result: { sessions: [{ sessionId: "sess_wf", title: "Runner", updatedAt: 900 }] },
+          };
+        }
+        if (method === "workflows/runs") {
+          return {
+            result: {
+              runs: [
+                { runId: "r2", parentSessionId: "sess_wf", status: "completed", updatedAt: 4000 },
+                { runId: "r1", parentSessionId: "sess_wf", status: "running", updatedAt: 5000 },
+              ],
+            },
+          };
+        }
+        return { error: { message: "unhandled" } };
+      },
+    } as unknown as ZcodeBackend;
+
+    const res = await fetch(`${await bootList(server)}/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{
+        sessionId: string;
+        workflowActivity?: { active: number; last?: { status: string } };
+      }>;
+    };
+    // r1 dismissed → no active count, the newest VISIBLE run decides `last`.
+    expect(body.sessions[0]!.workflowActivity).toMatchObject({
+      active: 0,
+      last: { status: "completed", updatedAt: 4000 },
+    });
   });
 });
