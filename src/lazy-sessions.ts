@@ -223,3 +223,20 @@ export function lookupModelChoiceByZcodeSid(zcodeSid: string): LazySessionRecord
 export function lookupLazySession(acpSid: string): LazySessionRecord | undefined {
   return loadRecords()[acpSid];
 }
+
+/**
+ * Every attachable ACP alias indexed by backend session id (newest record
+ * wins). Run-history rows carry the BACKEND id as parentSessionId; this index
+ * is what makes an editor-launched run addressable from the app (open session
+ * / resume) even after a bridge restart emptied the in-memory map.
+ */
+export function loadAliasesByZcodeSid(): Map<string, string> {
+  const newest = new Map<string, { acpSid: string; createdAt: number }>();
+  for (const [acpSid, rec] of Object.entries(loadRecords())) {
+    if (!rec.zcodeSid) continue;
+    const created = rec.createdAt ?? 0;
+    const prev = newest.get(rec.zcodeSid);
+    if (!prev || created > prev.createdAt) newest.set(rec.zcodeSid, { acpSid, createdAt: created });
+  }
+  return new Map([...newest.entries()].map(([sid, v]) => [sid, v.acpSid]));
+}

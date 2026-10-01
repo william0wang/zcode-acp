@@ -32,9 +32,10 @@ import {
   type WorkflowGate,
 } from "../config/workflow-gate.js";
 import { ensureRealSession } from "../handlers/session.js";
-import { lookupLazySession, rememberLazySession } from "../lazy-sessions.js";
+import { loadAliasesByZcodeSid, lookupLazySession, rememberLazySession } from "../lazy-sessions.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
+import { armWorkflowListWatch } from "../workflow/list-watch.js";
 import { writeJsonAtomic } from "./atomic-write.js";
 
 /** Workflow scope vocabulary (upstream workflows/* `scope`). */
@@ -106,6 +107,7 @@ export async function requireWorkflowEnabled(server: ZcodeAcpServer): Promise<Wo
       );
     }
     ensureWorkflowPolicyPushed(server);
+    armWorkflowListWatch(server);
     return override;
   }
   if (!server.backendWorkflowGate) {
@@ -121,6 +123,7 @@ export async function requireWorkflowEnabled(server: ZcodeAcpServer): Promise<Wo
       `gate mode=${gate?.mode ?? "unknown"} source=${gate?.source ?? "default"}`,
     );
   }
+  armWorkflowListWatch(server);
   return gate;
 }
 
@@ -309,7 +312,7 @@ export async function listRuns(
   opts: { scope?: WorkflowScope; name?: string; limit?: number } = {},
 ): Promise<Record<string, unknown>> {
   await requireWorkflowEnabled(server);
-  return rpc(
+  const result = await rpc(
     server,
     "workflows/runs",
     {
@@ -320,6 +323,87 @@ export async function listRuns(
     },
     TIMEOUT_FILE_MS,
   );
+  attachRunSessionAliases(server, result);
+  return result;
+}
+
+/**
+ * Join each journal row's parentSessionId (the BACKEND session id) to an
+ * attachable ACP alias, so an editor-launched run is actionable from the app
+ * (open session / resume) — the app's own launch memory only covers runs IT
+ * started. In-memory mapping first (fresh, no disk), the durable alias store
+ * as the restart fallback; rows this bridge cannot resolve stay bare and the
+ * app keeps them read-only.
+ */
+function attachRunSessionAliases(server: ZcodeAcpServer, result: Record<string, unknown>): void {
+  const runs = result["runs"];
+  if (!Array.isArray(runs)) return;
+  let storeIndex: Map<string, string> | null = null;
+  for (const row of runs) {
+    if (row === null || typeof row !== "object") continue;
+    const parent = (row as { parentSessionId?: unknown }).parentSessionId;
+    if (typeof parent !== "string" || !parent) continue;
+    const acpSid =
+      server.resolveAcpSid(parent) ?? (storeIndex ??= loadAliasesByZcodeSid()).get(parent);
+    if (acpSid) (row as { acpSessionId?: string }).acpSessionId = acpSid;
+  }
+}
+
+/** Per-session workflow activity joined onto the session-history listing. */
+export interface WorkflowActivity {
+  /** Journal runs of this session still pending/running in the newest window. */
+  active: number;
+  /** The newest run of the window (absent = no run recorded). */
+  last?: { status: string; updatedAt?: number; name?: string };
+}
+
+/**
+ * Group the journal's newest run window (50) by parentSessionId — the
+ * session-history rows' workflow badges. Silent degrade BY DESIGN: gate off,
+ * backend down, or a backend without the journal route all mean "no field",
+ * never a failed history page. A session whose latest run fell out of the
+ * window simply shows no badge — the same freshness cut the desktop's task
+ * row makes.
+ */
+export async function workflowActivityBySession(
+  server: ZcodeAcpServer,
+): Promise<Map<string, WorkflowActivity>> {
+  const out = new Map<string, WorkflowActivity>();
+  try {
+    await requireWorkflowEnabled(server);
+    const result = await rpc(
+      server,
+      "workflows/runs",
+      { workspace: workspaceRef(server), limit: 50 },
+      TIMEOUT_FILE_MS,
+    );
+    const runs = result["runs"];
+    if (!Array.isArray(runs)) return out;
+    for (const row of runs) {
+      if (row === null || typeof row !== "object") continue;
+      const rec = row as {
+        parentSessionId?: unknown;
+        status?: unknown;
+        updatedAt?: unknown;
+        name?: unknown;
+      };
+      if (typeof rec.parentSessionId !== "string" || !rec.parentSessionId) continue;
+      const act = out.get(rec.parentSessionId) ?? { active: 0 };
+      if (rec.status === "running" || rec.status === "pending") act.active += 1;
+      const updated = typeof rec.updatedAt === "number" ? rec.updatedAt : undefined;
+      if (!act.last || (updated ?? 0) > (act.last.updatedAt ?? 0)) {
+        act.last = {
+          status: typeof rec.status === "string" ? rec.status : "unknown",
+          ...(updated !== undefined ? { updatedAt: updated } : {}),
+          ...(typeof rec.name === "string" && rec.name ? { name: rec.name } : {}),
+        };
+      }
+      out.set(rec.parentSessionId, act);
+    }
+  } catch {
+    // Silent degrade — see the doc comment.
+  }
+  return out;
 }
 
 // ---------- v4 conversation run queries ----------

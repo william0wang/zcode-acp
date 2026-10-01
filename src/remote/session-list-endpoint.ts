@@ -37,6 +37,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { listSessions } from "../handlers/session.js";
 import type { ZcodeAcpServer } from "../server.js";
+import { workflowActivityBySession } from "../settings/workflow.js";
 import { runningZcodeSids } from "./status-endpoint.js";
 
 /** Rows per page when the client sends no limit. */
@@ -151,10 +152,18 @@ async function handleList(server: ZcodeAcpServer, req: IncomingMessage, res: Ser
       ? { before: updatedAtMs(lastRow.updatedAt), beforeId: lastRow.sessionId }
       : null;
 
+  // Desktop task-row parity: a history row carries its workflow activity
+  // (running count + newest run) when the journal knows any — silently absent
+  // when the gate is off or the journal read degrades.
+  const activity = await workflowActivityBySession(server);
+
   // The flags stay in the row shape but are constant false: a conversation
   // that was live or running was filtered out above and never reaches a page.
   const body = JSON.stringify({
-    sessions: page.map((s) => ({ ...s, live: false, running: false })),
+    sessions: page.map((s) => {
+      const act = activity.get(s.sessionId);
+      return { ...s, live: false, running: false, ...(act ? { workflowActivity: act } : {}) };
+    }),
     nextCursor,
   });
   res.writeHead(200, {

@@ -305,3 +305,83 @@ describe("session history endpoint", () => {
     expect(await res.text()).toContain("backend down");
   });
 });
+
+// ---------- workflowActivity join (desktop task-row parity) ----------
+
+describe("session history — workflowActivity", () => {
+  it("rows carry running count + newest run joined from the journal's newest window", async () => {
+    const server = new ZcodeAcpServer();
+    server.backendWorkflowGate = Promise.resolve({
+      mode: "alwaysOn",
+      enabled: true,
+      source: "override",
+    } satisfies import("../src/config/workflow-gate.js").WorkflowGate);
+    server.backend = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        if (method === "session/list") {
+          return {
+            result: {
+              sessions: [
+                { sessionId: "sess_wf", title: "Runner", updatedAt: 900 },
+                { sessionId: "sess_plain", title: "Plain", updatedAt: 800 },
+              ],
+            },
+          };
+        }
+        if (method === "workflows/runs") {
+          return {
+            result: {
+              runs: [
+                // Out of order on purpose: `last` is picked by updatedAt, not
+                // arrival order.
+                { runId: "r2", parentSessionId: "sess_wf", status: "completed", updatedAt: 4000 },
+                {
+                  runId: "r1",
+                  parentSessionId: "sess_wf",
+                  status: "running",
+                  updatedAt: 5000,
+                  name: "deploy",
+                },
+              ],
+            },
+          };
+        }
+        return { error: { message: "unhandled" } };
+      },
+    } as unknown as ZcodeBackend;
+
+    const res = await fetch(`${await bootList(server)}/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{
+        sessionId: string;
+        workflowActivity?: { active: number; last?: { status: string } };
+      }>;
+    };
+    expect(body.sessions.find((s) => s.sessionId === "sess_wf")!.workflowActivity).toMatchObject({
+      active: 1,
+      last: { status: "running", updatedAt: 5000, name: "deploy" },
+    });
+    expect(
+      body.sessions.find((s) => s.sessionId === "sess_plain")!.workflowActivity,
+    ).toBeUndefined();
+  });
+
+  it("gate off degrades silently — the page still answers, rows carry no field", async () => {
+    const server = new ZcodeAcpServer();
+    server.backendWorkflowGate = Promise.resolve({
+      mode: "disabled",
+      enabled: false,
+      source: "remote",
+    } satisfies import("../src/config/workflow-gate.js").WorkflowGate);
+    server.backend = listBackend([{ sessionId: "sess_x", title: "X", updatedAt: 100 }]);
+
+    const res = await fetch(`${await bootList(server)}/sessions`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      sessions: Array<{ sessionId: string; workflowActivity?: unknown }>;
+    };
+    expect(body.sessions[0]!.workflowActivity).toBeUndefined();
+  });
+});

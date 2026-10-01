@@ -23,6 +23,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
+import { recordMaterializedSession } from "../src/lazy-sessions.js";
 import { captureGate, type WorkflowGate } from "../src/config/workflow-gate.js";
 import { startHub, type HubHandle } from "../src/remote/hub-server.js";
 import { createSettingsHandler } from "../src/remote/settings-endpoint.js";
@@ -484,6 +485,39 @@ describe("workflow settings — management passthrough", () => {
     expect(calls.filter((c) => c.method === "workflows/runs").at(-1)!.params).toMatchObject({
       limit: 20,
     });
+  });
+
+  it("run rows carry an attachable acpSessionId — in-memory first, alias store fallback", async () => {
+    // A store-only alias: a session materialized by an earlier bridge
+    // generation — the restart case the durable store exists for.
+    recordMaterializedSession("acp_store_alias", "sess_zcode_stale", "/tmp/wf-proj");
+    const { server } = makeBridge(GATE_ON, {
+      results: {
+        "workflows/runs": {
+          runs: [
+            { runId: "r-live", parentSessionId: "sess_zcode_app" },
+            { runId: "r-store", parentSessionId: "sess_zcode_stale" },
+            { runId: "r-ghost", parentSessionId: "sess_zcode_unknown" },
+            { runId: "r-old" }, // journal rows pre-dating parentSessionId
+          ],
+        },
+      },
+    });
+    // In-memory mapping: this process attached the session.
+    provideSession(server);
+    const port = await serveSettings(server);
+
+    const res = await get(port, "workflows/runs");
+    const body = (await res.json()) as { runs: Array<Record<string, unknown>> };
+    expect(body.runs.find((r) => r.runId === "r-live")).toMatchObject({
+      acpSessionId: "sess_app",
+    });
+    expect(body.runs.find((r) => r.runId === "r-store")).toMatchObject({
+      acpSessionId: "acp_store_alias",
+    });
+    // Unresolvable and absent parents stay bare — the app keeps them read-only.
+    expect(body.runs.find((r) => r.runId === "r-ghost")!.acpSessionId).toBeUndefined();
+    expect(body.runs.find((r) => r.runId === "r-old")!.acpSessionId).toBeUndefined();
   });
 
   it("rejects an unknown scope with 400", async () => {
