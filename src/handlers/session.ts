@@ -4006,7 +4006,7 @@ export async function runEventTurn(
         // ordinary filesystem permissions.
         const denial = extractSandboxDenial(outputText);
         if (denial) {
-          await handleSandboxDenial(server, cx, acpSid, denial, toolCallId);
+          await handleSandboxDenial(server, cx, acpSid, denial, toolCallId, turn);
           if (turn.cancelled) return turnResult(translator, "cancelled");
         } else {
           // No path parsed — one generic hint per session, not one per retry.

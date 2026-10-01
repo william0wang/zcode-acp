@@ -1037,6 +1037,16 @@ const INTERRUPTED = Symbol("interactionInterrupted");
 type InteractionResult = unknown | typeof INTERRUPTED;
 
 /**
+ * Interruption test for external {@link requestWithTimeout} callers
+ * (sandbox-allow): distinguishes "wait broke" (connection close / turn
+ * cancel) from a client response, so a no-decision outcome is not mistaken
+ * for a user rejection.
+ */
+export function isInteractionInterrupted(value: unknown): boolean {
+  return value === INTERRUPTED;
+}
+
+/**
  * Send a client-side request and wait for the response. By default waits
  * indefinitely (see {@link INTERACTION_TIMEOUT_MS}). Resolves to the client
  * response, `null` if the client returned null/errored, or {@link INTERRUPTED}

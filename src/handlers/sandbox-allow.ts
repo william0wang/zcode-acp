@@ -25,10 +25,10 @@ import {
   resolveReal,
 } from "../backend/sandbox.js";
 import { messages } from "../i18n.js";
-import { armAskWatchdog, clearAskWatchdog, pushSourceLabel } from "../push/push.js";
 import { log, warn } from "../utils.js";
-import type { ZcodeAcpServer } from "../server.js";
+import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
+import { isInteractionInterrupted, requestWithTimeout } from "./server-requests.js";
 
 /** A sandbox write-denial observed in tool output. */
 export interface SandboxDenial {
@@ -95,9 +95,6 @@ export function extractSandboxDenial(text: string): SandboxDenial | null {
   if (!zsh) return null;
   return { path: zsh[1]!, isMkdir: false };
 }
-
-/** How long the allow popup may hang before it counts as a rejection. */
-const ASK_TIMEOUT_MS = 120_000;
 
 /**
  * How long approvals collect into one restart batch (ADR-0011). The old flow
@@ -256,22 +253,6 @@ export function extractPermDeniedPath(text: string): string | null {
   return zsh ? zsh[1]! : null;
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("sandbox ask timed out")), ms);
-    p.then(
-      (v) => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(timer);
-        reject(e);
-      },
-    );
-  });
-}
-
 /**
  * Paths that no popup can ever allow: the deny island (config self-edit =
  * self-escalation) and strictGit's .git — their denies are emitted LAST in
@@ -313,6 +294,7 @@ export async function handleSandboxDenial(
   acpSid: string,
   denial: SandboxDenial,
   toolCallId: string,
+  turn?: PendingTurn,
 ): Promise<void> {
   // Process-level fact, not the config wish: the caller gates on the same
   // flag, so a sandbox armed only via project config (no env) still flows.
@@ -393,61 +375,58 @@ export async function handleSandboxDenial(
     },
   ];
   let decision: "always" | "once" | "reject_once" | "reject_always" | "deny" = "deny";
-  // Same unanswered-ask watchdog as requestWithTimeout (§5.1 v1.3): this grant
-  // popup bypasses that funnel (own timeout path), but it is still a
-  // user-facing ask — it must notify when nobody answers. The derived payload
-  // only reads toolCall.title; the label (project / session) comes from the
-  // handler's own context because the synthetic params carry no sessionId.
-  armAskWatchdog(
+  // §6 funnel (requestWithTimeout), not a bare cx.request with a 120s cap:
+  // the ask used to die of ASK_TIMEOUT whenever it fired while its client
+  // wasn't looking (observed 2026-10-01: a gradle EPERM ask timed out
+  // unanswered, the model read the denial as final, and the WeCom push only
+  // landed at the timeout). The tracked race HOLDS while no client can
+  // answer (push active) and resendPendingInteractions re-fires it at the
+  // next client attach; the watchdog/ask_settled bookkeeping comes with the
+  // funnel. No finite timeout — the escapes are the answer, the connection
+  // closing, or the turn being cancelled.
+  // Wire name is session/request_permission (snake_case — the camelCase
+  // form is silently method-not-found on real clients). The schema has no
+  // top-level title: the popup's DETAILS live on the toolCall update — its
+  // title names the denied path and the text content explains the stakes.
+  const resp = await requestWithTimeout(
+    server,
+    cx,
     "session/request_permission",
-    { toolCall: { title: m.sandboxPopupTitle(targetReal) } },
-    pushSourceLabel(server, acpSid),
-  );
-  try {
-    // Wire name is session/request_permission (snake_case — the camelCase
-    // form is silently method-not-found on real clients). The schema has no
-    // top-level title: the popup's DETAILS live on the toolCall update — its
-    // title names the denied path and the text content explains the stakes.
-    // No `as never`: tsc validates the wire shape against the SDK schema.
-    const resp = (await withTimeout(
-      cx.request("session/request_permission", {
-        sessionId: acpSid,
-        toolCall: {
-          toolCallId,
-          title: m.sandboxPopupTitle(targetReal),
-          content: [
-            {
-              type: "content",
-              content: {
-                type: "text",
-                text: m.sandboxPopupDetails(targetReal),
-              },
+    {
+      sessionId: acpSid,
+      toolCall: {
+        toolCallId,
+        title: m.sandboxPopupTitle(targetReal),
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: m.sandboxPopupDetails(targetReal),
             },
-          ],
-          rawInput: { path: targetReal },
-        },
-        options,
-      }),
-      ASK_TIMEOUT_MS,
-    )) as { outcome?: { optionId?: string } } | undefined;
-    const oid = resp?.outcome?.optionId ?? "";
-    if (oid === "sandbox_allow_always") decision = "always";
-    else if (oid === "sandbox_allow_once") decision = "once";
-    else if (oid === "sandbox_reject_always") decision = "reject_always";
-    else if (oid === "sandbox_reject_once") decision = "reject_once";
-  } catch (e) {
-    // Popup failed/timed out or the client channel died — including a kill
-    // by ANOTHER grant's batched restart. This ask never got a user
-    // decision; the timestamp stays as-is, so the path merely cools down
-    // (SANDBOX_ASK_RETRY_MS) and may re-ask afterwards — never permanently
-    // muted, never free to storm.
-    warn(
-      `sandbox: allow ask for ${targetReal} failed: ${e instanceof Error ? e.message : String(e)}`,
-    );
+          },
+        ],
+        rawInput: { path: targetReal },
+      },
+      options,
+    },
+    `sandbox allow ${targetReal}`,
+    0,
+    turn,
+  );
+  if (resp === null || isInteractionInterrupted(resp)) {
+    // No user decision (client error, connection closed, or a kill by
+    // ANOTHER grant's batched restart). The asked-mark keeps its timestamp,
+    // so the path merely cools down (SANDBOX_ASK_RETRY_MS) and may re-ask
+    // afterwards — never permanently muted, never free to storm.
+    warn(`sandbox: allow ask for ${targetReal} ended without a decision — may re-ask later`);
     return;
-  } finally {
-    clearAskWatchdog();
   }
+  const oid = (resp as { outcome?: { optionId?: string } } | undefined)?.outcome?.optionId ?? "";
+  if (oid === "sandbox_allow_always") decision = "always";
+  else if (oid === "sandbox_allow_once") decision = "once";
+  else if (oid === "sandbox_reject_always") decision = "reject_always";
+  else if (oid === "sandbox_reject_once") decision = "reject_once";
 
   // A real outcome reached the client and came back (including an unknown
   // optionId the user picked): the user SAW this ask — pin the debounce
