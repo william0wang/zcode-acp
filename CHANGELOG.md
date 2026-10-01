@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.57.0](https://github.com/william0wang/zcode-acp/compare/v0.56.0...v0.57.0) (2026-10-01)
+
+
+### Features
+
+* run-session aliases on journal rows, session workflowActivity and list-change broadcast ([ca67c92](https://github.com/william0wang/zcode-acp/commit/ca67c924007310ba934b31746a575212f13fce0a))
+
 ## [0.56.0](https://github.com/william0wang/zcode-acp/compare/v0.55.0...v0.56.0) (2026-10-01)
 
 
