@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.58.1](https://github.com/william0wang/zcode-acp/compare/v0.58.0...v0.58.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* hold sandbox allow asks through the interaction funnel instead of a 120s timeout ([ff4567d](https://github.com/william0wang/zcode-acp/commit/ff4567d7b957561308ee73ef532ed7d3aa561b8f))
+
 ## [0.58.0](https://github.com/william0wang/zcode-acp/compare/v0.57.0...v0.58.0) (2026-10-01)
 
 
