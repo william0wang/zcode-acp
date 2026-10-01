@@ -33,6 +33,8 @@ export interface PushNotifyConfig {
   compact: boolean;
   /** Pending interaction asks (§5.1): zero-client push + the unanswered watchdog. */
   ask: boolean;
+  /** Workflow stage transitions (phase entered / node failed): mid-run digest push. */
+  workflowStage: boolean;
 }
 
 /** Default quiet window for settled pushes (§5.2): user active → no ping. */
@@ -109,6 +111,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     task: file.notify?.task !== false,
     compact: file.notify?.compact !== false,
     ask: file.notify?.ask !== false,
+    workflowStage: file.notify?.workflowStage !== false,
   };
   const quietMs =
     file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;

@@ -159,6 +159,8 @@ export interface PushNotifyUserConfig {
   compact?: boolean;
   /** Pending interaction asks (permission/question): zero-client push + unanswered watchdog. */
   ask?: boolean;
+  /** Workflow stage transitions (phase entered / node failed): mid-run digest push. */
+  workflowStage?: boolean;
 }
 
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
@@ -441,7 +443,15 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
         warn(`config: ${label}.notify in ${file} is not an object — ignoring`);
       } else {
         const n: PushNotifyUserConfig = {};
-        for (const key of ["turn", "goal", "run", "task", "compact", "ask"] as const) {
+        for (const key of [
+          "turn",
+          "goal",
+          "run",
+          "task",
+          "compact",
+          "ask",
+          "workflowStage",
+        ] as const) {
           const v = notify[key];
           if (v === undefined) continue;
           if (typeof v === "boolean") n[key] = v;

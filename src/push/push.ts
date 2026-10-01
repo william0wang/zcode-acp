@@ -20,10 +20,21 @@ import {
 import { createWeComSender, type WeComSender } from "./wecom.js";
 
 export type PushKind =
-  "permission" | "question" | "run" | "task" | "test" | "turn" | "goal" | "compact";
+  | "permission"
+  | "question"
+  | "run"
+  | "task"
+  | "test"
+  | "turn"
+  | "goal"
+  | "compact"
+  | "workflowStage";
 
 /** Settled kinds routed through {@link pushSettled} (§5.2 — per-kind switches). */
-export type PushSettledKind = Extract<PushKind, "turn" | "goal" | "run" | "task" | "compact">;
+export type PushSettledKind = Extract<
+  PushKind,
+  "turn" | "goal" | "run" | "task" | "compact" | "workflowStage"
+>;
 
 /**
  * "<project> / <session-title>" source label for settled pushes. It rides the

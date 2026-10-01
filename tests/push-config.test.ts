@@ -44,7 +44,15 @@ describe("resolvePushConfig", () => {
       secret: "s3cret",
       toUser: "@all",
       contentDetail: "full",
-      notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
+      notify: {
+        turn: true,
+        goal: true,
+        run: true,
+        task: true,
+        compact: true,
+        ask: true,
+        workflowStage: true,
+      },
       quietMs: 30_000,
       askDelayMs: 120_000,
       permissionAskDelayMs: 15_000,
@@ -101,7 +109,15 @@ describe("resolvePushConfig", () => {
       secret: "file-secret",
       toUser: "william",
       contentDetail: "minimal",
-      notify: { turn: true, goal: true, run: true, task: true, compact: true, ask: true },
+      notify: {
+        turn: true,
+        goal: true,
+        run: true,
+        task: true,
+        compact: true,
+        ask: true,
+        workflowStage: true,
+      },
       quietMs: 30_000,
       askDelayMs: 120_000,
       permissionAskDelayMs: 15_000,
@@ -166,6 +182,7 @@ describe("resolvePushConfig", () => {
       task: true,
       compact: false,
       ask: false,
+      workflowStage: true,
     });
   });
 

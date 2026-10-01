@@ -23,6 +23,11 @@
  *
  * Everything here is best-effort: request() resolves `{error}` instead of
  * throwing, and every failure path only logs — never into the event loop.
+ *
+ * Stage pushes (#294): phase entries and failed nodes also reach WeCom as a
+ * rate-limited DIGEST (`pushSettled` kind "workflowStage") — mid-run progress
+ * must be able to wake a phone, and the card only reaches clients already
+ * watching the session.
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
@@ -48,6 +53,15 @@ const MAX_PAGES_PER_TICK = 50;
 
 /** Cap on accumulated progress lines (keep first/last, drop the middle). */
 const MAX_LINES = 200;
+
+/**
+ * Min interval between stage-digest WeCom pushes per run (#294): a fan-out
+ * workflow with dozens of nodes must not machine-gun the phone. Stage lines
+ * landing inside the window are held and flushed as ONE digest when it opens
+ * (or at run settle, whichever comes first) — the poll cadence doubles as
+ * the digest timer, no extra timers.
+ */
+export const WORKFLOW_STAGE_PUSH_MIN_INTERVAL_MS = 60_000;
 
 /** One v4 journal event (transport.ts:599-646). */
 interface WorkflowRunEvent {
@@ -76,6 +90,14 @@ interface ActiveRun {
    * sends ONLY the lines added since the previous one.
    */
   pending: string[];
+  /**
+   * Stage lines (phase entered / node failed) held for the next WeCom digest
+   * push — flushed when {@link lastStagePushAt} ages past
+   * {@link WORKFLOW_STAGE_PUSH_MIN_INTERVAL_MS} or at run settle.
+   */
+  stagePending: string[];
+  /** Last stage-digest push time (0 = the window is open). */
+  lastStagePushAt: number;
   startedAt: number;
   intervalMs: number;
   consecutiveErrors: number;
@@ -178,11 +200,54 @@ function teardown(run: ActiveRun): void {
 
 /** Settled-push payload for a run's terminal state (§5.2 — four convergence
  * points, this is their shared renderer). */
+function runLabel(run: ActiveRun): string {
+  return run.name ?? `run ${run.runId.slice(0, 8)}`;
+}
+
+/**
+ * Stage transitions worth a WeCom push (#294): a phase entry (the journal has
+ * no phase-exited — entering phase N implies N-1 completed) and any FAILED
+ * node. Ok/cancelled node outcomes stay card-only (chatty at fan-out scale).
+ */
+function isStagePushEvent(ev: WorkflowRunEvent): boolean {
+  if (ev.type === "phase-entered") return true;
+  return ev.type.startsWith("node-") && (ev.payload ?? {}).outcome === "failed";
+}
+
+/**
+ * Send the held stage digest as one WeCom push. The failure marker rides the
+ * TITLE, not the body: `contentDetail: "minimal"` strips bodies, and a failed
+ * node is the one stage fact minimal mode must still carry.
+ */
+function flushStagePush(run: ActiveRun): void {
+  if (run.stagePending.length === 0) return;
+  const lines = run.stagePending;
+  run.stagePending = [];
+  run.lastStagePushAt = Date.now();
+  const failed = lines.some((l) => l.startsWith("✗"));
+  pushSettled(run.server, {
+    kind: "workflowStage",
+    label: pushSourceLabel(run.server),
+    title: `workflow ${runLabel(run)}: stage progress${failed ? " — node failed" : ""}`,
+    body: lines.join("\n"),
+  });
+}
+
+/** Flush the held digest once the rate-limit window has aged open. */
+function maybeFlushStagePush(run: ActiveRun): void {
+  if (run.stagePending.length === 0) return;
+  if (Date.now() - run.lastStagePushAt < WORKFLOW_STAGE_PUSH_MIN_INTERVAL_MS) return;
+  flushStagePush(run);
+}
+
 function pushRunSettled(run: ActiveRun, status: string): void {
+  // Terminal flush: a held digest must not die with the poller, and the phone
+  // should read stages-then-outcome in order.
+  flushStagePush(run);
   pushSettled(run.server, {
     kind: "run",
     label: pushSourceLabel(run.server),
-    title: `workflow ${run.name ?? `run ${run.runId.slice(0, 8)}`}`,
+    title: `workflow ${runLabel(run)}`,
     body: `run settled: ${status}`,
   });
 }
@@ -246,6 +311,12 @@ async function pollTick(run: ActiveRun): Promise<void> {
         if (line) {
           pushLine(run, line);
           emitted = true;
+          if (isStagePushEvent(ev)) {
+            // Digest-hold: accumulate, flush ONCE at tick end — a per-event
+            // flush would spend the window on the tick's first stage line and
+            // rate-limit the rest of the same tick into a later digest.
+            run.stagePending.push(line);
+          }
         }
         if (ev.type === "run-settled") {
           await emitCardUpdate(run);
@@ -263,6 +334,9 @@ async function pollTick(run: ActiveRun): Promise<void> {
     }
     run.consecutiveErrors = 0;
     if (emitted) await emitCardUpdate(run);
+    // Digest-hold expiry: ticks with no new events still flush a held digest
+    // once the rate-limit window opens.
+    maybeFlushStagePush(run);
   } catch (e) {
     // request() never throws; anything here is our own bug — count it as an
     // error tick so the consecutive-failure stop still applies.
@@ -330,6 +404,8 @@ export function armWorkflowRunPoller(
     afterSequence: 0,
     lines: [],
     pending: [],
+    stagePending: [],
+    lastStagePushAt: 0,
     startedAt: Date.now(),
     intervalMs: opts.intervalMs ?? WORKFLOW_POLL_INTERVAL_MS,
     consecutiveErrors: 0,

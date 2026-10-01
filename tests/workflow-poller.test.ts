@@ -25,8 +25,29 @@ import {
   stopAllWorkflowRunPollers,
   workflowPollerActive,
   WORKFLOW_POLL_INTERVAL_MS,
+  WORKFLOW_STAGE_PUSH_MIN_INTERVAL_MS,
 } from "../src/workflow/poller.js";
 import { ZcodeAcpServer } from "../src/server.js";
+import { resetPushSenderForTests, setPushSenderForTests } from "../src/push/push.js";
+
+// Push mocks (the push-if-offline pattern): stage-digest tests drive the REAL
+// pushSettled path against an injected sender. h.cfg defaults to null, so
+// every other test in this file keeps its no-push behavior unchanged.
+const h = vi.hoisted(() => ({
+  cfg: null as {
+    contentDetail: "full" | "minimal";
+    notify: Record<string, boolean>;
+    quietMs?: number;
+  } | null,
+}));
+vi.mock("../src/push/config.js", async (orig) => {
+  const actual = await orig<typeof import("../src/push/config.js")>();
+  return { ...actual, pushActive: () => h.cfg !== null, pushConfig: () => h.cfg };
+});
+vi.mock("../src/crash-guards.js", async (orig) => {
+  const actual = await orig<typeof import("../src/crash-guards.js")>();
+  return { ...actual, appendDiary: () => undefined };
+});
 
 // Pin the language: asserted card titles are English.
 beforeEach(() => {
@@ -454,5 +475,212 @@ describe("BackgroundTaskListener workflow integration", () => {
     );
     await vi.advanceTimersByTimeAsync(0);
     expect(workflowPollerActive("run_term")).toBe(false);
+  });
+});
+
+describe("workflow stage pushes (WeCom digest, #294)", () => {
+  const pushes: string[] = [];
+
+  beforeEach(() => {
+    h.cfg = {
+      contentDetail: "full",
+      notify: {
+        turn: true,
+        goal: true,
+        run: true,
+        task: true,
+        compact: true,
+        ask: true,
+        workflowStage: true,
+      },
+      quietMs: 0,
+    };
+    pushes.length = 0;
+    setPushSenderForTests({
+      sendText: async (c) => {
+        pushes.push(c);
+      },
+    });
+  });
+
+  afterEach(() => {
+    resetPushSenderForTests();
+    h.cfg = null;
+  });
+
+  it("phase entry and failed nodes push one digest; ok/cancelled nodes never push", async () => {
+    const { server, backend } = makeServer();
+    backend.pages = [
+      {
+        result: {
+          events: [
+            { sequence: 1, type: "phase-entered", payload: { phaseName: "plan" } },
+            {
+              sequence: 2,
+              type: "node-settled",
+              payload: { siteId: "ask", ordinal: 1, outcome: "ok" },
+            },
+            {
+              sequence: 3,
+              type: "node-settled",
+              payload: { siteId: "codegen", ordinal: 2, outcome: "failed" },
+            },
+          ],
+          hasMore: false,
+        },
+      },
+    ];
+
+    armWorkflowRunPoller(server, SID_Z, {
+      runId: "run_stage",
+      toolCallId: "c",
+      name: "release",
+      intervalMs: INTERVAL,
+    });
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+
+    // ONE digest for the whole tick: the phase line plus the FAILED node; the
+    // ok node stays card-only.
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain("workflow release: stage progress — node failed");
+    expect(pushes[0]).toContain("> phase plan");
+    expect(pushes[0]).toContain("✗ node codegen/#2 failed");
+    expect(pushes[0]).not.toContain("✓ node ask/#1 ok");
+  });
+
+  it("stages inside the rate-limit window digest into ONE delayed push", async () => {
+    const { server, backend } = makeServer();
+    backend.pages = [
+      {
+        result: {
+          events: [{ sequence: 1, type: "phase-entered", payload: { phaseName: "scan" } }],
+          hasMore: false,
+        },
+      },
+      {
+        result: {
+          events: [
+            { sequence: 2, type: "phase-entered", payload: { phaseName: "review" } },
+            { sequence: 3, type: "phase-entered", payload: { phaseName: "publish" } },
+          ],
+          hasMore: false,
+        },
+      },
+    ];
+
+    armWorkflowRunPoller(server, SID_Z, {
+      runId: "run_burst",
+      toolCallId: "c",
+      intervalMs: INTERVAL,
+    });
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(pushes).toHaveLength(1); // phase scan pushed, window opened
+
+    // Both further phases land INSIDE the window → held, no second push.
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(pushes).toHaveLength(1);
+
+    // Window ages open; a later tick flushes both held phases as one digest —
+    // even with no new journal events (scripted pages exhausted).
+    await vi.advanceTimersByTimeAsync(WORKFLOW_STAGE_PUSH_MIN_INTERVAL_MS);
+    expect(pushes).toHaveLength(2);
+    expect(pushes[1]).toContain("phase review");
+    expect(pushes[1]).toContain("phase publish");
+    expect(pushes[1]).not.toContain("node failed");
+  });
+
+  it("run settle flushes the held digest BEFORE the settled push", async () => {
+    const { server, backend } = makeServer();
+    backend.pages = [
+      {
+        result: {
+          events: [{ sequence: 1, type: "phase-entered", payload: { phaseName: "plan" } }],
+          hasMore: false,
+        },
+      },
+      {
+        result: {
+          events: [{ sequence: 2, type: "phase-entered", payload: { phaseName: "build" } }],
+          hasMore: false,
+        },
+      },
+      {
+        result: {
+          events: [{ sequence: 3, type: "run-settled", payload: { status: "completed" } }],
+          hasMore: false,
+        },
+      },
+    ];
+
+    armWorkflowRunPoller(server, SID_Z, {
+      runId: "run_end",
+      toolCallId: "c",
+      intervalMs: INTERVAL,
+    });
+    await vi.advanceTimersByTimeAsync(INTERVAL); // phase plan → digest #1
+    await vi.advanceTimersByTimeAsync(INTERVAL); // phase build → held (window)
+    expect(pushes).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(INTERVAL); // settle → held digest, then run push
+    expect(pushes).toHaveLength(3);
+    expect(pushes[1]).toContain("phase build");
+    expect(pushes[2]).toContain("run settled: completed");
+  });
+
+  it("push.notify.workflowStage=false silences stages; the settled push stays", async () => {
+    h.cfg = { ...h.cfg!, notify: { ...h.cfg!.notify, workflowStage: false } };
+    const { server, backend } = makeServer();
+    backend.pages = [
+      {
+        result: {
+          events: [
+            { sequence: 1, type: "phase-entered", payload: { phaseName: "plan" } },
+            { sequence: 2, type: "run-settled", payload: { status: "completed" } },
+          ],
+          hasMore: false,
+        },
+      },
+    ];
+
+    armWorkflowRunPoller(server, SID_Z, {
+      runId: "run_off",
+      toolCallId: "c",
+      intervalMs: INTERVAL,
+    });
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain("run settled: completed");
+    expect(pushes[0]).not.toContain("stage progress");
+  });
+
+  it("minimal mode keeps the failure marker in the title, body stripped", async () => {
+    h.cfg = { ...h.cfg!, contentDetail: "minimal" };
+    const { server, backend } = makeServer();
+    backend.pages = [
+      {
+        result: {
+          events: [
+            {
+              sequence: 1,
+              type: "node-settled",
+              payload: { siteId: "codegen", ordinal: 2, outcome: "failed" },
+            },
+          ],
+          hasMore: false,
+        },
+      },
+    ];
+
+    armWorkflowRunPoller(server, SID_Z, {
+      runId: "run_min",
+      toolCallId: "c",
+      intervalMs: INTERVAL,
+    });
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain("stage progress — node failed");
+    expect(pushes[0]).not.toContain("✗ node codegen/#2 failed");
   });
 });
