@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.61.0](https://github.com/william0wang/zcode-acp/compare/v0.60.0...v0.61.0) (2026-10-02)
+
+
+### Features
+
+* wait out quota exhaustion and continue automatically ([#297](https://github.com/william0wang/zcode-acp/issues/297)) ([6b18ebf](https://github.com/william0wang/zcode-acp/commit/6b18ebfeede58eba7d572da89e5428af1d126c78))
+
 ## [0.60.0](https://github.com/william0wang/zcode-acp/compare/v0.59.0...v0.60.0) (2026-10-01)
 
 
