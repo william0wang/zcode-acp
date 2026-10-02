@@ -18,7 +18,12 @@
  *   bridge per workspace — but every bridge of that workspace reads the same
  *   directory, so ONE representative suffices;
  * - the global saved-workflow directory is machine-wide, so one global group
- *   is enough.
+ *   is enough;
+ * - and a journal row can LIE about a living run: upstream's orphan
+ *   reconciliation writes stopped(interrupted) onto runs that are still
+ *   executing in another process (and the row never flips back mid-run), so
+ *   rows carrying that signature are cross-checked against the owning
+ *   process's live read before the overview trusts them (collectLiveOverrides).
  *
  * This module folds all of that server-side (the hub owns the instance map):
  * dedupe instances to one group per workspace, race the pair reads with the
@@ -43,7 +48,7 @@ export interface OverviewInstance {
   port: number;
   workspace: string;
   startedAt: number;
-  sessions: Array<{ sessionId: string; status?: "running" | "idle" }>;
+  sessions: Array<{ sessionId: string; status?: "running" | "idle"; updatedAt?: number }>;
 }
 
 /** A journal run row (the bridge's `workflows/runs` shape, passthrough). */
@@ -80,6 +85,8 @@ const FETCH_TIMEOUT_MS = 8_000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 /** Journal window for the global read (upstream caps the limit at 50). */
 const RUNS_LIMIT = 50;
+/** Live-registry statuses — a run reporting either is flying right now. */
+const LIVE_STATUSES = new Set(["running", "pending"]);
 
 /** GET one bridge route, parsed as JSON. Rejects on transport/status/parse. */
 function fetchBridgeJson(port: number, path: string): Promise<Record<string, unknown>> {
@@ -196,6 +203,10 @@ function invalidOf(list: Record<string, unknown>): unknown[] {
  */
 function annotateOwners(rows: OverviewRunRow[], instances: OverviewInstance[]): void {
   for (const row of rows) {
+    // The live-truth owner (set by applyLiveTruth from the instance whose
+    // live registry reported the run) is process evidence, not a heuristic —
+    // never overwrite it. The heuristic only fills rows it did not correct.
+    if (row.ownerInstanceId) continue;
     const acpSid = row.acpSessionId;
     if (typeof acpSid !== "string" || !acpSid) continue;
     let best: OverviewInstance | undefined;
@@ -214,6 +225,131 @@ function annotateOwners(rows: OverviewRunRow[], instances: OverviewInstance[]): 
       }
     }
     if (best) row.ownerInstanceId = best.id;
+  }
+}
+
+/**
+ * Live overrides for journal rows upstream may have wrongly declared dead.
+ *
+ * Why this exists: upstream's orphan reconciliation (`reconcileOrphanRuns`,
+ * bootstrap.app — it runs at every app construction) assumes "no in-flight
+ * run in MY process registry ⇒ every non-terminal row of this session is a
+ * dead process's leftover" and writes stopped(interrupted) — even when the
+ * run is still executing in ANOTHER process. Observed 2026-10-02: a second
+ * process constructed the session at 11:44 and wrote the interrupted verdict
+ * onto a run that kept dispatching sub-agents until it completed at 14:21;
+ * the row never flips back mid-run, so the whole flight window rendered as
+ * already-stopped. The owning process's live read
+ * (`/settings/workflow-runs?sessionId=` → `v4/conversation/workflowRuns` →
+ * `listRunsForSession`) overlays its live registry onto the journal — upstream
+ * built it exactly so "this read would not show a run marked dead by a foreign
+ * write" — and that overlay is the only trustworthy status here.
+ *
+ * Trigger = the reconciliation's signature alone (`stopReason:
+ * "interrupted"`); no suspicious row → zero probes. Do NOT gate on the
+ * instance showing the session as "running": a workflow keeps flying while its
+ * parent session sits idle between turns (exactly how the observed run looked
+ * for its last two hours), so a running-gated trigger misses the reported
+ * case. When suspicious rows exist, probe the sessions the OWNER WORKSPACE's
+ * instances list (any status), with each instance's OWN spelling — probing
+ * what it reported to the hub keeps this a same-process read. The row's
+ * `acpSessionId` is deliberately NOT used as the probe key: alias spellings
+ * differ per bridge (one bridge's `sess_…` is another's backend id), and an id
+ * a bridge never listed may still resolve through its durable alias store and
+ * cold-resume the conversation — materializing a second runtime for a live
+ * conversation, which scrambles the shared event log. The probe result joins
+ * on runId (a run's stable identity), so one confirmation corrects the row in
+ * every group that carries it.
+ */
+async function collectLiveOverrides(
+  instances: OverviewInstance[],
+  rows: OverviewRunRow[],
+): Promise<Map<string, { status: string; instanceId: string }>> {
+  const out = new Map<string, { status: string; instanceId: string }>();
+  const suspicious = rows.filter(
+    (r) =>
+      r["stopReason"] === "interrupted" &&
+      typeof r.runId === "string" &&
+      r.runId !== "" &&
+      typeof r.cwd === "string" &&
+      r.cwd !== "",
+  );
+  if (suspicious.length === 0) return out;
+
+  // The workspace is the ownership evidence: a run's cwd is where its session
+  // lives, and the hub already groups instances by that same workspace string.
+  const byWorkspace = new Map<string, OverviewInstance[]>();
+  for (const inst of instances) {
+    const list = byWorkspace.get(inst.workspace) ?? [];
+    list.push(inst);
+    byWorkspace.set(inst.workspace, list);
+  }
+  for (const list of byWorkspace.values()) list.sort((a, b) => b.startedAt - a.startedAt);
+
+  /** Hard ceiling on live probes per build (never hit in practice). */
+  const MAX_LIVE_PROBES = 24;
+  const probes = new Map<string, Promise<Record<string, unknown> | undefined>>();
+  const probe = (inst: OverviewInstance, sessionId: string) => {
+    const key = `${inst.id}\u0000${sessionId}`;
+    let p = probes.get(key);
+    if (!p) {
+      if (probes.size >= MAX_LIVE_PROBES) return Promise.resolve(undefined);
+      p = fetchBridgeJson(
+        inst.port,
+        `/settings/workflow-runs?sessionId=${encodeURIComponent(sessionId)}`,
+      ).catch(() => undefined);
+      probes.set(key, p);
+    }
+    return p;
+  };
+
+  for (const row of suspicious) {
+    const runId = row.runId as string;
+    const candidates = byWorkspace.get(row.cwd as string) ?? [];
+    outer: for (const inst of candidates) {
+      // Running sessions first (most likely to hold a flying run), then the
+      // freshest driving copy — the hub's own dedupe ranks bridges that way.
+      const sessions = [...inst.sessions].sort(
+        (a, b) =>
+          (a.status === "running" ? 0 : 1) - (b.status === "running" ? 0 : 1) ||
+          (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
+      );
+      for (const s of sessions) {
+        const body = await probe(inst, s.sessionId);
+        if (!body) continue; // dead / old bridge — next session or instance
+        const runs = Array.isArray(body["runs"]) ? (body["runs"] as OverviewRunRow[]) : [];
+        const match = runs.find((r) => r.runId === runId);
+        if (!match) continue; // this process does not know the run
+        if (typeof match.status === "string" && LIVE_STATUSES.has(match.status)) {
+          out.set(runId, { status: match.status, instanceId: inst.id });
+          break outer;
+        }
+        // Found terminal here — a sibling bridge may still hold the live
+        // copy, so keep trying the rest of the workspace's sessions.
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Apply the live truth to a set of journal rows, in place: a row the live
+ * registry reports flying loses the foreign "interrupted" verdict, and a row
+ * with no owner gets the instance that actually reported it live (the address
+ * for stop/detail from a client attached elsewhere).
+ */
+function applyLiveTruth(
+  rows: OverviewRunRow[],
+  liveRuns: Map<string, { status: string; instanceId: string }>,
+): void {
+  for (const row of rows) {
+    const runId = typeof row.runId === "string" ? row.runId : "";
+    if (!runId) continue;
+    const live = liveRuns.get(runId);
+    if (!live) continue;
+    row.status = live.status;
+    delete row["stopReason"];
+    if (!row.ownerInstanceId) row.ownerInstanceId = live.instanceId;
   }
 }
 
@@ -241,8 +377,15 @@ export async function buildWorkflowOverview(
   // project (each row carrying `cwd`) — the active-run feed and the global
   // group's badges come from the same answer.
   const global = await pickPair(instances, "global");
+  // Cross-check the global rows' reconciliation-signature verdicts against
+  // the owner's live read (see collectLiveOverrides); the runId-keyed result
+  // feeds every group carrying the same row.
+  const liveOverrides = global
+    ? await collectLiveOverrides(instances, global.pair.runs)
+    : new Map<string, { status: string; instanceId: string }>();
   let activeRuns: OverviewRunRow[] = [];
   if (global) {
+    applyLiveTruth(global.pair.runs, liveOverrides);
     groups.push({
       instanceId: global.inst.id,
       scope: "global",
@@ -252,7 +395,9 @@ export async function buildWorkflowOverview(
       lastRuns: lastRunByName(global.pair.runs),
       error: null,
     });
-    activeRuns = global.pair.runs.filter((r) => r.status === "running" || r.status === "pending");
+    activeRuns = global.pair.runs.filter(
+      (r) => typeof r.status === "string" && LIVE_STATUSES.has(r.status),
+    );
     annotateOwners(activeRuns, instances);
   }
 
@@ -276,6 +421,7 @@ export async function buildWorkflowOverview(
           error: "no bridge of this workspace answered",
         };
       }
+      await applyLiveTruth(picked.pair.runs, liveOverrides);
       return {
         instanceId: picked.inst.id,
         scope: "project",

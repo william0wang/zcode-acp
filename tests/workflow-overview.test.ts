@@ -35,13 +35,13 @@ interface FakeBridge {
 }
 
 /**
- * A fake bridge serving the two workflow routes. `answer` decides the body
- * per (kind, scope); an undefined answer rejects with a 404 — the "old
- * bridge" shape.
+ * A fake bridge serving the workflow routes: the journal LIST+RUNS pair and
+ * the live session-scoped runs read. `answer` decides the body per (kind,
+ * scope); an undefined answer rejects with a 404 — the "old bridge" shape.
  */
 function startFakeBridge(
   answer: (
-    kind: "list" | "runs",
+    kind: "list" | "runs" | "sessionRuns",
     scope: string,
   ) => { workflows?: unknown[]; runs?: unknown[]; invalid?: unknown[] } | undefined,
 ): Promise<FakeBridge> {
@@ -49,8 +49,15 @@ function startFakeBridge(
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const scope = url.searchParams.get("scope") ?? "project";
-    calls.push(`${url.pathname}?${scope}`);
-    const kind = url.pathname.endsWith("/runs") ? "runs" : "list";
+    calls.push(
+      `${url.pathname}?${url.searchParams.get("scope") ?? url.searchParams.get("sessionId") ?? ""}`,
+    );
+    const kind =
+      url.pathname === "/settings/workflow-runs"
+        ? "sessionRuns"
+        : url.pathname.endsWith("/runs")
+          ? "runs"
+          : "list";
     const body = answer(kind, scope);
     if (body === undefined) {
       res.writeHead(404, { "Content-Type": "text/plain" });
@@ -217,6 +224,194 @@ describe("buildWorkflowOverview", () => {
     expect(overview.activeRuns).toHaveLength(1);
     expect(overview.activeRuns[0]!.ownerInstanceId).toBeUndefined();
   });
+
+  it("overrides a falsely interrupted row when the owner's live read says running", async () => {
+    // The journal row was written by upstream's orphan reconciliation while
+    // the run kept executing ("the owning process exited" is the lie); the
+    // owner's live session read is the truth. The session is reported IDLE —
+    // exactly how the observed case looked (a workflow keeps flying while
+    // its parent session sits between turns), so a running-gated trigger
+    // would have missed it.
+    const bridge = await startFakeBridge((kind) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r1", status: "running" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      // Both the global and the project journal read carry the row — same as
+      // the real store (project scope just filters by cwd).
+      return {
+        runs: [
+          {
+            runId: "r1",
+            name: "live",
+            status: "stopped",
+            stopReason: "interrupted",
+            updatedAt: 30,
+            acpSessionId: "sess_a",
+            cwd: "/proj/a",
+          },
+        ],
+      };
+    });
+
+    const overview = await buildWorkflowOverview([
+      inst("A", bridge.port, "/proj/a", 100, [{ sessionId: "sess_a", status: "idle" }]),
+    ]);
+
+    expect(overview.activeRuns.map((r) => r.runId)).toEqual(["r1"]);
+    expect(overview.activeRuns[0]!.status).toBe("running");
+    expect(overview.activeRuns[0]!["stopReason"]).toBeUndefined();
+    expect(overview.activeRuns[0]!.ownerInstanceId).toBe("A");
+    // The project group's badge joins the same truth, not the journal lie.
+    const project = overview.groups.find((g) => g.scope === "project")!;
+    expect(project.lastRuns["live"]!.status).toBe("running");
+    // One probe per (instance, session); its runId-keyed truth feeds both the
+    // global and the project rows.
+    expect(bridge.calls.filter((c) => c.startsWith("/settings/workflow-runs")).length).toBe(1);
+  });
+
+  it("joins the live read by runId even when the row's alias differs per bridge", async () => {
+    // Alias spelling differs per bridge (one bridge's `sess_…` is another's
+    // backend id), so the probe must NOT key off the row's acpSessionId:
+    // it scans the workspace owner's LISTED sessions and joins on runId.
+    const bridge = await startFakeBridge((kind) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r5", status: "running" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      return {
+        runs: [
+          {
+            runId: "r5",
+            name: "live",
+            status: "stopped",
+            stopReason: "interrupted",
+            updatedAt: 30,
+            acpSessionId: "backend-xyz-no-instance-lists-this",
+            cwd: "/proj/a",
+          },
+        ],
+      };
+    });
+
+    const overview = await buildWorkflowOverview([
+      inst("A", bridge.port, "/proj/a", 100, [{ sessionId: "sess_listed", status: "idle" }]),
+    ]);
+
+    expect(overview.activeRuns.map((r) => r.runId)).toEqual(["r5"]);
+    expect(overview.activeRuns[0]!.status).toBe("running");
+    expect(overview.activeRuns[0]!.ownerInstanceId).toBe("A");
+    // The probe used the instance's OWN listed spelling, not the row's.
+    expect(bridge.calls.filter((c) => c === "/settings/workflow-runs?sess_listed").length).toBe(1);
+  });
+
+  it("keeps the live-truth owner when the heuristic would pick another bridge", async () => {
+    // The interrupted row's acpSessionId ("sess_alias") is listed RUNNING by
+    // bridge B, so the session-listing heuristic would route ownership to B —
+    // but the live registry answer comes from A, the actual owner. The live
+    // truth is process evidence and must win (stop/resume address correctness).
+    const owner = await startFakeBridge((kind) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r1", status: "running" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      return {
+        runs: [
+          {
+            runId: "r1",
+            name: "live",
+            status: "stopped",
+            stopReason: "interrupted",
+            updatedAt: 30,
+            acpSessionId: "sess_alias",
+            cwd: "/proj/a",
+          },
+        ],
+      };
+    });
+    const decoy = await startFakeBridge((kind) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r1", status: "stopped" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      return { runs: [] };
+    });
+
+    const overview = await buildWorkflowOverview([
+      inst("A", owner.port, "/proj/a", 200, [{ sessionId: "sess_owner", status: "idle" }]),
+      inst("B", decoy.port, "/proj/a", 100, [{ sessionId: "sess_alias", status: "running" }]),
+    ]);
+
+    expect(overview.activeRuns.map((r) => r.runId)).toEqual(["r1"]);
+    expect(overview.activeRuns[0]!.ownerInstanceId).toBe("A");
+  });
+
+  it("keeps an interrupted row terminal when the live read agrees it is not running", async () => {
+    const bridge = await startFakeBridge((kind, scope) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r2", status: "stopped" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      if (scope === "global") {
+        return {
+          runs: [
+            {
+              runId: "r2",
+              name: "dead",
+              status: "stopped",
+              stopReason: "interrupted",
+              updatedAt: 20,
+              acpSessionId: "sess_b",
+              cwd: "/proj/a",
+            },
+          ],
+        };
+      }
+      return { runs: [] };
+    });
+    const overview = await buildWorkflowOverview([
+      inst("A", bridge.port, "/proj/a", 100, [{ sessionId: "sess_b", status: "running" }]),
+    ]);
+    expect(overview.activeRuns).toEqual([]);
+    const global = overview.groups.find((g) => g.scope === "global")!;
+    expect(global.lastRuns["dead"]!.status).toBe("stopped");
+    // The probe DID happen (the workspace has a listed session) — it agreed.
+    expect(bridge.calls.filter((c) => c === "/settings/workflow-runs?sess_b").length).toBe(1);
+  });
+
+  it("never probes when the row's workspace has no registered bridge", async () => {
+    const bridge = await startFakeBridge((kind, scope) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r3", status: "running" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      if (scope === "global") {
+        return {
+          runs: [
+            // Reconciliation signature, but its workspace has no bridge —
+            // nothing to ask; the terminal verdict stands.
+            {
+              runId: "r3",
+              name: "orphan",
+              status: "stopped",
+              stopReason: "interrupted",
+              updatedAt: 10,
+              acpSessionId: "sess_absent",
+              cwd: "/proj/gone",
+            },
+            // A genuine supersede is terminal history, not a live run.
+            {
+              runId: "r4",
+              name: "old",
+              status: "stopped",
+              stopReason: "superseded",
+              updatedAt: 9,
+              acpSessionId: "sess_c",
+              cwd: "/proj/a",
+            },
+          ],
+        };
+      }
+      return { runs: [] };
+    });
+    const overview = await buildWorkflowOverview([
+      inst("A", bridge.port, "/proj/a", 100, [{ sessionId: "sess_c", status: "running" }]),
+    ]);
+    expect(overview.activeRuns).toEqual([]);
+    const global = overview.groups.find((g) => g.scope === "global")!;
+    expect(global.lastRuns["orphan"]!.status).toBe("stopped");
+    expect(global.lastRuns["old"]!.status).toBe("stopped");
+    // /proj/gone has no instance and the superseded row is not suspicious.
+    expect(bridge.calls.filter((c) => c.startsWith("/settings/workflow-runs"))).toEqual([]);
+  });
 });
 
 describe("hub /api/workflow-overview", () => {
@@ -269,5 +464,60 @@ describe("hub /api/workflow-overview", () => {
 
     const denied = await fetch(`http://127.0.0.1:${hub.port}/api/workflow-overview`);
     expect(denied.status).toBe(401);
+  });
+
+  it("serves a falsely-interrupted run as active through the hub route", async () => {
+    // End-to-end shape of the 2026-10-02 report: the journal's global read
+    // carries a stopped(interrupted) row while the registered bridge's live
+    // session read reports the same runId as running. The route must serve
+    // the LIVE verdict (idle session included).
+    const bridge = await startFakeBridge((kind) => {
+      if (kind === "sessionRuns") return { runs: [{ runId: "r7", status: "running" }] };
+      if (kind === "list") return { workflows: [], invalid: [] };
+      return {
+        runs: [
+          {
+            runId: "r7",
+            name: "real",
+            status: "stopped",
+            stopReason: "interrupted",
+            updatedAt: 50,
+            acpSessionId: "sess_live",
+            cwd: "/proj/a",
+          },
+        ],
+      };
+    });
+    const hub: HubHandle = track(
+      await startHub({ port: 0, host: "127.0.0.1", token: TOKEN }),
+      (h) => h.close(),
+    );
+    await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        token: TOKEN,
+        id: "live",
+        port: bridge.port,
+        pid: 1,
+        workspace: "/proj/a",
+        startedAt: 1,
+        sessions: [{ sessionId: "sess_live", status: "idle", updatedAt: 1 }],
+      }),
+    });
+
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/workflow-overview`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      activeRuns: Array<{ runId?: string; status?: string; ownerInstanceId?: string }>;
+      groups: Array<{ scope: string; lastRuns: Record<string, { status?: string }> }>;
+    };
+    expect(body.activeRuns.map((r) => r.runId)).toEqual(["r7"]);
+    expect(body.activeRuns[0]!.status).toBe("running");
+    expect(body.activeRuns[0]!.ownerInstanceId).toBe("live");
+    const global = body.groups.find((g) => g.scope === "global")!;
+    expect(global.lastRuns["real"]!.status).toBe("running");
   });
 });

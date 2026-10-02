@@ -235,9 +235,16 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     session-mapper.ts does the same server-side: "setModel 后 runtime 可能短暂
     保留上一个模型的 thoughtLevel") — without the clamp the CLI keeps showing
     and re-sending the previous model's level. And a REBUILT dist does NOT
-    restart RUNNING bridges — CLI windows and the hub keep serving the old code
-    until restarted (the post-0.48.1 "deleted model still listed" report was
-    stale processes, not a fix regression). `workspace/updateProviderRegistry` is
+    restart RUNNING bridges — CLI windows keep serving the old code until
+    closed (the post-0.48.1 "deleted model still listed" report was stale
+    processes, not a fix regression). The HUB is the exception:
+    `pnpm build`'s last step (and the npm `postinstall`) pokes
+    `POST /api/upgrade` (hub-upgrade-notify.ts) and the hub restarts itself
+    onto the fresh dist when its frozen fingerprint / version / dist mtimes
+    say the disk is newer (`restartSoon` → `respawnSelf`); verified live
+    2026-10-01 — the 0.60.0 rebuild auto-updated the running hub with no
+    manual restart. A newly started bridge on the newer build votes a stale
+    hub out the same way via the register reply. `workspace/updateProviderRegistry` is
     GONE in 3.12+ (method-not-found) — the bridge logs it as a no-op, not a
     failure. Also note `session.model_selection.persist_failed` ("FOREIGN KEY
     constraint failed") — ROOT CAUSE found in source (2026-09-21): the
@@ -388,6 +395,37 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   REAL window's process tree from a test (observed live 2026-09-08 — the run
   killed its own host window). Keep new tests store-safe by default and don't
   bypass the setup file.
+- **DWF journal rows can LIE about a living run — the hub corrects them
+  server-side; never trust `dwf_run.status` for liveness** (source + live
+  2026-10-02): upstream's orphan reconciliation (`reconcileOrphanRuns`,
+  bootstrap.app, runs at EVERY app construction) assumes "no in-flight run in
+  MY process registry ⇒ every non-terminal row of this session is a dead
+  process's leftover" and writes `stopped(interrupted)` onto runs still
+  executing in ANOTHER process — observed live: a second process constructed
+  the ai-hot-app session (11:44) and marked a run interrupted that kept
+  dispatching sub-agents until it truly completed 2.5h later; the row never
+  flips back mid-run, so every journal read (v3 `workflows/runs`, global
+  scope included) reports "stopped" for the whole flight — the reported "有
+  运行中工作流但活动列表为空". The TRUSTWORTHY live read is the session-scoped
+  v4 registry overlay (`/settings/workflow-runs?sessionId=` →
+  `v4/conversation/workflowRuns` → `listRunsForSession`, upstream comment:
+  "否则这一面会独自显示一个被外来写入标死的 run" — its live registry beats the
+  foreign journal write). `buildWorkflowOverview` (workflow-overview.ts)
+  therefore probes rows carrying `stopReason:"interrupted"` against the owner
+  WORKSPACE's bridges and joins by `runId`, overriding the false verdict (and
+  setting `ownerInstanceId` from the answering instance — the live-truth
+  owner wins over the session-listing heuristic, which can pick a sibling
+  bridge that merely lists the same alias); keep every NEW liveness consumer
+  on the same read, not the journal. Two traps that shaped
+  the probe: (a) the parent session reads IDLE while its workflow flies — a
+  "running sessions only" trigger misses exactly the reported case; (b) the
+  row's `acpSessionId` spelling differs per bridge (editor alias vs backend
+  id) — probe each instance with ITS OWN listed session ids, never the row's.
+  App side: the page polls every 5s unconditionally while open (a
+  falsely-terminal row would keep a "looks live" gate off forever). Also:
+  the engine's own settle (run-settled event) OVERWRITES the interrupted
+  verdict when the run truly finishes — a row that later reads completed does
+  not mean the correction was unnecessary during the flight.
 - **A store-recovered alias is NOT resident; "Session not found" ≠ "Session is
   not active" (same -32004!)**: after a bridge restart, `ensureRealSession`'s
   durable-store branch runs the SAME eviction guard as in-memory mappings
