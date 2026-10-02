@@ -24,6 +24,13 @@ pnpm build        # tsc -> dist/
 pnpm dev          # tsc --watch (hot reload)
 ```
 
+`pnpm build` ends by poking a RUNNING local hub (`hub-upgrade-notify` →
+`POST /api/upgrade`): the hub compares its frozen fingerprint / version / dist
+mtimes against the disk and restarts itself onto the fresh build when it
+judges the disk newer — no manual hub restart after a rebuild. Long-lived
+bridge processes (editor hosts, TUI windows) still keep the old code until
+closed.
+
 ### Test
 
 ```bash

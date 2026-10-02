@@ -16,6 +16,13 @@ const compactMock = vi.fn();
 const sendTextChunk = vi.fn();
 const reloadBackendSession = vi.fn();
 
+// Quota wait tests script the card; every other test keeps it unavailable.
+const quotaMock = vi.hoisted(() => ({ query: vi.fn() }));
+vi.mock("../src/quota/index.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/quota/index.js")>();
+  return { ...actual, queryQuota: (...args: unknown[]) => quotaMock.query(...args) };
+});
+
 vi.mock("../src/handlers/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/handlers/session.js")>();
   // Keep cancel() and preemptInFlightTurn REAL (exercised by the pre-empt and
@@ -139,12 +146,17 @@ beforeEach(() => {
   sendTextChunk.mockImplementation(async () => undefined);
   compactMock.mockImplementation(async () => ({}));
   reloadBackendSession.mockImplementation(async () => undefined);
+  quotaMock.query.mockImplementation(async () => ({ kind: "unavailable" }));
   fetchMessagesState.length = 0;
   pendingReplies.length = 0;
   readProjection = { contextUsed: 1000, contextWindow: 100_000 };
   root = mkdtempSync(path.join(tmpdir(), "goal-loop-test-"));
   delete process.env.ZCODE_ACP_GOAL_MAX_TURNS;
   delete process.env.ZCODE_ACP_AUTO_COMPACT_THRESHOLD;
+  delete process.env.ZCODE_ACP_QUOTA_AUTO_RESUME;
+  // Shrink the quota wait knobs for tests (internal env-only overrides).
+  process.env.ZCODE_ACP_QUOTA_RESET_MARGIN_MS = "1";
+  process.env.ZCODE_ACP_QUOTA_WAIT_CHUNK_MS = "10";
 });
 
 async function startLoop(server: unknown, objective = "build it") {
@@ -673,6 +685,123 @@ describe("goal-loop driver", () => {
     process.env.ZCODE_ACP_GOAL_MAX_TURNS = "7";
     expect(goalMaxTurns()).toBe(7);
   });
+});
+
+describe("goal-loop quota wait (cap exhaustion is waited out, never a pause)", () => {
+  /** A quota turn failure in the shape prompt() produces (RequestError data). */
+  const quotaFailure = (extra: Record<string, unknown> = {}) =>
+    new RequestError(-32603, "ZCode turn failed: rate limited", {
+      type: "zcode_turn_failed",
+      reason: "rate_limited",
+      providerCode: "1308",
+      retryable: false,
+      ...extra,
+    });
+
+  it("waits for the provider reset, re-enters the rounds, and completes", async () => {
+    const server = makeServer(root);
+    // Round 1 (decompose) dies on the usage cap with a Retry-After.
+    runOneTurn.mockImplementationOnce(async () => {
+      throw quotaFailure({ retryAfterMs: 20 });
+    });
+    scriptRound("```\n- t | x\n```"); // decompose after the wait
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    expect(driver["state"].status).toBe("complete");
+    // decompose (failed) + decompose + dispatch + verify
+    expect(runOneTurn).toHaveBeenCalledTimes(4);
+    const notices = sendTextChunk.mock.calls.map((c) => String(c[2] ?? ""));
+    expect(notices.some((t) => t.includes("usage cap reached"))).toBe(true);
+    expect(notices.some((t) => t.includes("quota recovered"))).toBe(true);
+    // No state was persisted as ended — the loop never paused.
+    expect(readGoalState(root, "zsid-1")?.status).not.toBe("paused-crash");
+  }, 15_000);
+
+  it("derives the reset from the quota card when the provider gives no Retry-After", async () => {
+    const server = makeServer(root);
+    runOneTurn.mockImplementationOnce(async () => {
+      throw quotaFailure();
+    });
+    quotaMock.query.mockImplementation(async () => ({
+      kind: "success",
+      level: "pro",
+      items: [
+        {
+          key: "token_5h",
+          label: "5h",
+          usedPercent: 100,
+          leftPercent: 0,
+          nextResetTime: Date.now() + 30,
+        },
+      ],
+    }));
+    scriptRound("```\n- t | x\n```");
+    scriptRound("done\nVERDICT: met");
+    scriptRound("PASS");
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+
+    expect(driver["state"].status).toBe("complete");
+    expect(quotaMock.query).toHaveBeenCalled();
+  }, 15_000);
+
+  it("pause during the wait settles as paused (flags checked inside the sleep)", async () => {
+    const server = makeServer(root);
+    runOneTurn.mockImplementationOnce(async () => {
+      throw quotaFailure();
+    });
+    // No provider reset and no card reset → the backoff fallback (5 min,
+    // chunked): the pause flag must break it within a chunk.
+    const driver = await startLoop(server);
+    await vi.waitFor(() => {
+      const notices = sendTextChunk.mock.calls.map((c) => String(c[2] ?? ""));
+      if (!notices.some((t) => t.includes("usage cap reached"))) {
+        throw new Error("quota wait not started");
+      }
+    });
+    driver.pause();
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused");
+    expect(driver["state"].endedReason).toBe("cancelled at quota wait");
+  }, 15_000);
+
+  it("autoResume=false keeps the old paused-crash behavior", async () => {
+    process.env.ZCODE_ACP_QUOTA_AUTO_RESUME = "0";
+    const server = makeServer(root);
+    scriptRound("```\n- t | x\n```");
+    runOneTurn.mockImplementationOnce(async () => {
+      throw quotaFailure({ retryAfterMs: 10 });
+    });
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused-crash");
+  }, 15_000);
+
+  it("a non-quota terminal failure still pauses (classification is narrow)", async () => {
+    const server = makeServer(root);
+    runOneTurn.mockImplementationOnce(async () => {
+      throw new RequestError(-32603, "ZCode turn failed: sign-in expired", {
+        type: "zcode_turn_failed",
+        reason: "auth_failed",
+        retryable: false,
+      });
+    });
+
+    const driver = await startLoop(server);
+    await waitSettled(driver);
+    expect(driver["state"].status).toBe("paused-crash");
+    expect(
+      sendTextChunk.mock.calls
+        .map((c) => String(c[2] ?? ""))
+        .some((t) => t.includes("usage cap reached")),
+    ).toBe(false);
+  }, 15_000);
 });
 
 describe("verification verdict via file (regression: verbose replies looped forever)", () => {

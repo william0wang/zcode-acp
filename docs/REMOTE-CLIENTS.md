@@ -858,11 +858,16 @@ POST {hub}/api/upgrade   → 200 { "ok": true, "restarting": false, "reason": "u
 ```
 
 Lets a remote client pick up a hub that was rebuilt on the machine (e.g. code
-edited and `pnpm build` run through a remote agent session). The client only
-**triggers** the check — the restart decision is entirely the hub's own. The
-hub restarts onto the on-disk code only when it judges that code NEWER than
-itself, by either signal:
+edited and `pnpm build` run through a remote agent session). A local rebuild
+needs no manual call — `pnpm build`'s last step runs `hub-upgrade-notify`,
+which POSTs here with the configured token (the npm `postinstall` does the
+same for package consumers), so a rebuilt dist is picked up automatically.
+The client only **triggers** the check — the restart decision is entirely the
+hub's own. The hub restarts onto the on-disk code only when it judges that
+code NEWER than itself, by any of these signals:
 
+- the on-disk dist's content fingerprint differs from the one frozen into the
+  running process at start (the primary, release-independent signal), **or**
 - the on-disk `package.json` version is newer than the version frozen into
   the running process at start, **or**
 - any `.js` under `dist/` has an mtime later than process start (a rebuild,
@@ -876,6 +881,36 @@ mtime, so the condition self-negates — no restart loops, and an OLDER on-disk
 version never triggers anything.
 
 Errors: `401` bad token. `GET` (or any other method) falls through to `404`.
+
+## Workflow overview (machine-level)
+
+```text
+GET {hub}/api/workflow-overview   → 200 { ok: true, groups: [...], activeRuns: [...] }
+```
+
+The management page's single read (bridge 0.60.0+, served by the HUB, not
+proxied per instance): the hub aggregates every registered bridge into one
+GROUP per workspace (editor + serve bridges of one project render once,
+freshest-started bridge preferred, siblings as fallback) plus `activeRuns` —
+the machine-wide `pending`/`running` journal window, each row annotated with
+`ownerInstanceId` (the instance currently listing the row's session, so
+stop/detail address correctly from a client attached elsewhere). Per-read
+budget 8s, per-group best-effort: one dead bridge degrades only its own
+workspace to an `error` group.
+
+**Live correction for falsely-interrupted rows**: the dwf journal is shared
+by every backend process, and upstream's orphan reconciliation can write
+`stopped(interrupted)` onto a run that is still executing in ANOTHER process
+(it never flips back mid-run). For every served row carrying
+`stopReason: "interrupted"`, the hub probes the owner workspace's bridges'
+session-scoped live read (`/settings/workflow-runs?sessionId=`, joining by
+`runId`) and overrides the row with the live verdict — the SAME read
+covers stop/resume addressing. Note the parent session reads `idle` while its
+workflow flies, so "is the session running" is never a liveness test for a
+run; the runId join is. Server-internal module:
+`src/remote/workflow-overview.ts`.
+
+Errors: `401` bad token.
 
 ## Session files (read-only)
 

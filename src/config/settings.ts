@@ -33,6 +33,20 @@ export function goalModeIsBackend(env: NodeJS.ProcessEnv = process.env): boolean
   return env.ZCODE_ACP_GOAL_MODE === "backend";
 }
 
+/**
+ * Quota auto-resume (workflow runs + /auto goal loops), default ON. The user
+ * asked for the wait-and-continue behavior to survive app sleep — the bridge
+ * owns the backend process, so it performs the wait. `0`/`false` restores the
+ * old pause-for-a-human behavior.
+ */
+export function quotaAutoResumeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = loadUserConfig(env).quota?.autoResume;
+  if (file !== undefined) return file;
+  const raw = env.ZCODE_ACP_QUOTA_AUTO_RESUME;
+  if (raw === undefined || raw.trim() === "") return true;
+  return !/^(0|false|off|no)$/i.test(raw.trim());
+}
+
 /** Mode a newly created session starts in (default "yolo"). */
 export function initialSessionMode(env: NodeJS.ProcessEnv = process.env): string {
   const file = loadUserConfig(env).session?.mode;

@@ -235,9 +235,16 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     session-mapper.ts does the same server-side: "setModel 后 runtime 可能短暂
     保留上一个模型的 thoughtLevel") — without the clamp the CLI keeps showing
     and re-sending the previous model's level. And a REBUILT dist does NOT
-    restart RUNNING bridges — CLI windows and the hub keep serving the old code
-    until restarted (the post-0.48.1 "deleted model still listed" report was
-    stale processes, not a fix regression). `workspace/updateProviderRegistry` is
+    restart RUNNING bridges — CLI windows keep serving the old code until
+    closed (the post-0.48.1 "deleted model still listed" report was stale
+    processes, not a fix regression). The HUB is the exception:
+    `pnpm build`'s last step (and the npm `postinstall`) pokes
+    `POST /api/upgrade` (hub-upgrade-notify.ts) and the hub restarts itself
+    onto the fresh dist when its frozen fingerprint / version / dist mtimes
+    say the disk is newer (`restartSoon` → `respawnSelf`); verified live
+    2026-10-01 — the 0.60.0 rebuild auto-updated the running hub with no
+    manual restart. A newly started bridge on the newer build votes a stale
+    hub out the same way via the register reply. `workspace/updateProviderRegistry` is
     GONE in 3.12+ (method-not-found) — the bridge logs it as a no-op, not a
     failure. Also note `session.model_selection.persist_failed` ("FOREIGN KEY
     constraint failed") — ROOT CAUSE found in source (2026-09-21): the
@@ -388,6 +395,84 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   REAL window's process tree from a test (observed live 2026-09-08 — the run
   killed its own host window). Keep new tests store-safe by default and don't
   bypass the setup file.
+- **DWF journal rows can LIE about a living run — the hub corrects them
+  server-side; never trust `dwf_run.status` for liveness** (source + live
+  2026-10-02): upstream's orphan reconciliation (`reconcileOrphanRuns`,
+  bootstrap.app, runs at EVERY app construction) assumes "no in-flight run in
+  MY process registry ⇒ every non-terminal row of this session is a dead
+  process's leftover" and writes `stopped(interrupted)` onto runs still
+  executing in ANOTHER process — observed live: a second process constructed
+  the ai-hot-app session (11:44) and marked a run interrupted that kept
+  dispatching sub-agents until it truly completed 2.5h later; the row never
+  flips back mid-run, so every journal read (v3 `workflows/runs`, global
+  scope included) reports "stopped" for the whole flight — the reported "有
+  运行中工作流但活动列表为空". The TRUSTWORTHY live read is the session-scoped
+  v4 registry overlay (`/settings/workflow-runs?sessionId=` →
+  `v4/conversation/workflowRuns` → `listRunsForSession`, upstream comment:
+  "否则这一面会独自显示一个被外来写入标死的 run" — its live registry beats the
+  foreign journal write). `buildWorkflowOverview` (workflow-overview.ts)
+  therefore probes rows carrying `stopReason:"interrupted"` against the owner
+  WORKSPACE's bridges and joins by `runId`, overriding the false verdict (and
+  setting `ownerInstanceId` from the answering instance — the live-truth
+  owner wins over the session-listing heuristic, which can pick a sibling
+  bridge that merely lists the same alias); keep every NEW liveness consumer
+  on the same read, not the journal. Two traps that shaped
+  the probe: (a) the parent session reads IDLE while its workflow flies — a
+  "running sessions only" trigger misses exactly the reported case; (b) the
+  row's `acpSessionId` spelling differs per bridge (editor alias vs backend
+  id) — probe each instance with ITS OWN listed session ids, never the row's.
+  App side: the page polls every 5s unconditionally while open (a
+  falsely-terminal row would keep a "looks live" gate off forever). Also:
+  the engine's own settle (run-settled event) OVERWRITES the interrupted
+  verdict when the run truly finishes — a row that later reads completed does
+  not mean the correction was unnecessary during the flight.
+- **Quota exhaustion (1308 family) is WAITED OUT bridge-side — no component
+  upstream ever schedules the "after the reset" continuation** (2026-10-02,
+  source-verified): both the workflow policy (`workflow-model-failure-policy.ts`
+  WORKFLOW_QUOTA_PROVIDER_CODES → `stopRun` → `stopped(provider)` +
+  `ProviderStopDetails{kind:"quota", resetAt?}`, notification text "after the
+  reset, call ResumeWorkflowRun") and the /auto loop (turn failure 1308) stop
+  and expect a HUMAN/MODEL to act later — with the app asleep nothing does, and
+  that was the reported "配额恢复后不自动继续". The bridge owns the waiting now
+  (`quota.autoResume`, default on, `ZCODE_ACP_QUOTA_AUTO_RESUME=0` opts out):
+  (a) `/auto` driver — on a classified quota failure it pauses the round loop
+  WITHOUT ending it, waits for the reset (provider `resetAt` ← Retry-After, else
+  the fresh quota card's earliest future `nextResetTime` at ≥98% used, else an
+  exponential backoff ladder), then re-enters `runRounds`; ESC//auto pause//auto
+  stop take effect within a 30s sleep chunk, and the recovery count is bounded
+  (6) so a truly stuck provider still ends in a pause. (b) Workflow watchdog —
+  `src/workflow/quota-resume.ts` scans `workflows/runs` (one session-less RPC,
+  live backend only, NEVER spawns) for `stopped(provider)` rows, reads each
+  parent session's `v4/conversation/workflowRuns` summaries (the failure MESSAGE
+  with the `[1308]` bracket is the only quota signal that travels — the summary
+  carries no structured providerStop), and schedules a persisted resume in
+  `~/.zcode/v2/acp-quota-resumes.json` (shared store, temp+rename merge-at-write
+  like the dismissals store). `fire()` re-checks everything at due time — the
+  quota card first (a future reset defers WITHOUT burning an attempt), then the
+  live run state (running again / completed / not resumable → drop), then sends
+  the same `resumeWorkflowRun` command the App's Resume button uses; an accepted
+  resume is re-verified after 10min (stopped again → attempt + backoff); ≥6
+  attempts announces "resume manually" and drops. The serve bridge's idle-exit
+  is EXEMPT while one of its project's resumes is pending (`hasQuotaResumePendingForCwd`)
+  or a live /auto loop exists (`server.goalLoops.size` — its quota wait
+  registers no turn either) — exiting would kill the only actor able to
+  continue while the app is asleep. `workflow_disabled` retires only for a
+  REAL verdict: the fail-closed gate fetch rejection (`gate mode=unknown …`)
+  backs off and retries instead of retiring the entry machine-wide off one
+  network blip. Cross-process single-flight: the side-effecting tail of a fire
+  runs only under a lock-protected `firing:{pid}` claim on the store entry
+  (`claimFire` via the shared settings file lock) — and ALL store mutations
+  (schedule merge / reschedule / retire) serialize on that same lock, because
+  an unlocked whole-table write could erase a sibling's live claim; a claim
+  whose write does not persist is NOT granted (fail closed). So two bridges of
+  one workspace (editor + serve) can never resume the same run twice — a
+  money-level double execution; a retired (`gaveUp`) entry is never
+  re-scheduled by a later scan of the same journal row, and an overdue
+  abandoned entry is pruned only past the TTL while a future-dated wait (a
+  weekly window's reset) survives it. Classification lives in `src/quota/resume.ts`: structured
+  `providerStop.kind` is authoritative, code sets are read by SHAPE
+  (RequestError.data / turn.failed cause / WorkflowErrorJson), and the message
+  fallback is deliberately narrow (non-retryable + rate_limited + quota wording).
 - **A store-recovered alias is NOT resident; "Session not found" ≠ "Session is
   not active" (same -32004!)**: after a bridge restart, `ensureRealSession`'s
   durable-store branch runs the SAME eviction guard as in-memory mappings

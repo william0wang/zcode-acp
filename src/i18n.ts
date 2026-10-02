@@ -169,6 +169,12 @@ export interface Messages {
   /** Goal-loop recovery hints on session/load (ADR-0022 §6). */
   goalHintInterrupted: (objective: string) => string;
   goalHintPaused: string;
+  /** Quota wait-and-continue (5h/weekly usage cap). */
+  goalQuotaWait: (until?: string) => string;
+  goalQuotaResumed: string;
+  /** Workflow-run quota auto-resume notices (bridge-side watchdog). */
+  workflowQuotaResumed: (label: string) => string;
+  workflowQuotaResumeGaveUp: (label: string) => string;
   slashForked: (sessionId: string) => string;
   slashModelSet: (value: string) => string;
   slashTuiOnly: (cmd: string) => string;
@@ -324,6 +330,12 @@ const zh: Messages = {
   goalReport: (r, max, t, done) => `[goal ${r}/${max}] ${done ? "✅ 已完成" : "进行中"}：${t}`,
   goalHintInterrupted: (o) => `⏸ goal loop（${o}）上次因桥接进程重启而中断 —— /auto resume 可继续`,
   goalHintPaused: "⏸ goal loop 处于暂停状态 —— /auto resume 可继续",
+  goalQuotaWait: (until) =>
+    `⏳ 配额已用尽${until ? `（预计 ${until} 重置）` : ""}——auto 任务挂起等待，恢复后自动继续；/auto stop 可取消`,
+  goalQuotaResumed: "▶️ 配额已恢复，auto 任务自动继续…",
+  workflowQuotaResumed: (label) => `▶️ 配额已恢复，工作流 ${label} 已自动续跑`,
+  workflowQuotaResumeGaveUp: (label) =>
+    `⚠️ 工作流 ${label} 多次自动续跑失败（配额仍未恢复）——请稍后手动恢复`,
   slashForked: (id) => `✓ 已分叉新会话：${id}`,
   slashModelSet: (v) => `✓ 模型 = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} 在 ACP 模式下不可用（需要 ZCode TUI）`,
@@ -477,6 +489,12 @@ const en: Messages = {
   goalHintInterrupted: (o) =>
     `⏸ goal loop (${o}) was interrupted by a bridge restart — /auto resume to continue`,
   goalHintPaused: "⏸ goal loop is paused — /auto resume to continue",
+  goalQuotaWait: (until) =>
+    `⏳ usage cap reached${until ? ` (resets ~${until})` : ""} — the auto loop is waiting and will continue after the reset; /auto stop to cancel`,
+  goalQuotaResumed: "▶️ quota recovered — auto loop continuing",
+  workflowQuotaResumed: (label) => `▶️ quota recovered — workflow ${label} resumed automatically`,
+  workflowQuotaResumeGaveUp: (label) =>
+    `⚠️ workflow ${label} gave up auto-resuming (quota still exhausted) — resume it manually later`,
   slashForked: (id) => `✓ forked new session: ${id}`,
   slashModelSet: (v) => `✓ model = ${v}`,
   slashTuiOnly: (cmd) => `⚠ /${cmd} is not available in ACP mode (requires ZCode TUI)`,
