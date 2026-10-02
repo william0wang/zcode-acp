@@ -426,6 +426,53 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   the engine's own settle (run-settled event) OVERWRITES the interrupted
   verdict when the run truly finishes — a row that later reads completed does
   not mean the correction was unnecessary during the flight.
+- **Quota exhaustion (1308 family) is WAITED OUT bridge-side — no component
+  upstream ever schedules the "after the reset" continuation** (2026-10-02,
+  source-verified): both the workflow policy (`workflow-model-failure-policy.ts`
+  WORKFLOW_QUOTA_PROVIDER_CODES → `stopRun` → `stopped(provider)` +
+  `ProviderStopDetails{kind:"quota", resetAt?}`, notification text "after the
+  reset, call ResumeWorkflowRun") and the /auto loop (turn failure 1308) stop
+  and expect a HUMAN/MODEL to act later — with the app asleep nothing does, and
+  that was the reported "配额恢复后不自动继续". The bridge owns the waiting now
+  (`quota.autoResume`, default on, `ZCODE_ACP_QUOTA_AUTO_RESUME=0` opts out):
+  (a) `/auto` driver — on a classified quota failure it pauses the round loop
+  WITHOUT ending it, waits for the reset (provider `resetAt` ← Retry-After, else
+  the fresh quota card's earliest future `nextResetTime` at ≥98% used, else an
+  exponential backoff ladder), then re-enters `runRounds`; ESC//auto pause//auto
+  stop take effect within a 30s sleep chunk, and the recovery count is bounded
+  (6) so a truly stuck provider still ends in a pause. (b) Workflow watchdog —
+  `src/workflow/quota-resume.ts` scans `workflows/runs` (one session-less RPC,
+  live backend only, NEVER spawns) for `stopped(provider)` rows, reads each
+  parent session's `v4/conversation/workflowRuns` summaries (the failure MESSAGE
+  with the `[1308]` bracket is the only quota signal that travels — the summary
+  carries no structured providerStop), and schedules a persisted resume in
+  `~/.zcode/v2/acp-quota-resumes.json` (shared store, temp+rename merge-at-write
+  like the dismissals store). `fire()` re-checks everything at due time — the
+  quota card first (a future reset defers WITHOUT burning an attempt), then the
+  live run state (running again / completed / not resumable → drop), then sends
+  the same `resumeWorkflowRun` command the App's Resume button uses; an accepted
+  resume is re-verified after 10min (stopped again → attempt + backoff); ≥6
+  attempts announces "resume manually" and drops. The serve bridge's idle-exit
+  is EXEMPT while one of its project's resumes is pending (`hasQuotaResumePendingForCwd`)
+  or a live /auto loop exists (`server.goalLoops.size` — its quota wait
+  registers no turn either) — exiting would kill the only actor able to
+  continue while the app is asleep. `workflow_disabled` retires only for a
+  REAL verdict: the fail-closed gate fetch rejection (`gate mode=unknown …`)
+  backs off and retries instead of retiring the entry machine-wide off one
+  network blip. Cross-process single-flight: the side-effecting tail of a fire
+  runs only under a lock-protected `firing:{pid}` claim on the store entry
+  (`claimFire` via the shared settings file lock) — and ALL store mutations
+  (schedule merge / reschedule / retire) serialize on that same lock, because
+  an unlocked whole-table write could erase a sibling's live claim; a claim
+  whose write does not persist is NOT granted (fail closed). So two bridges of
+  one workspace (editor + serve) can never resume the same run twice — a
+  money-level double execution; a retired (`gaveUp`) entry is never
+  re-scheduled by a later scan of the same journal row, and an overdue
+  abandoned entry is pruned only past the TTL while a future-dated wait (a
+  weekly window's reset) survives it. Classification lives in `src/quota/resume.ts`: structured
+  `providerStop.kind` is authoritative, code sets are read by SHAPE
+  (RequestError.data / turn.failed cause / WorkflowErrorJson), and the message
+  fallback is deliberately narrow (non-retryable + rate_limited + quota wording).
 - **A store-recovered alias is NOT resident; "Session not found" ≠ "Session is
   not active" (same -32004!)**: after a bridge restart, `ensureRealSession`'s
   durable-store branch runs the SAME eviction guard as in-memory mappings

@@ -50,6 +50,7 @@ import { reexecToBunIfEligible } from "./runtime.js";
 import { messages } from "./i18n.js";
 import { ZcodeAcpServer } from "./server.js";
 import { AGENT_INFO, SLASH_COMMANDS, log, warn } from "./utils.js";
+import { armQuotaResumeWatchdog, hasQuotaResumePendingForCwd } from "./workflow/quota-resume.js";
 
 /**
  * Build the full slash-command list: static bridge commands + dynamic plugin
@@ -135,6 +136,11 @@ export async function main(): Promise<void> {
   backendDeathInterval.unref();
 
   const app = buildAgentApp(server, allCommands);
+
+  // Quota auto-resume watchdog: waits out usage caps and continues quota-
+  // stopped workflow runs. Scans only on an already-live backend, never
+  // spawns one; alive for the process lifetime.
+  armQuotaResumeWatchdog(server);
 
   // Register broadcast tracking BEFORE connect so the stdio connection is
   // captured, then wire the stdio transport. The same app is later shared
@@ -359,6 +365,9 @@ export async function runHeadless(): Promise<void> {
   // to come from — idle exit below is this mode's shutdown path.
 
   const app = buildAgentApp(server, allCommands);
+  // Quota auto-resume watchdog (see main) — a serve bridge hosts remote
+  // sessions the app started; it must not depend on the app being awake.
+  armQuotaResumeWatchdog(server);
   // Track connections BEFORE the endpoint accepts any WS client so every
   // remote connection lands in the broadcast registry from its first message.
   trackConnections(app, server.clients);
@@ -373,8 +382,24 @@ export async function runHeadless(): Promise<void> {
   // and heartbeat timers are all unref'd (ADR-0001), so without this interval
   // the process would exit immediately. Deliberately NOT unref'd.
   let lastBusy = Date.now();
+  const cwd = server.projectCwd();
   const idleCheck = setInterval(() => {
-    if (server.clients.size > 0 || server.pendingTurns.size > 0) {
+    // A live /auto loop counts as busy even between rounds: a quota wait
+    // sleeps for the window reset while registering neither a client nor a
+    // turn — exiting here would kill the wait the bridge exists to serve
+    // (same rationale as the pending quota resume below).
+    if (
+      server.clients.size > 0 ||
+      server.pendingTurns.size > 0 ||
+      (server.goalLoops?.size ?? 0) > 0
+    ) {
+      lastBusy = Date.now();
+      return;
+    }
+    // A pending quota auto-resume keeps the backend (and this wait) alive:
+    // exiting now would lose the only actor able to continue the run while
+    // the app is asleep — the case the watchdog exists for.
+    if (hasQuotaResumePendingForCwd(cwd)) {
       lastBusy = Date.now();
       return;
     }

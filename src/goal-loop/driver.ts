@@ -29,10 +29,22 @@ import {
 import { sendTextChunk } from "../handlers/io.js";
 import { messages } from "../i18n.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
+import { queryQuota } from "../quota/index.js";
+import {
+  classifyQuotaExhaustion,
+  type QuotaExhaustionInfo,
+  quotaBackoffMs,
+  quotaResetAtFromResult,
+} from "../quota/resume.js";
+import type { QuotaResult } from "../quota/types.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { log, warn } from "../utils.js";
 import { waitForAutoCompactIdle } from "../config/auto-compact.js";
-import { autoCompactThreshold, goalMaxTurns as settingsGoalMaxTurns } from "../config/settings.js";
+import {
+  autoCompactThreshold,
+  goalMaxTurns as settingsGoalMaxTurns,
+  quotaAutoResumeEnabled,
+} from "../config/settings.js";
 import {
   clearGoalState,
   type GoalLoopState,
@@ -72,6 +84,23 @@ const KEEPALIVE_INTERVAL_MS = 60_000;
 /** How long a start waits for in-flight editor turns before pre-empting them. */
 const EDITOR_TURN_WAIT_MS = 10_000;
 
+/** Clock slack added after a window reset before re-entering the rounds. */
+const QUOTA_RESET_MARGIN_MS = 60_000;
+/** First fallback delay when no reset moment is known (doubles per attempt, capped). */
+const QUOTA_WAIT_BASE_MS = 5 * 60_000;
+/** Max single sleep between pause/stop flag checks during a quota wait. */
+const QUOTA_WAIT_CHUNK_MS = 30_000;
+
+/** Internal test knobs (env-only, undocumented): shrink the quota wait in CI. */
+function quotaResetMarginMs(): number {
+  const n = Number(process.env.ZCODE_ACP_QUOTA_RESET_MARGIN_MS ?? "");
+  return Number.isFinite(n) && n > 0 ? n : QUOTA_RESET_MARGIN_MS;
+}
+function quotaWaitChunkMs(): number {
+  const n = Number(process.env.ZCODE_ACP_QUOTA_WAIT_CHUNK_MS ?? "");
+  return Number.isFinite(n) && n > 0 ? n : QUOTA_WAIT_CHUNK_MS;
+}
+
 interface ParkedPrompt {
   id: number;
   text: string;
@@ -103,6 +132,14 @@ export class GoalLoopDriver {
    */
   private backendRecoveries = 0;
   private static readonly MAX_BACKEND_RECOVERIES = 3;
+  /**
+   * Quota wait-and-continue cycles (the usage cap exhausted — wait for its
+   * reset, then re-enter the round machinery). A real reset is served each
+   * time, so a handful of cycles covers a multi-window burn; past the cap the
+   * loop pauses for a human instead of waiting forever.
+   */
+  private quotaRecoveries = 0;
+  private static readonly MAX_QUOTA_RECOVERIES = 6;
 
   private constructor(
     server: ZcodeAcpServer,
@@ -538,6 +575,24 @@ export class GoalLoopDriver {
           await this.announce(messages().goalBackendRecovered);
           continue;
         }
+        // Quota exhaustion (5h/weekly cap): a deterministic stop that heals
+        // on its own at the window reset. Nothing upstream schedules that
+        // "after" — the bridge waits it out and re-enters the round
+        // machinery, so an unattended /auto run survives the cap without a
+        // human or the app being awake. Bounded per loop; the reset moment is
+        // derived from the provider (<- Retry-After) or the quota card.
+        const quota = classifyQuotaExhaustion(e);
+        if (
+          quota &&
+          quotaAutoResumeEnabled() &&
+          this.runId === myRun &&
+          this.quotaRecoveries < GoalLoopDriver.MAX_QUOTA_RECOVERIES
+        ) {
+          const outcome = await this.waitOutQuota(myRun, quota);
+          if (outcome !== "continue") return;
+          this.quotaRecoveries++;
+          continue;
+        }
         warn(`goal-loop: round machinery failed — pausing loop (${msg})`);
         if (this.runId !== myRun) return;
         try {
@@ -550,6 +605,67 @@ export class GoalLoopDriver {
         return;
       }
     }
+  }
+
+  /**
+   * Wait out a quota exhaustion, then let run() re-enter the round machinery.
+   * The reset moment comes from the provider (`resetAt` ← Retry-After) or from
+   * a fresh quota card; with neither, an exponential backoff ladder retries
+   * anyway (a window can reset without the card reporting a future timestamp).
+   * Sleeps in chunks so pause/stop flags — ESC, /auto pause, /auto stop —
+   * take effect within seconds. Returns "continue" to proceed or "stop" when
+   * the loop already ended.
+   */
+  private async waitOutQuota(
+    myRun: number,
+    info: QuotaExhaustionInfo,
+  ): Promise<"continue" | "stop"> {
+    if (this.runId !== myRun) return "stop";
+    if (this.stopFlag) {
+      await this.endLoop("stopped", "/auto stop", messages().goalStopped);
+      return "stop";
+    }
+    if (this.pauseFlag) {
+      await this.endLoop("paused", "cancelled at quota wait");
+      return "stop";
+    }
+    let resumeAt = info.resetAt;
+    if (resumeAt === undefined) {
+      const quota = await queryQuota().catch((): QuotaResult => ({ kind: "unavailable" }));
+      resumeAt = quotaResetAtFromResult(quota);
+    }
+    // Fallback ladder escalates across quota cycles (each failure re-enters
+    // here), so repeated unknown-reset retries stretch instead of hammering.
+    const waitMs =
+      resumeAt !== undefined
+        ? Math.max(0, resumeAt - Date.now()) + quotaResetMarginMs()
+        : quotaBackoffMs(this.quotaRecoveries + 1, QUOTA_WAIT_BASE_MS);
+    const until = resumeAt !== undefined ? new Date(resumeAt).toISOString() : undefined;
+    await this.announce(messages().goalQuotaWait(until));
+    warn(
+      `goal-loop: quota exhausted${info.providerCode ? ` [${info.providerCode}]` : ""} — ` +
+        `waiting ${Math.round(waitMs / 60_000)}min for the reset, then continuing`,
+    );
+    // Chunked sleep: flags stay responsive through a day-long wait.
+    const target = Date.now() + waitMs;
+    while (Date.now() < target) {
+      if (this.runId !== myRun || this.stopFlag || this.pauseFlag) break;
+      await sleep(Math.min(quotaWaitChunkMs(), target - Date.now()));
+    }
+    if (this.runId !== myRun) return "stop";
+    if (this.stopFlag) {
+      await this.endLoop("stopped", "/auto stop", messages().goalStopped);
+      return "stop";
+    }
+    if (this.pauseFlag) {
+      await this.endLoop("paused", "cancelled at quota wait");
+      return "stop";
+    }
+    // Window boundary reached (or backoff elapsed). The re-entry may still
+    // hit the tail of the cap: that failure classifies the same way and lands
+    // back here with a longer wait / a fresh reset moment.
+    await this.announce(messages().goalQuotaResumed);
+    return "continue";
   }
 
   private async runRounds(myRun: number): Promise<void> {

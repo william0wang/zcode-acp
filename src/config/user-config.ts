@@ -85,6 +85,13 @@ export interface RemoteUserConfig {
 
 /** The `quota` section of the user config file. */
 export interface QuotaUserConfig {
+  /**
+   * Wait out quota exhaustion and continue automatically (default true):
+   * /auto goal loops re-enter rounds after the usage cap resets, and
+   * quota-stopped workflow runs are resumed from the journal. Set false to
+   * restore the old pause-and-wait-for-a-human behavior.
+   */
+  autoResume?: boolean;
   /** Ollama Cloud API key for the `zcode-acp quota` card (cloud.ollama.ai). */
   ollamaApiKey?: string;
   /** Opencode Go workspace id (`wrk_…`) — see the quota CLI docs. */
@@ -304,6 +311,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
         const v = quota[jsonKey];
         if (typeof v === "string" && v.trim()) q[prop] = v.trim();
       }
+      if (typeof quota["autoResume"] === "boolean") q.autoResume = quota["autoResume"];
       if (Object.keys(q).length > 0) result.quota = q;
     }
   }

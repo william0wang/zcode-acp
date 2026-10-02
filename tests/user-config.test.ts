@@ -100,6 +100,16 @@ describe("loadUserConfig", () => {
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ remote: { enabled: true } });
   });
 
+  it("parses quota.autoResume (boolean only)", () => {
+    writeConfig(JSON.stringify({ quota: { autoResume: false } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ quota: { autoResume: false } });
+    writeConfig(JSON.stringify({ quota: { autoResume: true } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ quota: { autoResume: true } });
+    // Wrong type → dropped (the section stays empty and unset).
+    writeConfig(JSON.stringify({ quota: { autoResume: "no" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
+
   it("non-object quota section is ignored with the remote section intact", () => {
     writeConfig(JSON.stringify({ remote: { enabled: true }, quota: "nope" }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ remote: { enabled: true } });

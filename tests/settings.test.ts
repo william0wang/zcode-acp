@@ -23,6 +23,7 @@ import {
   initialSessionMode,
   interactionTimeoutMs,
   languageOverride,
+  quotaAutoResumeEnabled,
   tuiStatsSegments,
 } from "../src/config/settings.js";
 
@@ -93,6 +94,23 @@ describe("goalModeIsBackend", () => {
     writeConfig({ goal: { mode: "driver" } });
     expect(goalModeIsBackend(envOf({ ZCODE_ACP_GOAL_MODE: "backend" }))).toBe(true);
     expect(goalModeIsBackend(envOf())).toBe(false);
+  });
+});
+
+describe("quotaAutoResumeEnabled", () => {
+  it("defaults to true; only explicit off spellings disable", () => {
+    expect(quotaAutoResumeEnabled(envOf())).toBe(true);
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "" }))).toBe(true);
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "1" }))).toBe(true);
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "0" }))).toBe(false);
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "false" }))).toBe(false);
+  });
+
+  it("file quota.autoResume wins over env — an explicit true re-arms a disabled env", () => {
+    writeConfig({ quota: { autoResume: false } });
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "1" }))).toBe(false);
+    writeConfig({ quota: { autoResume: true } });
+    expect(quotaAutoResumeEnabled(envOf({ ZCODE_ACP_QUOTA_AUTO_RESUME: "0" }))).toBe(true);
   });
 });
 
