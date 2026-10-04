@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.62.0](https://github.com/william0wang/zcode-acp/compare/v0.61.0...v0.62.0) (2026-10-04)
+
+
+### Features
+
+* serve machine system stats from the hub (/api/system-stats) ([f7e610d](https://github.com/william0wang/zcode-acp/commit/f7e610d9ccba7b95fc2ecb7ef8b2cacaca148789))
+
 ## [0.61.0](https://github.com/william0wang/zcode-acp/compare/v0.60.0...v0.61.0) (2026-10-02)
 
 
