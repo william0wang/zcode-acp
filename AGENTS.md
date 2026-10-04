@@ -905,6 +905,10 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
 - `docs/PROTOCOL.md` — ACP + ZCode protocol mapping
 - `docs/DEVELOPMENT.md` — dev setup and debugging guide
 - `docs/TROUBLESHOOTING.md` — common issues and diagnostics
+- `.zcode/AGENTS.md` — OPTIONAL machine-local agent notes, gitignored and
+  absent on fresh clones (irrelevant to repo visitors); if present, read it
+  for environment-specific rules (e.g. gh CLI auth) and the gitignored
+  runbooks under `.zcode/docs/`
 
 ## Agent skills
 
