@@ -79,6 +79,7 @@ import { queryOcUsage } from "../quota/ollama-cloud/index.js";
 import { queryGoUsage } from "../quota/opencode-go/index.js";
 import { isTaskDeleted, listKnownWorkspaces, softDeleteWorkspaceTasks } from "../tasks-index.js";
 import { buildWorkflowOverview } from "./workflow-overview.js";
+import { collectSystemStats } from "./system-stats.js";
 
 export interface HubOptions {
   port: number;
@@ -1761,6 +1762,36 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       } catch {
         res.writeHead(502, { "Content-Type": "text/plain" });
         res.end("quota query failed");
+      }
+      return;
+    }
+    // GET /api/system-stats — machine-level system status (host info, CPU,
+    // memory, storage, battery, power assertions, network, hub + bridge
+    // process resources) for the App's system-status page. Every field is
+    // independently best-effort (see system-stats.ts): rate fields need two
+    // polls ~1s apart to have a delta baseline. The hub-side 1s collect cache
+    // is the only caching layer.
+    if (url.pathname === "/api/system-stats" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      try {
+        const stats = await collectSystemStats(
+          Array.from(instances.values(), (e) => ({
+            id: e.id,
+            pid: e.pid,
+            workspace: e.workspace,
+          })),
+          { version: AGENT_INFO.version, instances: instances.size },
+        );
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(JSON.stringify(stats));
+      } catch (err) {
+        warn(`hub: system-stats collect failed: ${String(err)}`);
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end("system stats failed");
       }
       return;
     }
