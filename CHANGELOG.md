@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.0](https://github.com/william0wang/zcode-acp/compare/v0.62.0...v0.63.0) (2026-10-05)
+
+
+### Features
+
+* serve recently finished runs from the workflow overview ([3d5e226](https://github.com/william0wang/zcode-acp/commit/3d5e226d74a6723d8ed2561c505ad69099856a37))
+
 ## [0.62.0](https://github.com/william0wang/zcode-acp/compare/v0.61.0...v0.62.0) (2026-10-04)
 
 
