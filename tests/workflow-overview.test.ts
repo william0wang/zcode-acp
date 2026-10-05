@@ -166,7 +166,7 @@ describe("buildWorkflowOverview", () => {
 
   it("returns empty groups and active runs when no bridge is registered", async () => {
     const overview = await buildWorkflowOverview([]);
-    expect(overview).toEqual({ ok: true, groups: [], activeRuns: [] });
+    expect(overview).toEqual({ ok: true, groups: [], activeRuns: [], recentRuns: [] });
   });
 
   it("feeds active runs from the machine-wide journal read and annotates owners", async () => {
@@ -225,6 +225,44 @@ describe("buildWorkflowOverview", () => {
     expect(overview.activeRuns[0]!.ownerInstanceId).toBeUndefined();
   });
 
+  it("serves recently finished runs newest-first, capped, owners annotated", async () => {
+    // 22 terminal rows around one live row: the recent list keeps the newest
+    // 20 terminal rows (RECENT_RUNS_LIMIT), the live one never leaks in, and
+    // a settled row whose session an instance still lists gets the owner
+    // annotation so the client can address its detail view.
+    const terminal = Array.from({ length: 22 }, (_, i) => ({
+      runId: `t${i}`,
+      name: `wf${i}`,
+      status: i % 2 === 0 ? "completed" : "errored",
+      updatedAt: 100 - i,
+      ...(i === 0 ? { acpSessionId: "sess_done" } : {}),
+    }));
+    const bridge = await startFakeBridge((kind, scope) => {
+      if (kind === "list") return { workflows: [], invalid: [] };
+      if (scope === "global") {
+        return {
+          runs: [
+            ...terminal,
+            { runId: "live", status: "running", updatedAt: 999, acpSessionId: "sess_a" },
+          ],
+        };
+      }
+      return { runs: [] };
+    });
+
+    const overview = await buildWorkflowOverview([
+      inst("A", bridge.port, "/proj/a", 200, [{ sessionId: "sess_a", status: "running" }]),
+      inst("B", bridge.port, "/proj/b", 100, [{ sessionId: "sess_done", status: "idle" }]),
+    ]);
+
+    expect(overview.recentRuns).toHaveLength(20);
+    expect(overview.recentRuns.map((r) => r.runId)).toEqual(
+      terminal.slice(0, 20).map((r) => r.runId),
+    );
+    expect(overview.recentRuns.some((r) => r.runId === "live")).toBe(false);
+    expect(overview.recentRuns[0]!.ownerInstanceId).toBe("B");
+  });
+
   it("overrides a falsely interrupted row when the owner's live read says running", async () => {
     // The journal row was written by upstream's orphan reconciliation while
     // the run kept executing ("the owning process exited" is the lie); the
@@ -260,6 +298,8 @@ describe("buildWorkflowOverview", () => {
     expect(overview.activeRuns[0]!.status).toBe("running");
     expect(overview.activeRuns[0]!["stopReason"]).toBeUndefined();
     expect(overview.activeRuns[0]!.ownerInstanceId).toBe("A");
+    // Live-corrected rows must not resurface as finished either.
+    expect(overview.recentRuns).toEqual([]);
     // The project group's badge joins the same truth, not the journal lie.
     const project = overview.groups.find((g) => g.scope === "project")!;
     expect(project.lastRuns["live"]!.status).toBe("running");

@@ -31,7 +31,9 @@
  * workflow routes — fall back to a sibling that answers), and answer with a
  * ready-to-render list plus the machine-wide `activeRuns` (journal rows with
  * status pending/running, annotated with the instance that currently lists
- * their session so the client can address stop/resume correctly).
+ * their session so the client can address stop/resume correctly) and
+ * `recentRuns` (the finished complement — the top-level completion list's
+ * feed).
  *
  * Everything is best-effort per group: a failing workspace degrades to an
  * `error` group (the list must not blank out because one bridge is down),
@@ -78,6 +80,13 @@ export interface WorkflowOverview {
   ok: true;
   groups: OverviewGroup[];
   activeRuns: OverviewRunRow[];
+  /**
+   * Recently finished runs (terminal statuses only, newest first, capped) —
+   * the same machine-wide journal read activeRuns feeds, minus the live rows.
+   * The completion list's home: without it a settled run only resurfaces two
+   * taps deep (workflow card → per-name history).
+   */
+  recentRuns: OverviewRunRow[];
 }
 
 /** Per-read budget — these are loopback scans, not backend round-trips. */
@@ -87,6 +96,8 @@ const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const RUNS_LIMIT = 50;
 /** Live-registry statuses — a run reporting either is flying right now. */
 const LIVE_STATUSES = new Set(["running", "pending"]);
+/** Served cap on the finished-run list (the journal read is capped at 50 anyway). */
+const RECENT_RUNS_LIMIT = 20;
 
 /** GET one bridge route, parsed as JSON. Rejects on transport/status/parse. */
 function fetchBridgeJson(port: number, path: string): Promise<Record<string, unknown>> {
@@ -384,6 +395,7 @@ export async function buildWorkflowOverview(
     ? await collectLiveOverrides(instances, global.pair.runs)
     : new Map<string, { status: string; instanceId: string }>();
   let activeRuns: OverviewRunRow[] = [];
+  let recentRuns: OverviewRunRow[] = [];
   if (global) {
     applyLiveTruth(global.pair.runs, liveOverrides);
     groups.push({
@@ -399,6 +411,13 @@ export async function buildWorkflowOverview(
       (r) => typeof r.status === "string" && LIVE_STATUSES.has(r.status),
     );
     annotateOwners(activeRuns, instances);
+    // The finished complement, newest first — terminal rows only, so a
+    // live-corrected row (applyLiveTruth above) lands in activeRuns, not here.
+    recentRuns = global.pair.runs
+      .filter((r) => typeof r.status === "string" && !LIVE_STATUSES.has(r.status))
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      .slice(0, RECENT_RUNS_LIMIT);
+    annotateOwners(recentRuns, instances);
   }
 
   // One project group per workspace, workspace-path order (stable across
@@ -435,5 +454,5 @@ export async function buildWorkflowOverview(
   );
   groups.push(...projectGroups);
 
-  return { ok: true, groups, activeRuns };
+  return { ok: true, groups, activeRuns, recentRuns };
 }
