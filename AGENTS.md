@@ -16,17 +16,6 @@ methods and streams events back as ACP `session/update` notifications.
 | `~/Develop/tools/zcode-acp-martty` | Source of the Rust `martty` TUI (this bridge's CLI frontend dependency)                                                                                                                                                                                  |
 | `~/Develop/NoBackup/ZCode`         | Open-source ZCode upstream (see the next section)                                                                                                                                                                                                        |
 
-## Release responsibility (owner's rule, 2026-10-05)
-
-**The agent releases ONLY this repo.** Backend releases follow docs/RELEASING.md
-(conventional commits on `main` → merge the release-please PR). **The mobile app
-(`zcode-acp-remote`) is NEVER released or published by the agent** — no
-`scripts/release.sh`, no `build:android`/APK builds, no tags or GitHub Releases
-on that repo, not even "to help". App-side code commits and web-dist rebuilds
-(`pnpm build`; the hub serves `dist/` same-origin via `remote.webDir`) are fine;
-everything publish-shaped is the owner's personally. This rule was set after
-the agent ran the app release against the owner's explicit instruction.
-
 ## ZCode upstream source (open-sourced 2026-09)
 
 ZCode went open source (Apache-2.0): a local checkout lives at
