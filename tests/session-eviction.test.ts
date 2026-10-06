@@ -389,4 +389,25 @@ describe("backend-loaded verification TTL", () => {
     await loadSession(server, { sessionId: "s-old" } as acp.LoadSessionRequest, stubCx());
     expect(count(calls, "session/resume")).toBe(1);
   });
+
+  it("a backend respawn voids the loaded stamps — no fresh-timestamp lie across generations", () => {
+    // resetBackendGeneration runs at every ensureBackend spawn. A stamp that
+    // survived the respawn kept isBackendSessionLive TRUE for a process that
+    // never loaded the session: session/load then skipped the resume RPC and
+    // replayed from a backend with no resident (empty) or a still-hydrating
+    // sibling re-resume (prefix) — the wake-reconnect truncated-history
+    // report (2026-10).
+    const server = new ZcodeAcpServer();
+    server.registerSession("s", "zs");
+    server.markBackendLoaded("s");
+    server.hydrationUnsettled.add("zs");
+    server.hydrationWatermark.set("zs", 9);
+    expect(server.isBackendSessionLive("s")).toBe(true);
+
+    server.resetBackendGeneration();
+
+    expect(server.isBackendSessionLive("s")).toBe(false);
+    expect(server.hydrationUnsettled.size).toBe(0);
+    expect(server.hydrationWatermark.size).toBe(0);
+  });
 });

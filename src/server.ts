@@ -197,7 +197,12 @@ export class ZcodeAcpServer {
    * plateau inside the cap again meant the marker never cleared — every
    * session/load re-paid a capped settle (observed 2026-09-20 on a 7413-
    * message session: 22–56s loads). Reset on backend respawn — a rehydrating
-   * session starts growing from zero again.
+   * session starts growing from zero again. The entry's PRESENCE is also the
+   * generation marker: "this backend instance has settle-observed the store
+   * (0 = observed empty is a valid write)". Replay paths re-settle a session
+   * with NO entry instead of trusting a plain read (fetchMessagesForReplay);
+   * session/create and fork seed 0 because a fresh store is complete by
+   * construction.
    */
   readonly hydrationWatermark = new Map<string, number>();
   /**
@@ -454,7 +459,8 @@ export class ZcodeAcpServer {
    * bare `registerSession` mapping does NOT qualify, and neither does an old
    * timestamp: the backend answers `session/messages` only for sessions with
    * a live resident runtime, so `session/load` must not skip the resume RPC
-   * for those (the replay would silently come back empty). Use
+   * for those (the replay would silently come back empty). Cleared wholesale
+   * on backend respawn (resetBackendGeneration). Use
    * `markBackendLoaded`/`isBackendSessionLive` instead of touching the map.
    */
   readonly backendLoadedSessions = new Map<string, number>();
@@ -696,14 +702,7 @@ export class ZcodeAcpServer {
     // every session, while the directory belongs to each window/session.
     const backend = new ZcodeBackend(argv, env);
     this.backend = backend;
-    // Fresh backend process: every session rehydrates from scratch, so the
-    // settle bookkeeping from the previous instance is void.
-    this.hydrationUnsettled.clear();
-    this.hydrationWatermark.clear();
-    this.compactOutcomes.clear();
-    // …and the send-semantics evidence: the respawned process may be an
-    // older build that still accepts mid-turn sends as steer.
-    this.observedSendBusyReject = false;
+    this.resetBackendGeneration();
     // Verdict observability (one line per spawn — a dark gate was previously
     // indistinguishable from an enabled one in the logs) plus the first enable
     // channel: the process-wide policy push, fire-and-forget through the
@@ -812,6 +811,31 @@ export class ZcodeAcpServer {
   /** Resolve the zcode session id for an ACP session id. */
   resolveSid(acpSid: string): string | undefined {
     return this.sessionMap.get(acpSid);
+  }
+
+  /**
+   * State void at every backend spawn — the previous process's residents,
+   * hydration bookkeeping, compaction outcomes and send-semantics evidence all
+   * died with it. Called from ensureBackend on every (re)spawn; exposed as a
+   * method so the generation-reset contract itself is testable without
+   * spawning a real backend.
+   */
+  resetBackendGeneration(): void {
+    // Fresh backend process: every session rehydrates from scratch, so the
+    // settle bookkeeping from the previous instance is void.
+    this.hydrationUnsettled.clear();
+    this.hydrationWatermark.clear();
+    this.compactOutcomes.clear();
+    // …and the send-semantics evidence: the respawned process may be an
+    // older build that still accepts mid-turn sends as steer.
+    this.observedSendBusyReject = false;
+    // …and the backend-loaded stamps: they vouch for residents of a process
+    // that no longer exists. A surviving stamp kept isBackendSessionLive true
+    // across a respawn, so session/load skipped the resume RPC and read a
+    // backend that never loaded the session — the replay came back empty
+    // (the backend's "Session is not active" is swallowed by fetchMessages),
+    // or a prefix when a sibling client's re-resume was still hydrating.
+    this.backendLoadedSessions.clear();
   }
 
   /**

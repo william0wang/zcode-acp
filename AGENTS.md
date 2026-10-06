@@ -510,6 +510,29 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   deferred replay must pass the REQUESTING connection's `ctx.client` into the
   handler — not `server.clients.broadcast()`. Live turn updates DO fan out
   (prompt() keeps the broadcast cx); only replay-shaped dispatch is targeted.
+- **Replay history reads are generation-guarded — three aligned facts, do not
+  un-align them** (2026-10 wake-reconnect report: first entry after phone
+  wake replayed a conversation that "ended in the middle"; re-entry, once
+  hydration finished, replayed whole — the mid-hydration prefix from
+  `session/messages` meets an unguarded plain read): (1) `backendLoadedSessions`
+  stamps are VOID on every spawn (`resetBackendGeneration`) — a stamp that
+  survived a respawn kept `isBackendSessionLive` true for a process that never
+  loaded the session, so `session/load` skipped the resume RPC and replayed
+  from a residentless/mid-re-hydration backend (empty or prefix); the turn
+  path's finally re-stamps only while the subscribe-PROVEN instance is still
+  the live backend (`residentBackend` — a failed backend-lost recovery must
+  not vouch for a session the respawn never loaded); (2) the
+  `hydrationWatermark` ENTRY PRESENCE — not its value — is the "this backend
+  instance settle-observed the store" marker: `fetchMessagesForReplay`
+  settle-polls a no-entry session instead of a plain read (one poll per
+  session per generation), `raiseWatermark` materializes the entry at 0
+  (observed-empty ≠ never-observed), and create/fork seed 0 (a fresh store is
+  complete by construction); (3) the turn-path baseline opts OUT of that
+  first-read guard (`guardFirstRead:false`) — no-watermark is unreachable
+  there once stamps are void, and a settle's 2×300ms gaps would sit on every
+  prompt. Residual, accepted: a read landing ABOVE the watermark while a
+  false-stable hydration still grows ships a prefix — the client-side
+  last-message-id reconciliation is that defense.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
 - **User-level TUI env does NOT reach hub-incubated windows by itself — two

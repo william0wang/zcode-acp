@@ -83,6 +83,10 @@ export async function fork(server: ZcodeAcpServer, params: ExtensionParams): Pro
     // and reloads without the client MCP servers. The source session's
     // remembered set is inherited so every later reload re-sends it (#193).
     server.markBackendLoaded(result.forkedSessionId);
+    // The fork's store snapshot is complete at creation — seed the settle
+    // watermark so replay paths skip the generation's first-read settle poll
+    // (entry presence = observed-settled, see fetchMessagesForReplay).
+    server.hydrationWatermark.set(result.forkedSessionId, 0);
     const srcMcp = server.sessionMcpServers.get(params.sessionId);
     if (srcMcp) server.sessionMcpServers.set(result.forkedSessionId, srcMcp);
     await server.ensureBackgroundListener(result.forkedSessionId);
