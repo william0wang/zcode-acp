@@ -510,7 +510,7 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   deferred replay must pass the REQUESTING connection's `ctx.client` into the
   handler — not `server.clients.broadcast()`. Live turn updates DO fan out
   (prompt() keeps the broadcast cx); only replay-shaped dispatch is targeted.
-- **Replay history reads are generation-guarded — three aligned facts, do not
+- **Replay history reads are generation-guarded — four aligned facts, do not
   un-align them** (2026-10 wake-reconnect report: first entry after phone
   wake replayed a conversation that "ended in the middle"; re-entry, once
   hydration finished, replayed whole — the mid-hydration prefix from
@@ -530,7 +530,21 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   complete by construction); (3) the turn-path baseline opts OUT of that
   first-read guard (`guardFirstRead:false`) — no-watermark is unreachable
   there once stamps are void, and a settle's 2×300ms gaps would sit on every
-  prompt. Residual, accepted: a read landing ABOVE the watermark while a
+  prompt; (4) a METADATA-ONLY attach (`_meta.zcode.limit 0`, the App's
+  cache-reconcile re-entry) opts out of BOTH the resume flight's settle
+  (`resumePreservingModel {skipSettle}`) and the replay-read guards (plain
+  `fetchMessages`) — its reconcile is CONSERVATIVE (a mid-hydration prefix
+  only makes ids/counts mismatch → the client falls back to a full attach,
+  which is where the settle then runs, once), and settling every metadata
+  attach burned a full settle cap on the cold path before the client even
+  knew whether anything changed, then armed `hydrationUnsettled` for the
+  follow-up full attach to pay AGAIN (observed 2026-10-06: minute-long
+  "session never loads" on wake-reconnect with a fresh cache). A joiner of a
+  skipped flight settles itself — no watermark was written, so its replay
+  read re-arms the first-read guard. `loadSession`/`resumeIntoSession` also
+  feed their just-read history into `buildSnapshot` (`presetMessages`) — the
+  differ baseline must never re-scan the store the load just paid for.
+  Residual, accepted: a read landing ABOVE the watermark while a
   false-stable hydration still grows ships a prefix — the client-side
   last-message-id reconciliation is that defense.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,

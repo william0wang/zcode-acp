@@ -332,8 +332,9 @@ describe("cap-truncated settle + alreadyLive re-settle (hydration gap)", () => {
     expect((r as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(8);
     expect(chunks(updates)).toHaveLength(8);
     expect(server.hydrationUnsettled.size).toBe(0);
-    // Settle reads: initial + ONE confirming read (+1 buildSnapshot baseline).
-    expect(counts.get("session/messages")).toBe(3);
+    // Settle reads: initial + ONE confirming read (buildSnapshot reuses the
+    // just-settled history — no third scan).
+    expect(counts.get("session/messages")).toBe(2);
   });
 
   it("an alreadyLive load with NO generation watermark re-settles instead of plain-reading mid-hydration", async () => {
@@ -374,14 +375,14 @@ describe("cap-truncated settle + alreadyLive re-settle (hydration gap)", () => {
     expect(server.hydrationUnsettled.size).toBe(0);
     const readsAfterFirst = counts.get("session/messages") ?? 0;
 
-    // AlreadyLive + no marker: the replay does ONE plain read (+1 for
-    // buildSnapshot's differ baseline) and completes without a single timer
-    // tick — a settle poll would need two 300ms gaps and show up here as
-    // extra reads (or as a hang, with the 0ms advance above).
+    // AlreadyLive + no marker: the replay does ONE plain read (buildSnapshot
+    // reuses it) and completes without a single timer tick — a settle poll
+    // would need two 300ms gaps and show up here as extra reads (or as a
+    // hang, with the 0ms advance above).
     const p2 = loadSession(server, loadParams(), cx2.cx);
     await vi.advanceTimersByTimeAsync(0);
     await p2;
-    expect(counts.get("session/messages") ?? 0).toBe(readsAfterFirst + 2);
+    expect(counts.get("session/messages") ?? 0).toBe(readsAfterFirst + 1);
   });
 
   it("fast-path needs the CONFIRMING read to reach the watermark — a dipping read falls back to the plateau rule", async () => {
@@ -429,4 +430,105 @@ describe("cap-truncated settle + alreadyLive re-settle (hydration gap)", () => {
     expect(server.hydrationUnsettled.size).toBe(0);
     expect(server.hydrationWatermark.get("sess_race")).toBe(8);
   });
+});
+
+describe("metadata-only attach skips the settle (cold-reattach fast path)", () => {
+  // The remote App re-attaches with _meta.zcode.limit 0: cache painted,
+  // metadata-only reconcile. That attach used to pay the resume flight's FULL
+  // settle poll (up to the 30s cap on big sessions) before the client even
+  // knew whether anything had changed — and a capped settle armed the
+  // re-settle marker for the follow-up full attach to pay AGAIN (observed
+  // 2026-10: minute-long "session never loads" on wake-reconnect). The
+  // reconcile is CONSERVATIVE: a mid-hydration prefix read only makes the
+  // ids/counts mismatch, and the client's fallback full attach is where the
+  // settle then runs — once, not once per attach. Real timers on purpose: a
+  // wrongly-arming settle poll shows up as extra reads after its 300ms gaps.
+  function metaLoadParams(limit: number): acp.LoadSessionRequest {
+    return {
+      sessionId: "sess_race",
+      cwd: "/tmp/ws",
+      mcpServers: [],
+      _meta: { zcode: { limit } },
+    } as acp.LoadSessionRequest;
+  }
+
+  it("limit 0 reads PLAIN — one read, prefix meta, no watermark entry", async () => {
+    // Ladder 3 → 8 → 8: the first read is a mid-hydration prefix; a settle
+    // poll (the pre-fix shape) would keep reading to 8.
+    const { backend, counts } = makeBackend({ messagesQueue: [hist(3), hist(8), hist(8)] });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx, updates } = collectCx();
+
+    const r = await loadSession(server, metaLoadParams(0), cx);
+
+    // ONE history read total — no settle poll on the flight, none on the
+    // replay read (buildSnapshot rides session/read, not session/messages).
+    expect(counts.get("session/messages")).toBe(1);
+    expect(counts.get("session/resume")).toBe(1);
+    // Metadata only: no message replayed (the lone update is the initial
+    // plan emission), the meta carries the (prefix) tail.
+    expect(chunks(updates)).toHaveLength(0);
+    const meta = (r as { replayMeta?: { totalMessages?: number; lastMessageId?: string } })
+      .replayMeta;
+    expect(meta?.totalMessages).toBe(3);
+    expect(meta?.lastMessageId).toBe("m2");
+    // No settle proof was written — the generation still owes one.
+    expect(server.hydrationWatermark.has("sess_race")).toBe(false);
+    expect(server.hydrationUnsettled.size).toBe(0);
+  }, 10_000);
+
+  it("the follow-up FULL attach settles exactly once and replays the complete history", async () => {
+    const { backend, counts } = makeBackend({ messagesQueue: [hist(3), hist(8), hist(8)] });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const cxMeta = collectCx();
+    const cxFull = collectCx();
+
+    const r0 = await loadSession(server, metaLoadParams(0), cxMeta.cx);
+    expect((r0 as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(3);
+
+    // Reconcile mismatched (prefix tail m2 vs the client's cached tail) → the
+    // client's fallback: a full tail attach, alreadyLive now (no resume). No
+    // watermark was written by the skipped flight, so THIS read settles —
+    // entry + two plateau reads = 3 more session/messages calls.
+    const r1 = await loadSession(server, metaLoadParams(30), cxFull.cx);
+
+    expect((r1 as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(8);
+    expect(chunks(cxFull.updates)).toHaveLength(8);
+    expect(counts.get("session/resume")).toBe(1);
+    expect(counts.get("session/messages")).toBe(4); // 1 (meta attach) + 3 (settle)
+    expect(server.hydrationWatermark.get("sess_race")).toBe(8);
+  }, 10_000);
+
+  it("a FULL joiner of a skipped flight settles itself (no watermark inherited)", async () => {
+    // Editor full attach racing the App's metadata-only attach on the same
+    // backend session: the App's flight skipped the settle, so the joiner
+    // must not trust a plain read — its replay read re-arms the first-read
+    // settle guard and lands on the COMPLETE history.
+    let release!: (v: unknown) => void;
+    const gate = new Promise<unknown>((r) => (release = r));
+    const { backend } = makeBackend({
+      messagesQueue: [hist(3), hist(8), hist(8), hist(8)],
+      resumeGate: gate,
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const cxMeta = collectCx();
+    const cxFull = collectCx();
+
+    const p0 = loadSession(server, metaLoadParams(0), cxMeta.cx);
+    await park();
+    const p1 = loadSession(server, loadParams(), cxFull.cx); // no _meta → full
+    await park();
+    release({});
+    const [r0, r1] = await Promise.all([p0, p1]);
+
+    // The metadata-only performer read the prefix ONCE; the full joiner
+    // settled through the ladder to 8.
+    expect((r0 as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(3);
+    expect((r1 as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(8);
+    expect(chunks(cxFull.updates)).toHaveLength(8);
+    expect(server.hydrationWatermark.get("sess_race")).toBe(8);
+  }, 10_000);
 });
