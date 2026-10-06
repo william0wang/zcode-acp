@@ -57,6 +57,7 @@ ACP editor ────── stdio ──────────┘
 | `GET /api/quota`                                       | required | Account-level usage stats — same payload as `account/usage_stats`, no ACP connection needed.                                                                      |
 | `POST /api/upgrade`                                    | required | Trigger the hub's own staleness check — see [Hub self-upgrade](#hub-self-upgrade).                                                                                |
 | `GET /api/projects`                                    | required | Known-project list (remote session-create whitelist) — see below.                                                                                                 |
+| `GET /api/fs/list?path=`                               | required | One directory level for the browse-and-create flow — see [Starting a session in a new directory](#starting-a-session-in-a-new-directory).                         |
 | `GET /api/projects/sessions?workspacePath=`            | required | A project's full session store incl. closed ones — see [Resuming a closed session](#resuming-a-closed-session).                                                   |
 | `POST /api/projects/delete {workspacePath}`            | required | Soft-delete a project and all its sessions (hidden from every listing) — see [Deleting a project or session](#deleting-a-project-or-session).                     |
 | `POST /api/instances {workspacePath[, sessionId]}`     | required | Create a bridge for one known project — a visible terminal TUI window (session-create) or one that boots into a closed session (resume, `sessionId`) — see below. |
@@ -177,6 +178,14 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   bound, not a security boundary: a token holder can already run any
   editor-bridge session in an arbitrary cwd; the trust boundary is the
   token itself.
+- **`remote.projectRoots` widening** (bridge ≥0.65, browse-and-create): the
+  machine's user config may list absolute directory roots
+  (`"remote": {"projectRoots": ["~/Develop"]}`, `~` expanded, read live;
+  env fallback `ZCODE_ACP_PROJECT_ROOTS`, a `:`-separated path-list). The
+  POST then also accepts any existing subdirectory under a configured
+  root, not just known projects. Unconfigured, the known list alone stays
+  the whitelist. See [Starting a session in a new
+  directory](#starting-a-session-in-a-new-directory).
 - On create the hub incubates a VISIBLE interactive TUI (Martty) in the machine's
   terminal (ADR-0016, macOS): the project's owner gets a real local CLI
   window, and its bridge registers with the hub like any serve instance (it
@@ -211,6 +220,42 @@ POST {hub}/api/instances  body {"workspacePath":"/Users/me/proj"}
   demand); the headless fallback exists for remote interest only and exits
   ~10 minutes after the last client detaches AND the last running turn
   finishes. Treat any vanished instance like a dead bridge.
+
+## Starting a session in a new directory
+
+The known-project list only ever holds directories that already ran a
+session. To start one somewhere new, browse the machine's directory tree
+(bridge ≥0.65) and create in the picked directory — it must sit under a
+configured `remote.projectRoots` root (see above):
+
+```text
+GET {hub}/api/fs/list?path=/Users/me          (path optional — default: home)
+  → 200 {"path":"/Users/me","parent":"/Users",
+         "creatable":false,
+         "entries":[{"name":"Develop"},{"name":"Documents"}, …],
+         "truncated":false}
+  → 400 "absolute path required"   (relative path)
+  → 404 "directory not found"      (missing path, or a file)
+
+POST {hub}/api/instances  body {"workspacePath":"/Users/me/Develop/newproj"}
+  → 200 {"id":"47073","reused":false}   (exactly the known-project create flow)
+```
+
+- One directory level per call; walk down via `entries[].name`, up via
+  `parent` (null at `/`). `path` in the answer is the RESOLVED (realpath)
+  spelling — navigate by it, not by what you sent (symlinks).
+- Only subdirectories are listed (cap 2000; `truncated` flags the cut);
+  hidden (`.`-prefixed) entries ARE included — filter client-side if the
+  UI wants them gone.
+- `creatable` tells whether a NEW session may start in the LISTED
+  directory itself: a known project, or under a configured project root.
+  With no roots configured everything still browses, but `creatable` is
+  true only on known projects. A create that ignores it gets the normal
+  403 "unknown project".
+- The create itself is the ordinary session-create flow above (visible
+  terminal TUI on the machine, ~20s budget). After the first session runs,
+  the directory enters the tasks index and appears in `GET /api/projects`
+  like any known project.
 
 ## Resuming a closed session
 
