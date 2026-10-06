@@ -985,10 +985,20 @@ everything below and you get the full replay):
       "replayedMessages": 47,
       "replayedTurns": 12,
       "totalMessages": 1893,
-      "totalTurns": 412
+      "totalTurns": 412,
+      "lastMessageId": "msg_b7c1…"
     }
   }
   ```
+
+  `lastMessageId` (additive) is the id of the newest message at or below the
+  slice's end anchor — on a `session/load` (tail or metadata-only) that is
+  history's newest message, on a `load_earlier` page the last message of the
+  page. It is the preferred reconcile key for a cached re-attach: a client
+  that watched a turn live has the new tail but a stale `totalMessages` (the
+  count only refreshes on replay), so comparing counts alone forces a
+  redundant full replay on every re-entry. Null on an empty store or an
+  id-less tail.
 
 - **`session/load_earlier`** (`{ sessionId, before, limit }`, limit defaults
   to 50) delivers one page of `session/update`s strictly older than `before`,

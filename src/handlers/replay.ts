@@ -37,6 +37,16 @@ export interface ReplayMeta {
   totalMessages: number;
   totalTurns: number;
   /**
+   * Id of the newest message at or below this slice's end anchor — for a
+   * tail/metadata-only attach that is history's newest message. Clients use
+   * it as the "did anything happen while we were gone" reconcile key: a
+   * watched-live turn moves the tail id but leaves a client's cached count
+   * stale (counts only refresh on replay), so comparing counts alone forces a
+   * redundant full replay on every re-entry. Null when the store is empty or
+   * the tail message carries no id.
+   */
+  lastMessageId: string | null;
+  /**
    * True when a turn for this session is still in flight on the bridge.
    * Re-attaching clients (mobile reconnect, second editor) restore their
    * "running" UI from this; they did not send the prompt, so only this flag
@@ -132,6 +142,7 @@ function buildSlice(
       replayedTurns: turnsInRange(starts, start, end),
       totalMessages: messages.length,
       totalTurns,
+      lastMessageId: messages[end - 1]?.info?.id ?? null,
     },
   };
 }
