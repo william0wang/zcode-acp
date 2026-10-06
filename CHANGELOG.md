@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.64.0](https://github.com/william0wang/zcode-acp/compare/v0.63.1...v0.64.0) (2026-10-06)
+
+
+### Features
+
+* add lastMessageId to replayMeta for client-side reconciliation ([#303](https://github.com/william0wang/zcode-acp/issues/303)) ([3e7a576](https://github.com/william0wang/zcode-acp/commit/3e7a5761d5163339df8c18d963c7e5d50886b74a))
+
 ## [0.63.1](https://github.com/william0wang/zcode-acp/compare/v0.63.0...v0.63.1) (2026-10-06)
 
 
