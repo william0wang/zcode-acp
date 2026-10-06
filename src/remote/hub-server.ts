@@ -51,7 +51,7 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -60,10 +60,10 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { sessionTabTitle } from "../terminal-title.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
-import type { TerminalPrefs } from "../config/user-config.js";
+import { expandHomePath, type TerminalPrefs } from "../config/user-config.js";
 import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
-import { remoteEnabledLive, remoteTerminalPrefs } from "./config.js";
+import { remoteEnabledLive, remoteProjectRoots, remoteTerminalPrefs } from "./config.js";
 import { envWithLoginShell } from "./login-shell-env.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
@@ -220,6 +220,8 @@ interface InstanceEntry {
 const HEARTBEAT_TIMEOUT_MS = 30_000;
 const IDLE_EXIT_MS = 10 * 60_000;
 const PING_INTERVAL_MS = 30_000;
+/** Max subdirectory names per GET /api/fs/list before truncation. */
+const FS_LIST_LIMIT = 2000;
 /**
  * Per-instance TCP probe timeout for /api/instances?probe=1. Generous on
  * purpose: the bridge is single-threaded and a busy event loop (large payload
@@ -290,6 +292,39 @@ function canonicalPath(p: string): string {
     return realpathSync(p);
   } catch {
     return p;
+  }
+}
+
+/**
+ * Canonical spellings of the configured remote.projectRoots (config file >
+ * env, LIVE read per call — same convention as remoteEnabledLive). These
+ * widen the session-create whitelist beyond the known-project list to any
+ * subdirectory under a root, powering the mobile app's browse-and-create
+ * flow. Empty when unconfigured: the known list alone stays the whitelist.
+ */
+function projectRootsRealpaths(): string[] {
+  return remoteProjectRoots().map(canonicalPath);
+}
+
+/** Whether the canonical path c is at or under one of the canonical roots. */
+function underAnyRoot(c: string, roots: string[]): boolean {
+  return roots.some((r) => c === r || c.startsWith(r + path.sep));
+}
+
+/**
+ * Whether a freshly-picked directory may host a NEW session: an existing
+ * directory that is not the filesystem root. Deliberately NARROWER than
+ * the known-list's isSelectableWorkspace exclusions — those temp/config-home
+ * rules guard AUTO-discovered historical cwds, while the paths reaching here
+ * sit under a root the user configured explicitly and are taken at face
+ * value.
+ */
+function isStartableDir(p: string): boolean {
+  if (canonicalPath(p) === path.sep) return false;
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
   }
 }
 
@@ -1816,6 +1851,79 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       res.end(JSON.stringify(projects));
       return;
     }
+    // GET /api/fs/list?path=<abs> — one directory level of the hub machine's
+    // filesystem, for the mobile app's browse-and-create flow. Read-only and
+    // deliberately unscoped (the token is the boundary, like every other hub
+    // route); the response's `creatable` flags whether a NEW session may
+    // start in the LISTED directory itself — a known project or under a
+    // configured remote.projectRoots root. Only subdirectories are listed:
+    // the flow picks a working directory, never a file.
+    if (url.pathname === "/api/fs/list" && req.method === "GET") {
+      if (!authorized(req, url, token)) {
+        res.writeHead(401, { "Content-Type": "text/plain" });
+        res.end("unauthorized");
+        return;
+      }
+      const rawPath = (url.searchParams.get("path") ?? "").trim();
+      const target = rawPath === "" || rawPath === "~" ? homedir() : expandHomePath(rawPath);
+      if (!path.isAbsolute(target)) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        res.end("absolute path required");
+        return;
+      }
+      let real: string;
+      try {
+        real = realpathSync(target);
+        if (!(await stat(real)).isDirectory()) throw new Error("not a directory");
+      } catch {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("directory not found");
+        return;
+      }
+      let dirents: Dirent[];
+      try {
+        dirents = await readdir(real, { withFileTypes: true });
+      } catch {
+        dirents = []; // unreadable dir (EACCES) — an empty listing, not an error
+      }
+      const names: string[] = [];
+      let truncated = false;
+      for (const d of dirents) {
+        if (names.length >= FS_LIST_LIMIT) {
+          truncated = true;
+          break;
+        }
+        let isDir = d.isDirectory();
+        if (!isDir && d.isSymbolicLink()) {
+          // Follow symlinks with stat: a linked-in directory is a navigable
+          // workspace candidate; a broken link simply drops out.
+          try {
+            isDir = statSync(path.join(real, d.name)).isDirectory();
+          } catch {
+            isDir = false;
+          }
+        }
+        if (isDir) names.push(d.name);
+      }
+      names.sort((a, b) => a.localeCompare(b));
+      const known = await listKnownWorkspaces(projectsDbPath);
+      const knownPaths = new Set(known.map((p) => canonicalPath(p.workspacePath)));
+      const creatable =
+        knownPaths.has(real) ||
+        (isStartableDir(real) && underAnyRoot(real, projectRootsRealpaths()));
+      const parent = path.dirname(real);
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(
+        JSON.stringify({
+          path: real,
+          parent: parent === real ? null : parent,
+          creatable,
+          entries: names.map((name) => ({ name })),
+          truncated,
+        }),
+      );
+      return;
+    }
     // POST /api/projects/delete — soft-delete a project (tombstones, not a
     // purge): every tasks row of the workspace gets deleted=1, so the project
     // vanishes from GET /api/projects and POST /api/instances above (unknown
@@ -1971,7 +2079,16 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         return;
       }
       const known = await listKnownWorkspaces(projectsDbPath);
-      if (!known.some((p) => p.workspacePath === workspacePath)) {
+      // The known-project list is the default whitelist; the configured
+      // remote.projectRoots widen it to any existing subdirectory under a
+      // root (the mobile app's browse-and-create flow). Same convenience-
+      // bound caveat as GET /api/projects: the trust boundary is the token,
+      // this gate only keeps fat-fingered paths out.
+      const roots = projectRootsRealpaths();
+      const allowed =
+        known.some((p) => p.workspacePath === workspacePath) ||
+        (isStartableDir(workspacePath) && underAnyRoot(canonicalPath(workspacePath), roots));
+      if (!allowed) {
         res.writeHead(403, { "Content-Type": "text/plain" });
         res.end("unknown project");
         return;

@@ -18,6 +18,7 @@ import {
   parseHubConfig,
   parseRemoteConfig,
   remoteEnabledLive,
+  remoteProjectRoots,
   remoteTerminalPrefs,
 } from "../src/remote/config.js";
 
@@ -274,6 +275,35 @@ describe("remoteTerminalPrefs (file > env, live-read)", () => {
       app: "iTerm",
       command: "my-term {script}",
     });
+  });
+});
+
+describe("remoteProjectRoots (file > env, live-read)", () => {
+  it("is empty when nothing is configured", () => {
+    expect(remoteProjectRoots(env())).toEqual([]);
+    expect(remoteProjectRoots(env({ ZCODE_ACP_PROJECT_ROOTS: "  " }))).toEqual([]);
+  });
+
+  it("reads the env path-list when no file exists (~ expanded, junk dropped)", () => {
+    const roots = remoteProjectRoots(
+      env({
+        ZCODE_ACP_PROJECT_ROOTS: `${path.join(homedir(), "dev")}::relative:  ${path.sep}abs`,
+      }),
+    );
+    expect(roots).toEqual([path.join(homedir(), "dev"), `${path.sep}abs`]);
+  });
+
+  it("the file wins over env, with per-entry validation", () => {
+    writeConfig({ remote: { projectRoots: ["~/Develop", "/srv/code", "relative", 42, ""] } });
+    const roots = remoteProjectRoots(
+      env({ ZCODE_ACP_PROJECT_ROOTS: path.join(homedir(), "env-only") }),
+    );
+    expect(roots).toEqual([path.join(homedir(), "Develop"), "/srv/code"]);
+  });
+
+  it("a non-array file value reads as absent (env fallback applies)", () => {
+    writeConfig({ remote: { projectRoots: "~/Develop" } });
+    expect(remoteProjectRoots(env())).toEqual([]);
   });
 });
 

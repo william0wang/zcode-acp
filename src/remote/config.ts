@@ -30,6 +30,10 @@
  *     ZCODE_ACP_WEB_DIR=<abs path>  web-client dist for same-origin hosting
  *                                   (file `remote.webDir` wins; empty = off;
  *                                   a leading ~ is expanded to the home dir)
+ *     ZCODE_ACP_PROJECT_ROOTS=<a:b> path-list of directory roots under which
+ *                                   remote clients may start new sessions
+ *                                   (file `remote.projectRoots` wins; a
+ *                                   leading ~ per entry expands to home)
  *   3. Built-in defaults.
  *
  * Process-role plumbing stays env-only by design (never file-configurable):
@@ -37,6 +41,8 @@
  *   ZCODE_ACP_REMOTE_PIN_CWD=1     pin session roots to the process cwd
  *   ZCODE_ACP_RESUME_SESSION=<id>  per-request boot-resume target (ADR-0017)
  */
+
+import path from "node:path";
 
 import { expandHomePath, loadUserConfig, type TerminalPrefs } from "../config/user-config.js";
 import { warn } from "../utils.js";
@@ -186,4 +192,25 @@ export function remoteTerminalPrefs(env: NodeJS.ProcessEnv = process.env): Termi
     ...(app ? { app } : {}),
     ...(command ? { command } : {}),
   };
+}
+
+/**
+ * Directory roots under which remote clients may start new sessions in any
+ * subdirectory (union with the known-project list), merged file > env. Read
+ * LIVE per use so editing the config takes effect without a hub restart.
+ * Entries are pre-validated (absolute, `~` expanded by the loader); the env
+ * path-list gets the same treatment here. Empty = the known list alone.
+ */
+export function remoteProjectRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const file = loadUserConfig(env).remote?.projectRoots;
+  if (file !== undefined) return file;
+  return (env.ZCODE_ACP_PROJECT_ROOTS ?? "")
+    .split(path.delimiter)
+    .map((s) => expandHomePath(s.trim()))
+    .filter((s) => {
+      if (!s) return false;
+      if (path.isAbsolute(s)) return true;
+      warn(`remote: project root ${JSON.stringify(s)} is not absolute — ignoring`);
+      return false;
+    });
 }

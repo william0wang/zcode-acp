@@ -80,6 +80,13 @@ export interface RemoteUserConfig {
    * daemon's cwd is unpredictable, so it would resolve differently per spawn.
    */
   webDir?: string;
+  /**
+   * Directory roots under which remote clients may start NEW sessions in any
+   * subdirectory (union with the known-project list). Empty/unset = the known
+   * list alone stays the whitelist. Same `~` expansion and absolute-only
+   * rules as webDir.
+   */
+  projectRoots?: string[];
   terminal?: TerminalPrefs;
 }
 
@@ -529,6 +536,26 @@ function parseRemoteSection(remote: Record<string, unknown>, file: string): Remo
     } else {
       warn(`config: remote.webDir=${JSON.stringify(webDir)} is not an absolute path — ignoring`);
     }
+  }
+  if (Array.isArray(remote["projectRoots"])) {
+    const roots: string[] = [];
+    for (const v of remote["projectRoots"]) {
+      if (typeof v !== "string" || !v.trim()) {
+        warn(
+          `config: remote.projectRoots entry ${JSON.stringify(v)} is not a non-empty string — ignoring`,
+        );
+        continue;
+      }
+      const root = expandHomePath(v.trim());
+      if (path.isAbsolute(root)) roots.push(root);
+      else
+        warn(
+          `config: remote.projectRoots entry ${JSON.stringify(root)} is not an absolute path — ignoring`,
+        );
+    }
+    if (roots.length > 0) out.projectRoots = roots;
+  } else if (remote["projectRoots"] !== undefined) {
+    warn(`config: remote.projectRoots in ${file} is not an array of paths — ignoring`);
   }
   const terminal = remote["terminal"];
   if (isPlainObject(terminal)) {
