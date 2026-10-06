@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.63.1](https://github.com/william0wang/zcode-acp/compare/v0.63.0...v0.63.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* guard replay reads against mid-hydration prefixes across backend respawns ([#301](https://github.com/william0wang/zcode-acp/issues/301)) ([a09fd43](https://github.com/william0wang/zcode-acp/commit/a09fd4387dfd622f510de7214f85cdfc967d6422))
+
 ## [0.63.0](https://github.com/william0wang/zcode-acp/compare/v0.62.0...v0.63.0) (2026-10-05)
 
 
