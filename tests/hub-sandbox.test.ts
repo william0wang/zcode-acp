@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 const execFileSyncMock = vi.hoisted(() => vi.fn());
 
 vi.mock("node:child_process", () => ({
   execFileSync: execFileSyncMock,
 }));
+
+import { readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 
 import {
   buildHubRelaunchPlist,
@@ -17,6 +21,19 @@ import {
 describe("hub sandbox self-relaunch", () => {
   beforeEach(() => {
     execFileSyncMock.mockReset();
+  });
+
+  // selfRelaunchOutsideSandbox writes real files (mkdtemp plist + sentinel)
+  // even with launchctl mocked — leave the machine as we found it.
+  afterEach(() => {
+    try {
+      const sentinel = path.join(tmpdir(), "zcode-hub-relaunch-last");
+      const dir = readFileSync(sentinel, "utf8").trim();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+      rmSync(sentinel, { force: true });
+    } catch {
+      // nothing was written — nothing to clean
+    }
   });
 
   it("detects the birth marker (darwin only)", () => {
@@ -33,7 +50,7 @@ describe("hub sandbox self-relaunch", () => {
     }
   });
 
-  it("builds a plist with the hub argv, the env (marker stripped), and XML escaping", () => {
+  it("builds a plist with the hub argv, the allowlisted env (marker and secrets stripped), and XML escaping", () => {
     const plist = buildHubRelaunchPlist({
       interpreter: ["/usr/bin/node"],
       hubJs: "/opt/acp/dist/bin/hub.js",
@@ -41,6 +58,11 @@ describe("hub sandbox self-relaunch", () => {
         ZCODE_ACP_REMOTE_TOKEN: "to&k<'s>",
         [SANDBOX_ACTIVE_ENV]: "1",
         ZCODE_ACP_HUB_PORT: "18377",
+        HOME: "/Users/william",
+        PATH: "/usr/bin:/bin",
+        GITHUB_TOKEN: "ghp_secret_should_not_travel",
+        BIFROST_API_KEY: "sk-bf-secret",
+        npm_lifecycle_event: "test",
       },
       logPath: "/tmp/hub.log",
     });
@@ -52,6 +74,15 @@ describe("hub sandbox self-relaunch", () => {
     // The birth marker never travels with the relaunch (no re-trigger loop).
     expect(plist).not.toContain(SANDBOX_ACTIVE_ENV);
     expect(plist).toContain("<string>18377</string>");
+    // Identity, paths, locale and ZCODE_* settings survive the allowlist...
+    expect(plist).toContain("<string>/Users/william</string>");
+    expect(plist).toContain("<string>/usr/bin:/bin</string>");
+    // ...shell secrets and build-tool noise never do.
+    expect(plist).not.toContain("GITHUB_TOKEN");
+    expect(plist).not.toContain("ghp_secret_should_not_travel");
+    expect(plist).not.toContain("BIFROST_API_KEY");
+    expect(plist).not.toContain("sk-bf-secret");
+    expect(plist).not.toContain("npm_lifecycle_event");
     // stdout + stderr both go to the log.
     expect((plist.match(/\/tmp\/hub\.log/g) ?? []).length).toBe(2);
     expect(plist).toContain("<false/>");
@@ -75,6 +106,12 @@ describe("hub sandbox self-relaunch", () => {
     const [, kickArgs] = execFileSyncMock.mock.calls[1]!;
     expect(kickArgs[0]).toBe("kickstart");
     expect(kickArgs[1]).toBe(`gui/${process.getuid()}/${HUB_LAUNCH_LABEL}`);
+    // The on-disk plist carries the hub env (token incl.): owner-only perms,
+    // and shell secrets from this worker's env never land in the file.
+    const dir = readFileSync(path.join(tmpdir(), "zcode-hub-relaunch-last"), "utf8").trim();
+    const plistPath = path.join(dir, "hub.plist");
+    expect(statSync(plistPath).mode & 0o777).toBe(0o600);
+    expect(readFileSync(plistPath, "utf8")).not.toContain("GITHUB_TOKEN");
   });
 
   it("swaps a stale definition: bootout the old label, bootstrap the fresh plist", () => {
@@ -89,7 +126,10 @@ describe("hub sandbox self-relaunch", () => {
       return Buffer.alloc(0);
     });
     expect(
-      selfRelaunchOutsideSandbox({ interpreter: ["/usr/bin/node"], hubJs: "/opt/acp/dist/bin/hub.js" }),
+      selfRelaunchOutsideSandbox({
+        interpreter: ["/usr/bin/node"],
+        hubJs: "/opt/acp/dist/bin/hub.js",
+      }),
     ).toBe(true);
     expect(execFileSyncMock.mock.calls.map((c) => c[1][0])).toEqual([
       "bootstrap",
@@ -105,7 +145,10 @@ describe("hub sandbox self-relaunch", () => {
       return Buffer.alloc(0);
     });
     expect(
-      selfRelaunchOutsideSandbox({ interpreter: ["/usr/bin/node"], hubJs: "/opt/acp/dist/bin/hub.js" }),
+      selfRelaunchOutsideSandbox({
+        interpreter: ["/usr/bin/node"],
+        hubJs: "/opt/acp/dist/bin/hub.js",
+      }),
     ).toBe(false);
     // 3 bootstrap attempts (with bootout between), never a blind kickstart —
     // that would revive the stale job definition.

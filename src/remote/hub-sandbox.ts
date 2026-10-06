@@ -46,8 +46,43 @@ function xmlEscape(s: string): string {
 }
 
 /**
- * The LaunchAgent plist body: run the hub entry under this node, with THIS
- * process's env minus the birth marker (so the relaunched hub does not
+ * Env the relaunched hub actually needs: identity/path/locale basics plus
+ * every ZCODE_* setting (token/ports included — the hub may be
+ * env-configured, and the plist is written 0600). Everything else is
+ * dropped: `process.env` carries shell secrets (API keys, tokens) that have
+ * no business sitting in a plist file, and serve bridges re-complete their
+ * env from the login shell at startup anyway, so a lean hub env is all the
+ * relaunch requires.
+ */
+const RELAUNCH_ENV_KEYS = new Set([
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "LANG",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TZ",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+]);
+
+function relaunchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (k === SANDBOX_ACTIVE_ENV) continue;
+    if (RELAUNCH_ENV_KEYS.has(k) || k.startsWith("ZCODE_") || k.startsWith("LC_")) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * The LaunchAgent plist body: run the hub entry under this node, with an
+ * ALLOWLISTED copy of this process's env (see relaunchEnv — never the raw
+ * environment) minus the birth marker (so the relaunched hub does not
  * re-trigger). RunAtLoad/KeepAlive stay false — the hub is started exactly
  * once, now, via kickstart; if it dies the bridges re-spawn it (the existing
  * machine-singleton behaviour).
@@ -59,7 +94,7 @@ export function buildHubRelaunchPlist(opts: {
   env: NodeJS.ProcessEnv;
   logPath: string;
 }): string {
-  const envEntries = Object.entries(opts.env).filter(([k]) => k !== SANDBOX_ACTIVE_ENV);
+  const envEntries = Object.entries(relaunchEnv(opts.env));
   const pair = ([k, v]: [string, string | undefined]) =>
     `        <key>${xmlEscape(k)}</key>\n        <string>${xmlEscape(String(v))}</string>`;
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -116,7 +151,11 @@ export function selfRelaunchOutsideSandbox(opts: {
   const dir = mkdtempSync(path.join(tmpdir(), "zcode-hub-relaunch-"));
   const logPath = opts.logPath ?? path.join(dir, "hub.log");
   const plistPath = path.join(dir, "hub.plist");
-  writeFileSync(plistPath, buildHubRelaunchPlist({ ...opts, env: process.env, logPath }));
+  // 0600: the plist carries the hub's env (token incl.) — group/world must
+  // not read it, even though the mkdtemp dir itself is already 0700.
+  writeFileSync(plistPath, buildHubRelaunchPlist({ ...opts, env: process.env, logPath }), {
+    mode: 0o600,
+  });
   const domain = `gui/${process.getuid?.() ?? 0}`;
   const target = `${domain}/${HUB_LAUNCH_LABEL}`;
   // Best-effort cleanup of the PREVIOUS attempt's dir (plist + log); the
