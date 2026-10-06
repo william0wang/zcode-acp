@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.65.0](https://github.com/william0wang/zcode-acp/compare/v0.64.1...v0.65.0) (2026-10-06)
+
+
+### Features
+
+* add remote.projectRoots widening and GET /api/fs/list for browse-and-create ([#307](https://github.com/william0wang/zcode-acp/issues/307)) ([066bb36](https://github.com/william0wang/zcode-acp/commit/066bb36954296df976531e5ce051e909a6f86cba))
+
 ## [0.64.1](https://github.com/william0wang/zcode-acp/compare/v0.64.0...v0.64.1) (2026-10-06)
 
 
