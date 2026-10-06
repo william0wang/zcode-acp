@@ -797,6 +797,10 @@ export async function ensureRealSession(
     }
     // session/create loads the session into this backend process.
     server.markBackendLoaded(acpSid);
+    // A fresh session's store is complete (empty) by construction — seed the
+    // settle watermark so replay paths skip the generation's first-read
+    // settle poll (entry presence = observed-settled, fetchMessagesForReplay).
+    server.hydrationWatermark.set(sid, 0);
     // Keep the durable alias in sync so a later bridge restart can still
     // resume this session via the placeholder id.
     recordMaterializedSession(acpSid, sid, pending.cwd);
@@ -1597,12 +1601,26 @@ export async function runOneTurn(
 
   let listener = new EventStreamListener(backend, zcodeSid);
   let monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
+  // The backend instance this turn PROVED residency on — a successful
+  // session/subscribe (it fails with "Session is not active" for a
+  // non-resident session). The finally's backend-loaded stamp is written only
+  // while this is still the live instance: a backend lost mid-turn whose
+  // recovery FAILED must not leave a fresh stamp vouching for a session the
+  // respawned backend never loaded (ghost stamp → load skips the resume RPC →
+  // empty replay for the whole TTL window).
+  let residentBackend: ZcodeBackend | undefined;
   // Per-session ProjectionDiffer (persists across turns). The baseline mark_seen
   // prevents the differ from re-emitting history at turn completion.
   const differ = getOrCreateDiffer(server, zcodeSid);
   // Marker-guarded read: a prefix baseline during armed hydration would make
-  // the completion diff re-emit the messages hydration later appends.
-  const baselineMsgs = await fetchMessagesForReplay(server, zcodeSid);
+  // the completion diff re-emit the messages hydration later appends. The
+  // generation first-read guard is OFF here: every production path to a
+  // no-watermark baseline reloaded/resumed the session first (respawn stamps
+  // are void, create/fork seed 0, store recovery settles), so the guard would
+  // only add a settle poll's latency to the turn path.
+  const baselineMsgs = await fetchMessagesForReplay(server, zcodeSid, {
+    guardFirstRead: false,
+  });
   differ.markSeen(baselineMsgs);
 
   // Subscribe BEFORE send so we don't lose early turn.completed on short turns.
@@ -1634,6 +1652,7 @@ export async function runOneTurn(
     }
     // A successful subscribe proves the resident runtime is live — refresh
     // the verification so concurrent/later entry points skip a reload.
+    residentBackend = backend;
     server.markBackendLoaded(acpSid);
   } catch (e) {
     server.pendingTurns.delete(requestId);
@@ -1984,6 +2003,7 @@ export async function runOneTurn(
             monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
             await reloadBackendSession(server, acpSid, zcodeSid);
             await listener.subscribe(() => server.nextId());
+            residentBackend = backend;
             backend.registerEventListener(zcodeSid, listener);
           } catch (recoverErr) {
             warn(
@@ -2036,10 +2056,16 @@ export async function runOneTurn(
     server.pendingTurns.delete(requestId);
     // Turn end = session activity — refresh the discovery summary and mark the
     // session discoverable regardless of outcome (end_turn, cancelled, retries
-    // exhausted). Also refresh the backend-loaded verification: the resident
-    // runtime was demonstrably live through this turn.
+    // exhausted). Also refresh the backend-loaded verification — but only on
+    // an instance this turn proved resident (a successful subscribe) that is
+    // STILL the live backend: an unconditional stamp let a failed backend-lost
+    // recovery vouch for a session the respawned backend never loaded (empty
+    // replays for the whole TTL window — same family as the respawn-stamp
+    // bug, found in review 2026-10).
     server.markSessionActive(acpSid);
-    server.markBackendLoaded(acpSid);
+    if (residentBackend && residentBackend === server.backend && !residentBackend.isDead) {
+      server.markBackendLoaded(acpSid);
+    }
     // Turn end = quota refresh point (ADR-0021): usage moved, the dock should
     // catch up immediately instead of waiting for the 60s interval.
     void forceRefreshQuota();
@@ -3311,25 +3337,45 @@ export async function fetchMessagesSettled(
   }
 }
 
-/** Monotonic watermark write — a concurrent settle's higher observation wins. */
+/** Monotonic watermark write — a concurrent settle's higher observation wins.
+ * Also materializes the entry at length 0: presence (not value) is the
+ * "settle-observed this generation" marker, so an observed-empty store must
+ * not keep reading as never-observed. */
 function raiseWatermark(server: ZcodeAcpServer, zcodeSid: string, length: number): void {
-  if (length > (server.hydrationWatermark.get(zcodeSid) ?? 0)) {
+  const current = server.hydrationWatermark.get(zcodeSid);
+  if (current === undefined || length > current) {
     server.hydrationWatermark.set(zcodeSid, length);
   }
 }
 
 /**
- * History read for replay paths: plain unless the last settle for this
- * session capped out mid-hydration — then re-settle first (the marker is
- * maintained by fetchMessagesSettled). Stable sessions pay zero extra reads;
- * a still-hydrating session gets the settle poll instead of a prefix.
+ * History read for replay paths. Plain read only when the store is PROVEN
+ * settled for this backend generation; otherwise settle-poll first (details
+ * on both guards inline, and in server.hydrationWatermark's doc).
  */
 async function fetchMessagesForReplay(
   server: ZcodeAcpServer,
   zcodeSid: string,
+  opts: { guardFirstRead?: boolean } = {},
 ): Promise<ZcodeMessage[]> {
-  if (!server.hydrationUnsettled.has(zcodeSid)) return fetchMessages(server, zcodeSid);
-  return fetchMessagesSettled(server, zcodeSid);
+  if (server.hydrationUnsettled.has(zcodeSid)) return fetchMessagesSettled(server, zcodeSid);
+  // A session this backend generation has never settle-observed (no watermark
+  // entry — the map is cleared on respawn, and only settles/creates write it)
+  // has no proof the store is fully hydrated: a plain read can land
+  // mid-restore with no marker armed to say so, and replaying that prefix
+  // caches a truncated conversation on the client (observed 2026-10: first
+  // entry after a wake-reconnect ended mid-conversation; re-entry, once
+  // hydration finished, replayed whole). One settle poll per session per
+  // generation buys that proof; stable sessions pay zero extra reads. Skipped
+  // by the turn-path baseline (guardFirstRead:false — latency-sensitive, and
+  // no-watermark is unreachable there once respawn stamps are void).
+  // Residual, accepted: a read landing ABOVE the watermark while a
+  // false-stable hydration still grows ships a prefix — the client-side
+  // last-message-id reconciliation is the defense there.
+  if (opts.guardFirstRead !== false && !server.hydrationWatermark.has(zcodeSid)) {
+    return fetchMessagesSettled(server, zcodeSid);
+  }
+  return fetchMessages(server, zcodeSid);
 }
 
 /**

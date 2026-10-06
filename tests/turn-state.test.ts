@@ -242,3 +242,106 @@ describe("$/zcode/turnState emission", () => {
     ]);
   });
 });
+
+describe("backend-loaded stamp after backend-lost turns", () => {
+  it("a FAILED backend-lost recovery leaves no stamp — the respawned backend never loaded the session", async () => {
+    // Ghost-stamp regression (2026-10 review): the turn's finally used to
+    // stamp backend-loaded unconditionally. A backend dying mid-turn with a
+    // failed recovery (reload rejected on the fresh process) left a fresh
+    // stamp vouching for a session the NEW backend never loaded — every
+    // session/load in the TTL window then skipped the resume RPC and
+    // replayed empty.
+    const server = new ZcodeAcpServer();
+    const listeners: Array<{ handleEvent: (e: ZcodeEvent) => void }> = [];
+    // The respawned generation: answers the registry ping, refuses the reload.
+    const b2 = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        if (method === "session/resume") {
+          return { error: { code: -32004, message: "Session is not active: zs_ts" } };
+        }
+        return { result: {} };
+      },
+      send: () => {},
+      pollServerRequests: () => [],
+      registerEventListener: () => {},
+      unregisterEventListener: () => {},
+    } as unknown as ZcodeBackend;
+    let flipped = false;
+    const b1 = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        switch (method) {
+          case "workspace/updateProviderRegistry":
+          case "session/subscribe":
+            return { result: {} };
+          case "session/read":
+            return { result: { projection: { status: "idle", contextUsed: 0 }, settings: {} } };
+          case "session/messages":
+            return { result: { messages: [] } };
+          case "session/send": {
+            for (const e of [
+              { type: "turn.started" },
+              {
+                type: "turn.failed",
+                payload: {
+                  error: {
+                    code: "UNKNOWN_ERROR",
+                    message: "Turn execution failed",
+                    cause: { code: "ERR_INVALID_STATE", message: "database is not open" },
+                  },
+                },
+              },
+            ] as ZcodeEvent[]) {
+              for (const l of listeners) l.handleEvent(e);
+            }
+            // The process dies with the turn: by the time the recovery runs,
+            // the world has already moved to a respawned backend (stamps
+            // voided, exactly as ensureBackend's spawn branch does).
+            flipped = true;
+            b1.isDead = true;
+            server.backend = b2;
+            server.resetBackendGeneration();
+            return { result: { accepted: true } };
+          }
+          default:
+            return { result: {} };
+        }
+      },
+      send: () => {},
+      pollServerRequests: () => [],
+      registerEventListener: (_sid: string, l: { handleEvent: (e: ZcodeEvent) => void }) => {
+        listeners.push(l);
+      },
+      unregisterEventListener: (_sid: string, l: { handleEvent: (e: ZcodeEvent) => void }) => {
+        const i = listeners.indexOf(l);
+        if (i >= 0) listeners.splice(i, 1);
+      },
+    } as unknown as ZcodeBackend;
+    server.backend = b1;
+    server.registerSession("sess_ts", "zs_ts");
+    server.markBackendLoaded("sess_ts");
+    const { cx } = collectCx();
+
+    await expect(prompt(server, promptParams(), cx, 7)).rejects.toThrow();
+
+    expect(flipped).toBe(true);
+    // No ghost stamp: the load path must re-resume instead of replaying empty.
+    expect(server.isBackendSessionLive("sess_ts")).toBe(false);
+  });
+
+  it("a turn that runs to completion still refreshes the stamp", async () => {
+    const server = setup(
+      scriptedBackend(() => [
+        { type: "turn.started" },
+        { type: "turn.completed", payload: { resultType: "success" } },
+      ]),
+    );
+    const { cx } = collectCx();
+
+    const result = await prompt(server, promptParams(), cx, 8);
+
+    expect(result).toEqual({ stopReason: "end_turn" });
+    expect(server.isBackendSessionLive("sess_ts")).toBe(true);
+  });
+});

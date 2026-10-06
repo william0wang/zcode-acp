@@ -336,6 +336,31 @@ describe("cap-truncated settle + alreadyLive re-settle (hydration gap)", () => {
     expect(counts.get("session/messages")).toBe(3);
   });
 
+  it("an alreadyLive load with NO generation watermark re-settles instead of plain-reading mid-hydration", async () => {
+    // The wake-reconnect shape (2026-10): the bridge and its mappings
+    // survived, but this backend generation never settle-observed the store
+    // — no marker (nothing capped), no watermark (nothing settled). The
+    // plain read landed mid-hydration and replayed a PREFIX the client then
+    // cached. Entry presence is the "observed settled" proof: the
+    // generation's FIRST replay read pays the settle poll instead.
+    const { backend, counts } = makeBackend({ messagesQueue: [hist(3), hist(8), hist(8)] });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    server.registerSession("sess_race", "sess_race");
+    server.markBackendLoaded("sess_race"); // alreadyLive: no resume flight
+
+    const { cx, updates } = collectCx();
+    const p = loadSession(server, loadParams(), cx);
+    await vi.advanceTimersByTimeAsync(2_000);
+    const r = await p;
+
+    expect(counts.get("session/resume") ?? 0).toBe(0);
+    expect((r as { replayMeta?: { totalMessages?: number } }).replayMeta?.totalMessages).toBe(8);
+    expect(chunks(updates)).toHaveLength(8);
+    expect(server.hydrationUnsettled.size).toBe(0);
+    expect(server.hydrationWatermark.get("sess_race")).toBe(8);
+  });
+
   it("a stable session never arms the marker — alreadyLive loads do no settle poll", async () => {
     const { backend, counts } = makeBackend({ messagesQueue: [hist(8)] });
     const server = new ZcodeAcpServer();
