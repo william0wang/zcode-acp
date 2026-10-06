@@ -56,6 +56,7 @@ describe("sliceTail", () => {
       replayedTurns: 1,
       totalMessages: 8,
       totalTurns: 4,
+      lastMessageId: "a3",
     });
   });
 
@@ -73,9 +74,14 @@ describe("sliceTail", () => {
     expect(s.batch).toEqual([]);
     expect(s.meta.hasMore).toBe(true);
     expect(s.meta.totalMessages).toBe(8);
-    // Paging from that cursor delivers the tail.
+    // The reconcile key: history's newest message id, present even on the
+    // metadata-only attach (empty batch, end anchored at history's end).
+    expect(s.meta.lastMessageId).toBe("a3");
+    // Paging from that cursor delivers the tail; the page's own anchor is the
+    // message just before the cursor.
     const page = sliceBefore(MSGS, s.meta.cursor, 2);
     expect(ids(page.batch)).toEqual(["u3", "a3"]);
+    expect(page.meta.lastMessageId).toBe("a3");
   });
 
   it("limit >= length replays everything", () => {
@@ -91,7 +97,12 @@ describe("sliceTail", () => {
   it("handles empty history", () => {
     const s = sliceTail([], 30);
     expect(s.batch).toEqual([]);
-    expect(s.meta).toMatchObject({ hasMore: false, totalMessages: 0, totalTurns: 0 });
+    expect(s.meta).toMatchObject({
+      hasMore: false,
+      totalMessages: 0,
+      totalTurns: 0,
+      lastMessageId: null,
+    });
   });
 
   it("hidden tool-result user messages are not turn anchors (cursor must survive replay)", () => {
