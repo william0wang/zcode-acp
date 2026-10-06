@@ -1253,8 +1253,10 @@ export async function resumeIntoSession(
 
   // Fetch inside the batch (see replayResumeHistory): the guard must cover
   // the history RPC, or a concurrent prompt renders above the replay.
+  let replayedHistory: ZcodeMessage[] | undefined;
   await withReplayBatch(acpSid, async () => {
     const history = settledHistory ?? (await fetchMessagesForReplay(server, zcodeTarget));
+    replayedHistory = history;
     if (history.length > 0) server.markSessionActive(acpSid);
     const slice = fullSlice(history);
     await replayMessages(cx, acpSid, slice.batch, {
@@ -1272,7 +1274,7 @@ export async function resumeIntoSession(
   // completion diff does not re-emit it, then emit the current todos from a
   // throwaway differ and the initial context-usage bar.
   try {
-    const snapshot = await buildSnapshot(server, zcodeTarget);
+    const snapshot = await buildSnapshot(server, zcodeTarget, {}, replayedHistory);
     getOrCreateDiffer(server, zcodeTarget).diff(snapshot);
     const planEvents = new ProjectionDiffer().diffPlan(snapshot.todos ?? []);
     for (const iev of planEvents) {
@@ -1315,6 +1317,23 @@ export async function loadSession(
   // snapshot is the mid-hydration-prefix guard; undefined = alreadyLive).
   let settledHistory: ZcodeMessage[] | undefined;
 
+  // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
+  // N messages aligned to turn boundaries — the full replay stays the default
+  // for editors that send no `_meta` (Zed path unchanged). limit 0 is the
+  // remote client's metadata-only reconcile attach: nothing is replayed, so
+  // nothing needs the history to be COMPLETE — the settle can be skipped on
+  // the resume flight and the read below stays a plain (possibly prefix)
+  // read. A prefix only makes the reconcile conservative (ids/counts mismatch
+  // → the client falls back to a full attach, which is where the settle then
+  // runs — once, not once per attach). This is the cold-reattach fast path:
+  // settling every metadata-only attach burned a full settle-poll cap (30s on
+  // big sessions) before the client even knew whether anything had changed,
+  // and a capped settle left the re-settle marker for the follow-up full
+  // attach to pay AGAIN (observed 2026-10: minute-long "session never loads"
+  // on wake-reconnect).
+  const limit = readTailLimit(params);
+  const metadataOnly = limit === 0;
+
   if (!alreadyLive) {
     // Same mcpServers contract as resume: the client may re-declare them on
     // load; a stored set keeps riding along when it doesn't (#193).
@@ -1327,11 +1346,13 @@ export async function loadSession(
     );
     // Push the provider registry BEFORE resume: a loaded session may carry a
     // third-party model in its history, and the backend needs the provider
-    // registered to process it.
+    // registered to process the resume turn.
     await syncProviderRegistry(server, cwd);
     let resumeResult: unknown;
     try {
-      const outcome = await resumePreservingModel(server, zcParams);
+      const outcome = await resumePreservingModel(server, zcParams, {
+        skipSettle: metadataOnly,
+      });
       resumeResult = outcome.result;
       settledHistory = outcome.history;
     } catch (e) {
@@ -1382,15 +1403,18 @@ export async function loadSession(
     }
   }
 
-  // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
-  // N messages aligned to turn boundaries — the full replay stays the default
-  // for editors that send no `_meta` (Zed path unchanged).
-  const limit = readTailLimit(params);
   // Named `history` — a local `messages` would shadow the i18n `messages()`
   // helper (TDZ crash from a catch block). A resume flight's SETTLED snapshot
   // is the mid-hydration guard; only an already-live session (no flight) falls
   // back to a plain read — which fetchMessagesForReplay upgrades to a settle
-  // poll when the last flight capped out mid-hydration.
+  // poll when the last flight capped out mid-hydration. A metadata-only
+  // attach reads PLAIN even then: its meta is a conservative reconcile
+  // signal, and completeness is the full attach's job (see metadataOnly).
+  const replayHistoryFor = (): Promise<ZcodeMessage[]> =>
+    metadataOnly ? fetchMessages(server, zcodeSid) : fetchMessagesForReplay(server, zcodeSid);
+  // Hoisted for the buildSnapshot reuse below — the load just paid for this
+  // history (settle poll included), the differ baseline must not pay again.
+  let replayedHistory: ZcodeMessage[] | undefined;
   let slice: ReplaySlice;
   if (opts.replayHistory === false) {
     // Boot-resume interception (session/new): the terminal TUI client does not
@@ -1398,11 +1422,11 @@ export async function loadSession(
     // and blocks on the response until the replay finishes — so skip the
     // dispatch. The differ baseline below still runs, so the next turn's
     // completion diff does not re-emit the historical messages.
-    const history = settledHistory ?? (await fetchMessagesForReplay(server, zcodeSid));
+    replayedHistory = settledHistory ?? (await fetchMessagesForReplay(server, zcodeSid));
     // History on disk = real interaction (covers untitled sessions resumed from
     // a previous bridge lifetime) — make the session discoverable remotely.
-    if (history.length > 0) server.markSessionActive(acpSid);
-    slice = limit === null ? fullSlice(history) : sliceTail(history, limit);
+    if (replayedHistory.length > 0) server.markSessionActive(acpSid);
+    slice = limit === null ? fullSlice(replayedHistory) : sliceTail(replayedHistory, limit);
     log(
       `session/load: history replay skipped (boot-resume); ${slice.meta.totalMessages} messages on record`,
     );
@@ -1411,7 +1435,8 @@ export async function loadSession(
     // a prompt landing while the history RPC is in flight must queue behind
     // the batch, not dispatch above the replayed history.
     slice = await withReplayBatch(acpSid, async () => {
-      const history = settledHistory ?? (await fetchMessagesForReplay(server, zcodeSid));
+      const history = settledHistory ?? (await replayHistoryFor());
+      replayedHistory = history;
       if (history.length > 0) server.markSessionActive(acpSid);
       const batchSlice = limit === null ? fullSlice(history) : sliceTail(history, limit);
       await replayMessages(cx, acpSid, batchSlice.batch);
@@ -1428,7 +1453,7 @@ export async function loadSession(
   // Replay the existing todo list as an initial plan so a loaded session shows
   // its todos immediately.
   try {
-    const snapshot = await buildSnapshot(server, zcodeSid);
+    const snapshot = await buildSnapshot(server, zcodeSid, {}, replayedHistory);
     const loadDiffer = getOrCreateDiffer(server, zcodeSid);
     // Keep the shared differ's full diff for its mark-seen side effect on the
     // replayed history (next turn-completion diff must not re-emit it).
@@ -3066,7 +3091,9 @@ interface ResumeOutcome {
   performed: boolean;
   /** The resume RPC result — shared with joiners (cwd adoption is uniform). */
   result?: unknown;
-  /** Settled history read (fresh flights only) — ordering guarantee vs hydration. */
+  /** Settled history read (fresh flights only) — ordering guarantee vs
+   * hydration. Undefined when the flight skipped the settle (metadata-only
+   * attach): the replay read then re-arms the settle guards itself. */
   history?: ZcodeMessage[];
 }
 
@@ -3188,6 +3215,7 @@ export function cacheModelAvailability(
 async function resumePreservingModel(
   server: ZcodeAcpServer,
   zcParams: Record<string, unknown>,
+  opts: { skipSettle?: boolean } = {},
 ): Promise<ResumeOutcome> {
   const zcodeSid = String(zcParams["sessionId"] ?? "");
   const inFlight = server.resumeInFlight.get(zcodeSid) as Promise<ResumeOutcome> | undefined;
@@ -3229,8 +3257,13 @@ async function resumePreservingModel(
       }
     }
     // The settle rides the flight (see the docstring): joiners awaiting this
-    // promise are ordered after hydration, not merely after the RPC.
-    const history = await fetchMessagesSettled(server, zcodeSid);
+    // promise are ordered after hydration, not merely after the RPC. EXCEPT
+    // for a metadata-only attach (skipSettle): its reconcile is conservative —
+    // a mid-hydration prefix read only makes the ids/counts mismatch, and the
+    // client's fallback full attach is where the settle actually pays. A
+    // joiner of a skipped flight settles itself: no watermark was written, so
+    // its replay read re-arms the first-read settle guard.
+    const history = opts.skipSettle ? undefined : await fetchMessagesSettled(server, zcodeSid);
     // Resume/fork snapshots carry the FULL model-availability list (only
     // session/read is hardcoded "current") — refresh the switch-time level
     // lookup for models added after create BEFORE the remembered choice
@@ -4319,10 +4352,14 @@ async function buildSnapshot(
   server: ZcodeAcpServer,
   zcodeSid: string,
   opts: FetchMessagesOptions = {},
+  /** Pre-fetched messages (skip the history read): callers that just read
+   * the store for a replay/differ baseline pass their copy instead of paying
+   * a second full session/messages scan. */
+  presetMessages?: ZcodeMessage[],
 ): Promise<ZcodeSnapshot> {
   const backend = await server.ensureBackend();
   const [msgs, readResp] = await Promise.all([
-    fetchMessages(server, zcodeSid, opts),
+    presetMessages ?? fetchMessages(server, zcodeSid, opts),
     backend.request(server.nextId(), "session/read", { sessionId: zcodeSid }, 8000),
   ]);
   const read = (readResp.result ?? {}) as {

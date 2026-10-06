@@ -1000,6 +1000,14 @@ everything below and you get the full replay):
   redundant full replay on every re-entry. Null on an empty store or an
   id-less tail.
 
+  A metadata-only attach (`limit 0`) is deliberately FAST over complete: the
+  bridge skips the hydration settle for it, so on a freshly-resumed backend
+  the meta may describe a mid-hydration PREFIX (smaller `totalMessages`,
+  prefix-tail `lastMessageId`). Treat reconcile conservatively — a mismatch
+  is "unknown, re-attach with a real limit"; only an exact tail-id match
+  means "nothing changed". The follow-up full attach is where the settle
+  runs, so it always sees the complete history.
+
 - **`session/load_earlier`** (`{ sessionId, before, limit }`, limit defaults
   to 50) delivers one page of `session/update`s strictly older than `before`,
   oldest → newest — prepend them. Same `replayMeta` shape in the result;
