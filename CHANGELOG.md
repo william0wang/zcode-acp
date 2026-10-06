@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.64.1](https://github.com/william0wang/zcode-acp/compare/v0.64.0...v0.64.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* skip the hydration settle for metadata-only attaches ([#305](https://github.com/william0wang/zcode-acp/issues/305)) ([#305](https://github.com/william0wang/zcode-acp/issues/305)) ([f745d48](https://github.com/william0wang/zcode-acp/commit/f745d48635db9f5b8316b01c5b5643045c4d80d6))
+
 ## [0.64.0](https://github.com/william0wang/zcode-acp/compare/v0.63.1...v0.64.0) (2026-10-06)
 
 
