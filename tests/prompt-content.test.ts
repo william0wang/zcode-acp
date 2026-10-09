@@ -59,7 +59,7 @@ describe("embedded resource conversion", () => {
       await directory(),
     );
     expect(result.text).toBe(
-      "prefix  \nTEXT736\n[related resource: doc](/tmp/my doc.txt)\n[related resource: remote](https://example.invalid/reference)",
+      "prefix  \n[embedded resource: memory://text]\nTEXT736\n[related resource: doc](/tmp/my doc.txt)\n[related resource: remote](https://example.invalid/reference)",
     );
     expect(result.attachments).toEqual([]);
   });
@@ -133,7 +133,7 @@ describe("embedded resource conversion", () => {
           await directory(),
         )
       ).text,
-    ).toBe("Empty resource: memory://empty");
+    ).toBe("[embedded resource: memory://empty]");
     for (const resource of [
       { uri: "memory://empty", blob: "" },
       { uri: "memory://both", text: "text", blob: "AQID" },

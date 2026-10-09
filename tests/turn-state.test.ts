@@ -131,6 +131,29 @@ describe("$/zcode/turnState emission", () => {
     });
   });
 
+  it.each([
+    [{ type: "resource", resource: { uri: "memory://instructions", text: "/compact" } }],
+    [
+      { type: "text", text: "/compact" },
+      { type: "resource_link", name: "notes", uri: "file:///missing/notes.txt" },
+    ],
+  ] as acp.ContentBlock[][])(
+    "sends slash-like attached context to the model, not command handlers",
+    async (...blocks) => {
+      const backend = scriptedBackend(() => [
+        { type: "turn.completed", payload: { resultType: "success" } },
+      ]);
+      const request = vi.spyOn(backend, "request");
+      const { cx } = collectCx();
+      await prompt(setup(backend), { sessionId: "sess_ts", prompt: blocks }, cx, 101);
+      const sent = request.mock.calls.find((call) => call[1] === "session/send");
+      expect(sent).toBeDefined();
+      expect((sent?.[2] as { content: string }).content).not.toMatch(/^\//);
+      expect((sent?.[2] as { content: string }).content).toContain("/compact");
+      expect(request.mock.calls.some((call) => call[1] === "session/compact")).toBe(false);
+    },
+  );
+
   it("rejects goal-loop binary prompts instead of parking text and dropping bytes", async () => {
     const backend = scriptedBackend(() => []);
     const request = vi.spyOn(backend, "request");

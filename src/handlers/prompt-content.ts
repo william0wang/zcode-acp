@@ -156,7 +156,7 @@ export async function convertPromptContent(
         if ("text" in r) {
           if ("blob" in r) invalid("Resource must contain text or blob, not both");
           charge(Buffer.byteLength(r.text), type);
-          text.push(r.text || `Empty resource: ${r.uri}`);
+          text.push(`[embedded resource: ${r.uri}]\n${r.text}`);
         } else await binary(r.blob, type, filename(r.uri, "resource"));
       } else if (block.type === "resource_link") {
         let location = block.uri;
@@ -172,7 +172,12 @@ export async function convertPromptContent(
         text.push(reference);
       } else invalid("Unsupported prompt content type; audio transcription is not implemented");
     }
-    const content = text.join("\n").trim();
+    let content = text.join("\n").trim();
+    // Attached context must not become a native slash command merely because
+    // its text starts with a command name. All-text command prompts are unchanged.
+    if (blocks.some((block) => block.type !== "text") && content.startsWith("/")) {
+      content = `[attached context]\n${content}`;
+    }
     if (!content && !attachments.length) invalid("Prompt requires text or attachments");
     return { text: content, attachments };
   } catch (error) {

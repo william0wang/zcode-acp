@@ -2200,10 +2200,9 @@ async function runPrompt(
   // `client` (the requesting connection) rides along so replay-shaped slash
   // dispatch — /resume's history replay above all — targets that connection
   // instead of the broadcast cx (see resumeIntoSession).
-  const intercepted =
-    attachments.length > 0
-      ? null
-      : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client);
+  const intercepted = !params.prompt.every((block) => block.type === "text")
+    ? null
+    : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client);
   if (intercepted) {
     await emitSessionTurnState(server, params.sessionId, false, cx);
     return intercepted;
