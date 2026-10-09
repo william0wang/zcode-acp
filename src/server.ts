@@ -1151,16 +1151,17 @@ export class ZcodeAcpServer {
         // endpoint, hub-proxied at /api/instances/{id}/fs/* (ADR-0004).
         _meta: { zcode: { fs: true } },
       },
-      // The GLM API key is read from ~/.zcode/v2/config.json by the ZCode
-      // backend subprocess; the editor never needs to supply credentials.
+      // Credentials come from Desktop configuration or a manually configured
+      // private bridge account; runtime headers supply the Coding Plan key.
+      // The editor never needs to supply credentials.
       // Declared as AuthMethodAgent (no `type` field → defaults to "agent"),
       // which the ACP registry CI accepts as "agent self-handles auth".
       authMethods: [
         {
           id: "zcode-credentials",
-          name: "ZCode built-in credentials",
+          name: "ZCode Coding Plan credentials",
           description:
-            "Reads the GLM API key from ~/.zcode/v2/config.json managed by the ZCode desktop app. No editor-side credentials required.",
+            "Uses existing ZCode Desktop credentials or a private bridge account configured with zcode-acp setup. No editor-side credentials required.",
         },
       ],
     };
