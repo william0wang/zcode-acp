@@ -178,9 +178,9 @@ export function builtinProviderEnv(entryArg?: string): NodeJS.ProcessEnv {
   const found = candidates.find((c) => existsSync(c));
   if (!found) return {};
   const personal = zcodePersonalProviderPath();
-  return existsSync(personal)
-    ? { [BUILTIN_PROVIDER_ENV]: found, [PERSONAL_PROVIDER_ENV]: personal }
-    : { [BUILTIN_PROVIDER_ENV]: found };
+  // A missing personal table is valid: the backend reads it as an empty layer.
+  // Both paths must still be explicit to keep the builtin revision path stable.
+  return { [BUILTIN_PROVIDER_ENV]: found, [PERSONAL_PROVIDER_ENV]: personal };
 }
 
 /**
