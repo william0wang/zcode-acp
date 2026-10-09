@@ -87,6 +87,81 @@ function promptParams(): acp.PromptRequest {
 }
 
 describe("$/zcode/turnState emission", () => {
+  it("forwards exact embedded PDF bytes through prompt to native session/send", async () => {
+    const backend = scriptedBackend(() => [
+      { type: "turn.completed", payload: { resultType: "success" } },
+    ]);
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const { cx } = collectCx();
+    const data = Buffer.from("synthetic PDF payload").toString("base64");
+    const result = await prompt(
+      server,
+      {
+        sessionId: "sess_ts",
+        prompt: [
+          { type: "text", text: "inspect" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///does-not-exist/paper.pdf",
+              mimeType: "application/pdf",
+              blob: data,
+            },
+          },
+        ],
+      },
+      cx,
+      99,
+    );
+    expect(result.stopReason).toBe("end_turn");
+    const sent = request.mock.calls.find((call) => call[1] === "session/send");
+    expect(sent?.[2]).toEqual({
+      sessionId: "zs_ts",
+      content: "inspect",
+      attachments: [
+        {
+          kind: "pdf",
+          filename: "paper.pdf",
+          mimeType: "application/pdf",
+          dataBase64: data,
+          sizeBytes: Buffer.byteLength("synthetic PDF payload"),
+        },
+      ],
+    });
+  });
+
+  it("rejects goal-loop binary prompts instead of parking text and dropping bytes", async () => {
+    const backend = scriptedBackend(() => []);
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const parkPrompt = vi.fn();
+    server.goalLoops.set("zs_ts", { parkPrompt } as never);
+    const { cx } = collectCx();
+    await expect(
+      prompt(
+        server,
+        {
+          sessionId: "sess_ts",
+          prompt: [
+            {
+              type: "resource",
+              resource: {
+                uri: "memory://paper.pdf",
+                mimeType: "application/pdf",
+                blob: Buffer.from("synthetic").toString("base64"),
+              },
+            },
+          ],
+        },
+        cx,
+        100,
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(parkPrompt).not.toHaveBeenCalled();
+    expect(request.mock.calls.some((call) => call[1] === "session/send")).toBe(false);
+  });
+
   it("emits running:true at turn start and running:false at completion", async () => {
     const server = setup(
       scriptedBackend(() => [

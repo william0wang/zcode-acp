@@ -164,6 +164,15 @@ through unchanged.
 
 Send a prompt.
 
+ACP `resource` text is merged into `content`. Embedded PDF/image blobs and ACP
+image blocks are forwarded in an optional native `attachments` array, with
+`kind`, `filename`, `mimeType`, exact `sizeBytes`, and `dataBase64`. Supplied
+bytes take precedence over URI metadata. Other binary resources use `kind:
+"file"` and a private staged `localPath` instead of `dataBase64`; successful
+staging survives bridge restarts so native tools can read it after resume.
+See [README prompt attachments](../README.md#prompt-attachments) for limits and
+retention. These resources are advertised by `promptCapabilities.embeddedContext`.
+
 **Request:**
 
 ```json

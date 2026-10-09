@@ -18,6 +18,8 @@ import { realpathSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
+import { convertPromptContent, type NativePromptAttachment } from "./prompt-content.js";
+
 import { backendCapabilities } from "../backend/adapter.js";
 import type { ZcodeBackend } from "../backend/client.js";
 import { EventStreamListener, TurnMonitor } from "../backend/listener.js";
@@ -74,7 +76,7 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { clientConnectionRoot, log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn, zcodeHomeDir } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import {
@@ -1593,7 +1595,7 @@ export interface RunOneTurnOptions {
   preempted: boolean;
   /** Wire text for the backend send (slash-neutralized on the prompt path). */
   sendText: string;
-  attachments?: unknown[];
+  attachments?: NativePromptAttachment[];
   /** Sandbox allow-restart continuation round (emits the resumed status line). */
   continuationRound?: boolean;
   /** Run the env-gated maybeAutoCompact after an end_turn. Default true. */
@@ -2131,12 +2133,10 @@ async function runPrompt(
   await server.applySandboxFlip();
   const backend = await server.ensureBackend();
 
-  // Extract prompt text + image attachments from ACP ContentBlock[].
-  const text = extractPromptText(params.prompt);
-  const attachments = extractAttachments(params.prompt);
-  // A prompt is valid if it has text OR at least one image attachment (a user
-  // may drag in an image with no accompanying text).
-  if (!text && attachments.length === 0) throw new Error("empty prompt");
+  const { text, attachments } = await convertPromptContent(
+    params.prompt,
+    path.join(zcodeHomeDir(), "v2", "acp-attachments"),
+  );
 
   // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
   // auto-submitted trigger until its boot bind, so it arrives as the FIRST
@@ -2200,14 +2200,10 @@ async function runPrompt(
   // `client` (the requesting connection) rides along so replay-shaped slash
   // dispatch — /resume's history replay above all — targets that connection
   // instead of the broadcast cx (see resumeIntoSession).
-  const intercepted = await handleSlashCommand(
-    server,
-    cx,
-    params.sessionId,
-    zcodeSid,
-    text,
-    client,
-  );
+  const intercepted =
+    attachments.length > 0
+      ? null
+      : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client);
   if (intercepted) {
     await emitSessionTurnState(server, params.sessionId, false, cx);
     return intercepted;
@@ -2289,6 +2285,9 @@ async function runPrompt(
   await withPreemptLock(server, zcodeSid, async () => {
     const goalLoop = server.goalLoops?.get(zcodeSid);
     if (goalLoop) {
+      if (attachments.length) {
+        throw new RequestError(-32602, "Pause the goal loop before sending attachments");
+      }
       parked = goalLoop.parkPrompt(sendText);
       return;
     }
@@ -2874,7 +2873,7 @@ export function preemptInFlightTurn(
 // ---------- internals ----------
 
 /** Concatenate text from ACP ContentBlock[] into a prompt string.
- *  Exported for unit testing (the resource_link path is easy to break). */
+ *  Legacy compatibility helper; runtime prompts use convertPromptContent instead. */
 export function extractPromptText(blocks: acp.ContentBlock[] | undefined): string {
   const parts: string[] = [];
   for (const block of blocks ?? []) {
@@ -2901,7 +2900,7 @@ export function extractPromptText(blocks: acp.ContentBlock[] | undefined): strin
       const label = b.name || path;
       parts.push(`[related resource: ${label}](${path})`);
     } else if (b.type === "resource" && b.resource) {
-      // Embedded resource. We don't advertise embeddedContext, but accept text
+      // Legacy extraction only (not the runtime converter): accept text
       // payloads defensively in case a client sends them anyway. Binary
       // payloads (BlobResourceContents) are never decoded — the base64 blob is
       // useless to the model — so rewrite the resource uri into a readable
