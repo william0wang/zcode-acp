@@ -42,6 +42,19 @@ describe("userConfigPath", () => {
 });
 
 describe("loadUserConfig", () => {
+  it("validates the successful completion-status preference without dropping session mode", () => {
+    writeConfig(JSON.stringify({ session: { mode: "build", showCompletionStatus: false } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      session: { mode: "build", showCompletionStatus: false },
+    });
+    writeConfig(JSON.stringify({ session: { showCompletionStatus: true } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      session: { showCompletionStatus: true },
+    });
+    writeConfig(JSON.stringify({ session: { mode: "build", showCompletionStatus: "false" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ session: { mode: "build" } });
+  });
+
   it("missing file reads as empty (the no-file env-only path)", () => {
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });

@@ -137,7 +137,10 @@ at bridge start just like its env var.
 {
   "lang": "zh", // user-facing strings: "zh" | "en"
   "debug": false, // verbose diagnostics (ZCODE_ACP_DEBUG=1)
-  "session": { "mode": "yolo" }, // initial mode: plan|build|edit|yolo|auto
+  "session": {
+    "mode": "yolo", // initial mode: plan|build|edit|yolo|auto
+    "showCompletionStatus": true, // successful turn-end assistant status (default true)
+  },
   "autoCompact": { "threshold": 240000 }, // compact once N tokens are used (unset = off)
   "goal": {
     "maxTurns": 100, // goal/auto loop round budget
@@ -155,6 +158,12 @@ at bridge start just like its env var.
 
 Invalid values are warned about on stderr and dropped — the env fallback
 applies — and the file is never rewritten by the bridge.
+
+For clients such as T3 Code that display the last assistant message as the
+final response, set `session.showCompletionStatus` to `false` (or
+`ZCODE_ACP_SHOW_COMPLETION_STATUS=0`). This omits the successful completion/cache
+status line so the answer stays visible. Error and cancellation warnings still
+appear; structured usage updates and prompt-response usage are unchanged.
 
 Deliberately NOT file-configurable: per-process plumbing
 (`ZCODE_ACP_RESUME_SESSION`, `ZCODE_ACP_REMOTE_ORIGIN`,
@@ -189,6 +198,7 @@ field (see [User config file](#user-config-file)); the file value wins.
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`              | First loopback port for the bridge's ACP endpoint. Each bridge (each editor window) auto-increments to the next free port.                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `ZCODE_ACP_SANDBOX`                | _(unset)_           | Set to `1` to confine the agent's file writes with a macOS Seatbelt sandbox globally; per-project, set `"enabled": true` in `<workspace>/.zcode/acp/sandbox.json` instead (see [Sandbox](#sandbox)).                                                                                                                                                                                                                                                                                                                                                                           |
 | `ZCODE_ACP_LANG`                   | _(inherited)_       | Language of the bridge's user-facing strings (popups, status/hint lines, command menu descriptions): `zh` or `en`. When unset, the bridge inherits the ZCode app's language (`localePreference`/`locale` in `~/.zcode/v2/setting.json`), then falls back to the `LC_ALL`/`LC_MESSAGES`/`LANG` locale, defaulting to English.                                                                                                                                                                                                                                                   |
+| `ZCODE_ACP_SHOW_COMPLETION_STATUS` | `1`                 | Emit successful turn-end status as assistant text. Set `0` or `false` to omit it; `session.showCompletionStatus` overrides the env. Error and cancellation warnings remain visible.                                                                                                                                                                                                                                                                                                                                                                                            |
 
 ## Sandbox
 
