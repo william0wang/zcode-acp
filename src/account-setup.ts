@@ -15,7 +15,9 @@ export function readHiddenApiKey(
     return Promise.reject(new Error("Run account setup in an interactive terminal"));
   return new Promise((resolve, reject) => {
     const wasRaw = input.isRaw;
-    const wasPaused = input.isPaused();
+    // A fresh stdin has readableFlowing=null even though isPaused() is false.
+    // Starting reads must not leave that otherwise idle handle alive after setup.
+    const wasFlowing = input.readableFlowing === true;
     let value = "";
     let done = false;
     const finish = (error?: Error) => {
@@ -25,7 +27,11 @@ export function readHiddenApiKey(
       input.off("end", onEnd);
       input.off("error", onError);
       input.setRawMode(wasRaw);
-      if (wasPaused) input.pause();
+      if (!wasFlowing) {
+        input.pause();
+        // Pausing consumption alone can leave stdin referenced by Node.
+        input.unref?.();
+      }
       output.write("\n");
       if (error) reject(error);
       else resolve(value);
@@ -52,6 +58,7 @@ export function readHiddenApiKey(
     input.once("error", onError);
     output.write("Coding Plan API key (hidden): ");
     input.setRawMode(true);
+    if (!wasFlowing) input.ref?.();
     input.resume();
   });
 }

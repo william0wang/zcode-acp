@@ -222,6 +222,32 @@ describe("hidden terminal input", () => {
     expect(state.raw).toBe(false);
     expect(input.listenerCount("keypress")).toBe(0);
   });
+  it.each(["fresh", "paused"])("releases %s input after completion", async (initial) => {
+    const { input, output } = terminal();
+    if (initial === "paused") input.pause();
+    const ref = vi.fn(() => input);
+    const unref = vi.fn(() => input);
+    Object.assign(input, { ref, unref });
+    const answer = readHiddenApiKey(input, output);
+    input.emit("keypress", "a", {});
+    input.emit("keypress", "\r", { name: "return" });
+    expect(await answer).toBe("a");
+    expect(input.readableFlowing).toBe(false);
+    expect(ref).toHaveBeenCalledOnce();
+    expect(unref).toHaveBeenCalledOnce();
+  });
+  it("preserves a caller's already flowing input and raw state", async () => {
+    const { input, output, state } = terminal();
+    input.setRawMode(true);
+    input.resume();
+    const answer = readHiddenApiKey(input, output);
+    input.emit("keypress", "a", {});
+    input.emit("keypress", "\r", { name: "return" });
+    expect(await answer).toBe("a");
+    expect(input.readableFlowing).toBe(true);
+    expect(state.raw).toBe(true);
+    input.pause();
+  });
   it.each(["interrupt", "eof", "error"])("restores input on %s", async (event) => {
     const { input, output, state } = terminal();
     const answer = readHiddenApiKey(input, output);
