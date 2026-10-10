@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.66.0](https://github.com/william0wang/zcode-acp/compare/v0.65.1...v0.66.0) (2026-10-10)
+
+
+### Features
+
+* derive Ollama Cloud quota from the 2026-10 spend analytics API ([730a0bc](https://github.com/william0wang/zcode-acp/commit/730a0bc3e74ac9dbf90231bf074adabefd3025f4))
+
+
+### Bug Fixes
+
+* dual-emit turnState under the ACP-reserved _zcode name ([#311](https://github.com/william0wang/zcode-acp/issues/311)) ([9b86e51](https://github.com/william0wang/zcode-acp/commit/9b86e513dd35d4f2a54ea9023b157edd59988948))
+
 ## [0.65.1](https://github.com/william0wang/zcode-acp/compare/v0.65.0...v0.65.1) (2026-10-06)
 
 
