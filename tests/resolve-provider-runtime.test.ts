@@ -15,20 +15,36 @@
  * tmpdir.
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { builtinProviderEnv, BUILTIN_PROVIDER_ENV } from "../src/backend/resolve.js";
+import {
+  builtinProviderEnv,
+  BUILTIN_PROVIDER_ENV,
+  PERSONAL_PROVIDER_ENV,
+} from "../src/backend/resolve.js";
 
 const SAVED = {
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE,
   ZCODE_BIN: process.env.ZCODE_BIN,
+  ZCODE_HOME: process.env.ZCODE_HOME,
+  ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE,
 };
 
+let scratch: string;
+let personal: string;
+
+beforeEach(() => {
+  scratch = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+  process.env.ZCODE_HOME = path.join(scratch, "data");
+  personal = path.join(process.env.ZCODE_HOME, "v2", "provider_config.json");
+});
+
 afterEach(() => {
+  rmSync(scratch, { recursive: true, force: true });
   for (const [k, v] of Object.entries(SAVED)) {
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
@@ -48,47 +64,69 @@ function makeAppBundle(root: string): string {
 
 describe("builtinProviderEnv", () => {
   it("points at ../config/provider for the .app bundle layout (the host's own path)", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+    const root = scratch;
     const entry = makeAppBundle(root);
 
     expect(builtinProviderEnv(entry)).toEqual({
       [BUILTIN_PROVIDER_ENV]: path.join(root, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
     });
   });
 
+  it("injects the intended personal path when its file and parent directory are missing", () => {
+    const entry = makeAppBundle(scratch);
+    expect(existsSync(path.dirname(personal))).toBe(false);
+    expect(builtinProviderEnv(entry)[PERSONAL_PROVIDER_ENV]).toBe(personal);
+    expect(existsSync(path.dirname(personal))).toBe(false);
+    expect(existsSync(personal)).toBe(false);
+  });
+
+  it("uses the same path when the personal table exists", () => {
+    const entry = makeAppBundle(scratch);
+    mkdirSync(path.dirname(personal), { recursive: true });
+    writeFileSync(personal, "{}");
+    expect(builtinProviderEnv(entry)[PERSONAL_PROVIDER_ENV]).toBe(personal);
+  });
+
   it("prefers a sibling provider/ config (npm/dev layout)", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+    const root = scratch;
     const entry = makeAppBundle(root);
     const sibling = path.join(root, "glm", "provider", "zcode-builtin.json");
     mkdirSync(path.dirname(sibling), { recursive: true });
     writeFileSync(sibling, "{}");
 
-    expect(builtinProviderEnv(entry)).toEqual({ [BUILTIN_PROVIDER_ENV]: sibling });
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: sibling,
+      [PERSONAL_PROVIDER_ENV]: personal,
+    });
   });
 
   it("honors ZCODE_BIN as the entry when no explicit entry is passed", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+    const root = scratch;
     const entry = makeAppBundle(root);
     process.env.ZCODE_BIN = entry;
 
     expect(builtinProviderEnv()).toEqual({
       [BUILTIN_PROVIDER_ENV]: path.join(root, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
     });
   });
 
   it("overrides an inherited ambient value — version-keyed runtime paths go stale across app updates", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+    const root = scratch;
     const entry = makeAppBundle(root);
+    process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = "/stale/provider_config.json";
     process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE =
       "/stale/runtime/provider/3.12.3/endpoint-x/zcode-builtin.json";
 
     expect(builtinProviderEnv(entry)).toEqual({
       [BUILTIN_PROVIDER_ENV]: path.join(root, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
     });
   });
 
   it("returns {} when no provider config exists anywhere (old CLI, PATH install)", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
+    const root = scratch;
     const entry = path.join(root, "zcode.cjs");
     writeFileSync(entry, "// fake cli");
 
