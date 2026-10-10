@@ -240,9 +240,45 @@ powered by Martty), plan quota cards (`zcode-acp quota`, GLM + Opencode Go + Oll
 the remote hub daemon (`zcode-acp hub`), and the stdio server editors invoke
 (`zcode-acp server`). TUI keys and quota setup: [docs/CLI.md](docs/CLI.md).
 
+## Manual Coding Plan account setup
+
+With a supported ZCode CLI installed, run this command in your own terminal:
+
+```bash
+zcode-acp setup --provider zai       # or: bigmodel
+```
+
+Enter your individual Coding Plan API key at the hidden prompt. Do not put a
+key in command arguments or environment flags. Setup saves an owner-only
+`~/.zcode/v2/acp-accounts.json` file (`ZCODE_HOME` relocates the `.zcode` root),
+using atomic replacement and an exclusive setup lock. It never modifies the
+Desktop's `config.json`, `setting.json`, or `provider_config.json`.
+
+An explicitly configured bridge account overrides that family's Desktop key
+and enablement **in memory**. Other providers and their order are preserved;
+use `ZCODE_PROVIDER=builtin:zai-coding-plan` (or `builtin:bigmodel-coding-plan`)
+to select a specific account for model discovery and quota queries. The
+installed public catalog supplies the plan's models. Runtime account headers,
+model discovery, and quota use the same merged credential source. Saving does
+not verify plan membership or key validity; the first provider request does.
+Restart connected clients after setup. To return to Desktop-only credentials,
+remove the selected family entry from the private account file, preserving
+version `1` and the other account entries.
+
+This is manual terminal setup, not an interactive ACP authentication method.
+T3 Code and other clients can continue using the agent-handled authentication
+already advertised by the bridge. No OAuth/captcha flow or alternative remote
+login mechanism is added. Fresh homes also require the provider-bootstrap fix
+in [PR #314](https://github.com/william0wang/zcode-acp/pull/314), which injects
+both builtin and personal-provider paths before the personal file exists.
+If setup is killed while saving, it may leave an `acp-accounts.json.lock`
+directory. After confirming no setup process is running, remove that empty
+lock directory and retry. Malformed, linked, or broadly readable account files
+are refused; setup never overwrites their contents to recover automatically.
+
 ## ACP Registry
 
-This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — the GLM API key is read from `~/.zcode/v2/config.json` by the ZCode backend, so **no editor-side credentials are required**.
+This server is compatible with the [ACP Registry](https://agentclientprotocol.com/get-started/registry). It advertises a single `agent`-type auth method at `initialize` time — credentials come from Desktop configuration or a private bridge account created by manual terminal setup, so **no editor-side credentials are required**.
 
 The registry submission assets live under [`registry/zcode-acp/`](registry/zcode-acp/) (`agent.json` + `icon.svg`). Once the package is published to npm, copy that directory into a fork of [`agentclientprotocol/registry`](https://github.com/agentclientprotocol/registry) and open a PR — the CI validates the `agent.json` schema, icon, and that `initialize` returns a non-empty `authMethods`.
 
@@ -339,12 +375,12 @@ ZCode backend over **local pipes**; that data reaches the GLM cloud API only
 because the ZCode backend itself sends it there for inference — this server
 adds no extra destinations.
 
-| Concern     | What & why                                                                                                                                                                                                                        |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                          |
-| Credentials | API key read from `~/.zcode/v2/config.json` to authenticate the ZCode subprocess and quota request. Never logged, never written elsewhere. OAuth handled entirely by the ZCode subprocess                                         |
-| Disk        | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt) |
-| Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                      |
+| Concern     | What & why                                                                                                                                                                                                                         |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network     | Only one outbound request in the whole codebase: the quota GET (`open.bigmodel.cn` / `api.z.ai`), carrying just your API key — needed to fetch your usage numbers, sends no user content                                           |
+| Credentials | Desktop credentials or owner-only `~/.zcode/v2/acp-accounts.json` authenticate native requests and quota queries. Manual setup writes only the private bridge file; Desktop settings are preserved. OAuth remains handled by ZCode |
+| Disk        | No new files created. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — this **syncs sessions to the ZCode app** so they appear in its history list and full-text search (stores the session title and first prompt)  |
+| Logging     | Diagnostics to stderr for troubleshooting bridge issues. Even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are ever logged                                                                                                       |
 
 ## License
 

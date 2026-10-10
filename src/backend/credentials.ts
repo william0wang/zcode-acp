@@ -4,13 +4,13 @@
  * Vendored from the reference Python implementation so this package stays
  * self-contained. The ZCode desktop app stores provider credentials in
  * `~/.zcode/v2/config.json`; GUI-launched processes don't inherit shell env
- * vars, so we read the config and inject the active provider's settings into
+ * vars, so we read Desktop config plus optional bridge accounts and inject the active provider's settings into
  * the subprocess environment.
  */
 
-import { readFileSync } from "node:fs";
 import process from "node:process";
 
+import { readCredentialConfig } from "../config/bridge-accounts.js";
 import { DEFAULT_MODEL_ID, providerSelectable } from "../config/options.js";
 import { log, ZCODE_CREDS_PATH } from "../utils.js";
 
@@ -41,10 +41,10 @@ export interface ZcodeCredentials {
   providerBaseURL?: string;
 }
 
-/** Read the active provider's credentials from config.json. Best-effort. */
+/** Read the active provider from Desktop config plus optional bridge accounts. */
 export function loadZcodeCredentials(): ZcodeCredentials {
   try {
-    const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as ZcodeConfig;
+    const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as ZcodeConfig;
     // ZCODE_PROVIDER pins the provider by id; unset keeps the historical
     // "first enabled provider wins" behaviour.
     const pinned = process.env.ZCODE_PROVIDER;
@@ -107,4 +107,3 @@ export function mergeEnvWithCreds(creds: ZcodeCredentials): NodeJS.ProcessEnv {
   }
   return merged;
 }
-

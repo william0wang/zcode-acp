@@ -22,6 +22,10 @@ describe("resolveInvocation", () => {
   });
 
   it("maps each subcommand, passing through trailing args", () => {
+    expect(resolveInvocation("cli.js", ["setup", "--provider", "zai"])).toEqual({
+      kind: "setup",
+      args: ["--provider", "zai"],
+    });
     expect(resolveInvocation("cli.js", ["server"])).toEqual({ kind: "server" });
     expect(resolveInvocation("cli.js", ["serve"])).toEqual({ kind: "serve" });
     expect(resolveInvocation("cli.js", ["hub"])).toEqual({ kind: "hub" });
