@@ -107,11 +107,18 @@ export async function convertPromptContent(
         sizeBytes: bytes.length,
       });
     } else {
-      await mkdir(stagingDir, { recursive: true, mode: 0o700 });
-      const directory = await lstat(stagingDir);
-      if (!directory.isDirectory() || directory.isSymbolicLink())
-        invalid("Invalid attachment staging directory");
-      await chmod(stagingDir, 0o700);
+      // Staging setup failures must surface as -32602 request errors, not
+      // bare OS errors (EEXIST/ENOTDIR …) leaking to the client.
+      try {
+        await mkdir(stagingDir, { recursive: true, mode: 0o700 });
+        const directory = await lstat(stagingDir);
+        if (!directory.isDirectory() || directory.isSymbolicLink())
+          invalid("Invalid attachment staging directory");
+        await chmod(stagingDir, 0o700);
+      } catch (error) {
+        if (error instanceof RequestError) throw error;
+        invalid("Attachment staging directory is unavailable");
+      }
       const localPath = join(
         stagingDir,
         `${randomUUID()}-${
@@ -155,8 +162,14 @@ export async function convertPromptContent(
         const type = mime(r.mimeType || ("text" in r ? "text/plain" : undefined));
         if ("text" in r) {
           if ("blob" in r) invalid("Resource must contain text or blob, not both");
-          charge(Buffer.byteLength(r.text), type);
-          text.push(`[embedded resource: ${r.uri}]\n${r.text}`);
+          // Charge the ASSEMBLED line: the URI is unbounded client input and
+          // must not ride into the prompt outside the total limit (review of
+          // #315 — a 50 MiB-data URI plus 1 byte of text used to pass).
+          // Charging without the resource's MIME type also keeps an image/*-
+          // labelled text resource off the 10 MiB image cap.
+          const line = `[embedded resource: ${r.uri}]\n${r.text}`;
+          charge(Buffer.byteLength(line));
+          text.push(line);
         } else await binary(r.blob, type, filename(r.uri, "resource"));
       } else if (block.type === "resource_link") {
         let location = block.uri;

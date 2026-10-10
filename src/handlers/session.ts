@@ -15,6 +15,7 @@ import process from "node:process";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
 
@@ -2137,6 +2138,20 @@ async function runPrompt(
     params.prompt,
     path.join(zcodeHomeDir(), "v2", "acp-attachments"),
   );
+  // Staged attachments (file-kind) are referenced by nothing until the turn
+  // commits. Every path below that abandons the prompt BEFORE the send —
+  // boot-resume ack, slash interception, a thrown gate (evicted session,
+  // listener re-arm), goal-loop rejection, compact-busy — must unlink them or
+  // they orphan in ~/.zcode/v2/acp-attachments, which has no GC (found in
+  // review of #315).
+  let stagedDiscarded = false;
+  const discardStagedFiles = (): void => {
+    if (stagedDiscarded) return;
+    stagedDiscarded = true;
+    for (const a of attachments) {
+      if (a.localPath) void unlink(a.localPath).catch(() => undefined);
+    }
+  };
 
   // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
   // auto-submitted trigger until its boot bind, so it arrives as the FIRST
@@ -2150,6 +2165,7 @@ async function runPrompt(
   // prompt.
   const promptRoot = clientConnectionRoot(client);
   const ackBootResumeTrigger = async (): Promise<acp.PromptResponse> => {
+    discardStagedFiles();
     await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
     log("session/prompt: boot-resume banner handshake acknowledged");
     await emitSessionTurnState(server, params.sessionId, false, cx);
@@ -2186,12 +2202,20 @@ async function runPrompt(
 
   // Materialize a lazy session/new placeholder on first use. Placed after the
   // empty-prompt check so an invalid request doesn't create a backend session.
-  const zcodeSid = await ensureRealSession(server, params.sessionId);
-  // Re-arm the session's out-of-band listeners (background tasks, backend
-  // titles): a mid-session backend respawn (sandbox flip, dynamic allow
-  // batches, dead-reader recovery) replaces the instance the listeners were
-  // registered on — ensureBackgroundListener re-registers on the current one.
-  await server.ensureBackgroundListener(zcodeSid);
+  // A failure here (evicted session, dead backend) abandons the prompt before
+  // the send — staged files must go with it.
+  let zcodeSid: string;
+  try {
+    zcodeSid = await ensureRealSession(server, params.sessionId);
+    // Re-arm the session's out-of-band listeners (background tasks, backend
+    // titles): a mid-session backend respawn (sandbox flip, dynamic allow
+    // batches, dead-reader recovery) replaces the instance the listeners were
+    // registered on — ensureBackgroundListener re-registers on the current one.
+    await server.ensureBackgroundListener(zcodeSid);
+  } catch (error) {
+    discardStagedFiles();
+    throw error;
+  }
 
   // Slash-command interception: dispatches directly to ZCode methods and
   // returns end_turn without entering the turn loop. Known passthrough
@@ -2202,8 +2226,14 @@ async function runPrompt(
   // instead of the broadcast cx (see resumeIntoSession).
   const intercepted = !params.prompt.every((block) => block.type === "text")
     ? null
-    : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client);
+    : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client).catch(
+        (error: unknown) => {
+          discardStagedFiles();
+          throw error;
+        },
+      );
   if (intercepted) {
+    discardStagedFiles();
     await emitSessionTurnState(server, params.sessionId, false, cx);
     return intercepted;
   }
@@ -2285,6 +2315,7 @@ async function runPrompt(
     const goalLoop = server.goalLoops?.get(zcodeSid);
     if (goalLoop) {
       if (attachments.length) {
+        discardStagedFiles();
         throw new RequestError(-32602, "Pause the goal loop before sending attachments");
       }
       parked = goalLoop.parkPrompt(sendText);
@@ -2298,6 +2329,7 @@ async function runPrompt(
     // Only reachable when the compaction outlived AUTO_COMPACT_SETTLE_MS: the
     // hold above refused to wait indefinitely. The message was never queued, so
     // the user resends against a session the compaction has (by now) settled.
+    discardStagedFiles();
     await sendTextChunk(cx, params.sessionId, messages().autoCompactBusy, randomUUID());
     log("session/prompt: rejected — a detached auto-compact outlived its settle cap");
     await emitSessionTurnState(server, params.sessionId, false, cx);

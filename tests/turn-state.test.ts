@@ -10,12 +10,15 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 import { prompt } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
+import { zcodeHomeDir } from "../src/utils.js";
 
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
@@ -183,6 +186,37 @@ describe("$/zcode/turnState emission", () => {
     ).rejects.toMatchObject({ code: -32602 });
     expect(parkPrompt).not.toHaveBeenCalled();
     expect(request.mock.calls.some((call) => call[1] === "session/send")).toBe(false);
+
+    // Review of #315: a STAGED (file-kind) binary rejected on this path must
+    // not leave an orphan behind in the no-GC attachment directory.
+    await expect(
+      prompt(
+        server,
+        {
+          sessionId: "sess_ts",
+          prompt: [
+            {
+              type: "resource",
+              resource: {
+                uri: "memory://orphan.bin",
+                mimeType: "application/octet-stream",
+                blob: Buffer.from("orphan-bytes").toString("base64"),
+              },
+            },
+          ],
+        },
+        cx,
+        101,
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    const staging = join(zcodeHomeDir(), "v2", "acp-attachments");
+    let listed: string[] = [];
+    try {
+      listed = await readdir(staging);
+    } catch {
+      /* an absent directory is also clean */
+    }
+    expect(listed).toEqual([]);
   });
 
   it("emits running:true at turn start and running:false at completion", async () => {

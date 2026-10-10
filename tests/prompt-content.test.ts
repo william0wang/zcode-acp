@@ -182,4 +182,34 @@ describe("embedded resource conversion", () => {
       code: -32602,
     });
   });
+
+  it("charges an embedded resource's URI bytes toward the total (review of #315)", async () => {
+    // The `[embedded resource: <uri>]` header is client-controlled input; a
+    // ~50 MiB URI used to ride into the prompt outside the charged total and
+    // from there into session/send.
+    const oversizedUri = `memory://attack/${"a".repeat(PROMPT_LIMITS.total)}`;
+    await expect(
+      convertPromptContent(
+        [{ type: "resource", resource: { uri: oversizedUri, text: "!", mimeType: "text/plain" } }],
+        await directory(),
+      ),
+    ).rejects.toThrow(/exceeds 50 MiB/);
+  });
+
+  it("an image/*-labelled TEXT resource is not capped by the 10 MiB image limit", async () => {
+    // Charge must use the generic budget for text resources: the MIME label
+    // is client-supplied and only real image BYTES belong on the image cap.
+    const bigText = "t".repeat(PROMPT_LIMITS.image + 1);
+    const result = await convertPromptContent(
+      [
+        {
+          type: "resource",
+          resource: { uri: "memory://mislabelled", text: bigText, mimeType: "image/png" },
+        },
+      ],
+      await directory(),
+    );
+    expect(result.attachments).toEqual([]);
+    expect(result.text).toContain("embedded resource: memory://mislabelled");
+  });
 });
