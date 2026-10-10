@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.67.0](https://github.com/william0wang/zcode-acp/compare/v0.66.0...v0.67.0) (2026-10-10)
+
+
+### Features
+
+* allow opting out of successful completion status messages ([#313](https://github.com/william0wang/zcode-acp/issues/313)) ([690172a](https://github.com/william0wang/zcode-acp/commit/690172a6e3ecb816a0e562967c2da9e0d321f5a2))
+* preserve embedded prompt resources and attachment bytes ([#315](https://github.com/william0wang/zcode-acp/issues/315)) ([44e0c23](https://github.com/william0wang/zcode-acp/commit/44e0c236a3ebff2c129d005692a14839b3f5995c))
+
+
+### Bug Fixes
+
+* preserve provider bootstrap paths without a personal table ([#314](https://github.com/william0wang/zcode-acp/issues/314)) ([89e54da](https://github.com/william0wang/zcode-acp/commit/89e54dad051da537622e11597b8b9c5505a8c82a))
+
 ## [0.66.0](https://github.com/william0wang/zcode-acp/compare/v0.65.1...v0.66.0) (2026-10-10)
 
 
