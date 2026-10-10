@@ -1,8 +1,13 @@
 /**
- * Tests for the `$/zcode/turnState` out-of-band running indicator emitted by
+ * Tests for the turn-state out-of-band running indicator emitted by
  * prompt(): running:true when a turn starts, running:false when it ends, and
  * running:true from a preempted turn's finally while the preempting turn is
  * still in flight.
+ *
+ * The indicator is dual-emitted (#311): the deprecated `$/zcode/turnState`
+ * (LSP-style) and the spec-compliant `_zcode/turnState` — every transition
+ * must arrive identically on BOTH names so old and new consumers coexist
+ * during the migration window.
  *
  * The fake backend drives prompt() end-to-end: `session/send` accepts the
  * prompt and synchronously delivers scripted events to every registered
@@ -22,21 +27,29 @@ vi.mock("../src/tasks-index.js", () => ({
   updateSessionTitle: async () => true,
 }));
 
-/** cx that records every $/zcode/turnState notification payload. */
+type TurnStatePayload = { sessionId: string; running: boolean };
+
+/** cx that records every turnState notification payload, per method name. */
 function collectCx(): {
   cx: acp.AgentContext;
-  turnStates: Array<{ sessionId: string; running: boolean }>;
+  /** Deprecated `$/zcode/turnState` payloads. */
+  turnStates: TurnStatePayload[];
+  /** Spec-compliant `_zcode/turnState` payloads (#311). */
+  turnStatesV2: TurnStatePayload[];
 } {
-  const turnStates: Array<{ sessionId: string; running: boolean }> = [];
+  const turnStates: TurnStatePayload[] = [];
+  const turnStatesV2: TurnStatePayload[] = [];
   const cx = {
     notify: async (method: string, params: Record<string, unknown>) => {
       if (method === "$/zcode/turnState") {
-        turnStates.push(params as { sessionId: string; running: boolean });
+        turnStates.push(params as TurnStatePayload);
+      } else if (method === "_zcode/turnState") {
+        turnStatesV2.push(params as TurnStatePayload);
       }
     },
     request: async () => ({}),
   } as unknown as acp.AgentContext;
-  return { cx, turnStates };
+  return { cx, turnStates, turnStatesV2 };
 }
 
 /** Fake backend whose session/send delivers `events()` to all listeners. */
@@ -104,6 +117,28 @@ describe("$/zcode/turnState emission", () => {
 
     expect(result).toEqual({ stopReason: "end_turn" });
     expect(turnStates).toEqual([
+      { sessionId: "sess_ts", running: true },
+      { sessionId: "sess_ts", running: false },
+    ]);
+  });
+
+  it("dual-emits the spec-compliant _zcode/turnState identically (#311)", async () => {
+    // The `$/` spelling is the LSP convention — ACP reserves `_`-prefixed
+    // names for extension notifications, and strict routers (the Python
+    // agent-client-protocol library) error on it. Both names must carry the
+    // exact same transitions while consumers migrate.
+    const server = setup(
+      scriptedBackend(() => [
+        { type: "turn.started" },
+        { type: "turn.completed", payload: { resultType: "success" } },
+      ]),
+    );
+    const { cx, turnStates, turnStatesV2 } = collectCx();
+
+    await prompt(server, promptParams(), cx, 9);
+
+    expect(turnStatesV2).toEqual(turnStates);
+    expect(turnStatesV2).toEqual([
       { sessionId: "sess_ts", running: true },
       { sessionId: "sess_ts", running: false },
     ]);

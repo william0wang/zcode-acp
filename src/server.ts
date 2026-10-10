@@ -26,7 +26,7 @@ import {
   type WorkflowGate,
 } from "./config/workflow-gate.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
-import { enqueueSessionSend } from "./handlers/io.js";
+import { enqueueSessionSend, TURN_STATE_METHODS } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import {
   answerProviderRuntimeHeaders,
@@ -1149,7 +1149,9 @@ export class ZcodeAcpServer {
         sessionCapabilities: { list: {}, resume: {}, fork: {} },
         // Read-only session file access lives on the bridge's loopback /fs
         // endpoint, hub-proxied at /api/instances/{id}/fs/* (ADR-0004).
-        _meta: { zcode: { fs: true } },
+        // turnState: the out-of-band running notifications this bridge emits,
+        // old and new spellings (#311) — see TURN_STATE_METHODS.
+        _meta: { zcode: { fs: true, turnState: [...TURN_STATE_METHODS] } },
       },
       // The GLM API key is read from ~/.zcode/v2/config.json by the ZCode
       // backend subprocess; the editor never needs to supply credentials.

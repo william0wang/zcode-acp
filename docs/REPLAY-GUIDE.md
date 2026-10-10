@@ -128,7 +128,7 @@ update's `_meta`:
   too. These updates never collide with live tool_call ids (they carry the
   `histfold_` prefix).
 
-## Turn running state (`replayMeta.turnActive` + `$/zcode/turnState`)
+## Turn running state (`replayMeta.turnActive` + turnState notifications)
 
 A turn may already be in flight when you attach — started by the editor or
 another remote client (the bridge runs it to completion regardless of who
@@ -137,16 +137,26 @@ prompted). Two signals cover it:
 - **Attach snapshot**: `session/load`'s `replayMeta.turnActive` (boolean) —
   `true` when any turn for this session is running at attach time. Seed your
   spinner/running state from it.
-- **Out-of-band updates**: the notification `$/zcode/turnState` with params
+- **Out-of-band updates**: the turn-state notification with params
   `{ sessionId: string, running: boolean }` — emitted when a turn starts and
   when it ends (including failures, e.g. a failed subscribe). On preemption (a
   new prompt interrupts an in-flight one) the old turn's exit reports
   `running: true`: the preempting turn took over, so the session is still busy.
 
+The notification is **dual-emitted under two names** (#311): the deprecated
+`$/zcode/turnState` (LSP-style prefix) and the spec-compliant
+`_zcode/turnState` (ACP reserves `_`-prefixed names for extension
+notifications). Subscribe to exactly ONE of them — a client handling both
+sees every transition twice. New clients should use `_zcode/turnState`; the
+`$/` spelling remains for existing consumers (martty, zcode-acp-remote) and
+will be removed once they migrate. Both names are advertised in
+`initialize`'s `agentCapabilities._meta.zcode.turnState`.
+
 The client that sent `session/prompt` already knows its own turn via the
 request/response; these signals exist for the OTHER attached clients
 (re-attached mobile, second editor). Unknown notifications are ignorable —
-clients that don't handle `$/zcode/turnState` lose nothing (Zed ignores it).
+clients that don't handle the turn-state notifications lose nothing (Zed
+ignores them).
 
 ## Scroll-up pagination
 
@@ -202,8 +212,9 @@ Never parse the cursor — it is opaque. (For the curious it round-trips
 - [ ] `session/load` params include `cwd` and `mcpServers` (even `[]`).
 - [ ] Message list keyed/deduped by `messageId`; tool cards by `toolCallId`.
 - [ ] Pagination pages prepended, live updates appended.
-- [ ] Running state seeded from `replayMeta.turnActive` and updated from
-      `$/zcode/turnState` notifications (covers other clients' turns).
+- [ ] Running state seeded from `replayMeta.turnActive` and updated from the
+      turn-state notifications — `_zcode/turnState` (or the deprecated `$/`
+      spelling; pick ONE) — covering other clients' turns.
 - [ ] `"cursor expired"` handled by full re-attach.
 - [ ] Cursor stored per session, never parsed, never persisted across app
       runs (it is only meaningful to the bridge that minted it).

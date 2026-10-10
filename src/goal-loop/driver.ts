@@ -26,7 +26,7 @@ import {
   runOneTurn,
   withPreemptLock,
 } from "../handlers/session.js";
-import { sendTextChunk } from "../handlers/io.js";
+import { emitSessionTurnState, sendTextChunk } from "../handlers/io.js";
 import { messages } from "../i18n.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
 import { queryQuota } from "../quota/index.js";
@@ -284,12 +284,7 @@ export class GoalLoopDriver {
         this.disarmKeepalive();
         return;
       }
-      for (const sid of this.server.sessionAliases(this.acpSid)) {
-        void this.server.clients
-          .broadcast()
-          .notify("$/zcode/turnState", { sessionId: sid, running: true })
-          .catch(() => undefined);
-      }
+      void emitSessionTurnState(this.server, this.acpSid, true);
     }, KEEPALIVE_INTERVAL_MS);
   }
 
@@ -348,12 +343,7 @@ export class GoalLoopDriver {
       });
       // Mirror runPrompt's round-start indicator: remote clients would flip
       // idle between rounds (runOneTurn's finally emits running:false per round).
-      for (const sid of server.sessionAliases(this.acpSid)) {
-        void server.clients
-          .broadcast()
-          .notify("$/zcode/turnState", { sessionId: sid, running: true })
-          .catch(() => undefined);
-      }
+      void emitSessionTurnState(server, this.acpSid, true);
       try {
         const result = await runOneTurn(server, {
           backend,

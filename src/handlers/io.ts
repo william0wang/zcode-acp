@@ -339,7 +339,21 @@ export function throwError(code: number, message: string): never {
 }
 
 /**
- * Broadcast `$/zcode/turnState {running}` for every ACP alias of the session.
+ * Turn-state notification method names, old and new.
+ *
+ * The original `$/zcode/turnState` spelling follows the LSP convention, but
+ * ACP reserves `_`-prefixed names for extension notifications (#311) —
+ * `_zcode/turnState` is the spec-compliant spelling (strict routers like the
+ * Python `agent-client-protocol` library error on `$/`). Both are emitted per
+ * transition during the migration window; `$/` is deprecated and will be
+ * dropped once consumers (martty, zcode-acp-remote) move over. Clients must
+ * subscribe to exactly ONE name or they see every transition twice.
+ */
+export const TURN_STATE_METHODS = ["$/zcode/turnState", "_zcode/turnState"] as const;
+
+/**
+ * Broadcast the turn-state notification pair for every ACP alias of the
+ * session ({@link TURN_STATE_METHODS} — see its doc for the naming story).
  *
  * The single emit path for ALL turn-state reporting — the turn loop, the
  * cancel/early-return paths and the auto-compact busy window (which reports
@@ -358,7 +372,9 @@ export async function emitSessionTurnState(
   const results = await Promise.allSettled(
     server
       .sessionAliases(acpSid)
-      .map((sid) => targetCx.notify("$/zcode/turnState", { sessionId: sid, running })),
+      .flatMap((sid) =>
+        TURN_STATE_METHODS.map((method) => targetCx.notify(method, { sessionId: sid, running })),
+      ),
   );
   for (const r of results) {
     if (r.status === "rejected") {
