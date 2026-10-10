@@ -1141,7 +1141,7 @@ export class ZcodeAcpServer {
       agentInfo: { ...AGENT_INFO },
       agentCapabilities: {
         loadSession: true,
-        promptCapabilities: { image: true, audio: false, embeddedContext: false },
+        promptCapabilities: { image: true, audio: false, embeddedContext: true },
         // http MCP configs are forwarded verbatim to the backend (session/
         // create + resume), which mounts them fine — the declaration was the
         // only blocker keeping clients from sending http servers (#180).

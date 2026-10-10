@@ -40,6 +40,15 @@ describe("ZcodeAcpServer.initialize", () => {
     expect(resp.agentCapabilities?.sessionCapabilities?.fork).toBeDefined();
   });
 
+  it("advertises embedded resources, images, and no audio transcription", async () => {
+    const resp = await new ZcodeAcpServer().initialize(initParams());
+    expect(resp.agentCapabilities?.promptCapabilities).toEqual({
+      image: true,
+      audio: false,
+      embeddedContext: true,
+    });
+  });
+
   // Registry CI gate: rejects `authMethods: []` with "No authMethods in response".
   it("returns a non-empty authMethods array", async () => {
     const server = new ZcodeAcpServer();

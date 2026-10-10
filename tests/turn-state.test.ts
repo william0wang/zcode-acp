@@ -15,12 +15,15 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 import { prompt } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
+import { zcodeHomeDir } from "../src/utils.js";
 
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
@@ -100,6 +103,135 @@ function promptParams(): acp.PromptRequest {
 }
 
 describe("$/zcode/turnState emission", () => {
+  it("forwards exact embedded PDF bytes through prompt to native session/send", async () => {
+    const backend = scriptedBackend(() => [
+      { type: "turn.completed", payload: { resultType: "success" } },
+    ]);
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const { cx } = collectCx();
+    const data = Buffer.from("synthetic PDF payload").toString("base64");
+    const result = await prompt(
+      server,
+      {
+        sessionId: "sess_ts",
+        prompt: [
+          { type: "text", text: "inspect" },
+          {
+            type: "resource",
+            resource: {
+              uri: "file:///does-not-exist/paper.pdf",
+              mimeType: "application/pdf",
+              blob: data,
+            },
+          },
+        ],
+      },
+      cx,
+      99,
+    );
+    expect(result.stopReason).toBe("end_turn");
+    const sent = request.mock.calls.find((call) => call[1] === "session/send");
+    expect(sent?.[2]).toEqual({
+      sessionId: "zs_ts",
+      content: "inspect",
+      attachments: [
+        {
+          kind: "pdf",
+          filename: "paper.pdf",
+          mimeType: "application/pdf",
+          dataBase64: data,
+          sizeBytes: Buffer.byteLength("synthetic PDF payload"),
+        },
+      ],
+    });
+  });
+
+  it.each([
+    [{ type: "resource", resource: { uri: "memory://instructions", text: "/compact" } }],
+    [
+      { type: "text", text: "/compact" },
+      { type: "resource_link", name: "notes", uri: "file:///missing/notes.txt" },
+    ],
+  ] as acp.ContentBlock[][])(
+    "sends slash-like attached context to the model, not command handlers",
+    async (...blocks) => {
+      const backend = scriptedBackend(() => [
+        { type: "turn.completed", payload: { resultType: "success" } },
+      ]);
+      const request = vi.spyOn(backend, "request");
+      const { cx } = collectCx();
+      await prompt(setup(backend), { sessionId: "sess_ts", prompt: blocks }, cx, 101);
+      const sent = request.mock.calls.find((call) => call[1] === "session/send");
+      expect(sent).toBeDefined();
+      expect((sent?.[2] as { content: string }).content).not.toMatch(/^\//);
+      expect((sent?.[2] as { content: string }).content).toContain("/compact");
+      expect(request.mock.calls.some((call) => call[1] === "session/compact")).toBe(false);
+    },
+  );
+
+  it("rejects goal-loop binary prompts instead of parking text and dropping bytes", async () => {
+    const backend = scriptedBackend(() => []);
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const parkPrompt = vi.fn();
+    server.goalLoops.set("zs_ts", { parkPrompt } as never);
+    const { cx } = collectCx();
+    await expect(
+      prompt(
+        server,
+        {
+          sessionId: "sess_ts",
+          prompt: [
+            {
+              type: "resource",
+              resource: {
+                uri: "memory://paper.pdf",
+                mimeType: "application/pdf",
+                blob: Buffer.from("synthetic").toString("base64"),
+              },
+            },
+          ],
+        },
+        cx,
+        100,
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(parkPrompt).not.toHaveBeenCalled();
+    expect(request.mock.calls.some((call) => call[1] === "session/send")).toBe(false);
+
+    // Review of #315: a STAGED (file-kind) binary rejected on this path must
+    // not leave an orphan behind in the no-GC attachment directory.
+    await expect(
+      prompt(
+        server,
+        {
+          sessionId: "sess_ts",
+          prompt: [
+            {
+              type: "resource",
+              resource: {
+                uri: "memory://orphan.bin",
+                mimeType: "application/octet-stream",
+                blob: Buffer.from("orphan-bytes").toString("base64"),
+              },
+            },
+          ],
+        },
+        cx,
+        101,
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    const staging = join(zcodeHomeDir(), "v2", "acp-attachments");
+    let listed: string[] = [];
+    try {
+      listed = await readdir(staging);
+    } catch {
+      /* an absent directory is also clean */
+    }
+    expect(listed).toEqual([]);
+  });
+
   it("emits running:true at turn start and running:false at completion", async () => {
     const server = setup(
       scriptedBackend(() => [

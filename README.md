@@ -23,6 +23,21 @@ In active development. Core bridging, slash commands and ZCode extensions,
 auto-compaction, remote access for mobile/web clients, and the quota APIs are
 in place; see the project board for what's next.
 
+## Prompt attachments
+
+ACP embedded resources preserve the supplied content: text is included in the
+prompt, and PDF/image bytes are forwarded as native attachments even when their
+URI is not a readable local file. Other binary resources are staged privately
+under `$ZCODE_HOME/v2/acp-attachments` (default `~/.zcode/v2/acp-attachments`).
+Resource links remain references; the bridge does not download remote URIs.
+
+Prompts accept at most 100 blocks and 50 MiB of decoded content, with a 10 MiB
+limit per image. Staged files use private permissions and persist for native tool
+reads and session resume; remove files there manually when those sessions no
+longer need them. Invalid conversions roll back files created by that request.
+Pause an active goal loop before sending binary attachments; its queued prompts
+support text only. Audio transcription is not supported.
+
 ## Requirements
 
 - **Node.js ≥ 22** (the bridge uses `node:sqlite` for tasks-index sync; the

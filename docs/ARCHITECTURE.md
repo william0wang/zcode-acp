@@ -146,7 +146,7 @@ API only because the ZCode backend itself sends them for inference.
 | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Network     | One outbound request in the whole codebase — `src/quota/client.ts` GET to the quota API, Bearer token only, no body                                              |
 | Credentials | API key from `~/.zcode/v2/config.json` (authenticates the subprocess + quota request), never logged. OAuth handled by the ZCode subprocess, not this server      |
-| Disk        | No new files. Writes only to the existing `~/.zcode/v2/tasks-index.sqlite` — syncs sessions into the ZCode app's history & search (session title + first prompt) |
+| Disk        | Updates `~/.zcode/v2/tasks-index.sqlite` for history/search. Embedded generic binaries are staged privately in `$ZCODE_HOME/v2/acp-attachments` and retained for native reads/resume; see [retention](../README.md#prompt-attachments). |
 | Logging     | `log()`/`warn()` → stderr only for troubleshooting; even with `ZCODE_ACP_DEBUG=1`, no prompts/code/keys are logged                                               |
 
 ## Module Responsibilities

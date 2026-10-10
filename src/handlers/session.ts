@@ -15,8 +15,11 @@ import process from "node:process";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import type * as acp from "@agentclientprotocol/sdk";
 import { RequestError } from "@agentclientprotocol/sdk";
+
+import { convertPromptContent, type NativePromptAttachment } from "./prompt-content.js";
 
 import { backendCapabilities } from "../backend/adapter.js";
 import type { ZcodeBackend } from "../backend/client.js";
@@ -74,7 +77,7 @@ import {
   ProjectionDiffer,
 } from "../translators/index.js";
 import type { InternalEvent } from "../translators/index.js";
-import { clientConnectionRoot, log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn, zcodeHomeDir } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import {
@@ -1593,7 +1596,7 @@ export interface RunOneTurnOptions {
   preempted: boolean;
   /** Wire text for the backend send (slash-neutralized on the prompt path). */
   sendText: string;
-  attachments?: unknown[];
+  attachments?: NativePromptAttachment[];
   /** Sandbox allow-restart continuation round (emits the resumed status line). */
   continuationRound?: boolean;
   /** Run the env-gated maybeAutoCompact after an end_turn. Default true. */
@@ -2131,12 +2134,24 @@ async function runPrompt(
   await server.applySandboxFlip();
   const backend = await server.ensureBackend();
 
-  // Extract prompt text + image attachments from ACP ContentBlock[].
-  const text = extractPromptText(params.prompt);
-  const attachments = extractAttachments(params.prompt);
-  // A prompt is valid if it has text OR at least one image attachment (a user
-  // may drag in an image with no accompanying text).
-  if (!text && attachments.length === 0) throw new Error("empty prompt");
+  const { text, attachments } = await convertPromptContent(
+    params.prompt,
+    path.join(zcodeHomeDir(), "v2", "acp-attachments"),
+  );
+  // Staged attachments (file-kind) are referenced by nothing until the turn
+  // commits. Every path below that abandons the prompt BEFORE the send —
+  // boot-resume ack, slash interception, a thrown gate (evicted session,
+  // listener re-arm), goal-loop rejection, compact-busy — must unlink them or
+  // they orphan in ~/.zcode/v2/acp-attachments, which has no GC (found in
+  // review of #315).
+  let stagedDiscarded = false;
+  const discardStagedFiles = (): void => {
+    if (stagedDiscarded) return;
+    stagedDiscarded = true;
+    for (const a of attachments) {
+      if (a.localPath) void unlink(a.localPath).catch(() => undefined);
+    }
+  };
 
   // Boot-resume banner handshake (see BOOT_RESUME_TRIGGER): martty queues the
   // auto-submitted trigger until its boot bind, so it arrives as the FIRST
@@ -2150,6 +2165,7 @@ async function runPrompt(
   // prompt.
   const promptRoot = clientConnectionRoot(client);
   const ackBootResumeTrigger = async (): Promise<acp.PromptResponse> => {
+    discardStagedFiles();
     await sendTextChunk(cx, params.sessionId, messages().bootResumeAck, randomUUID());
     log("session/prompt: boot-resume banner handshake acknowledged");
     await emitSessionTurnState(server, params.sessionId, false, cx);
@@ -2186,12 +2202,20 @@ async function runPrompt(
 
   // Materialize a lazy session/new placeholder on first use. Placed after the
   // empty-prompt check so an invalid request doesn't create a backend session.
-  const zcodeSid = await ensureRealSession(server, params.sessionId);
-  // Re-arm the session's out-of-band listeners (background tasks, backend
-  // titles): a mid-session backend respawn (sandbox flip, dynamic allow
-  // batches, dead-reader recovery) replaces the instance the listeners were
-  // registered on — ensureBackgroundListener re-registers on the current one.
-  await server.ensureBackgroundListener(zcodeSid);
+  // A failure here (evicted session, dead backend) abandons the prompt before
+  // the send — staged files must go with it.
+  let zcodeSid: string;
+  try {
+    zcodeSid = await ensureRealSession(server, params.sessionId);
+    // Re-arm the session's out-of-band listeners (background tasks, backend
+    // titles): a mid-session backend respawn (sandbox flip, dynamic allow
+    // batches, dead-reader recovery) replaces the instance the listeners were
+    // registered on — ensureBackgroundListener re-registers on the current one.
+    await server.ensureBackgroundListener(zcodeSid);
+  } catch (error) {
+    discardStagedFiles();
+    throw error;
+  }
 
   // Slash-command interception: dispatches directly to ZCode methods and
   // returns end_turn without entering the turn loop. Known passthrough
@@ -2200,15 +2224,16 @@ async function runPrompt(
   // `client` (the requesting connection) rides along so replay-shaped slash
   // dispatch — /resume's history replay above all — targets that connection
   // instead of the broadcast cx (see resumeIntoSession).
-  const intercepted = await handleSlashCommand(
-    server,
-    cx,
-    params.sessionId,
-    zcodeSid,
-    text,
-    client,
-  );
+  const intercepted = !params.prompt.every((block) => block.type === "text")
+    ? null
+    : await handleSlashCommand(server, cx, params.sessionId, zcodeSid, text, client).catch(
+        (error: unknown) => {
+          discardStagedFiles();
+          throw error;
+        },
+      );
   if (intercepted) {
+    discardStagedFiles();
     await emitSessionTurnState(server, params.sessionId, false, cx);
     return intercepted;
   }
@@ -2289,6 +2314,10 @@ async function runPrompt(
   await withPreemptLock(server, zcodeSid, async () => {
     const goalLoop = server.goalLoops?.get(zcodeSid);
     if (goalLoop) {
+      if (attachments.length) {
+        discardStagedFiles();
+        throw new RequestError(-32602, "Pause the goal loop before sending attachments");
+      }
       parked = goalLoop.parkPrompt(sendText);
       return;
     }
@@ -2300,6 +2329,7 @@ async function runPrompt(
     // Only reachable when the compaction outlived AUTO_COMPACT_SETTLE_MS: the
     // hold above refused to wait indefinitely. The message was never queued, so
     // the user resends against a session the compaction has (by now) settled.
+    discardStagedFiles();
     await sendTextChunk(cx, params.sessionId, messages().autoCompactBusy, randomUUID());
     log("session/prompt: rejected — a detached auto-compact outlived its settle cap");
     await emitSessionTurnState(server, params.sessionId, false, cx);
@@ -2874,7 +2904,7 @@ export function preemptInFlightTurn(
 // ---------- internals ----------
 
 /** Concatenate text from ACP ContentBlock[] into a prompt string.
- *  Exported for unit testing (the resource_link path is easy to break). */
+ *  Legacy compatibility helper; runtime prompts use convertPromptContent instead. */
 export function extractPromptText(blocks: acp.ContentBlock[] | undefined): string {
   const parts: string[] = [];
   for (const block of blocks ?? []) {
@@ -2901,7 +2931,7 @@ export function extractPromptText(blocks: acp.ContentBlock[] | undefined): strin
       const label = b.name || path;
       parts.push(`[related resource: ${label}](${path})`);
     } else if (b.type === "resource" && b.resource) {
-      // Embedded resource. We don't advertise embeddedContext, but accept text
+      // Legacy extraction only (not the runtime converter): accept text
       // payloads defensively in case a client sends them anyway. Binary
       // payloads (BlobResourceContents) are never decoded — the base64 blob is
       // useless to the model — so rewrite the resource uri into a readable
