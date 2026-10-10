@@ -54,6 +54,13 @@ export function initialSessionMode(env: NodeJS.ProcessEnv = process.env): string
   return env.ZCODE_ACP_MODE || "yolo";
 }
 
+/** Successful turn-end status as assistant text (default ON); warnings are unaffected. */
+export function showCompletionStatus(env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = loadUserConfig(env).session?.showCompletionStatus;
+  if (file !== undefined) return file;
+  return !/^(0|false|off|no)$/i.test((env.ZCODE_ACP_SHOW_COMPLETION_STATUS ?? "").trim());
+}
+
 /**
  * Wait cap (ms) for permission/elicitation requests; 0 = wait forever.
  * Resolved once at bridge start (module-load const in server-requests.ts) —

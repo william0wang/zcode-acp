@@ -110,10 +110,12 @@ export interface QuotaUserConfig {
   opencodeGoSessionToken?: string;
 }
 
-/** The `session` section: defaults for newly created sessions. */
+/** The `session` section: session defaults and output preferences. */
 export interface SessionUserConfig {
   /** Mode a new session starts in (plan/build/edit/yolo/auto — the backend's own modes). */
   mode?: string;
+  /** Show successful turn-end status as assistant text (default true). */
+  showCompletionStatus?: boolean;
 }
 
 /** The `autoCompact` section: threshold-based context compaction. */
@@ -345,6 +347,11 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
       const m = typeof mode === "string" ? mode.trim() : "";
       if (m && SESSION_MODES.has(m)) s.mode = m;
       else warn(`config: ${label}.mode=${JSON.stringify(mode)} is not a session mode — ignoring`);
+    }
+    const showCompletionStatus = body["showCompletionStatus"];
+    if (showCompletionStatus !== undefined) {
+      if (typeof showCompletionStatus === "boolean") s.showCompletionStatus = showCompletionStatus;
+      else warn(`config: ${label}.showCompletionStatus is not a boolean — ignoring`);
     }
     return s;
   });

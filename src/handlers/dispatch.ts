@@ -18,6 +18,7 @@ import {
   modelContextWindow,
   parseModelValue,
 } from "../config/options.js";
+import { showCompletionStatus } from "../config/settings.js";
 import {
   extractExitCode,
   parseSubagentMetadata,
@@ -386,6 +387,9 @@ async function dispatchTurnInfo(
   ev: Extract<InternalEvent, { kind: "TurnInfo" }>,
   chunkMsgId: string,
 ): Promise<void> {
+  // Some clients display only the last assistant message of a turn. Let users
+  // keep the actual reply in that position without hiding unsuccessful stops.
+  if (ev.resultType === "success" && !showCompletionStatus()) return;
   const m = messages();
   let line: string;
   if (ev.resultType === "success") {
