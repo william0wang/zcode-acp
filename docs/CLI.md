@@ -136,10 +136,10 @@ Without credentials, the default multi-provider mode silently shows GLM only
 ## Ollama Cloud setup
 
 Ollama Cloud exposes an (undocumented) usage endpoint at
-`ollama.com/api/usage` that the CLI queries with your API key. Create a key
-at [cloud.ollama.ai](https://cloud.ollama.ai) → API keys. The key comes from
-two sources, with the **config file taking precedence** over the environment
-variable:
+`ollama.com/api/usage` that the CLI queries with your API key (the rolling
+`30d` window). Create a key at [cloud.ollama.ai](https://cloud.ollama.ai) →
+API keys. The key comes from two sources, with the **config file taking
+precedence** over the environment variable:
 
 - **Config file** (`~/.config/zcode-acp/config.json`, `quota` section):
   ```json
@@ -150,14 +150,17 @@ variable:
   export OLLAMA_API_KEY="your_ollama_api_key"
   ```
 
-The card shows whatever usage windows the account's plan exposes — legacy
-plans get `5h` + `Week` bars, current credit plans get a `Month` bar. The
-server returns fractions only, so reset moments are derived client-side
-(epoch-aligned 5h buckets, Monday 00:00 UTC weeks, and for monthly the
-`/api/me` billing period end or — on new credit plans, which return only a
-`CreatedAt` — the next subscription-day anniversary). Without a key, the
-default mode silently skips the Ollama section; `zcode-acp quota oc` without
-a key prints a setup hint.
+The API was rewritten upstream (2026-10): it now reports **spend analytics**
+(`usage_usd`, request/token counts) and no longer exposes usage fractions or
+plan limits. The card therefore derives the `Month` percent from the 30d
+spend ÷ the plan's monthly credit (`/api/me` → `Plan`; credits from
+ollama.com/pricing: Pro $60, Max $300, Team $1000 — unknown plans show the
+spend line only, no bar) and shows a spend detail line
+(`$1.57 of $60 · 246 req (30d)`) under the bars. The monthly reset is derived
+from the `/api/me` billing period end or — on new credit plans, which return
+only a `CreatedAt` — the next subscription-day anniversary. Without a key,
+the default mode silently skips the Ollama section; `zcode-acp quota oc`
+without a key prints a setup hint.
 
 ## Hub and server subcommands
 

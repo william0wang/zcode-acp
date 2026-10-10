@@ -39,8 +39,9 @@ export interface RenderedSection {
  * Render the Ollama Cloud section.
  *
  * Used by the combined formatter. The header is always `Ollama Cloud`; body
- * has one bar line per window. Non-success kinds return a header + a single
- * explanatory line.
+ * has one bar line per window, plus (2026-10 API) a spend detail line under
+ * the bars when the result carries `usageUsd`. Non-success kinds return a
+ * header + a single explanatory line.
  *
  * When `color` is true the bar is a heat-colored 24-bit ANSI bar with the
  * percent overlaid inside, mirroring the other providers' color layout.
@@ -70,5 +71,25 @@ export function formatOcSection(result: OcQueryResult, color = false): RenderedS
     return `${m.label.padEnd(5)} ${renderBar(pct)}  ${String(pct).padStart(2)}%${trailing}`;
   });
 
+  const detail = formatOcSpendLine(result);
+  if (detail) body.push(detail);
+
   return { header, body };
+}
+
+/**
+ * Spend detail line for the analytics API (2026-10+): `usage` spend over the
+ * rolling 30d window, with the plan credit as context when known. Indented to
+ * sit under the window bars. `null` when the result carries no spend (legacy
+ * response shape) — the card then stays exactly as before.
+ */
+function formatOcSpendLine(result: Extract<OcQueryResult, { kind: "success" }>): string | null {
+  if (result.usageUsd === undefined) return null;
+  const spend = `$${result.usageUsd.toFixed(2)}`;
+  const of = result.creditUsd !== undefined ? ` of $${result.creditUsd}` : " spent";
+  const req =
+    result.requestCount !== undefined
+      ? ` · ${result.requestCount.toLocaleString("en-US")} req`
+      : "";
+  return `      ${spend}${of}${req} (30d)`;
 }

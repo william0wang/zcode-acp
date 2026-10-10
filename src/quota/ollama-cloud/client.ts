@@ -1,10 +1,13 @@
 /**
  * Ollama Cloud usage HTTP client.
  *
- * Talks to `https://ollama.com/api/usage` — an undocumented but live endpoint
- * that returns `{limits:{session:{usage},weekly:{usage}}}` with usage as a
- * 0..1 fraction. Auth is a plain Bearer API key (docs.ollama.com). No
- * rate-limit headers exist on any Ollama endpoint, so the body is the only
+ * Talks to `https://ollama.com/api/usage` — an undocumented but live endpoint.
+ * Rewritten upstream (observed 2026-10-10) to return usage analytics
+ * (`{range, totals:{usage_usd, request_count, …}, buckets}`); the accepted
+ * ranges are 24h / 7d / 30d. We request the 30d rolling window — the closest
+ * match to a credit plan's monthly billing period, and the numerator for the
+ * derived monthly percent. Auth is a plain Bearer API key (docs.ollama.com).
+ * No rate-limit headers exist on any Ollama endpoint, so the body is the only
  * data source.
  */
 
@@ -13,6 +16,13 @@ const TIMEOUT_MS = 10_000;
 
 /** The undocumented usage endpoint (verified live 2026-09). */
 export const USAGE_URL = "https://ollama.com/api/usage";
+
+/**
+ * The rolling window we request — the numerator window for the derived
+ * monthly percent. Not the billing month itself: the API offers no
+ * billing-period range, so the percent is an approximation near the reset.
+ */
+export const USAGE_RANGE = "30d";
 
 /**
  * Fetch the usage JSON body.
@@ -25,7 +35,7 @@ export async function fetchOcUsage(
   apiKey: string,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): Promise<{ status: number; text: string }> {
-  const resp = await fetchImpl(USAGE_URL, {
+  const resp = await fetchImpl(`${USAGE_URL}?range=${USAGE_RANGE}`, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${apiKey}`,

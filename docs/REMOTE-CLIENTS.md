@@ -419,9 +419,15 @@ section — so clients can reproduce the CLI layout exactly:
       "ollama": {
         "kind": "success",
         "windows": [
-          { "key": "session", "label": "5h", "usagePercent": 31 },
-          { "key": "weekly", "label": "Week", "usagePercent": 67.5 }
-        ]
+          { "key": "monthly", "label": "Month", "usagePercent": 2.6,
+            "resetsAt": 1729071480308 }
+        ],
+        "usage": {
+          "plan": "pro", "usageUsd": 1.5747, "creditUsd": 60,
+          "requestCount": 246, "inputTokens": 14294081,
+          "cachedInputTokens": 12922504, "outputTokens": 940919,
+          "window": "30d"
+        }
       }
     } }
 ```
@@ -438,12 +444,14 @@ section — so clients can reproduce the CLI layout exactly:
   means the user never set OpenCode Go credentials — omit the section, like
   the CLI does.
 - `ollama` (`kind`: `success` | `not_configured` | `auth_error` |
-  `unavailable`): on success, `windows` carries whichever entries the
-  account's plan exposes — legacy plans: `session` (`5h`) + `weekly`
-  (`Week`); current credit plans: `monthly` (`Month`) — each with
-  `usagePercent` (0–100) and, when available, `resetsAt` (epoch ms,
-  derived client-side: epoch-aligned 5h buckets / Monday 00:00 UTC weeks /
-  the `/api/me` billing period or subscription-day anniversary for monthly).
+  `unavailable`): since the 2026-10 upstream API rewrite the endpoint reports
+  spend only, so on success `windows` carries the derived `monthly` (`Month`)
+  entry — 30d `usageUsd` ÷ the plan's monthly credit, absent when the plan's
+  credit is unknown — with `resetsAt` (epoch ms, from the `/api/me` billing
+  period or subscription-day anniversary) when available. The additive
+  `usage` object carries the raw analytics (`plan`, `usageUsd`,
+  `creditUsd?`, `requestCount`/token totals, `window: "30d"`) for clients
+  that want to render spend directly; older clients ignore it.
   `not_configured` means no
   Ollama API key is set — omit the section, like the CLI does.
 - Provider failures are per-section `kind` strings, not JSON-RPC errors —

@@ -56,10 +56,31 @@ export interface OcWindowEntry {
   resetsAt?: number;
 }
 
+/**
+ * Ollama Cloud spend detail (analytics API, 2026-10+): usage in USD over the
+ * rolling 30d window. `creditUsd` is present only when the plan's monthly
+ * credit is known (pricing table) — which is also what makes the `monthly`
+ * percent window derivable; without it the client can still render the raw
+ * spend. Additive field: older clients ignore it.
+ */
+export interface OcUsageDetail {
+  plan?: string;
+  usageUsd: number;
+  creditUsd?: number;
+  requestCount?: number;
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  /** The rolling window the spend covers — the API offers no billing-period
+   *  range, so the monthly percent is this window ÷ credit (approximation). */
+  window: "30d";
+}
+
 /** Ollama Cloud section — `windows` present only on success. */
 export interface OcUsageStats {
   kind: OcQueryResult["kind"];
   windows?: OcWindowEntry[];
+  usage?: OcUsageDetail;
 }
 
 export interface UsageStatsResult {
@@ -107,8 +128,9 @@ function toGoStats(result: GoQueryResult, now = Date.now()): GoUsageStats {
 /**
  * Ollama windows as percents — the API's 0..1 fractions converted once here
  * so remote clients can render the same bar the CLI does. Which windows exist
- * depends on the plan (legacy: session+weekly; credit: monthly). The derived
- * reset moments pass through when present.
+ * depends on the plan (legacy: session+weekly; credit: monthly, derived from
+ * 30d spend ÷ plan credit). The derived reset moments and the analytics spend
+ * detail pass through when present.
  */
 function toOcStats(result: OcQueryResult): OcUsageStats {
   if (result.kind !== "success") return { kind: result.kind };
@@ -130,7 +152,22 @@ function toOcStats(result: OcQueryResult): OcUsageStats {
       },
     ];
   });
-  return { kind: "success", windows };
+  const usage =
+    result.usageUsd !== undefined
+      ? {
+          ...(result.plan !== undefined && { plan: result.plan }),
+          usageUsd: result.usageUsd,
+          ...(result.creditUsd !== undefined && { creditUsd: result.creditUsd }),
+          ...(result.requestCount !== undefined && { requestCount: result.requestCount }),
+          ...(result.inputTokens !== undefined && { inputTokens: result.inputTokens }),
+          ...(result.cachedInputTokens !== undefined && {
+            cachedInputTokens: result.cachedInputTokens,
+          }),
+          ...(result.outputTokens !== undefined && { outputTokens: result.outputTokens }),
+          window: "30d" as const,
+        }
+      : undefined;
+  return { kind: "success", windows, ...(usage !== undefined && { usage }) };
 }
 
 /** `account/usage_stats` handler — all providers, queried in parallel. */

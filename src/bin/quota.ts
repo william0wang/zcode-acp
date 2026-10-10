@@ -76,7 +76,7 @@ Providers:
   (none)                    All configured providers (GLM + Opencode Go + Ollama Cloud).
   glm                       GLM Coding Plan only.
   go                        Opencode Go only (rolling + weekly + monthly).
-  oc                        Ollama Cloud only (5h + weekly).
+  oc                        Ollama Cloud only (Month % + spend detail).
 
 GLM credentials: read from ~/.zcode/v2/config.json (created by the ZCode app).
 Non-GLM credentials resolve per field, highest precedence first:
@@ -104,7 +104,7 @@ Options:
 Examples:
   zcode-acp quota                 # all providers, print once and exit (color bars)
   zcode-acp quota go              # Opencode Go only (3 windows)
-  zcode-acp quota oc              # Ollama Cloud only (5h + weekly)
+  zcode-acp quota oc              # Ollama Cloud only (Month % + spend detail)
   zcode-acp quota glm -w          # GLM only, live monitor every 30s
   zcode-acp quota -w -i 60        # all, refresh every 60s
   zcode-acp quota -d              # all, include per-model MCP breakdown

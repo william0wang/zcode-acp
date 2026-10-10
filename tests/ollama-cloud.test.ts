@@ -51,13 +51,38 @@ function setFileKey(key: string | null): void {
   loadUserConfigMock.mockReturnValue(key === null ? {} : { quota: { ollamaApiKey: key } });
 }
 
-/** Build a valid /api/usage response body. */
+/** Build a valid legacy (pre-2026-10) /api/usage response body. */
 function usageBody(session: number | null, weekly: number | null, monthly?: number | null): string {
   const limits: Record<string, { usage: number }> = {};
   if (session !== null && session !== undefined) limits.session = { usage: session };
   if (weekly !== null && weekly !== undefined) limits.weekly = { usage: weekly };
   if (monthly != null) limits.monthly = { usage: monthly };
   return JSON.stringify({ limits });
+}
+
+/** Build an analytics (2026-10+) /api/usage response body. */
+function analyticsBody(totals: {
+  usage_usd: number;
+  request_count?: number;
+  input_tokens?: number;
+  cached_input_tokens?: number;
+  output_tokens?: number;
+}): string {
+  return JSON.stringify({
+    range: "30d",
+    scope: "self",
+    granularity: "day",
+    from: "2026-09-10T00:00:00Z",
+    until: "2026-10-10T00:00:00Z",
+    totals: {
+      request_count: totals.request_count ?? 246,
+      usage_usd: totals.usage_usd,
+      input_tokens: totals.input_tokens ?? 14_294_081,
+      cached_input_tokens: totals.cached_input_tokens ?? 12_922_504,
+      output_tokens: totals.output_tokens ?? 940_919,
+    },
+    buckets: [],
+  });
 }
 
 // --- formatOcSection -------------------------------------------------------
@@ -91,6 +116,27 @@ describe("formatOcSection", () => {
     expect(sec.body[0]).toMatch(/5h\s+[█░]+\s+30%\s+·\s+\d{2}-\d{2} \d{2}:\d{2}/);
     // The weekly line carries no stamp of its own on this fixture.
     expect(sec.body[1]).not.toMatch(/· \d{2}-\d{2}/);
+  });
+
+  it("appends the spend detail line when the result carries usageUsd", () => {
+    const sec = formatOcSection({
+      kind: "success",
+      monthly: 0.026,
+      monthlyResetAt: 1_800_000_000_000,
+      usageUsd: 1.5747,
+      creditUsd: 60,
+      requestCount: 246,
+      fetchedAt: 1,
+    });
+    expect(sec.body).toHaveLength(2);
+    expect(sec.body[0]).toMatch(/Month\s+[█░]+\s+2\.6%/);
+    expect(sec.body[1]).toMatch(/\$1\.57 of \$60 · 246 req \(30d\)/);
+  });
+
+  it("spend without a known credit reads 'spent' instead of 'of $…'", () => {
+    const sec = formatOcSection({ kind: "success", usageUsd: 0.44, fetchedAt: 1 });
+    expect(sec.body).toHaveLength(1);
+    expect(sec.body[0]).toMatch(/\$0\.44 spent \(30d\)/);
   });
 
   it("non-success kinds render a single explanation line", () => {
@@ -236,6 +282,90 @@ describe("queryOcUsage orchestration", () => {
     expect(nextMonthlyAnniversary(Y("2026-01-31T09:15:00Z"), Y("2026-02-01T00:00:00Z"))).toBe(
       Y("2026-02-28T09:15:00Z"),
     );
+  });
+
+  describe("analytics API (2026-10+)", () => {
+    /** /api/me body for a Pro account (live shape, verified 2026-09-17). */
+    const proMe = JSON.stringify({
+      ID: "09c296ae-ff2b-4043-8ea7-33875c996f82",
+      CreatedAt: "2026-09-12T13:38:00.308816Z",
+      Email: "user@example.com",
+      Name: "user",
+      Plan: "pro",
+    });
+
+    it("derives monthly from 30d spend ÷ plan credit and carries the detail", async () => {
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({ status: 200, text: analyticsBody({ usage_usd: 1.5747 }) });
+      mockedMe.mockResolvedValue({ status: 200, text: proMe });
+      const result = await queryOcUsage();
+      expect(result).toMatchObject({
+        kind: "success",
+        usageUsd: 1.5747,
+        plan: "pro",
+        creditUsd: 60,
+        monthly: 1.5747 / 60,
+        requestCount: 246,
+        inputTokens: 14_294_081,
+        cachedInputTokens: 12_922_504,
+        outputTokens: 940_919,
+      });
+      if (result.kind !== "success") return;
+      // Monthly reset = next CreatedAt anniversary (no SubscriptionPeriodEnd).
+      expect(result.monthlyResetAt).toBeGreaterThan(result.fetchedAt);
+      expect(result.monthlyResetAt! - result.fetchedAt).toBeLessThanOrEqual(32 * 86_400_000);
+      // No legacy windows from the analytics shape.
+      expect(result.session).toBeUndefined();
+      expect(result.weekly).toBeUndefined();
+    });
+
+    it("unknown plan: spend detail without a derived monthly percent", async () => {
+      // Free's starter-credit amount is unlisted → no denominator → no bar.
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({ status: 200, text: analyticsBody({ usage_usd: 0.44 }) });
+      mockedMe.mockResolvedValue({ status: 200, text: JSON.stringify({ Plan: "free" }) });
+      const result = await queryOcUsage();
+      expect(result).toMatchObject({ kind: "success", usageUsd: 0.44, plan: "free" });
+      if (result.kind !== "success") return;
+      expect(result.creditUsd).toBeUndefined();
+      expect(result.monthly).toBeUndefined();
+    });
+
+    it("clamps the derived monthly at 100% when spend exceeds the credit", async () => {
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({ status: 200, text: analyticsBody({ usage_usd: 90 }) });
+      mockedMe.mockResolvedValue({ status: 200, text: proMe });
+      const result = await queryOcUsage();
+      expect(result).toMatchObject({ kind: "success", monthly: 1, creditUsd: 60 });
+    });
+
+    it("zero spend is a success (monthly 0%), not unavailable", async () => {
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({ status: 200, text: analyticsBody({ usage_usd: 0 }) });
+      mockedMe.mockResolvedValue({ status: 200, text: proMe });
+      const result = await queryOcUsage();
+      expect(result).toMatchObject({ kind: "success", usageUsd: 0, monthly: 0 });
+    });
+
+    it("/api/me failure leaves the spend detail, drops percent + reset", async () => {
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({ status: 200, text: analyticsBody({ usage_usd: 1.2 }) });
+      mockedMe.mockRejectedValue(new Error("network down"));
+      const result = await queryOcUsage();
+      expect(result).toMatchObject({ kind: "success", usageUsd: 1.2 });
+      if (result.kind !== "success") return;
+      expect(result.monthly).toBeUndefined();
+      expect(result.monthlyResetAt).toBeUndefined();
+    });
+
+    it("a negative usage_usd is not recognised (falls through to unavailable)", async () => {
+      process.env.OLLAMA_API_KEY = "sk-test";
+      mockedFetch.mockResolvedValue({
+        status: 200,
+        text: JSON.stringify({ totals: { usage_usd: -1 } }),
+      });
+      expect((await queryOcUsage()).kind).toBe("unavailable");
+    });
   });
 
   it("monthly reset is omitted when /api/me fails (best-effort)", async () => {

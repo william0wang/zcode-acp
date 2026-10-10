@@ -177,4 +177,58 @@ describe("accountUsageStats", () => {
     const out = await accountUsageStats();
     expect(out.ollama.windows).toEqual([{ key: "monthly", label: "Month", usagePercent: 0.6 }]);
   });
+
+  it("analytics Ollama: derived Month window plus the additive spend detail", async () => {
+    // 2026-10 API: percent derived from 30d spend ÷ plan credit; `usage` is an
+    // additive field older clients ignore.
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "unavailable" },
+      go: { kind: "not_configured" },
+      oc: {
+        kind: "success",
+        monthly: 1.5747 / 60,
+        monthlyResetAt: NOW + 5 * 86_400_000,
+        usageUsd: 1.5747,
+        plan: "pro",
+        creditUsd: 60,
+        requestCount: 246,
+        inputTokens: 14_294_081,
+        cachedInputTokens: 12_922_504,
+        outputTokens: 940_919,
+        fetchedAt: NOW,
+      },
+    } satisfies CombinedResult);
+
+    const out = await accountUsageStats();
+    expect(out.ollama.windows).toEqual([
+      {
+        key: "monthly",
+        label: "Month",
+        usagePercent: (1.5747 / 60) * 100,
+        resetsAt: NOW + 5 * 86_400_000,
+      },
+    ]);
+    expect(out.ollama.usage).toEqual({
+      plan: "pro",
+      usageUsd: 1.5747,
+      creditUsd: 60,
+      requestCount: 246,
+      inputTokens: 14_294_081,
+      cachedInputTokens: 12_922_504,
+      outputTokens: 940_919,
+      window: "30d",
+    });
+  });
+
+  it("analytics Ollama without a known plan: spend detail, no windows", async () => {
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "unavailable" },
+      go: { kind: "not_configured" },
+      oc: { kind: "success", usageUsd: 0.44, plan: "free", fetchedAt: NOW },
+    } satisfies CombinedResult);
+
+    const out = await accountUsageStats();
+    expect(out.ollama.windows).toEqual([]);
+    expect(out.ollama.usage).toEqual({ plan: "free", usageUsd: 0.44, window: "30d" });
+  });
 });
