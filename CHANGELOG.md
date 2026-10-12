@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.68.2](https://github.com/william0wang/zcode-acp/compare/v0.68.1...v0.68.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* **dispatch:** keep the turn success status line off editor clients by default ([#319](https://github.com/william0wang/zcode-acp/issues/319)) ([ce1410e](https://github.com/william0wang/zcode-acp/commit/ce1410e129a1b92f5ef12e8db9f0eefdda5f7642))
+
 ## [0.68.1](https://github.com/william0wang/zcode-acp/compare/v0.68.0...v0.68.1) (2026-10-12)
 
 
