@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.69.0](https://github.com/william0wang/zcode-acp/compare/v0.68.2...v0.69.0) (2026-10-12)
+
+
+### Features
+
+* adapt to ZCode 3.15.1 (guarded mode, dynamicWorkflowMode pass-through) ([364bfb4](https://github.com/william0wang/zcode-acp/commit/364bfb436a357fcc011096e3012073ac9955e139))
+
 ## [0.68.2](https://github.com/william0wang/zcode-acp/compare/v0.68.1...v0.68.2) (2026-10-12)
 
 
