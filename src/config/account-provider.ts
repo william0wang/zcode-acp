@@ -31,6 +31,7 @@ import path from "node:path";
 
 import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js";
 import type { ZcodeBackend } from "../backend/client.js";
+import { readCredentialConfig } from "./bridge-accounts.js";
 import { log, warn, ZCODE_CREDS_PATH } from "../utils.js";
 
 /** The bundled provider-table file the CLI boots from. */
@@ -65,7 +66,7 @@ interface BuiltinTable {
  * (verified 2026-09 — the push reported "received" but entitlement never
  * applied, switch stayed "Provider Registry 中不存在 Model").
  */
-function builtinTablePath(): string | null {
+export function builtinTablePath(): string | null {
   const injected = builtinProviderEnv()[BUILTIN_PROVIDER_ENV];
   if (injected) return injected;
   const fromEnv = process.env[BUILTIN_PROVIDER_ENV]?.trim();
@@ -199,7 +200,7 @@ function entitledBuiltinProviders(): Set<string> {
   }
   // 2) Legacy config.json (still the app's own provider enablement).
   try {
-    const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
+    const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as {
       provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
     };
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
@@ -257,7 +258,7 @@ export function codingPlanRequestAuthFor(
   if (legacyId === accountProviderId) return null;
   if (!entitledBuiltinProviders().has(legacyId)) return null;
   try {
-    const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
+    const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as {
       provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
     };
     const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();

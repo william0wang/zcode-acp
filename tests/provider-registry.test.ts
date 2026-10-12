@@ -222,7 +222,8 @@ describe("buildProviderRegistry", () => {
     const a = buildProviderRegistry();
     const cfg2 = JSON.parse(JSON.stringify(FAKE_CONFIG));
     cfg2.provider["custom-openai-kind"].kind = "anthropic";
-    vi.doMock("node:fs", () => ({
+    vi.doMock("node:fs", async () => ({
+      ...(await vi.importActual<typeof import("node:fs")>("node:fs")),
       readFileSync: () => JSON.stringify(cfg2),
     }));
     // vi.doMock takes effect on next dynamic import; reset and reimport.

@@ -15,8 +15,7 @@
  *   anthropic → "anthropic-messages", openai-compatible → "openai-chat-completions".
  */
 
-import { readFileSync } from "node:fs";
-
+import { readCredentialConfig } from "./bridge-accounts.js";
 import { ZCODE_CREDS_PATH, log } from "../utils.js";
 
 /** A model entry in config.json (`provider.<id>.models.<modelId>`). */
@@ -134,7 +133,7 @@ function buildProviderElement(providerId: string, p: ProviderEntry): Record<stri
  * `provider_not_configured` before auth is even tried.
  */
 export function buildProviderRegistry(): ProviderRegistryPayload {
-  const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as ConfigShape;
+  const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as ConfigShape;
   const allEntries = Object.entries(cfg.provider ?? {});
   const skipped: string[] = [];
   const providers = [] as ReturnType<typeof buildProviderElement>[];
@@ -161,7 +160,9 @@ export function buildProviderRegistry(): ProviderRegistryPayload {
 /** Stable short hash over provider ids + kind + baseURL + models (revision gate). */
 function hashRevision(providers: ReadonlyArray<Record<string, unknown>>): string {
   const sig = providers
-    .map((p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}|${JSON.stringify(p.models ?? [])}`)
+    .map(
+      (p) => `${p.providerId}|${p.kind ?? ""}|${p.baseURL ?? ""}|${JSON.stringify(p.models ?? [])}`,
+    )
     .sort()
     .join("\n");
   // FNV-1a 32-bit → hex; cheap, dependency-free, stable.
