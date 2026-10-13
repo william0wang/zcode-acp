@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.69.3](https://github.com/william0wang/zcode-acp/compare/v0.69.2...v0.69.3) (2026-10-13)
+
+
+### Bug Fixes
+
+* advertise the configured initial mode for pending sessions ([84b9687](https://github.com/william0wang/zcode-acp/commit/84b96871672087d52f1791d774ec016db874840a))
+* make the sandbox allow loop own turn pacing (freeze, hold, unattended timeout) ([71c6e6d](https://github.com/william0wang/zcode-acp/commit/71c6e6d0bd8474e22fd78c39480f5fe3ac6044af))
+
 ## [0.69.2](https://github.com/william0wang/zcode-acp/compare/v0.69.1...v0.69.2) (2026-10-12)
 
 
