@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.69.4](https://github.com/william0wang/zcode-acp/compare/v0.69.3...v0.69.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* dedupe quota threshold pushes across hub and bridge processes ([0a624b2](https://github.com/william0wang/zcode-acp/commit/0a624b297808085167b5d27a7e3513cbd74d490e))
+* ollama monthly percent uses billing-period spend, not rolling 30d ([7f8725a](https://github.com/william0wang/zcode-acp/commit/7f8725a1d092420a7a21c0b3adba832ecc3ac648))
+
 ## [0.69.3](https://github.com/william0wang/zcode-acp/compare/v0.69.2...v0.69.3) (2026-10-13)
 
 
