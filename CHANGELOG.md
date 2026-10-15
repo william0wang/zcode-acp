@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.71.0](https://github.com/william0wang/zcode-acp/compare/v0.70.0...v0.71.0) (2026-10-15)
+
+
+### Features
+
+* show CLIProxy quota as pool-wide 5h/week aggregates ([e0a06b9](https://github.com/william0wang/zcode-acp/commit/e0a06b99c25eb943f974a31e31ce160e3fef9835))
+
 ## [0.70.0](https://github.com/william0wang/zcode-acp/compare/v0.69.4...v0.70.0) (2026-10-15)
 
 
