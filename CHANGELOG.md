@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.70.0](https://github.com/william0wang/zcode-acp/compare/v0.69.4...v0.70.0) (2026-10-15)
+
+
+### Features
+
+* add the CLIProxyAPI quota card and converge quota reads on the hub cache ([8f232e3](https://github.com/william0wang/zcode-acp/commit/8f232e30279d1a16f8a25dcf299221ee4222f4fd))
+
+
+### Bug Fixes
+
+* make the cliproxy quota card work against real antigravity accounts ([32f3014](https://github.com/william0wang/zcode-acp/commit/32f3014ca0ecdad1d7743bc12bc7368e34ba42d9))
+
 ## [0.69.4](https://github.com/william0wang/zcode-acp/compare/v0.69.3...v0.69.4) (2026-10-14)
 
 
