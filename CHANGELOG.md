@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.74.0](https://github.com/william0wang/zcode-acp/compare/v0.73.0...v0.74.0) (2026-10-19)
+
+
+### Features
+
+* add API-key fallback source for Opencode Go usage (cookie stays preferred) ([5f57c34](https://github.com/william0wang/zcode-acp/commit/5f57c343b4fc072df09ad38e9aa25686d6a3f6d3))
+
 ## [0.73.0](https://github.com/william0wang/zcode-acp/compare/v0.72.0...v0.73.0) (2026-10-19)
 
 
