@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.73.0](https://github.com/william0wang/zcode-acp/compare/v0.72.0...v0.73.0) (2026-10-19)
+
+
+### Features
+
+* hub Desktop Presence — a connected desktop client incubates new sessions headless (ADR-0016 amendment) ([5a310bd](https://github.com/william0wang/zcode-acp/commit/5a310bd7b3d4ab6b8c2b4b27432e63625a4ac86a))
+
+
+### Bug Fixes
+
+* stop writing the sandbox discovery template into unarmed workspaces ([#332](https://github.com/william0wang/zcode-acp/issues/332)) ([888385a](https://github.com/william0wang/zcode-acp/commit/888385ac5c0676e3985bd1c01c5a8f08e847b545))
+
 ## [0.72.0](https://github.com/william0wang/zcode-acp/compare/v0.71.0...v0.72.0) (2026-10-15)
 
 
