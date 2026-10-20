@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.75.0](https://github.com/william0wang/zcode-acp/compare/v0.74.0...v0.75.0) (2026-10-20)
+
+
+### Features
+
+* header-based desktop presence, headless resume, messageId on replayed cards, force close stops running turns ([cfcbc5d](https://github.com/william0wang/zcode-acp/commit/cfcbc5db2200bad01bdf197f772b902926fade58))
+
+
+### Bug Fixes
+
+* settle hub dial failures once and prune corpse bridge registrations ([37a8107](https://github.com/william0wang/zcode-acp/commit/37a8107095a115cef3c6228fc460ff0b26622449))
+* use the antigravity hub User-Agent so quota reads include the Gemini family ([ad6c175](https://github.com/william0wang/zcode-acp/commit/ad6c175d7014bf1c20053e5736d898034b4df034))
+
 ## [0.74.0](https://github.com/william0wang/zcode-acp/compare/v0.73.0...v0.74.0) (2026-10-19)
 
 
