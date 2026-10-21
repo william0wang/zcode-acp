@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.0](https://github.com/william0wang/zcode-acp/compare/v0.75.0...v0.76.0) (2026-10-21)
+
+
+### Features
+
+* edit provider endpoints, probe model connectivity and expose agent advanced fields from the settings API ([753c824](https://github.com/william0wang/zcode-acp/commit/753c82471f1282aa46705e73c90ccaf56d2b7b15))
+* hub Desktop Presence — recent-request presence tier and live-bridge reuse (ADR-0033 amendment) ([ee659f4](https://github.com/william0wang/zcode-acp/commit/ee659f4d7ec55f1477f4059ec1a999a6445429b8))
+
+
+### Bug Fixes
+
+* **tests:** strip the serve-bridge birth env in the hermetic setup ([f184e29](https://github.com/william0wang/zcode-acp/commit/f184e299e0d811d61a8a9b66017b72bd7bf6ac24))
+
 ## [0.75.0](https://github.com/william0wang/zcode-acp/compare/v0.74.0...v0.75.0) (2026-10-20)
 
 
