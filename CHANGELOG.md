@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.76.1](https://github.com/william0wang/zcode-acp/compare/v0.76.0...v0.76.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* broadcast turn lifecycle state so attach-only clients clear running and flush queued prompts ([ceb6d7f](https://github.com/william0wang/zcode-acp/commit/ceb6d7f378044d474b30d6f0022045137af8634b))
+
 ## [0.76.0](https://github.com/william0wang/zcode-acp/compare/v0.75.0...v0.76.0) (2026-10-21)
 
 
