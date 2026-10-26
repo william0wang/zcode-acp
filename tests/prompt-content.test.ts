@@ -63,6 +63,32 @@ describe("embedded resource conversion", () => {
     );
     expect(result.attachments).toEqual([]);
   });
+  it("labels a nameless resource link with its decoded path", async () => {
+    const result = await convertPromptContent(
+      [{ type: "resource_link", name: "", uri: "file:///tmp/my%20x.txt" }],
+      await directory(),
+    );
+    expect(result.text).toBe("[related resource: /tmp/my x.txt](/tmp/my x.txt)");
+  });
+  it("names attachments from decoded URIs, or by position among attachments and MIME subtype", async () => {
+    const result = await convertPromptContent(
+      [
+        blob("application/pdf", "%PDF", "https://example.invalid/files/my%20report.pdf"),
+        { type: "image", mimeType: "image/png", data: "AAAA" },
+        { type: "text", text: "and another" },
+        { type: "image", mimeType: "image/jpeg", data: "BBBB" },
+        blob("application/pdf", "%PDF", "file:///tmp/my%20doc.pdf"),
+      ],
+      await directory(),
+    );
+    expect(result.text).toBe("and another");
+    expect(result.attachments.map((a) => a.filename)).toEqual([
+      "my report.pdf",
+      "image-2.png",
+      "image-3.jpeg",
+      "my doc.pdf",
+    ]);
+  });
   it("stages exact arbitrary binary bytes privately and retains them across conversions", async () => {
     const root = await directory(),
       storage = join(root, "storage");
@@ -120,6 +146,7 @@ describe("embedded resource conversion", () => {
     );
     expect(result.attachments[0]).toMatchObject({
       kind: "image",
+      filename: "image.png",
       dataBase64: "AQIDBA==",
       sizeBytes: 4,
     });
@@ -148,6 +175,8 @@ describe("embedded resource conversion", () => {
       [{ type: "resource", resource: { uri: "memory://x", mimeType: "not a type", blob: "AQID" } }],
       [{ type: "resource", resource: { uri: "memory://x", blob: "AB==" } }],
       [{ type: "audio", mimeType: "audio/wav", data: "AQID" }],
+      [{ type: "image", mimeType: "image/x-weird", data: "AAAA" }],
+      [{ type: "image", mimeType: "image/png" }],
     ])
       await expect(
         convertPromptContent(input as ContentBlock[], await directory()),
