@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.77.0](https://github.com/william0wang/zcode-acp/compare/v0.76.3...v0.77.0) (2026-10-28)
+
+
+### Features
+
+* add private terminal coding plan account setup ([#316](https://github.com/william0wang/zcode-acp/issues/316)) ([166b9ac](https://github.com/william0wang/zcode-acp/commit/166b9ac62712411b07c06e0277ef0786cc92b858))
+
+
+### Bug Fixes
+
+* name the bridge plan's model in App task rows ([#343](https://github.com/william0wang/zcode-acp/issues/343)) ([0a0913d](https://github.com/william0wang/zcode-acp/commit/0a0913d847b63dd9d9753694b454c9b1f80d3738))
+
 ## [0.76.3](https://github.com/william0wang/zcode-acp/compare/v0.76.2...v0.76.3) (2026-10-26)
 
 
