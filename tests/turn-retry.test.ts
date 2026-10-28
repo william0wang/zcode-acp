@@ -11,7 +11,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { isBackendLostError, isTransientTurnError } from "../src/translators/tool-helpers.js";
+import {
+  isBackendLostError,
+  isGatewayBlipTurnError,
+  isTransientTurnError,
+} from "../src/translators/tool-helpers.js";
 
 describe("isTransientTurnError", () => {
   it("matches a transient cause.code (model_request_failed)", () => {
@@ -124,6 +128,72 @@ describe("isTransientTurnError", () => {
         cause: { code: "INVALID_PARAMS", message: "bad input" }, // fatal cause
       }),
     ).toBe(false);
+  });
+});
+
+describe("isGatewayBlipTurnError", () => {
+  it("matches the observed relay-gateway 400 marked non-retryable", () => {
+    // 2026-10-28: a local OpenAI-compatible relay intermittently answered
+    // 400 invalid_request_error mid-conversation; the upstream classifier
+    // marks the shape retryable:false (it judges the request, not the
+    // gateway), and resending the same prompt succeeded.
+    const err = {
+      code: "UNKNOWN_ERROR",
+      message: "Turn execution failed",
+      cause: {
+        code: "invalid_model_request",
+        message: "Upstream request failed: [invalid_request_error] thinking must be passed back",
+        context: { attempt: 1, maxAttempts: 11, providerCode: "server_error", retryable: false },
+      },
+    };
+    expect(isGatewayBlipTurnError(err)).toBe(true);
+  });
+
+  it("matches request-failure cause codes even when marked non-retryable", () => {
+    expect(
+      isGatewayBlipTurnError({
+        cause: { code: "model_request_failed", context: { retryable: false } },
+      }),
+    ).toBe(true);
+    expect(
+      isGatewayBlipTurnError({
+        cause: { code: "provider_not_configured", context: { retryable: false } },
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to the top-level code when no cause is present", () => {
+    expect(isGatewayBlipTurnError({ code: "model_request_failed" })).toBe(true);
+  });
+
+  it("does not match quota, context-window or model-not-found failures", () => {
+    // Those stay terminal for a plain resend: quota has dedicated wait
+    // machinery (quota.autoResume, goal-loop waits), context-exceeded needs
+    // compaction, model-not-found is a configuration error.
+    expect(
+      isGatewayBlipTurnError({
+        cause: {
+          code: "model_rate_limited",
+          context: { reason: "rate_limited", retryable: false },
+        },
+      }),
+    ).toBe(false);
+    expect(isGatewayBlipTurnError({ cause: { code: "model_context_exceeded" } })).toBe(false);
+    expect(isGatewayBlipTurnError({ cause: { code: "model_not_found" } })).toBe(false);
+  });
+
+  it("ignores message wording — the verdict is the code alone", () => {
+    // Deliberately narrower than isTransientTurnError: a gateway blip is not
+    // re-derived from message keywords, so quota/business wording that merely
+    // resembles a network failure cannot sneak into the bounded resend.
+    expect(isGatewayBlipTurnError({ cause: { message: "network connection failed" } })).toBe(false);
+  });
+
+  it("returns false for non-object / malformed input", () => {
+    expect(isGatewayBlipTurnError(null)).toBe(false);
+    expect(isGatewayBlipTurnError("invalid_model_request")).toBe(false);
+    expect(isGatewayBlipTurnError([])).toBe(false);
+    expect(isGatewayBlipTurnError({})).toBe(false);
   });
 });
 

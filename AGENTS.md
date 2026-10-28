@@ -348,6 +348,26 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   cancel — that made ESC feel dead for the whole remaining generation.
 - **`session/prompt` ordering**: subscribe to events BEFORE calling `session/send`
   — short turns can complete before a late subscribe catches them.
+- **One-shot gateway failures are resent even when the backend marks them
+  `retryable: false`** (2026-10-28): the upstream classifier tags provider
+  4xx/unknown request failures (`invalid_model_request`,
+  `model_request_failed`, `provider_not_configured`) as non-retryable — a
+  verdict about the REQUEST shape, not the gateway's health. Relay gateways
+  break that assumption (observed live: a local OpenAI-compatible relay
+  intermittently answered 400 `invalid_request_error` mid-conversation; the
+  resend succeeded — same session, minutes apart, and `attempt:1/11` meant
+  the backend's own 10-retry budget never engaged). `isGatewayBlipTurnError`
+  (src/translators/tool-helpers.ts) feeds those codes into the SAME bounded
+  resend ladder as transient failures (6 attempts, 1s/2s/4s/4s/4s); quota
+  (`model_rate_limited`), context-exceeded and model-not-found stay
+  terminal — quota has its own wait machinery and a resend cannot fix the
+  others. Exhausting the ladder now falls through to the graceful degrade
+  (`requestFailed` notice + end_turn) instead of throwing the raw
+  TurnFailedError: the pre-fix final attempt bypassed the degrade block and
+  hard-stopped the session, and the goal-loop path also lost the structured
+  RequestError its quota classifier reads. Do not "tighten" the classifier
+  back to retryable-only, and do not widen it by message keywords — the
+  code-only match is what keeps quota wording out.
 - **Auto-compact runs DETACHED from the turn that armed it — do not re-couple
   them**: `runOneTurn` arms it on end_turn; the `finally` starts it only AFTER
   `pendingTurns` cleanup + `running:false` (`runAutoCompactDetached`). The old

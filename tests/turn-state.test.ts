@@ -394,6 +394,110 @@ describe("$/zcode/turnState emission", () => {
     ]);
   });
 
+  it("resends a non-retryable gateway 400 and recovers when the resend succeeds", async () => {
+    // 2026-10-28 observation: a relay gateway intermittently answers 400
+    // invalid_request_error (marked retryable:false by the upstream
+    // classifier) on a request the same session accepts on resend. The turn
+    // loop must give it the bounded resend instead of failing the session —
+    // the retry notice reaches the prompting connection as a text chunk.
+    let sendCount = 0;
+    const backend = scriptedBackend(() => {
+      sendCount++;
+      if (sendCount > 1) {
+        return [
+          { type: "turn.started" },
+          { type: "turn.completed", payload: { resultType: "success" } },
+        ];
+      }
+      return [
+        { type: "turn.started" },
+        {
+          type: "turn.failed",
+          payload: {
+            error: {
+              code: "UNKNOWN_ERROR",
+              message: "Turn execution failed",
+              cause: {
+                code: "invalid_model_request",
+                message: "Upstream request failed: [invalid_request_error] gateway blip",
+                context: { providerCode: "server_error", retryable: false },
+              },
+            },
+          },
+        },
+      ];
+    });
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const texts: string[] = [];
+    const cx = {
+      notify: async (_method: string, params: Record<string, unknown>) => {
+        texts.push(JSON.stringify(params));
+      },
+      request: async () => ({}),
+    } as unknown as acp.AgentContext;
+    server.clients.add(cx);
+
+    const result = await prompt(server, promptParams(), cx, 3);
+
+    expect(result).toEqual({ stopReason: "end_turn" });
+    expect(request.mock.calls.filter((call) => call[1] === "session/send")).toHaveLength(2);
+    // The user saw the retry happen, not a hard error.
+    expect(texts.join("\n")).toContain("(1/5)");
+  });
+
+  it("degrades gracefully when gateway-blip retries are exhausted", async () => {
+    // The session must survive an exhausted retry ladder: a user-visible
+    // "please resend" notice plus end_turn — never a hard error that stops
+    // the conversation (the pre-fix code threw the raw TurnFailedError from
+    // the final attempt, leaving the graceful-degrade block unreachable).
+    const backend = scriptedBackend(() => [
+      { type: "turn.started" },
+      {
+        type: "turn.failed",
+        payload: {
+          error: {
+            code: "UNKNOWN_ERROR",
+            message: "Turn execution failed",
+            cause: {
+              code: "invalid_model_request",
+              message: "Upstream request failed: [invalid_request_error] gateway down",
+              context: { providerCode: "server_error", retryable: false },
+            },
+          },
+        },
+      },
+    ]);
+    const request = vi.spyOn(backend, "request");
+    const server = setup(backend);
+    const texts: string[] = [];
+    const cx = {
+      notify: async (_method: string, params: Record<string, unknown>) => {
+        texts.push(JSON.stringify(params));
+      },
+      request: async () => ({}),
+    } as unknown as acp.AgentContext;
+    server.clients.add(cx);
+
+    vi.useFakeTimers();
+    let result: acp.PromptResponse | undefined;
+    try {
+      const promise = prompt(server, promptParams(), cx, 4);
+      // Retry backoffs: 1s, 2s, 4s, 4s, 4s (plus slack).
+      await vi.advanceTimersByTimeAsync(20_000);
+      result = await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // 1 initial attempt + 5 bounded resends, then the graceful degrade.
+    expect(result).toEqual({ stopReason: "end_turn" });
+    expect(request.mock.calls.filter((call) => call[1] === "session/send")).toHaveLength(6);
+    const joined = texts.join("\n");
+    expect(joined).toContain("(5/5)");
+    expect(joined).toMatch(/会话仍可用|still usable/);
+  });
+
   it("preempted turn's exit reports running:true while the preemptor is in flight", async () => {
     let sendCount = 0;
     const server = setup(

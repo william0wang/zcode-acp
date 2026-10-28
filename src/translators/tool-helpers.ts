@@ -431,6 +431,50 @@ export function isTransientTurnError(error: unknown): boolean {
   return matchesTransient(cause) || (cause === undefined && matchesTransient(e));
 }
 
+/**
+ * `turn.failed` cause codes that mark a provider/gateway REQUEST failure.
+ * The upstream classifier emits these for 4xx/5xx/unknown provider answers
+ * and usually marks them `retryable: false` — but that verdict judges the
+ * REQUEST shape ("a 400 is deterministic"), not the gateway's health. Relay
+ * gateways break the assumption: a forwarding blip surfaces as a one-shot
+ * 400/invalid shape on a request the same session accepts moments later
+ * (observed 2026-10-28: a local OpenAI-compatible relay intermittently
+ * answered 400 invalid_request_error mid-conversation; resending succeeded).
+ * The bridge gives these shapes a bounded resend even when marked
+ * non-retryable. Quota (`model_rate_limited` — owned by the quota-resume
+ * machinery), context-window and model-not-found failures are deliberately
+ * absent: retrying those is pure waste or fights a dedicated mechanism.
+ */
+const GATEWAY_BLIP_CAUSE_CODES = new Set([
+  "model_request_failed",
+  "invalid_model_request",
+  "provider_not_configured",
+]);
+
+/**
+ * Whether a `turn.failed` error object is a provider/gateway request failure
+ * worth a bounded resend even when the upstream classifier marked it
+ * non-retryable. `context.retryable === false` is deliberately ignored: the
+ * classifier cannot distinguish a relay's transient fault from a genuinely
+ * malformed request, and a couple of cheap resends cost far less than a
+ * session hard-stopped mid-conversation.
+ */
+export function isGatewayBlipTurnError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const e = error as Record<string, unknown>;
+  const cause = e["cause"];
+  // Same shape contract as isTransientTurnError: the recoverable cause lives
+  // under `error.cause`; the top level is only a fallback when absent.
+  if (cause !== undefined) return matchesGatewayBlip(cause);
+  return matchesGatewayBlip(e);
+}
+
+function matchesGatewayBlip(node: unknown): boolean {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return false;
+  const code = String((node as Record<string, unknown>)["code"] ?? "").trim();
+  return code !== "" && GATEWAY_BLIP_CAUSE_CODES.has(code);
+}
+
 function matchesTransient(node: unknown): boolean {
   if (!node || typeof node !== "object" || Array.isArray(node)) return false;
   const n = node as Record<string, unknown>;

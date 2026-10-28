@@ -75,6 +75,7 @@ import {
   extractLocations,
   formatTurnError,
   isBackendLostError,
+  isGatewayBlipTurnError,
   isTransientTurnError,
   ProjectionDiffer,
 } from "../translators/index.js";
@@ -2191,16 +2192,30 @@ export async function runOneTurn(
           suppressRetryNotice = true;
           continue;
         }
-        // Only a transient TurnFailedError is retryable; everything else (send
-        // failures, non-transient turn errors, exhausted retries, cancellation)
-        // propagates to the caller.
+        // Transient failures and one-shot gateway blips are retried; everything
+        // else (send failures, terminal turn errors, cancellation) propagates
+        // to the caller.
         if (e instanceof TurnFailedError) {
           const transient = isTransientTurnError(e.turnError);
-          if (attempt < MAX_TURN_ATTEMPTS && !turn.cancelled && transient) {
+          // A relay gateway's transient fault arrives as a request-failure
+          // cause code the upstream classifier marked non-retryable — its
+          // verdict judges the request shape, not the gateway's health
+          // (observed 2026-10-28: intermittent 400 invalid_request_error from
+          // a forwarding gateway, resend succeeded). Give those a bounded
+          // resend too; quota/context-exceeded/model-not-found stay terminal.
+          const gatewayBlip = !transient && isGatewayBlipTurnError(e.turnError);
+          if (attempt < MAX_TURN_ATTEMPTS && !turn.cancelled && (transient || gatewayBlip)) {
             lastTurnError = e.turnError;
             continue;
           }
-          if (!transient) throw turnFailureRequestError(e);
+          if (!transient && !gatewayBlip) throw turnFailureRequestError(e);
+          // Retries exhausted on a transient/gateway-blip failure: degrade
+          // gracefully below (user-visible notice + end_turn, goal-loop
+          // pauses via its structured throw) instead of a hard error that
+          // stops the session. A cancelled turn keeps the raw propagate.
+          if (turn.cancelled) throw e;
+          lastTurnError = e.turnError;
+          break;
         }
         throw e;
       }

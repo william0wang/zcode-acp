@@ -294,12 +294,28 @@ rather than hanging.
 Transient errors are identified by the nested `error.cause.code`
 (`model_request_failed`, `provider_not_configured`, `rate_limit`, `timeout`,
 `ECONNRESET`, etc.) or by network/connection/timeout keywords in
-`error.cause.message`. Non-transient failures (e.g. `prompt is running`) still
-surface as hard errors immediately.
+`error.cause.message`.
 
-After retries are exhausted, the bridge **degrades gracefully**: it emits a
-user-visible `[请求失败：…。会话仍可用，请重新发送消息重试。]` message and returns
-`end_turn`, so the session stays usable — resend the message to try again.
+**One-shot gateway failures are retried even when marked non-retryable.**
+The upstream classifier tags provider 4xx/unknown answers
+(`invalid_model_request`, `model_request_failed`, `provider_not_configured`)
+with `retryable: false` — a verdict about the *request shape*, not the
+gateway's health. Relay gateways break that assumption: a forwarding blip
+surfaces as a one-shot 400 on a request the same session accepts moments
+later (observed 2026-10-28 with an OpenAI-compatible relay intermittently
+answering `invalid_request_error` mid-conversation). These cause codes get
+the same bounded resend ladder regardless of the `retryable` flag. Quota
+(`model_rate_limited` — the quota wait/resume machinery owns it),
+context-window (`model_context_exceeded`) and model-not-found failures stay
+terminal: a plain resend cannot fix them.
+
+Other non-transient failures (e.g. `prompt is running`) still surface as
+hard errors immediately.
+
+After retries are exhausted (transient or gateway blip), the bridge
+**degrades gracefully**: it emits a user-visible
+`[请求失败：…。会话仍可用，请重新发送消息重试。]` message and returns `end_turn`,
+so the session stays usable — resend the message to try again.
 
 **Debugging:**
 
