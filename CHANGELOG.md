@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.78.0](https://github.com/william0wang/zcode-acp/compare/v0.77.0...v0.78.0) (2026-10-28)
+
+
+### Features
+
+* hub close tombstone with auto/user resume intent and orderly serve self-exit ([83f9903](https://github.com/william0wang/zcode-acp/commit/83f9903ea123d0e918cb9cc84352753a77d67516))
+
+
+### Bug Fixes
+
+* implement authenticate and read manual coding-plan keys from provider_config ([#344](https://github.com/william0wang/zcode-acp/issues/344)) ([4a88f58](https://github.com/william0wang/zcode-acp/commit/4a88f58985251587081305fdd08d04530eee7171))
+* keep an auto session/load from resurrecting a remotely closed session ([7e8ab77](https://github.com/william0wang/zcode-acp/commit/7e8ab7748ffa19192cce242d1e570c5191a90cac))
+* replay prose-less tool messages id-less so adjacent calls coalesce after resume ([c445979](https://github.com/william0wang/zcode-acp/commit/c445979bb90694f8a669ff30a9e5fb50ecfa2d83))
+* tombstone every session-id spelling of a remotely closed conversation ([8c09883](https://github.com/william0wang/zcode-acp/commit/8c098832322f4276c69528d35744e980c9e55f22))
+
 ## [0.77.0](https://github.com/william0wang/zcode-acp/compare/v0.76.3...v0.77.0) (2026-10-28)
 
 
