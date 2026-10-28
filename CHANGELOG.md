@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.79.0](https://github.com/william0wang/zcode-acp/compare/v0.78.0...v0.79.0) (2026-10-28)
+
+
+### Features
+
+* bounded resend for one-shot gateway failures + graceful exhaustion degrade ([8a63196](https://github.com/william0wang/zcode-acp/commit/8a63196ea3f982871b3dfd312164bc33d25a9806))
+
+
+### Bug Fixes
+
+* persist remote-close retirement so a respawned serve bridge cannot resurrect a closed session ([19530c2](https://github.com/william0wang/zcode-acp/commit/19530c2a61d30c8bea225e84f284acb2fa8da94c))
+
 ## [0.78.0](https://github.com/william0wang/zcode-acp/compare/v0.77.0...v0.78.0) (2026-10-28)
 
 
