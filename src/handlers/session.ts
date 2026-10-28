@@ -68,6 +68,7 @@ import {
   rememberLazySession,
 } from "../lazy-sessions.js";
 import { refreshTerminalTabTitle } from "../terminal-title.js";
+import { isClosedSessionId } from "../closed-sessions.js";
 import {
   buildDiffContent,
   EventTranslator,
@@ -1450,8 +1451,15 @@ export async function loadSession(
   // on every surface and the auto-409 gate disarms with it. The response
   // discloses the suppression via `_meta.zcode.sessionClosed: true` so the
   // client can retire its tab locally. "user" (the default — old clients)
-  // keeps the manual-reopen re-arm exactly as before.
-  const retiredForAuto = readLoadIntent(params) === "auto" && server.isDiscoveryRetired(acpSid);
+  // keeps the manual-reopen re-arm exactly as before. Retirement is checked
+  // BOTH in memory AND in the durable close record: a serve-origin bridge
+  // EXITS on last close, so the hub-incubated successor process has no
+  // in-memory stamp — without the durable lookup a reconnect ladder's auto
+  // load resurrected the closed conversation on the fresh bridge (observed
+  // 2026-10-28: closed 00:48, auto-loaded back to life 01:07).
+  const retiredForAuto =
+    readLoadIntent(params) === "auto" &&
+    (server.isDiscoveryRetired(acpSid) || isClosedSessionId(acpSid) || isClosedSessionId(zcodeSid));
 
   if (!alreadyLive) {
     // Same mcpServers contract as resume: the client may re-declare them on

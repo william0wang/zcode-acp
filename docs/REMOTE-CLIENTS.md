@@ -875,6 +875,14 @@ discovery (no re-advertise, so the hub tombstone above stays armed), and the
 result carries `_meta.zcode.sessionClosed: true`: retire the tab locally and
 do not retry. Omitted (or `"user"`) keeps the manual-reopen behavior — a
 human picking the session on a live bridge re-arms discovery as before.
+"Retired" is checked BOTH in the bridge's memory AND in its durable close
+record (`~/.zcode/v2/acp-closed-sessions.json`, every id spelling): a
+serve-origin bridge exits on its last close, and the hub-incubated successor
+process has no memory of the retirement — without the durable lookup the
+ladder's auto load resurrected the conversation on the fresh bridge
+(observed 2026-10-28). Genuine use (a prompt, a user-intent load) clears the
+record, so a deliberate reopen survives later respawns; entries expire after
+30 days.
 
 Cross-instance note: if the same conversation is also registered by another
 bridge of the project, the hub's dedupe re-attaches it under that instance —

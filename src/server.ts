@@ -19,6 +19,7 @@ import {
   ZcodeBackend,
 } from "./backend/index.js";
 import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
+import { clearClosedSessionIds } from "./closed-sessions.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -925,6 +926,11 @@ export class ZcodeAcpServer {
     // retirement stamp only ever suppressed TRAILING activity of the retired
     // conversation, and it must not suppress the next real one.
     this.discoveryRetiredAt.delete(acpSid);
+    // And it clears the DURABLE close record for every spelling — the next
+    // serve-bridge respawn must not re-retire a conversation the user
+    // deliberately reopened (self-heal, both halves). No write when nothing
+    // is recorded.
+    clearClosedSessionIds([acpSid, this.resolveSid(acpSid)]);
     // Self-heal soft-delete tombstones (ADR-0031 amendment): using a session
     // again cancels its tombstone — the session itself, and project-wide when
     // the workspace had gone fully invisible (project delete). Fire-and-forget

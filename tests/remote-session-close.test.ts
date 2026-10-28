@@ -17,6 +17,7 @@ import {
   setForceSettleMsForTests,
   tuiTeardownPids,
 } from "../src/remote/session-close-endpoint.js";
+import { isClosedSessionId } from "../src/closed-sessions.js";
 import { collectStatus } from "../src/remote/status-endpoint.js";
 import { collectSessions } from "../src/remote/endpoint.js";
 import { ZcodeAcpServer } from "../src/server.js";
@@ -100,6 +101,14 @@ describe("session close endpoint", () => {
     // an auto session/load may quote either id.
     expect(server.discoveryRetiredAt.has(acpSid)).toBe(true);
     expect(server.discoveryRetiredAt.has(acpSid2)).toBe(true);
+    // …and the DURABLE close record covers every spelling PLUS the backend
+    // id: the stamp dies with this process (serve self-exit), so the
+    // respawned bridge's auto-load gate reads this record instead — without
+    // it, the conversation resurrected on every hub re-incubation (observed
+    // 2026-10-28).
+    expect(isClosedSessionId(acpSid)).toBe(true);
+    expect(isClosedSessionId(acpSid2)).toBe(true);
+    expect(isClosedSessionId(zcodeSid)).toBe(true);
   });
 
   it("a turn that settles after the close does not re-advertise the conversation", async () => {
@@ -330,6 +339,7 @@ describe("session close endpoint", () => {
 
     expect((await fetch(`${base}/sessions/${acpSid}/close`, { method: "POST" })).status).toBe(200);
     expect(collectStatus(server).sessions).toHaveLength(0);
+    expect(isClosedSessionId(acpSid)).toBe(true);
 
     // Editor side was actually still open: the next prompt/load re-registers
     // and marks active — the conversation returns to discovery.
@@ -338,6 +348,10 @@ describe("session close endpoint", () => {
     const sessions = collectStatus(server).sessions;
     expect(sessions.map((s) => s.sessionId)).toContain(acpSid);
     expect(sessions[0]!.status).toBe("idle");
+    // …and the durable record is cleared with it: a later respawn's auto
+    // ladder must not re-retire a conversation the user reopened.
+    expect(isClosedSessionId(acpSid)).toBe(false);
+    expect(isClosedSessionId(zcodeSid)).toBe(false);
   });
 
   it("a mere registration (editor restart auto-resume) does NOT resurrect a closed session", async () => {

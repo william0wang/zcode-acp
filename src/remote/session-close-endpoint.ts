@@ -23,6 +23,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import process from "node:process";
 
 import { cancelSessionTurns } from "../handlers/session.js";
+import { recordClosedSessionIds } from "../closed-sessions.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { log } from "../utils.js";
 import { stopPollersForSession } from "../workflow/poller.js";
@@ -248,6 +249,12 @@ async function handleClose(
   // parity): a load or close may quote the backend id while the listing showed
   // the alias, and the auto-load retirement gate checks the quoted spelling.
   for (const sid of aliases) server.retireDiscovery(sid);
+  // Durable half of the retirement: the in-memory stamp above dies with this
+  // process (a serve-origin bridge exits on last close), and the hub-incubated
+  // successor must still refuse to resurrect the conversation on a reconnect
+  // ladder's auto session/load. Every spelling (aliases + backend id) is
+  // recorded; genuine use (markSessionActive) clears the record again.
+  recordClosedSessionIds([...aliases, zcodeSid]);
   // Workflow-run progress pollers address this session's journal — stop them
   // with the teardown (best-effort, never throws) instead of letting them run
   // to the hard cap for a conversation nothing else references anymore.

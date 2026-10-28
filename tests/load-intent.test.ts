@@ -9,12 +9,16 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { rmSync } from "node:fs";
+import path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
+import { isClosedSessionId, recordClosedSessionIds } from "../src/closed-sessions.js";
 import { readLoadIntent } from "../src/handlers/replay.js";
 import { loadSession } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
+import { zcodeHomeDir } from "../src/utils.js";
 
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
@@ -80,6 +84,10 @@ describe("readLoadIntent", () => {
 });
 
 describe("session/load intent gate", () => {
+  beforeEach(() => {
+    rmSync(path.join(zcodeHomeDir(), "v2", "acp-closed-sessions.json"), { force: true });
+  });
+
   it("an AUTO load of a retired session replays history, stays retired, discloses sessionClosed", async () => {
     const server = new ZcodeAcpServer();
     server.backend = fakeBackend();
@@ -123,5 +131,53 @@ describe("session/load intent gate", () => {
 
     expect(server.sessionSummaries.get("s1")?.hasActivity).toBe(true);
     expect(sessionClosedOf(res)).toBeUndefined();
+  });
+
+  it("survives the serve-bridge respawn: the DURABLE close record gates without any in-memory stamp", async () => {
+    // The observed resurrection (2026-10-28): closed 00:48, the serve bridge
+    // exited, the hub incubated a successor at 01:07 and the reconnect
+    // ladder's auto load re-armed discovery on the FRESH process — the
+    // in-memory stamp died with the old one. The gate must also read the
+    // durable record the close endpoint wrote.
+    recordClosedSessionIds(["s1", "sess_1"]);
+    const server = new ZcodeAcpServer(); // fresh process: NO retireDiscovery
+    server.backend = fakeBackend();
+    server.registerSession("s1", "sess_1");
+    const { cx, updates } = collectCx();
+
+    const res = await loadSession(server, load("s1", { zcode: { intent: "auto" } }), cx);
+
+    expect(updates.length).toBeGreaterThan(0); // history still replayed
+    expect(server.sessionSummaries.get("s1")?.hasActivity ?? false).toBe(false);
+    expect(sessionClosedOf(res)).toBe(true);
+  });
+
+  it("either spelling of the durable record gates the load (alias or backend id)", async () => {
+    recordClosedSessionIds(["sess_1"]);
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend();
+    server.registerSession("s1", "sess_1");
+    const { cx } = collectCx();
+
+    const res = await loadSession(server, load("s1", { zcode: { intent: "auto" } }), cx);
+
+    expect(sessionClosedOf(res)).toBe(true);
+  });
+
+  it("a USER load reopens the conversation AND clears the durable record (self-heal, both halves)", async () => {
+    recordClosedSessionIds(["s1", "sess_1"]);
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend();
+    server.registerSession("s1", "sess_1");
+    const { cx } = collectCx();
+
+    const res = await loadSession(server, load("s1"), cx); // user intent
+
+    expect(server.sessionSummaries.get("s1")?.hasActivity).toBe(true);
+    expect(sessionClosedOf(res)).toBeUndefined();
+    // The record is gone: the next respawn's auto ladder must not re-retire
+    // a conversation the user deliberately reopened.
+    expect(isClosedSessionId("s1")).toBe(false);
+    expect(isClosedSessionId("sess_1")).toBe(false);
   });
 });

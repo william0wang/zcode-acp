@@ -566,6 +566,25 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   last-message-id reconciliation is that defense.
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
+- **A remote close's retirement must OUTLIVE the serve bridge (ADR-0006
+  2026-10-28 amendment)**: `retireDiscovery`'s stamp is in-memory and a
+  serve-origin bridge EXITS on its last close, so the hub-incubated
+  successor has no retirement memory — a reconnect ladder's auto
+  `session/load` re-armed discovery on the fresh process, the heartbeat
+  re-advertised, the hub cleared its tombstone as "real use", and the closed
+  conversation resurrected on every surface (observed 2026-10-28: closed
+  00:48, resurrected 01:07 with a live turn; the intent gate never engaged
+  because the fresh process's stamp map was empty). The durable half is
+  `src/closed-sessions.ts` (`~/.zcode/v2/acp-closed-sessions.json`,
+  temp+rename like the lazy-alias store): the close endpoint records EVERY
+  id spelling (aliases + backend sess_ id), `loadSession`'s auto-intent gate
+  reads it alongside the in-memory stamp, and `markSessionActive` (a
+  prompt, a user-intent load) CLEARS it — the self-heal contract holds on
+  both sides of a respawn. Entries expire after 30 days (a desktop-side
+  reopen that never passed through a bridge must not keep the App's tab
+  retired forever). Do not "simplify" the gate back to the in-memory stamp
+  only, and keep new close/retire paths recording through
+  `recordClosedSessionIds`.
 - **User-level TUI env does NOT reach hub-incubated windows by itself — two
   gates, both must pass** (observed 2026-09-21: `DSH_TUI_STATS=tokens,context`
   exported in the user's shell never filtered the composer dock in a
