@@ -910,6 +910,13 @@ conversation itself is still resumable later via
 process, not the history. If other advertised conversations (or remote-created
 empty sessions) remain on the instance, it stays up.
 
+**`POST /api/instances/{id}/shutdown`** (the older "close the instance"
+gesture) retires first too: before the kill, every conversation the instance
+advertises goes through the same close semantics with `force` (an in-flight
+turn is cancelled, not a refusal), so an auto reconnect ladder meets the same
+`409 session closed` on every id spelling and resurrects nothing. A
+user-intent resume always reopens the conversations afterwards.
+
 ## Renaming a session
 
 ```text

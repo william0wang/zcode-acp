@@ -5,8 +5,9 @@
  * resolution (ADR-0016) those incubations build on.
  */
 
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { realpathSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { homedir, tmpdir } from "node:os";
@@ -40,6 +41,8 @@ import {
   type HubHandle,
 } from "../src/remote/hub-server.js";
 import { BOOT_RESUME_TRIGGER } from "../src/handlers/session.js";
+import { isClosedSessionId } from "../src/closed-sessions.js";
+import { zcodeHomeDir } from "../src/utils.js";
 
 const TOKEN = "test-hub-token";
 const BASE_PORT = 18400; // bridge ports start here; ephemeral hub uses port 0
@@ -821,12 +824,28 @@ describe("hub project session history (ADR-0015)", () => {
 describe("hub terminal-TUI session resume (ADR-0017)", () => {
   const PROJECT = "/Users/dev/Develop/demo";
   const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+
+  /** The durable close record the shutdown-retirement tests write (hermetic HOME). */
+  const closedSessionsStore = () => path.join(zcodeHomeDir(), "v2", "acp-closed-sessions.json");
   const post = (hub: HubHandle, body: Record<string, unknown>): Promise<Response> =>
     fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
       method: "POST",
       headers: auth,
       body: JSON.stringify(body),
     });
+
+  /** A real killable placeholder process standing in for a serve bridge. */
+  async function startDummyBridge(): Promise<number> {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "ignore",
+    });
+    await new Promise<void>((resolve) => {
+      if (child.pid) resolve();
+      else child.once("spawn", () => resolve());
+    });
+    cleanups.push(() => child.kill("SIGKILL"));
+    return child.pid!;
+  }
 
   let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
   let spawnCalls: Array<{
@@ -841,6 +860,7 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     listKnownWorkspacesMock.mockResolvedValue([
       { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
     ]);
+    rmSync(closedSessionsStore(), { force: true });
     fakeChild = new EventEmitter() as typeof fakeChild;
     fakeChild.pid = 4242;
     fakeChild.exitCode = null;
@@ -1083,6 +1103,131 @@ describe("hub terminal-TUI session resume (ADR-0017)", () => {
     expect(spawnCalls).toHaveLength(2);
     await registerServeBridge(hub, "resume-repl-2", spawnCalls[1]!.env.ZCODE_ACP_SPAWN_NONCE);
     expect((await auto).status).toBe(200);
+  });
+
+  it("shutdown retires every advertised session before the kill (ADR-0006 hardening)", async () => {
+    // The old hole: /shutdown killed the pid and nothing else, so the
+    // conversations died with NO retirement memory anywhere — an auto
+    // reconnect ladder re-incubated the workspace and resurrected them
+    // (old mobile clients still use the shutdown gesture instead of
+    // per-session close). Shutdown must relay the bridge's own close route
+    // per advertised session with force semantics FIRST, tombstone every
+    // spelling the bridge reports, and write the durable close record so a
+    // respawned serve bridge refuses the auto session/load too.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const closes: Array<{ path: string; body: string }> = [];
+    const bridge = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const sid = (req.url ?? "").split("/")[2];
+        closes.push({ path: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            sessionIds: sid === "alias-a" ? ["alias-a", "sess_backend_a"] : [sid],
+          }),
+        );
+      });
+    });
+    const bridgePort = await new Promise<number>((resolve) => {
+      bridge.listen(0, "127.0.0.1", () => {
+        const addr = bridge.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+    track(bridge, (s) => new Promise<void>((resolve) => s.close(() => resolve())));
+    const pid = await startDummyBridge();
+    const registered = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id: "inst-shutdown",
+          workspace: PROJECT,
+          origin: "serve",
+          port: bridgePort,
+          pid,
+          sessions: [
+            { sessionId: "alias-a", title: "t", updatedAt: 1 },
+            { sessionId: "alias-b", title: "t", updatedAt: 1 },
+          ],
+        }),
+      ),
+    });
+    expect(registered.ok).toBe(true);
+
+    const shutdown = await fetch(
+      `http://127.0.0.1:${hub.port}/api/instances/inst-shutdown/shutdown`,
+      { method: "POST", headers: auth },
+    );
+    expect(shutdown.status).toBe(200);
+
+    // Every advertised session went through the bridge's close route with
+    // force semantics (the gesture is "end it"), BEFORE the kill.
+    expect(closes.map((c) => c.path).sort()).toEqual([
+      "/sessions/alias-a/close",
+      "/sessions/alias-b/close",
+    ]);
+    expect(closes.every((c) => c.body === '{"force":true}')).toBe(true);
+
+    // Auto resumes are refused under EVERY spelling — the alias the listing
+    // showed AND the backend id a ladder may quote.
+    for (const sid of ["alias-a", "sess_backend_a", "alias-b"]) {
+      expect(
+        (await post(hub, { workspacePath: PROJECT, sessionId: sid, intent: "auto" })).status,
+      ).toBe(409);
+    }
+    expect(spawnCalls).toHaveLength(0);
+
+    // The durable half: a respawned serve bridge reads this record to refuse
+    // the auto session/load of the same conversation.
+    expect(isClosedSessionId("alias-a")).toBe(true);
+    expect(isClosedSessionId("sess_backend_a")).toBe(true);
+    expect(isClosedSessionId("alias-b")).toBe(true);
+
+    // Shutdown retires, never deletes: a user-intent resume still reopens.
+    const user = post(hub, { workspacePath: PROJECT, sessionId: "sess_backend_a" });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    await registerServeBridge(hub, "resume-repl", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    expect((await user).status).toBe(200);
+  });
+
+  it("shutdown falls back to hub-side retirement when the bridge is unreachable", async () => {
+    // A wedged or already-dead bridge must not dodge retirement: the relay
+    // fails fast and the hub stamps the ADVERTISED spelling itself — the
+    // tombstone still 409s the auto ladder, and the durable record keeps a
+    // respawned bridge honest.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const pid = await startDummyBridge();
+    const registered = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id: "inst-wedged",
+          workspace: PROJECT,
+          origin: "serve",
+          port: 1, // nothing listens — the relay dies with ECONNREFUSED
+          pid,
+          sessions: [{ sessionId: "alias-x", title: "t", updatedAt: 1 }],
+        }),
+      ),
+    });
+    expect(registered.ok).toBe(true);
+
+    const shutdown = await fetch(
+      `http://127.0.0.1:${hub.port}/api/instances/inst-wedged/shutdown`,
+      { method: "POST", headers: auth },
+    );
+    expect(shutdown.status).toBe(200);
+    expect(
+      (await post(hub, { workspacePath: PROJECT, sessionId: "alias-x", intent: "auto" })).status,
+    ).toBe(409);
+    expect(isClosedSessionId("alias-x")).toBe(true);
+    expect(spawnCalls).toHaveLength(0);
   });
 
   it("carries the resume env into the .command script so the terminal shell boots into the session", () => {

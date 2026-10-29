@@ -60,6 +60,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { sessionTabTitle } from "../terminal-title.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
+import { recordClosedSessionIds } from "../closed-sessions.js";
 import { expandHomePath, type TerminalPrefs } from "../config/user-config.js";
 import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
@@ -1052,6 +1053,70 @@ function fetchBridgeSessions(
       req.destroy();
       reject(new Error("bridge session list timed out"));
     });
+  });
+}
+
+/**
+ * Per-close relay bound for instance shutdown retirement. Sized to cover the
+ * bridge's own worst-case close: the force-settle wait (~3s) plus one
+ * racedNotify cap on the session_closed fan-out — anything past that is a
+ * wedged bridge, and shutdown must not wait for it.
+ */
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 8_000;
+
+/**
+ * Relay one retirement close to an instance the shutdown route is about to
+ * kill: POST {force:true} to the bridge's /sessions/{sid}/close (the loopback
+ * route the per-session close proxy uses). Resolves with EVERY id spelling
+ * the bridge reported for the conversation, or null when the bridge did not
+ * answer 200 (unreachable, refused a running turn, timed out) — the caller
+ * then falls back to stamping the advertised spelling alone. Never rejects:
+ * shutdown proceeds to the kill whatever the dying bridge says.
+ */
+function relayShutdownClose(port: number, sid: string): Promise<string[] | null> {
+  const body = Buffer.from(JSON.stringify({ force: true }));
+  return new Promise((resolve) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: `/sessions/${sid}/close`,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(body.length),
+        },
+      },
+      (up) => {
+        const chunks: Buffer[] = [];
+        up.on("data", (chunk: Buffer) => chunks.push(chunk));
+        up.on("error", () => resolve(null));
+        up.on("end", () => {
+          if (up.statusCode !== 200) {
+            resolve(null);
+            return;
+          }
+          let spellings = [sid];
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              sessionIds?: unknown;
+            };
+            if (Array.isArray(parsed.sessionIds)) {
+              const extra = parsed.sessionIds.filter(
+                (s): s is string => typeof s === "string" && s.length > 0 && s !== sid,
+              );
+              if (extra.length > 0) spellings = [sid, ...extra];
+            }
+          } catch {
+            // non-JSON body — the requested sid alone (older bridges)
+          }
+          resolve(spellings);
+        });
+      },
+    );
+    req.setTimeout(SHUTDOWN_CLOSE_TIMEOUT_MS, () => req.destroy()); // 'error' resolves null
+    req.on("error", () => resolve(null));
+    req.end(body);
   });
 }
 
@@ -2597,6 +2662,36 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.writeHead(403, { "Content-Type": "text/plain" });
         res.end("instance was not incubated remotely (editor bridge) — refusing shutdown");
         return;
+      }
+      // Retirement BEFORE the kill (ADR-0006 hardening, 2026-10-29): the
+      // remote shutdown gesture is "close everything this instance hosts",
+      // not just "kill the pid". Killing alone leaves no retirement memory
+      // anywhere, and an auto reconnect ladder re-incubates the workspace and
+      // resurrects what the user closed — the same hole the durable close
+      // record fixed for per-session close (2026-10-28), reached via the
+      // shutdown route old clients still use. Relay the bridge's own close
+      // route per advertised session ({force:true} — the gesture is "end
+      // it", so an in-flight turn is cancelled instead of refusing), which
+      // runs discovery retirement, the durable close record, and the
+      // session_closed fan-out (martty drops its tab cleanly), and answers
+      // EVERY id spelling of each conversation. A wedged or older bridge
+      // falls back to hub-side stamps on the advertised spelling; the
+      // tombstone still 409s the auto resume ladder, and the idempotent
+      // durable write below covers bridges that predate the record.
+      const advertisedSids = entry.sessions
+        .map((s) => s.sessionId)
+        .filter((sid) => typeof sid === "string" && sid.length > 0);
+      if (advertisedSids.length > 0) {
+        const relays = await Promise.all(
+          advertisedSids.map(async (sid) => (await relayShutdownClose(entry.port, sid)) ?? [sid]),
+        );
+        const spellings = [...new Set(relays.flat())];
+        stampClosedSession(spellings);
+        recordClosedSessionIds(spellings);
+        log(
+          `hub: instance ${entry.id} shutdown — retired ${advertisedSids.length} session(s), ` +
+            `${spellings.length} id spelling(s) stamped`,
+        );
       }
       // TUI-incubated instance: the registered bridge is only the LEAF of the
       // window's tree (cli → martty → bridge); killing it alone leaves the

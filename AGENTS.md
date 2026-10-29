@@ -604,7 +604,13 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   reopen that never passed through a bridge must not keep the App's tab
   retired forever). Do not "simplify" the gate back to the in-memory stamp
   only, and keep new close/retire paths recording through
-  `recordClosedSessionIds`.
+  `recordClosedSessionIds`. Instance SHUTDOWN follows the same retirement
+  (2026-10-29): `/api/instances/{id}/shutdown` relays the bridge's close
+  route per advertised session (`{force:true}`) BEFORE the kill — killing
+  alone left no retirement memory anywhere, and old clients' "close
+  instance" gesture resurrected through the same hole; a wedged or
+  unreachable bridge falls back to hub-side stamps + the durable record on
+  the advertised spelling.
 - **User-level TUI env does NOT reach hub-incubated windows by itself — two
   gates, both must pass** (observed 2026-09-21: `DSH_TUI_STATS=tokens,context`
   exported in the user's shell never filtered the composer dock in a

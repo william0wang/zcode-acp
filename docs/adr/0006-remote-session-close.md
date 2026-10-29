@@ -89,3 +89,15 @@ that never passed through a bridge cannot keep the App's tab retired
 forever. The earlier resume-guard rejection above stands: this amendment
 gates the auto LOAD path only, which the intent contract already
 distinguishes from a human's reopen.
+
+Amendment (2026-10-29) — instance shutdown retires too.
+`POST /api/instances/{id}/shutdown` (the older "close the instance" gesture)
+used to kill the pid and nothing else, leaving the hosted conversations with
+NO retirement memory anywhere — an auto reconnect ladder re-incubated the
+workspace and resurrected them through the same hole. The hub now relays the
+bridge's own close route per advertised session (`{force:true}` — cancel an
+in-flight turn instead of refusing) BEFORE the kill: discovery retirement,
+the durable record, the `session_closed` fan-out, and every id spelling
+tombstoned. A wedged or already-dead bridge falls back to hub-side stamps
+plus `recordClosedSessionIds` on the advertised spelling alone; a
+user-intent resume always reopens (shutdown retires, it never deletes).
