@@ -30,16 +30,10 @@ import {
   renderToolOutput,
   summarizeToolInput,
   TOOL_KIND_MAP,
+  TOOL_STATUS_MAP,
 } from "./tool-helpers.js";
 import type { InternalEvent } from "./types.js";
 import { makePlanEntry } from "./types.js";
-
-const TOOL_STATUS_MAP: Record<string, ToolCallStatus> = {
-  pending: "pending",
-  running: "in_progress",
-  completed: "completed",
-  error: "failed",
-};
 
 export class ProjectionDiffer {
   private readonly seenToolIds = new Set<string>();

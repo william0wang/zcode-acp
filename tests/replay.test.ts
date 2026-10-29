@@ -521,7 +521,7 @@ describe("replayMessages tool history parts", () => {
         parts: [
           {
             type: "tool",
-            id: "part_1",
+            callId: "part_1",
             tool: "Read",
             state: {
               status: "completed",
@@ -550,7 +550,7 @@ describe("replayMessages tool history parts", () => {
     await replayMessages(cx, "s", [
       {
         info: { id: "m1", role: "assistant" },
-        parts: [{ type: "tool", id: "part_2", tool: "Bash", state: { input: "ls -la" } }],
+        parts: [{ type: "tool", callId: "part_2", tool: "Bash", state: { input: "ls -la" } }],
       },
     ]);
     const u = updates[0]!.update as Record<string, unknown>;
@@ -565,7 +565,7 @@ describe("replayMessages tool history parts", () => {
     await replayMessages(cx, "s", [
       {
         info: { id: "m1", role: "assistant" },
-        parts: [{ type: "tool", id: "part_3", tool: "TodoWrite" }],
+        parts: [{ type: "tool", callId: "part_3", tool: "TodoWrite" }],
       },
     ]);
     const u = updates[0]!.update as Record<string, unknown>;
@@ -583,7 +583,7 @@ describe("replayMessages tool history parts", () => {
     const toolMsg = (id: string, partId: string): ZcodeMessage => ({
       info: { id, role: "assistant" },
       parts: [
-        { type: "tool", id: partId, tool: "Bash", state: { status: "completed", title: id } },
+        { type: "tool", callId: partId, tool: "Bash", state: { status: "completed", title: id } },
       ],
     });
     await replayMessages(cx, "s", [toolMsg("m1", "part_1"), toolMsg("m2", "part_2")]);
@@ -600,7 +600,7 @@ describe("replayMessages tool history parts", () => {
         info: { id: "m1", role: "assistant" },
         parts: [
           { type: "text", text: "checking" },
-          { type: "tool", id: "part_1", tool: "Bash", state: { status: "completed" } },
+          { type: "tool", callId: "part_1", tool: "Bash", state: { status: "completed" } },
         ],
       },
     ]);
@@ -610,6 +610,97 @@ describe("replayMessages tool history parts", () => {
     const card = updates[1]!.update as Record<string, unknown>;
     expect(card.sessionUpdate).toBe("tool_call");
     expect(card.messageId).toBe("m1");
+  });
+
+  it("keys the card to the store's callId so later live updates can address it", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", callId: "call_9", tool: "Agent", state: { status: "running" } }],
+      },
+    ]);
+    expect((updates[0]!.update as Record<string, unknown>).toolCallId).toBe("call_9");
+  });
+
+  it("accepts the callID spelling the projection differ also reads", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [{ type: "tool", callID: "call_9", tool: "Bash", state: { status: "completed" } }],
+      },
+    ]);
+    expect((updates[0]!.update as Record<string, unknown>).toolCallId).toBe("call_9");
+  });
+
+  it("maps backend statuses to legal ACP statuses", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [
+          { type: "tool", callId: "c1", tool: "Bash", state: { status: "running" } },
+          { type: "tool", callId: "c2", tool: "Bash", state: { status: "pending" } },
+          { type: "tool", callId: "c3", tool: "Bash", state: { status: "error" } },
+          { type: "tool", callId: "c4", tool: "Bash", state: { status: "weird" } },
+          { type: "tool", callId: "c5", tool: "Bash", state: {} },
+        ],
+      },
+    ]);
+    const statuses = updates.map((p) => (p.update as Record<string, unknown>).status);
+    expect(statuses).toEqual(["in_progress", "pending", "failed", "completed", "completed"]);
+  });
+
+  it("renders the error payload as content for failed parts", async () => {
+    // The store writes no `output` on a failed part — only `error`. Replay
+    // used to read output alone, so a failed sub-agent card replayed empty
+    // with no way to recover the error text.
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      {
+        info: { id: "m1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            callId: "c1",
+            tool: "Agent",
+            state: { status: "error", error: "sub-agent crashed: budget exceeded" },
+          },
+        ],
+      },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.status).toBe("failed");
+    const content = u.content as Array<{ content: { text: string } }>;
+    expect(content).toHaveLength(1);
+    expect(content[0]!.content.text).toContain("sub-agent crashed: budget exceeded");
+  });
+
+  it("derives deterministic fallback ids so repeated replays replace, not duplicate", async () => {
+    // No info.id AND no callId — both fallback chains engaged. A fresh
+    // random id per replay would re-attach the same card/text as a new item
+    // on every reconnect; index-derived ids keep replays idempotent.
+    const history: ZcodeMessage[] = [
+      {
+        info: { role: "assistant" },
+        parts: [
+          { type: "tool", tool: "Bash", state: { status: "completed", input: "ls" } },
+          { type: "text", text: "done" },
+        ],
+      },
+    ];
+    const run = async (): Promise<(string | undefined)[]> => {
+      const { cx, updates } = collectCx();
+      await replayMessages(cx, "s", history);
+      return updates.map((p) => {
+        const u = p.update as Record<string, unknown>;
+        return (u.toolCallId as string) ?? (u.messageId as string);
+      });
+    };
+    const first = await run();
+    expect(first).toEqual(["histtool_hist_0_0", "hist_0"]);
+    expect(await run()).toEqual(first);
   });
 });
 
@@ -630,7 +721,7 @@ describe("replayMessages toolTurnWindow (TUI condensation)", () => {
     parts: [
       {
         type: "tool",
-        id: `tool_${id}`,
+        callId: `tool_${id}`,
         tool: "Bash",
         state: { title: `Run ${id}`, status: "completed", input: "ls", output: "file" },
       },

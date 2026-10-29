@@ -8,7 +8,12 @@
  * the same tool.
  */
 
-import type { ToolCallContent, ToolCallLocation, ToolKind } from "@agentclientprotocol/sdk";
+import type {
+  ToolCallContent,
+  ToolCallLocation,
+  ToolCallStatus,
+  ToolKind,
+} from "@agentclientprotocol/sdk";
 
 /** zcode toolName → ACP ToolKind. Keys are case-duplicated for safety. */
 export const TOOL_KIND_MAP: Record<string, ToolKind> = {
@@ -34,6 +39,19 @@ export const TOOL_KIND_MAP: Record<string, ToolKind> = {
   // call — "other" keeps the generic card the workflow progress poller appends
   // its tool_call_update lines onto (snapshot path already defaults to other).
   CreateWorkflow: "other",
+};
+
+/**
+ * zcode store/event tool status → ACP ToolCallStatus. Shared by the snapshot
+ * (ProjectionDiffer) and history-replay paths so both spell in_progress /
+ * failed identically — the raw backend spellings ("running"/"error") are not
+ * valid ACP statuses.
+ */
+export const TOOL_STATUS_MAP: Record<string, ToolCallStatus> = {
+  pending: "pending",
+  running: "in_progress",
+  completed: "completed",
+  error: "failed",
 };
 
 /** Max length for single-field title summaries (not Bash command — kept full). */

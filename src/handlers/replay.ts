@@ -11,8 +11,6 @@
  * that bypasses the per-message lock — it only runs inside a batch.
  */
 
-import { randomUUID } from "node:crypto";
-
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeMessage, ZcodeMessagesResult } from "../backend/types.js";
@@ -20,6 +18,7 @@ import type { ZcodeMessage, ZcodeMessagesResult } from "../backend/types.js";
 // parameter that would shadow the plain import name.
 import { messages as i18nMessages } from "../i18n.js";
 import type { ZcodeAcpServer } from "../server.js";
+import { renderToolOutput, TOOL_STATUS_MAP } from "../translators/tool-helpers.js";
 import { log, warn } from "../utils.js";
 import { throwError, withReplayBatch } from "./io.js";
 
@@ -547,13 +546,18 @@ export async function replayMessages(
   for (const [mi, m] of messages.entries()) {
     const info = m.info ?? {};
     const role = info.role;
-    const mid = info.id ?? `hist_${randomUUID().slice(0, 12)}`;
+    // Fallback ids must be derived from stable inputs (the message index),
+    // never minted randomly: mid keys client-side text folding and the
+    // histfold_/thought_ card derivatives below, so a re-replay with fresh
+    // random ids could never match — and re-attach what the client already
+    // holds, duplicating it instead of replacing.
+    const mid = info.id ?? `hist_${mi}`;
     // Only a message that also emits a text chunk under `mid` should key its
     // tool cards to that id (see the tool branch below).
     const carriesText = (m.parts ?? []).some(
       (p) => p?.type === "text" && Boolean((p as { text?: string }).text),
     );
-    for (const p of m.parts ?? []) {
+    for (const [pi, p] of (m.parts ?? []).entries()) {
       if (!p || typeof p !== "object") continue;
       const ptype = (p as { type?: string }).type;
       if (ptype === "text") {
@@ -611,6 +615,8 @@ export async function replayMessages(
       } else if (ptype === "tool") {
         if (!toolsKept(mi)) continue;
         const tp = p as {
+          callID?: string;
+          callId?: string;
           id?: string;
           tool?: string;
           state?: {
@@ -618,6 +624,7 @@ export async function replayMessages(
             status?: string;
             input?: unknown;
             output?: unknown;
+            error?: unknown;
           };
         };
         const st = tp.state ?? {};
@@ -626,6 +633,9 @@ export async function replayMessages(
         // invocation input and the full (backend-truncated) result text.
         // Attach both as content blocks so expanding a replayed call shows
         // what was read/edited/ran; without content the row expands empty.
+        // Failed parts carry `error` with no `output` (the store writes no
+        // output on failure) — read both, output first, same precedence the
+        // projection differ uses.
         const content: Array<{ type: "content"; content: { type: "text"; text: string } }> = [];
         if (st.input !== undefined && st.input !== null) {
           const inputText =
@@ -634,17 +644,27 @@ export async function replayMessages(
             content.push({ type: "content", content: { type: "text", text: inputText } });
           }
         }
-        if (typeof st.output === "string" && st.output) {
-          content.push({ type: "content", content: { type: "text", text: st.output } });
+        const outputText = renderToolOutput(st.output ?? st.error);
+        if (outputText) {
+          content.push({ type: "content", content: { type: "text", text: outputText } });
         }
         await cx.notify("session/update", {
           sessionId: acpSid,
           update: markEarlierPage({
             sessionUpdate: "tool_call",
-            toolCallId: tp.id ?? `histtool_${randomUUID().slice(0, 8)}`,
+            // The store's call id is the ONLY identity later live
+            // tool_call_update events address a card by. A card replayed
+            // under anything else (random ids did this for a long time) can
+            // never be patched afterwards: a turn still running through a
+            // client reconnect replays its cards mid-flight, then every real
+            // update misses and the card stays frozen at replay-time state.
+            // callID/callId mirror the projection differ's dual spelling.
+            // The index-derived fallback keeps the id deterministic so
+            // repeated replays of the same history replace, not duplicate.
+            toolCallId: tp.callID ?? tp.callId ?? tp.id ?? `histtool_${mid}_${pi}`,
             title: st.title ?? histToolName ?? i18nMessages().replayToolCallFallback,
             kind: "other",
-            status: (st.status as acp.ToolCallStatus) ?? "completed",
+            status: TOOL_STATUS_MAP[st.status ?? ""] ?? "completed",
             ...(content.length > 0 ? { content } : {}),
             ...(histToolName ? { _meta: { claudeCode: { toolName: histToolName } } } : {}),
             // Key the card to its history message ONLY when that message also
