@@ -1057,12 +1057,14 @@ function fetchBridgeSessions(
 }
 
 /**
- * Per-close relay bound for instance shutdown retirement. Sized to cover the
- * bridge's own worst-case close: the force-settle wait (~3s) plus one
- * racedNotify cap on the session_closed fan-out — anything past that is a
- * wedged bridge, and shutdown must not wait for it.
+ * Per-close relay bound for instance shutdown retirement. Covers the bridge's
+ * own worst-case close — the force-settle wait (~3s) plus one racedNotify cap
+ * (5s) — WITH margin: a bound that merely EQUALS the worst case races the
+ * boundary flush into the fallback (benign, but the full relay retires every
+ * spelling). Anything past this is a wedged bridge, and shutdown must not
+ * wait for it.
  */
-const SHUTDOWN_CLOSE_TIMEOUT_MS = 8_000;
+const SHUTDOWN_CLOSE_TIMEOUT_MS = 10_000;
 
 /**
  * Relay one retirement close to an instance the shutdown route is about to
