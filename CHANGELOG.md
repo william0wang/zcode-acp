@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.79.2](https://github.com/william0wang/zcode-acp/compare/v0.79.1...v0.79.2) (2026-10-29)
+
+
+### Bug Fixes
+
+* replay tool cards under the store's real callId so live updates can patch them ([f213c15](https://github.com/william0wang/zcode-acp/commit/f213c150c8c253d3e82ab376ff5f58edbae1c75c))
+
 ## [0.79.1](https://github.com/william0wang/zcode-acp/compare/v0.79.0...v0.79.1) (2026-10-29)
 
 
