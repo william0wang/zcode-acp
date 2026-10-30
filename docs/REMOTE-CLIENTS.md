@@ -924,19 +924,24 @@ POST {hub}/api/instances/{id}/sessions/{sessionId}/rename
      body: { "title": "new name" }                        → 200 { "ok": true, "title": "…" }
 ```
 
-The session title is set **once**, automatically, from the first prompt of a
-freshly created session (first non-empty line, capped at 80 chars) — this
-endpoint is the only later modifier. ACP has no client→agent rename channel,
-and an editor-side rename lives in the editor's own storage forever, so the
-remote side is where a rename enters the system.
+The session title is set **once**, automatically: the first prompt seeds a
+provisional title (first non-empty line, capped at 80 chars) and the backend's
+first LLM-generated title may replace it — after that the title is frozen for
+every automatic path. Only a manual rename may change it afterwards: this
+endpoint, the `/rename <title>` slash command (editors and the CLI TUI), or a
+rename made in the ZCode desktop app.
 
-The bridge applies the rename everywhere: its in-memory title pin (no later
-automatic write can touch it), the discovery summary (live within one
-heartbeat), the ZCode App's tasks-index (`title_overridden=1`, same marker the
-App's own rename sets), and a `session_info_update` broadcast to every
-attached client — the editor tab updates live. The title is normalized like
-the auto-title: flattened to one line, trimmed, capped at 80 chars; an
-all-whitespace title is rejected with `400`.
+The bridge applies the rename everywhere (via the shared `renameSessionCore`):
+its in-memory title pin for the FULL alias group (no later automatic write can
+touch it), the backend's own store through the v4 `renameSession` command
+(`titleSource=custom`, sticky — the backend never auto-generates over it, and
+the desktop app's conversation view follows the same event), the discovery
+summary (live within one heartbeat), the ZCode App's tasks-index
+(`title_overridden=1`, same marker the App's own rename sets), and a
+`session_info_update` broadcast to every attached client — the editor tab
+updates live. The title is normalized like the auto-title: flattened to one
+line, trimmed, capped at 80 chars; an all-whitespace title is rejected with
+`400`.
 
 Errors: `400` missing/empty title or oversized body (>4 KB), `401` bad token,
 `404` unknown session (or instance), `502` bridge unreachable. Renaming during

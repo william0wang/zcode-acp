@@ -581,17 +581,63 @@ export async function isTaskDeleted(
  * from overriding the user's rename. False when the index or row is absent.
  */
 export async function isTitleOverridden(taskId: string): Promise<boolean> {
-  if (!existsSync(TASKS_INDEX_PATH)) return false;
+  return (await readTaskTitle(taskId))?.overridden === true;
+}
+
+/**
+ * One tasks row's title state, for the load/resume title adoption
+ * (`adoptStoredTitle`): `overridden: true` means the user renamed this
+ * conversation and the durable title must win over the backend's stored
+ * (possibly stale) auto title. Null when the row or index is absent.
+ */
+export async function readTaskTitle(
+  taskId: string,
+): Promise<{ title: string | null; overridden: boolean } | null> {
+  if (!existsSync(TASKS_INDEX_PATH)) return null;
   try {
     const row = await withSqliteRetry(
       (con) =>
-        con.prepare("SELECT title_overridden FROM tasks WHERE task_id=?").get(taskId) as
-          { title_overridden: number } | undefined,
+        con
+          .prepare("SELECT deleted, title, title_overridden FROM tasks WHERE task_id=?")
+          .get(taskId) as
+          { deleted: number; title: string | null; title_overridden: number } | undefined,
     );
-    return row?.title_overridden === 1;
+    if (!row || row.deleted === 1) return null;
+    return { title: row.title ?? null, overridden: row.title_overridden === 1 };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Every durably user-renamed title (task_id → title, `title_overridden=1`,
+ * visible rows). Session listings overlay these onto the backend's rows: the
+ * backend store can lag a rename (the v4 renameSession command may still be
+ * cold-resuming the session), and the pin is the user's truth. Empty map on
+ * any failure — no overlay, backend titles as-is.
+ */
+export async function overriddenTaskTitles(
+  dbPath: string = TASKS_INDEX_PATH,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!existsSync(dbPath)) return out;
+  try {
+    const rows = await withSqliteRetry(
+      (con) =>
+        con
+          .prepare(
+            "SELECT task_id AS id, title AS t FROM tasks WHERE title_overridden=1 AND deleted=0",
+          )
+          .all() as Array<{ id: unknown; t: unknown }>,
+      dbPath,
+    );
+    for (const r of rows ?? []) {
+      if (typeof r.id === "string" && typeof r.t === "string" && r.t) out.set(r.id, r.t);
+    }
+  } catch {
+    // Best-effort overlay — an unreadable index must not fail the listing.
+  }
+  return out;
 }
 
 /** One known project workspace, as recorded by the App's tasks index. */

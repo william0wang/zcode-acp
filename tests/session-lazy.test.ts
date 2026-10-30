@@ -15,6 +15,7 @@ import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
 import {
   ensureRealSession,
+  listSessions,
   loadSession,
   newSession,
   reloadBackendSession,
@@ -28,6 +29,8 @@ import { ZcodeAcpServer } from "../src/server.js";
 // ~/.zcode/v2/tasks-index.sqlite and must not be touched by tests.
 const mockUpsertCalls: Array<Record<string, unknown>> = [];
 const mockReviveCalls: Array<Record<string, unknown>> = [];
+const mockRenames: Array<{ taskId: string; title: string }> = [];
+const mockTaskTitles = new Map<string, { title: string | null; overridden: boolean }>();
 vi.mock("../src/tasks-index.js", () => ({
   reviveTombstonesOnActivity: async (opts: Record<string, unknown>) => {
     mockReviveCalls.push(opts);
@@ -38,6 +41,18 @@ vi.mock("../src/tasks-index.js", () => ({
     return true;
   },
   updateSessionTitle: async () => true,
+  renameSessionTask: async (taskId: string, title: string) => {
+    mockRenames.push({ taskId, title });
+    return true;
+  },
+  readTaskTitle: async (taskId: string) => mockTaskTitles.get(taskId) ?? null,
+  overriddenTaskTitles: async () => {
+    const out = new Map<string, string>();
+    for (const [id, t] of mockTaskTitles) {
+      if (t.overridden && t.title) out.set(id, t.title);
+    }
+    return out;
+  },
 }));
 
 // In-memory durable alias store (src/lazy-sessions.ts persists this to
@@ -79,6 +94,8 @@ beforeEach(() => {
   mockStore.clear();
   mockUpsertCalls.length = 0;
   mockReviveCalls.length = 0;
+  mockRenames.length = 0;
+  mockTaskTitles.clear();
   // Keep the create-mode assertions deterministic on a machine that exports
   // ZCODE_ACP_MODE; the per-test stub below still overrides this.
   vi.stubEnv("ZCODE_ACP_MODE", "");
@@ -138,6 +155,8 @@ function fakeBackend(
           return { id, result: { projection: { contextUsed: 0 }, settings: {} } };
         case "session/messages":
           return { id, result: { messages } };
+        case "v4/command":
+          return { id, result: {} };
         default:
           return { id, error: { message: `unhandled ${method}` } };
       }
@@ -572,6 +591,104 @@ describe("stored title adoption on load/resume", () => {
     );
 
     expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
+  });
+
+  it("tier 1: a sibling alias's title beats the backend's stale stored title", async () => {
+    const server = new ZcodeAcpServer();
+    // The rename landed through another spelling of the same conversation;
+    // the backend store was never told and still answers the old title.
+    server.registerSession("acp_sibling", "sess_real");
+    server.sessionTitles.set("acp_sibling", "user name");
+    const { backend, calls } = fakeBackend([{ sessionId: "sess_real", title: "stale auto" }]);
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionTitles.get("sess_real")).toBe("user name");
+    expect(server.sessionSummaries.get("sess_real")?.title).toBe("user name");
+    expect(calls.some((c) => c.method === "session/list")).toBe(false);
+  });
+
+  it("tier 2: the durable user rename (title_overridden) beats the backend's stale title", async () => {
+    const server = new ZcodeAcpServer();
+    // Post-restart state: no in-memory title, but the tasks-index pin says
+    // the user renamed this conversation.
+    mockTaskTitles.set("sess_real", { title: "user name", overridden: true });
+    const { backend, calls } = fakeBackend([{ sessionId: "sess_real", title: "stale auto" }]);
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    expect(server.sessionTitles.get("sess_real")).toBe("user name");
+    expect(server.titleUserSetBy.has("sess_real")).toBe(true);
+    expect(calls.some((c) => c.method === "session/list")).toBe(false);
+  });
+
+  it("listSessions overlays the durable user rename over the backend's stale rows", async () => {
+    const server = new ZcodeAcpServer();
+    // The backend store lags the rename (v4 command still landing) — the
+    // listing must still show the user's title, or a client re-read right
+    // after a rename flips the fresh title back.
+    mockTaskTitles.set("sess_stale", { title: "user name", overridden: true });
+    const { backend } = fakeBackend([{ sessionId: "sess_stale", title: "stale auto" }]);
+    server.backend = backend;
+
+    const { sessions } = await listSessions(server, { cwd: "/tmp/ws" } as acp.ListSessionsRequest);
+
+    const row = sessions.find((s) => s.sessionId === "sess_stale");
+    expect(row?.title).toBe("user name");
+    const untouched = sessions.find((s) => s.sessionId !== "sess_stale");
+    if (untouched) expect(untouched.title).not.toBe("user name");
+  });
+});
+
+describe("placeholder rename persisted at materialization", () => {
+  it("a rename made before first use replays onto the backend and tasks-index", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    // /rename while the session is still a placeholder: in-memory pin only
+    // (no backend id yet) — and no auto-title eligibility left.
+    const { renameSessionCore } = await import("../src/handlers/session-titles.js");
+    const { title } = await renameSessionCore(server, resp.sessionId, "early name");
+    expect(title).toBe("early name");
+    expect(server.titleEligibleSessions.has(resp.sessionId)).toBe(false);
+    expect(mockRenames).toHaveLength(0);
+
+    const sid = await ensureRealSession(server, resp.sessionId);
+    // Materialization replays the rename: backend v4 renameSession + the
+    // durable tasks-index pin.
+    await vi.waitFor(() => {
+      const cmd = calls.find((c) => c.method === "v4/command");
+      expect(cmd?.params).toMatchObject({
+        type: "renameSession",
+        sessionId: sid,
+        payload: { title: "early name" },
+      });
+    });
+    expect(mockRenames).toEqual([{ taskId: sid, title: "early name" }]);
+  });
+
+  it("an unnamed placeholder materializes without any rename replay", async () => {
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    await ensureRealSession(server, resp.sessionId);
+
+    expect(calls.some((c) => c.method === "v4/command")).toBe(false);
+    expect(mockRenames).toHaveLength(0);
   });
 });
 

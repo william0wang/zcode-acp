@@ -62,6 +62,7 @@ import type { ZcodeResponse } from "../backend/types.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { sendTextChunk } from "./io.js";
 import { compact, fork, goal } from "./extensions.js";
+import { renameSessionCore } from "./session-titles.js";
 import { listSessions, resumeIntoSession } from "./session.js";
 import { askSessionPick, type SessionPickItem } from "./server-requests.js";
 
@@ -446,6 +447,16 @@ export async function handleSlashCommand(
         const servers = loadMcpServers();
         const statuses = await fetchMcpStatuses(server, acpSid);
         return ok(statuses ? formatMcpServerHealth(statuses) : formatMcpServers(servers));
+      }
+      case "rename": {
+        // Manual rename — the only title change after the one-shot auto
+        // title. Applies to every surface via the shared core (alias pins,
+        // backend v4 renameSession, tasks-index, session_info_update); a
+        // placeholder session is pinned in memory and persisted at its
+        // materialization (ensureRealSession).
+        if (!arg) throw new RequestError(-32602, messages().slashErrRenameArg);
+        const { title } = await renameSessionCore(server, acpSid, arg);
+        return ok(messages().slashRenamed(title));
       }
       case "compact": {
         // `/compact <focus…>` forwards the argument as compact instructions.

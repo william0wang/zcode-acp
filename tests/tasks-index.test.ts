@@ -176,6 +176,24 @@ function makeStatement(sql: string) {
       },
     };
   }
+  // SELECT deleted, title, title_overridden FROM tasks WHERE task_id=?
+  // (readTaskTitle — adoptStoredTitle's durable pin consult)
+  if (/^SELECT deleted, title, title_overridden/i.test(sql)) {
+    return {
+      get(taskId: string) {
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) {
+            return {
+              deleted: r.deleted,
+              title: r.title,
+              title_overridden: r.title_overridden,
+            } as const;
+          }
+        }
+        return undefined;
+      },
+    };
+  }
   // SELECT deleted, title_overridden, meta_json FROM tasks WHERE task_id=?
   // (updateSessionTitle)
   if (/^SELECT deleted, title_overridden/i.test(sql)) {
@@ -202,6 +220,21 @@ function makeStatement(sql: string) {
           if (r.task_id === taskId) return { deleted: r.deleted } as const;
         }
         return undefined;
+      },
+    };
+  }
+  // SELECT task_id AS id, title AS t FROM tasks WHERE title_overridden=1 AND
+  // deleted=0 (overriddenTaskTitles — MUST precede the shorter prefix below)
+  if (/^SELECT task_id AS id, title AS t FROM tasks/i.test(sql)) {
+    return {
+      all() {
+        const out: Array<{ id: string; t: string }> = [];
+        for (const r of rows.values()) {
+          if (r.title_overridden === 1 && r.deleted === 0 && r.title) {
+            out.push({ id: r.task_id, t: r.title });
+          }
+        }
+        return out;
       },
     };
   }
@@ -395,6 +428,8 @@ vi.mock("node:fs", async () => {
 import {
   hiddenTaskIds,
   isTaskDeleted,
+  overriddenTaskTitles,
+  readTaskTitle,
   renameSessionTask,
   reviveTombstonesOnActivity,
   softDeleteTask,
@@ -870,6 +905,45 @@ describe("tasks-index session sync", () => {
       expect(ok).toBe(true);
       expect(rows.get("/ws\u0000sess_rn")!.title).toBe("new name");
       expect(rows.get("/ws\u0000sess_rn")!.title_overridden).toBe(1);
+    });
+  });
+
+  describe("readTaskTitle", () => {
+    it("returns the durable user rename (title + overridden pin)", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_pin", title: "auto" });
+      await renameSessionTask("sess_pin", "my name");
+      expect(await readTaskTitle("sess_pin")).toEqual({ title: "my name", overridden: true });
+    });
+
+    it("returns an unpinned auto title as overridden:false", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_auto", title: "auto" });
+      expect(await readTaskTitle("sess_auto")).toEqual({ title: "auto", overridden: false });
+    });
+
+    it("null for a deleted row or an absent row", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "sess_del_r", title: "x" });
+      await softDeleteTask({ taskId: "sess_del_r", workspacePath: "/ws" });
+      expect(await readTaskTitle("sess_del_r")).toBeNull();
+      expect(await readTaskTitle("never_created")).toBeNull();
+    });
+  });
+
+  describe("overriddenTaskTitles", () => {
+    it("maps only visible user-renamed rows", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_ov1", title: "auto1" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_ov2", title: "auto2" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_plain", title: "auto3" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_ovdel", title: "auto4" });
+      await renameSessionTask("s_ov1", "name one");
+      await renameSessionTask("s_ov2", "name two");
+      await renameSessionTask("s_ovdel", "deleted rename");
+      await softDeleteTask({ taskId: "s_ovdel", workspacePath: "/ws" });
+
+      const map = await overriddenTaskTitles();
+      expect(map.get("s_ov1")).toBe("name one");
+      expect(map.get("s_ov2")).toBe("name two");
+      expect(map.has("s_plain")).toBe(false);
+      expect(map.has("s_ovdel")).toBe(false);
     });
   });
 });

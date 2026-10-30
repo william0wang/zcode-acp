@@ -585,6 +585,15 @@ export class ZcodeAcpServer {
    */
   readonly titleUserSetBy = new Set<string>();
   /**
+   * Backend sessions (zcodeSid) whose FIRST auto title is already final: the
+   * provisional seed has been replaced by (or settled as) the one allowed
+   * generated title. Every later `generated` push is ignored — only a manual
+   * rename (`custom` push, /rename, or the remote endpoint) may change the
+   * title again. In-memory is sufficient: after a restart the backend re-pushes
+   * the SAME stored title, so re-adopting it once is idempotent.
+   */
+  readonly autoTitleFinalized = new Set<string>();
+  /**
    * Per-Bash-callId stdout snapshot already streamed via terminal_output. Used
    * by dispatchTerminalUpdate for two dedup guards:
    *   - progress: diff cumulative stdoutTail snapshots, emit only the suffix.

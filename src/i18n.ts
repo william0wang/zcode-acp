@@ -157,6 +157,9 @@ export interface Messages {
   slashCompactTimeout: string;
   slashCompactFailed: string;
   slashCompactAlreadyRunning: string;
+  /** /rename — manual session title change (the only one after auto-title). */
+  slashRenamed: (title: string) => string;
+  slashErrRenameArg: string;
   slashGoalSet: (value: string) => string;
   slashAutoSet: (value: string) => string;
   slashErrAutoArg: string;
@@ -337,6 +340,8 @@ const zh: Messages = {
   slashCompactTimeout: "⚠ 压缩超时（300s），后端可能仍在处理——稍等片刻再发送",
   slashCompactFailed: "⚠ 压缩失败：后端未完成上下文压缩（详见日志）",
   slashCompactAlreadyRunning: "⏳ 已有压缩正在进行——已等待其完成",
+  slashRenamed: (title) => `✓ 会话已重命名为 "${title}"`,
+  slashErrRenameArg: "⚠ 用法：/rename <新标题>",
   slashGoalSet: (v) => `✓ 目标已设置：${v}`,
   slashAutoSet: (v) => `✓ auto loop：${v}`,
   slashErrAutoArg: "/auto 需要目标描述（或 status | pause | resume | stop）",
@@ -402,6 +407,7 @@ const zh: Messages = {
     model: "切换会话模型",
     thought: "设置思考深度",
     quota: "查看剩余用量配额（5 小时 / 周 / MCP）",
+    rename: "重命名当前会话（标题）",
     resume: "在当前线程接续一个历史会话（弹窗选择）",
     mcp: "列出可用的 MCP 服务器",
     init: "创建或更新工作区 AGENTS.md 指令",
@@ -507,6 +513,8 @@ const en: Messages = {
     "⚠ compact timed out (300s), backend may still be processing — wait a bit before sending",
   slashCompactFailed: "⚠ compaction failed: the backend did not compress the context (see logs)",
   slashCompactAlreadyRunning: "⏳ a compaction was already running — waited for it to finish",
+  slashRenamed: (title) => `✓ session renamed to "${title}"`,
+  slashErrRenameArg: "⚠ usage: /rename <new title>",
   slashGoalSet: (v) => `✓ goal set: ${v}`,
   slashAutoSet: (v) => `✓ auto loop: ${v}`,
   slashErrAutoArg: "/auto requires an objective (or status | pause | resume | stop)",
@@ -576,6 +584,7 @@ const en: Messages = {
     model: "Switch the session model",
     thought: "Set the reasoning effort",
     quota: "Show remaining usage quota (5h / weekly / MCP)",
+    rename: "Rename the current session (title)",
     resume: "Resume a past session into this thread (picker popup)",
     mcp: "List available MCP servers",
     init: "Create or update workspace AGENTS.md instructions",

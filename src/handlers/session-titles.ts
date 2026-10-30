@@ -14,11 +14,14 @@
  * the authoritative pushes:
  *
  *   - `generated` — the backend's LLM-generated title; replaces the
- *     provisional seed. A manual user rename still wins: sessions marked in
- *     `server.titleUserSetBy` (the remote rename endpoint marks them) are
- *     left untouched, and the durable `title_overridden` flag in
- *     tasks-index.sqlite is consulted for renames that predate this bridge
- *     process (the in-memory pin does not survive a restart).
+ *     provisional seed. This is the ONE allowed automatic rename: after the
+ *     first adopted `generated` push (`server.autoTitleFinalized`) every later
+ *     one is ignored. A manual user rename still wins at any time: sessions
+ *     marked in `server.titleUserSetBy` (the remote rename endpoint and
+ *     /rename mark them) are left untouched, and the durable
+ *     `title_overridden` flag in tasks-index.sqlite is consulted for renames
+ *     that predate this bridge process (the in-memory pin does not survive a
+ *     restart).
  *   - `custom` — a title set by another surface (the desktop app over the
  *     same session store); adopted so every window stays consistent, and
  *     marked user-set so later `generated` pushes cannot override it.
@@ -34,12 +37,14 @@
  * event loop.
  */
 
+import { randomUUID } from "node:crypto";
+
 import type { EventListener } from "../backend/client.js";
 import type { ZcodeEvent } from "../backend/types.js";
-import { isTitleOverridden, updateSessionTitle } from "../tasks-index.js";
+import { isTitleOverridden, renameSessionTask, updateSessionTitle } from "../tasks-index.js";
 import { refreshTerminalTabTitle } from "../terminal-title.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { log } from "../utils.js";
+import { log, warn } from "../utils.js";
 import { sendSessionUpdate } from "./io.js";
 
 /** Payload of a `session.titleUpdated` event (schema-verified, see above). */
@@ -56,6 +61,124 @@ function normalizeTitle(raw: string): string {
     .replace(/[\r\n]+/g, " ")
     .trim()
     .slice(0, 80);
+}
+
+/** v4/command budget — the gateway may cold-resume an idle session first. */
+const RENAME_COMMAND_TIMEOUT_MS = 10_000;
+
+/** Best-effort notify: never throws, never blocks the caller's response. */
+async function sendBackendRename(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+  title: string,
+): Promise<void> {
+  try {
+    const backend = await server.ensureBackend();
+    const resp = await backend.request(
+      server.nextId(),
+      "v4/command",
+      {
+        commandId: randomUUID(),
+        clientId: "zcode-acp-server",
+        sessionId: zcodeSid,
+        type: "renameSession",
+        payload: { title },
+        issuedAt: Date.now(),
+      },
+      RENAME_COMMAND_TIMEOUT_MS,
+    );
+    if (resp.error) {
+      warn(
+        `rename: backend v4 renameSession rejected (non-fatal): ` +
+          `${resp.error.message ?? "unknown error"}`,
+      );
+    }
+  } catch (e) {
+    warn(
+      `rename: backend v4 renameSession failed (non-fatal): ` +
+        `${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+}
+
+/**
+ * Unified manual rename — the single write path behind the remote rename
+ * endpoint and the /rename slash command. A rename is the ONLY title change
+ * allowed after the one-shot auto title, and it must reach EVERY surface:
+ *
+ *   - this bridge: `sessionTitles` + `titleUserSetBy` pin + discovery summary
+ *     for the FULL alias group (`sessionAliases` — clients hold different
+ *     acpSids for one conversation), and the terminal tab title;
+ *   - the backend: v4 `renameSession` command → `titleSource=custom` (sticky
+ *     — the backend never auto-generates over it again). Without this the
+ *     backend store keeps the old title and resurrects it through
+ *     `session/list` adoption and resume title re-emission. AWAITED (bounded
+ *     by the 10s command budget): the gateway cold-resumes non-resident
+ *     sessions, and the caller's response must not beat the store — the
+ *     client's immediate re-read of the list would otherwise flip the fresh
+ *     title back (older backends without the command degrade to warn + the
+ *     bridge-side pins);
+ *   - the App's tasks-index: `renameSessionTask` pins `title_overridden=1`,
+ *     which `adoptStoredTitle` consults to survive bridge restarts;
+ *   - attached clients: a `session_info_update` broadcast per alias (the
+ *     backend's own `custom` push for the same title is deduped by the
+ *     listener's equality guard).
+ *
+ * A placeholder session (no backend id yet) is pinned in memory only; its
+ * materialization re-runs this core to persist the rename (see
+ * `ensureRealSession`).
+ */
+export async function renameSessionCore(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  rawTitle: string,
+): Promise<{ title: string }> {
+  const title = normalizeTitle(rawTitle);
+  if (!title) throw new Error("rename: empty title");
+  const zcodeSid = server.resolveSid(acpSid);
+  for (const sid of server.sessionAliases(acpSid)) {
+    server.sessionTitles.set(sid, title);
+    // Wins over every later automatic path: generated pushes (this pin and
+    // the freeze set), the first-prompt auto-title gate (sessionTitles.has).
+    server.titleUserSetBy.add(sid);
+    server.titleEligibleSessions.delete(sid);
+    // A rename must not resurrect an alias retired by a remote close
+    // (ADR-0006) — same guard as the listener's adoption loop.
+    if (!server.discoveryRetiredAt.has(sid)) server.touchSessionSummary(sid, title);
+    refreshTerminalTabTitle(server, sid);
+  }
+  if (zcodeSid) {
+    // Manual intent finalizes the auto-title phase regardless of whether a
+    // generated push was ever seen.
+    server.autoTitleFinalized.add(zcodeSid);
+    // AWAIT both persists: the response must not beat the backend store.
+    // The phone/editor re-reads the session list right after a rename, and
+    // `listSessions` serves backend titles — answering before the v4 command
+    // landed flipped the fresh title back to the stale one (the command may
+    // cold-resume an idle session first, hence the 10s budget). Both are
+    // best-effort: on failure the bridge-side pins above still hold and the
+    // listing overlay (overriddenTaskTitles) covers the read side.
+    await sendBackendRename(server, zcodeSid, title);
+    await renameSessionTask(zcodeSid, title).catch((e) =>
+      warn(
+        `rename: tasks-index persist failed (non-fatal): ` +
+          `${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
+  }
+  for (const sid of server.sessionAliases(acpSid)) {
+    void sendSessionUpdate(server.clients.broadcast(), sid, {
+      sessionUpdate: "session_info_update",
+      title,
+      updatedAt: new Date().toISOString(),
+    }).catch((e) =>
+      log(
+        `rename: session_info_update broadcast failed: ${e instanceof Error ? e.message : String(e)}`,
+      ),
+    );
+  }
+  log(`rename: session ${acpSid.slice(0, 8)} → "${title}"`);
+  return { title };
 }
 
 export class SessionTitleListener implements EventListener {
@@ -89,6 +212,14 @@ export class SessionTitleListener implements EventListener {
     if (!primary) return; // no ACP alias attached yet — nothing to update
     const aliases = this.server.sessionAliases(primary);
 
+    // Auto naming happens EXACTLY ONCE: the first `generated` push (replacing
+    // the provisional seed) is the only automatic title change a conversation
+    // ever gets. Later pushes — deferred sidecar results, resume re-emission
+    // after the stored event rotated out of the retention window — must not
+    // retitle a conversation mid-flight. Checked BEFORE the durable pin
+    // consult so a repeat push costs no sqlite read.
+    if (source === "generated" && this.server.autoTitleFinalized.has(this.zcodeSid)) return;
+
     // A manual rename is the strongest title intent; a generated push must
     // not override it. The in-memory pin covers renames made through THIS
     // bridge; the durable tasks-index flag covers renames that predate the
@@ -110,6 +241,8 @@ export class SessionTitleListener implements EventListener {
     if (source === "custom") {
       for (const sid of aliases) this.server.titleUserSetBy.add(sid);
     }
+    // Either adoption finalizes the auto-title phase for good.
+    this.server.autoTitleFinalized.add(this.zcodeSid);
 
     if (aliases.every((sid) => this.server.sessionTitles.get(sid) === title)) return;
 

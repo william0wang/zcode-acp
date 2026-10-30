@@ -1009,13 +1009,28 @@ The bridge's session-scoped `SessionTitleListener` (registered alongside the
 background-task listener) adopts `generated` and `custom` pushes — updating
 `sessionTitles` for every ACP alias of the conversation, the session summary,
 the tasks-index, the martty terminal tab title, and broadcasting an ACP
-`session_info_update` to attached clients per alias. A manual rename wins:
-sessions renamed through the bridge's remote rename endpoint (or adopted via
-a `custom` push) are pinned in `server.titleUserSetBy`, and the durable
-`title_overridden` flag in `tasks-index.sqlite` is consulted for renames that
-predate the bridge process — later `generated` pushes never override them.
-`default`/`first_input` pushes are ignored — the bridge already seeds the
-first-prompt form itself (see "one-shot session title" in the handlers).
+`session_info_update` to attached clients per alias.
+
+Auto naming happens **exactly once**: the first-prompt provisional seed may be
+replaced by the first `generated` push (`server.autoTitleFinalized` freezes the
+phase after it); every later `generated` push — a deferred sidecar result, the
+resume re-emission after the stored title event rotated out of the retention
+window — is ignored. Only a manual rename may change the title afterwards: the
+`/rename` slash command, the remote rename endpoint, or a `custom` push
+(another surface's rename, e.g. the desktop app). Manual renames are pinned in
+`server.titleUserSetBy` (all aliases), and the durable `title_overridden` flag
+in `tasks-index.sqlite` is consulted for renames that predate the bridge
+process — later `generated` pushes never override them. `default`/
+`first_input` pushes are ignored — the bridge already seeds the first-prompt
+form itself (see "one-shot session title" in the handlers).
+
+A manual rename also reaches the BACKEND store via the v4 `renameSession`
+command (`titleSource=custom`, sticky — the backend's own auto generation is
+skipped from then on), so `session/list` reads, resume title re-emission, and
+the desktop app's v4 projection all converge on the user's title.
+`adoptStoredTitle` (load/resume) is pin-first: a sibling alias's known title,
+then the durable `title_overridden` title, and only then the backend's stored
+title.
 
 ### `session/cancelBackgroundTask`
 

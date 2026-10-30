@@ -66,6 +66,22 @@ function seedSession(server: ZcodeAcpServer, title: string): { acpSid: string; z
   return { acpSid, zcodeSid };
 }
 
+/**
+ * Stub the backend so the rename core's v4/command notify never spawns the
+ * real app-server; records every v4/command frame for assertions.
+ */
+function stubBackend(server: ZcodeAcpServer): Array<Record<string, unknown>> {
+  const commands: Array<Record<string, unknown>> = [];
+  const fake = {
+    request: async (_id: number, method: string, params: unknown) => {
+      if (method === "v4/command") commands.push(params as Record<string, unknown>);
+      return { result: {} };
+    },
+  };
+  (server as unknown as { ensureBackend: () => Promise<unknown> }).ensureBackend = async () => fake;
+  return commands;
+}
+
 function rename(base: string, acpSid: string, title: string): Promise<Response> {
   // No Content-Type header on purpose — the hub proxy relays bodies without
   // forwarding headers, so the handler must not depend on it.
@@ -76,9 +92,10 @@ function rename(base: string, acpSid: string, title: string): Promise<Response> 
 }
 
 describe("session rename endpoint", () => {
-  it("renames a session: pin, discovery, and tasks-index persist", async () => {
+  it("renames a session: pin, discovery, tasks-index persist, backend v4 notify", async () => {
     const server = new ZcodeAcpServer();
     const { acpSid, zcodeSid } = seedSession(server, "auto title");
+    const v4Commands = stubBackend(server);
     const base = await bootRename(server);
 
     const res = await rename(base, acpSid, "  my own name\n");
@@ -93,11 +110,38 @@ describe("session rename endpoint", () => {
       "my own name",
     );
     expect(renames).toEqual([{ taskId: zcodeSid, title: "my own name" }]);
+    // The backend is told too (titleSource=custom, sticky) — AWAITED before
+    // the response, so a client re-reading the list right after the rename
+    // cannot flip the fresh title back to the stale store.
+    expect(v4Commands).toHaveLength(1);
+    expect(v4Commands[0]).toMatchObject({
+      sessionId: zcodeSid,
+      type: "renameSession",
+      payload: { title: "my own name" },
+    });
+  });
+
+  it("a rename covers the FULL alias group, not just the requested spelling", async () => {
+    const server = new ZcodeAcpServer();
+    const { acpSid, zcodeSid } = seedSession(server, "auto title");
+    stubBackend(server);
+    // A second client holds the same conversation under a different acpSid.
+    const acpSid2 = randomUUID();
+    server.registerSession(acpSid2, zcodeSid);
+    server.sessionTitles.set(acpSid2, "auto title");
+    const base = await bootRename(server);
+
+    expect((await rename(base, acpSid, "user name")).status).toBe(200);
+    expect(server.sessionTitles.get(acpSid)).toBe("user name");
+    expect(server.sessionTitles.get(acpSid2)).toBe("user name");
+    expect(server.titleUserSetBy.has(acpSid)).toBe(true);
+    expect(server.titleUserSetBy.has(acpSid2)).toBe(true);
   });
 
   it("a rename survives a later one-shot auto-title attempt", async () => {
     const server = new ZcodeAcpServer();
     const { acpSid } = seedSession(server, "auto title");
+    stubBackend(server);
     const base = await bootRename(server);
     expect((await rename(base, acpSid, "user name")).status).toBe(200);
 
@@ -110,6 +154,7 @@ describe("session rename endpoint", () => {
   it("rejects empty/missing titles, oversized bodies, unknown sessions, non-POST", async () => {
     const server = new ZcodeAcpServer();
     const { acpSid } = seedSession(server, "auto title");
+    stubBackend(server);
     const base = await bootRename(server);
 
     expect((await rename(base, acpSid, "   ")).status).toBe(400);
@@ -136,6 +181,7 @@ describe("session rename endpoint", () => {
   it("truncates and flattens the title like the auto-title does", async () => {
     const server = new ZcodeAcpServer();
     const { acpSid } = seedSession(server, "auto title");
+    stubBackend(server);
     const base = await bootRename(server);
 
     const long = "y".repeat(100);

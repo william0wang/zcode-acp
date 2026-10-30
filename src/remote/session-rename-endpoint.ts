@@ -4,20 +4,19 @@
  * POST /api/instances/{id}/sessions/{sessionId}/rename (JSON body: {title}).
  *
  * A rename is the ONLY way a session title changes after its one-shot
- * auto-title (set once at the first prompt). The bridge applies it in-memory
- * (sessionTitles + discovery summary), persists it to the App's tasks-index
- * with title_overridden=1 — the same pin the App's own rename flow sets, so
- * no later automatic write can touch it — and broadcasts session_info_update
+ * auto-title (set once at the first prompt, finalized by the first backend
+ * `generated` push). The shared `renameSessionCore` applies it everywhere:
+ * in-memory pins + discovery summary for the full alias group, the backend's
+ * v4 `renameSession` command (titleSource=custom, sticky), the App's
+ * tasks-index with title_overridden=1, and a `session_info_update` broadcast
  * so attached editors and phones update live.
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import { sendSessionUpdate } from "../handlers/io.js";
+import { renameSessionCore } from "../handlers/session-titles.js";
 import type { ZcodeAcpServer } from "../server.js";
-import { refreshTerminalTabTitle } from "../terminal-title.js";
-import { renameSessionTask } from "../tasks-index.js";
-import { log, warn } from "../utils.js";
+import { log } from "../utils.js";
 
 const MAX_BODY_BYTES = 4096;
 
@@ -74,33 +73,10 @@ async function handleRename(
     sendText(res, 404, "unknown session");
     return;
   }
-  // Mirror the auto-title's normalization: single line, trimmed, 80 chars.
-  const title = rawTitle
-    .replace(/[\r\n]+/g, " ")
-    .trim()
-    .slice(0, 80);
-
-  server.sessionTitles.set(sessionId, title);
-  // Manual rename wins over the backend's later `generated` title pushes
-  // (SessionTitleListener consults this set).
-  server.titleUserSetBy.add(sessionId);
-  server.touchSessionSummary(sessionId, title);
-  refreshTerminalTabTitle(server, sessionId);
-  const zcodeSid = server.resolveSid(sessionId);
-  if (zcodeSid) {
-    try {
-      await renameSessionTask(zcodeSid, title);
-    } catch (e) {
-      warn(
-        `remote: rename persist failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-  }
-  await sendSessionUpdate(server.clients.broadcast(), sessionId, {
-    sessionUpdate: "session_info_update",
-    title,
-    updatedAt: new Date().toISOString(),
-  }).catch(() => undefined);
+  // All surfaces (alias group, backend v4 renameSession, tasks-index pin,
+  // session_info_update broadcast) are applied by the shared core — see
+  // renameSessionCore for why the backend MUST be told too.
+  const { title } = await renameSessionCore(server, sessionId, rawTitle);
   log(`remote: session ${sessionId.slice(0, 8)} renamed to "${title}"`);
   sendJson(res, 200, { ok: true, title });
 }

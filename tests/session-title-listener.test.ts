@@ -19,6 +19,7 @@ import type { ZcodeEvent } from "../src/backend/types.js";
 // never touch the real ~/.zcode/v2/tasks-index.sqlite.
 vi.mock("../src/tasks-index.js", () => ({
   updateSessionTitle: vi.fn(async () => true),
+  renameSessionTask: vi.fn(async () => true),
   isTitleOverridden: vi.fn(async () => false),
 }));
 
@@ -33,6 +34,7 @@ afterEach(() => {
 interface FakeServerShape {
   sessionTitles: Map<string, string>;
   titleUserSetBy: Set<string>;
+  autoTitleFinalized: Set<string>;
   sessionSummaries: Map<string, unknown>;
   discoveryRetiredAt: Map<string, number>;
   sessionCwds: Map<string, string>;
@@ -52,6 +54,7 @@ function makeServer(zcodeSid = "zcode_1", acpSid = "acp_1"): FakeServerShape {
   const server: FakeServerShape = {
     sessionTitles: new Map([[acpSid, "first prompt line as provisional title"]]),
     titleUserSetBy: new Set(),
+    autoTitleFinalized: new Set(),
     sessionSummaries: new Map([[acpSid, { title: "old" }]]),
     discoveryRetiredAt: new Map(),
     sessionCwds: new Map([[acpSid, "/repo/proj"]]),
@@ -119,6 +122,26 @@ describe("SessionTitleListener", () => {
     expect(server.notifies[0]!.sessionId).toBe("acp_1");
     expect(server.notifies[0]!.update["sessionUpdate"]).toBe("session_info_update");
     expect(server.notifies[0]!.update["title"]).toBe("Fix the login bug");
+  });
+
+  it("auto-names exactly ONCE — a later generated push never retitles mid-conversation", async () => {
+    const server = makeServer("zcode_1", "acp_1");
+    const l = new SessionTitleListener(server as unknown as ZcodeAcpServer, "zcode_1");
+    l.handleEvent(titleEvent({ source: "generated", title: "First auto title" }));
+    await flush();
+    expect(server.sessionTitles.get("acp_1")).toBe("First auto title");
+    // A second generated push (deferred sidecar result, resume re-emission
+    // after the stored event rotated out of the retention window) is frozen
+    // out — only a manual rename may change the title again.
+    l.handleEvent(titleEvent({ source: "generated", title: "Regenerated later" }));
+    await flush();
+    expect(server.sessionTitles.get("acp_1")).toBe("First auto title");
+    expect(server.notifies).toHaveLength(1);
+    // A manual rename (custom push from another surface) still lands.
+    l.handleEvent(titleEvent({ source: "custom", title: "my own name" }));
+    await flush();
+    expect(server.sessionTitles.get("acp_1")).toBe("my own name");
+    expect(server.notifies).toHaveLength(2);
   });
 
   it("a trailing title push does not resurrect a remote-closed conversation", async () => {

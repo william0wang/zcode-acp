@@ -926,6 +926,17 @@ export async function ensureRealSession(
       title: session.title ?? "",
       traceId: session.traceId,
     });
+    // A rename made while this was still a placeholder (no backend id) could
+    // only pin in memory — re-run the shared core now that the session exists
+    // so the backend (v4 renameSession, titleSource=custom) and tasks-index
+    // catch up. Idempotent (same title, equality-guarded downstream).
+    if (server.titleUserSetBy.has(acpSid)) {
+      const placeholderTitle = server.sessionTitles.get(acpSid);
+      if (placeholderTitle) {
+        const { renameSessionCore } = await import("./session-titles.js");
+        void renameSessionCore(server, acpSid, placeholderTitle).catch(() => undefined);
+      }
+    }
 
     return sid;
   })();
@@ -990,19 +1001,40 @@ export async function listSessions(
   } catch {
     // tasks-index unavailable — show everything.
   }
+  // User renames are the title truth: the backend store can lag the v4
+  // renameSession command (an idle session cold-resumes first), so overlay
+  // the durable `title_overridden` titles — a rename must be visible in
+  // every read the moment it returns, or the client's next list pull flips
+  // the fresh title back to the stale one ("改名被弹回"). Own try (a partially
+  // mocked tasks-index must only skip the overlay, never fail the listing).
+  try {
+    const { overriddenTaskTitles } = await import("../tasks-index.js");
+    const renamed = await overriddenTaskTitles();
+    if (renamed.size > 0) {
+      sessions = sessions.map((s) =>
+        renamed.has(s.sessionId) ? { ...s, title: renamed.get(s.sessionId) } : s,
+      );
+    }
+  } catch {
+    // overlay unavailable — backend titles as-is.
+  }
   log(`session/list → ${sessions.length} sessions`);
   return { sessions };
 }
 
 /**
- * Adopt the backend's stored title for a loaded/resumed session.
+ * Adopt a title for a loaded/resumed session, pin-first:
+ *   1. a sibling alias's already-known title (same conversation, another id
+ *      spelling);
+ *   2. the durable user rename from the App's tasks-index
+ *      (`title_overridden=1` — survives bridge restarts);
+ *   3. the backend's `session/list` stored title.
  *
  * The prompt loop's auto-title only fires for freshly created sessions
  * (`titleEligibleSessions`), so a session resumed across a bridge restart
  * would otherwise appear title-less in the hub's discovery API — remote
- * clients have no editor-side session storage to fall back on. The backend's
- * session/list is the only title source for sessions born in a previous
- * bridge lifetime. Best-effort: failures log and leave the session untitled.
+ * clients have no editor-side session storage to fall back on. Best-effort:
+ * failures log and leave the session untitled.
  */
 async function adoptStoredTitle(
   server: ZcodeAcpServer,
@@ -1010,6 +1042,41 @@ async function adoptStoredTitle(
   zcodeSid: string,
 ): Promise<void> {
   if (server.sessionTitles.has(acpSid)) return;
+  // Tier 1 — sibling alias: a rename or adoption under another spelling of
+  // the same conversation already knows the title. Copy it instead of asking
+  // the backend, whose store may lag a bridge-side rename (a rename through
+  // one alias used to be invisible here, so a load via a second alias reset
+  // the title).
+  const sibling = server
+    .sessionAliases(acpSid)
+    .map((sid) => server.sessionTitles.get(sid))
+    .find((t) => t !== undefined);
+  if (sibling !== undefined) {
+    server.sessionTitles.set(acpSid, sibling);
+    server.touchSessionSummary(acpSid, sibling);
+    refreshTerminalTabTitle(server, acpSid);
+    return;
+  }
+  // Tier 2 — durable user rename: `title_overridden=1` in the App's
+  // tasks-index survives bridge restarts (the in-memory pin does not). The
+  // backend store may never have been told (pre-v4 rename, command failure),
+  // so its session/list answer can be stale — the user's title wins.
+  try {
+    const { readTaskTitle } = await import("../tasks-index.js");
+    const task = await readTaskTitle(zcodeSid);
+    if (task?.overridden && task.title) {
+      server.sessionTitles.set(acpSid, task.title);
+      for (const sid of server.sessionAliases(acpSid)) server.titleUserSetBy.add(sid);
+      server.touchSessionSummary(acpSid, task.title);
+      refreshTerminalTabTitle(server, acpSid);
+      log(`adopted user-renamed title for ${acpSid.slice(0, 8)}: ${task.title}`);
+      return;
+    }
+  } catch {
+    // Best-effort consult — fall through to the backend's stored title.
+  }
+  // Tier 3 — the backend's session/list: the only title source for sessions
+  // born in a previous bridge lifetime.
   try {
     const backend = await server.ensureBackend();
     const resp = await backend.request(server.nextId(), "session/list", {}, 15000);

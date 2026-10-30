@@ -1049,6 +1049,26 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   in the remote history list) because the session listing hides archived rows
   while the workspace list kept the group — the sessions count now counts
   only visible rows too.
+- **Session titles auto-name exactly ONCE, and a manual rename must fan out
+  through `renameSessionCore` — never a partial write** (2026-10-30): the
+  bridge seeds the title from the first prompt, the backend's FIRST
+  `generated` push may replace the seed (`server.autoTitleFinalized` freezes
+  the phase; every later `generated` — a deferred sidecar result, the resume
+  re-emission after the stored event rotated out of the retention window — is
+  ignored), and after that only manual renames (`/rename`, the remote rename
+  endpoint, a `custom` push from the desktop App) may change it. A rename that
+  skips the v4 `renameSession` command leaves the backend store stale and
+  every backend-derived read resurrects the old title ("改名被重置":
+  `adoptStoredTitle` read the stale `session/list` title after a restart, and
+  the resume title re-emission re-pushed it). The command sets
+  `titleSource=custom` (sticky — the backend's own generation is skipped
+  forever), and the v4 gateway COLD-RESUMES non-resident sessions for it, so
+  idle sessions are renamable too. Invariants: the rename covers the FULL
+  `sessionAliases` group (one spelling is not enough — another alias's load
+  adopted the stale title and reset it); `adoptStoredTitle` is pin-first
+  (sibling alias title → durable `title_overridden` title via `readTaskTitle`
+  → backend `session/list`); a placeholder renamed before first use replays
+  the rename at materialization (`ensureRealSession`).
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish

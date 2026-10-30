@@ -147,6 +147,11 @@ export const SLASH_COMMANDS = [
     input: { hint: "low|high|max" },
   },
   { name: "quota", description: "Show remaining usage quota (5h / weekly / MCP)" },
+  {
+    name: "rename",
+    description: "Rename the current session (title)",
+    input: { hint: "<new title>" },
+  },
   { name: "resume", description: "Resume a past session into this thread (picker popup)" },
   { name: "mcp", description: "List available MCP servers" },
   { name: "init", description: "Create or update workspace AGENTS.md instructions" },
