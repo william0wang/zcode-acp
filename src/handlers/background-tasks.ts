@@ -170,7 +170,13 @@ export class BackgroundTaskListener implements EventListener {
           (event.payload?.["turnId"] as string | undefined) ??
           "";
         if (inputSource === "background_task") {
-          this.activeNotifyTurnId = turnId || null;
+          if (this.activeNotifyTurnId !== (turnId || null)) {
+            // A replacement notification started without the previous one's
+            // terminal ever arriving: drop the unfinished turn's generated
+            // message id so the new turn's text does not append to it.
+            this.firstMessageId = null;
+            this.activeNotifyTurnId = turnId || null;
+          }
           // Publish the window: the prompt path extends its send busy-retry
           // budget while a notification turn (a real model turn) holds the
           // prompt lock (server.notifyTurnActiveSince, see session.ts).
@@ -178,20 +184,52 @@ export class BackgroundTaskListener implements EventListener {
             this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
             log(`  [bg] background notification turn started (${turnId.slice(-8)})`);
           }
+        } else if (this.activeNotifyTurnId) {
+          // A non-background turn starting while a notification is marked
+          // active means the notification's terminal event was never observed
+          // (dropped stream / superseded — v3 sends cannot start mid-turn on
+          // 0.16.9+). Clear the stale state: the prompt translator owns normal
+          // turns, and a stale marker would forward THEIR text as duplicated
+          // background output and hold the busy window open (#351).
+          log(`  [bg] stale notification state cleared by normal turn (${turnId.slice(-8)})`);
+          this.activeNotifyTurnId = null;
+          this.firstMessageId = null;
+          this.server.notifyTurnActiveSince.delete(this.zcodeSid);
         }
         return;
       }
-      // Inside an active background notification turn → forward text deltas.
+      // Inside an active background notification turn → forward its text.
       if (this.activeNotifyTurnId) {
+        // Envelope-first turn attribution: an event naming a DIFFERENT turnId
+        // belongs to another turn (the user's foreground reply above all) —
+        // never forward it as background output and never let it close the
+        // busy window (#351). Events without any turnId (legacy backends)
+        // keep the window-open forwarding behavior.
+        const eventTurnId =
+          (event.turnId as string | undefined) ??
+          (event.payload?.["turnId"] as string | undefined) ??
+          "";
+        const foreignTurn = !!eventTurnId && eventTurnId !== this.activeNotifyTurnId;
         if (event.type === "model.streaming") {
+          if (foreignTurn) return;
           const kind = event.payload?.["kind"];
           if (kind === "text_delta") {
             const delta = (event.payload?.["delta"] as string | undefined) ?? "";
-            if (delta) void this.forwardText(delta);
+            if (delta) {
+              // Prefer the backend's assistantMessageId — replay/history
+              // surfaces key on it; the generated id covers legacy events.
+              const backendMessageId = event.payload?.["assistantMessageId"];
+              const messageId =
+                typeof backendMessageId === "string" && backendMessageId
+                  ? backendMessageId
+                  : undefined;
+              void this.forwardText(delta, messageId);
+            }
           }
           return;
         }
         if (event.type === "turn.completed" || event.type === "turn.failed") {
+          if (foreignTurn) return;
           log(`  [bg] background notification turn ended (${event.type})`);
           this.activeNotifyTurnId = null;
           this.server.notifyTurnActiveSince.delete(this.zcodeSid);
@@ -467,10 +505,14 @@ export class BackgroundTaskListener implements EventListener {
     }
   }
 
-  /** Forward a text delta from the active background notification turn. */
-  private async forwardText(delta: string): Promise<void> {
+  /**
+   * Forward a text delta from the active background notification turn.
+   * `backendMessageId` (the payload's assistantMessageId) wins when present;
+   * otherwise the lazily-allocated generated id keeps one id per turn.
+   */
+  private async forwardText(delta: string, backendMessageId?: string): Promise<void> {
     // Allocate the messageId lazily so an empty-result turn emits nothing.
-    let msgId = this.activeMessageId();
+    let msgId = backendMessageId ?? this.activeMessageId();
     if (!msgId) {
       msgId = `bg_msg_${randomUUID().slice(0, 12)}`;
       this.firstMessageId = msgId;

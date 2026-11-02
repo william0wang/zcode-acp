@@ -228,6 +228,142 @@ describe("BackgroundTaskListener", () => {
     expect(server.calls).toHaveLength(0);
   });
 
+  // ---- #351: stale notification state must not duplicate foreground text ----
+
+  it("a normal turn started after a terminal-less notification clears the stale state (#351)", async () => {
+    // The notification turn's terminal event was never observed (dropped
+    // stream). When the user's turn then starts, the stale marker must be
+    // cleared — otherwise this listener forwards the user reply's deltas as
+    // a second, bg_msg_*-identified copy of what the prompt translator
+    // already emits.
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg" }),
+    );
+    await Promise.resolve();
+    expect(server.notifyTurnActiveSince.has("sess_test")).toBe(true);
+    // No terminal for turn_bg; the user's foreground turn starts.
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "user_prompt" }, { turnId: "turn_user" }),
+    );
+    await Promise.resolve();
+    // Stale busy window closed with the stale state.
+    expect(server.notifyTurnActiveSince.has("sess_test")).toBe(false);
+    // The user turn's deltas (which the prompt translator forwards) are NOT
+    // re-forwarded here — not even without envelope turnIds.
+    l.handleEvent(
+      zcodeEvent(
+        "model.streaming",
+        { kind: "text_delta", delta: "user reply" },
+        { turnId: "turn_user" },
+      ),
+    );
+    await Promise.resolve();
+    expect(server.calls).toHaveLength(0);
+  });
+
+  it("foreign-turn streaming events are not forwarded while a notification is active (#351)", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg" }),
+    );
+    await Promise.resolve();
+    // A delta explicitly attributed to another turn.
+    l.handleEvent(
+      zcodeEvent(
+        "model.streaming",
+        { kind: "text_delta", delta: "user reply" },
+        { turnId: "turn_user" },
+      ),
+    );
+    await Promise.resolve();
+    // The notification's own delta (matching turnId) still flows.
+    l.handleEvent(
+      zcodeEvent(
+        "model.streaming",
+        { kind: "text_delta", delta: "bg result" },
+        { turnId: "turn_bg" },
+      ),
+    );
+    await Promise.resolve();
+    const chunks = server.calls.filter((c) => c.update["sessionUpdate"] === "agent_message_chunk");
+    expect(chunks).toHaveLength(1);
+    expect((chunks[0]!.update["content"] as { text: string }).text).toBe("bg result");
+  });
+
+  it("foreign-turn terminal events do not close the notification busy window (#351)", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg" }),
+    );
+    await Promise.resolve();
+    // Another turn's completion arrives mid-notification.
+    l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }, { turnId: "other" }));
+    await Promise.resolve();
+    expect(server.notifyTurnActiveSince.has("sess_test")).toBe(true);
+    // The notification's own completion closes it.
+    l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }, { turnId: "turn_bg" }));
+    await Promise.resolve();
+    expect(server.notifyTurnActiveSince.has("sess_test")).toBe(false);
+  });
+
+  it("a replacement notification turn gets its own generated messageId (#351)", async () => {
+    // Second background notification starting without the first one's
+    // terminal: its text must not append to the unfinished turn's message.
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t1" }),
+    );
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task1 partial" }));
+    await Promise.resolve();
+    // No terminal for t1 — t2 replaces it directly.
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t2" }),
+    );
+    await Promise.resolve();
+    l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task2 result" }));
+    await Promise.resolve();
+    const chunks = server.calls.filter((c) => c.update["sessionUpdate"] === "agent_message_chunk");
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.update["messageId"]).not.toBe(chunks[1]!.update["messageId"]);
+    expect((chunks[1]!.update["content"] as { text: string }).text).toBe("task2 result");
+  });
+
+  it("forwards with the backend's assistantMessageId when supplied (#351)", async () => {
+    // Backend-attributed ids keep the streamed chunk and the replayed history
+    // under one identity; the generated id only covers legacy events.
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_bg" }),
+    );
+    await Promise.resolve();
+    l.handleEvent(
+      zcodeEvent("model.streaming", {
+        kind: "text_delta",
+        delta: "result part 1 ",
+        assistantMessageId: "msg_bg1",
+      }),
+    );
+    l.handleEvent(
+      zcodeEvent("model.streaming", {
+        kind: "text_delta",
+        delta: "part 2",
+        assistantMessageId: "msg_bg1",
+      }),
+    );
+    await Promise.resolve();
+    const chunks = server.calls.filter((c) => c.update["sessionUpdate"] === "agent_message_chunk");
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]!.update["messageId"]).toBe("msg_bg1");
+    expect(chunks[1]!.update["messageId"]).toBe("msg_bg1");
+  });
+
   it("markCancelled emits a failed update with cancelled flag and clears state", async () => {
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
