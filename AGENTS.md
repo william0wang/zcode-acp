@@ -20,13 +20,14 @@ methods and streams events back as ACP `session/update` notifications.
 
 ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
-to source root 3.16.2 = app-server/`apps/zcode-cli` 0.17.0, commit `3c5b2276`,
-audited 2026-10-20 with no bridge impact — see docs/BACKLOG.md). The bridge
-runs desktop 3.16.3, whose bundled `zcode.cjs` self-reports CLI 0.17.0 — the
-SAME CLI the checkout carries, so the source is authoritative for the running
-backend (the 3.16.2→3.16.3 desktop delta is not in the public tree;
-`origin/main` IS `3c5b2276`). The Gotchas below were written against 0.16.9
-and re-verified file-by-file at the 0.17.0 audits (2026-10-19/20); the bundle
+to source root 3.17.1 = app-server/`apps/zcode-cli` 0.17.1, commit `a60ba6a7`,
+audited 2026-11-02 — see docs/BACKLOG.md). The bridge runs desktop 3.17.1,
+whose bundled `zcode.cjs` self-reports CLI 0.17.1 — the SAME CLI the checkout
+carries, so the source is EXACTLY the running backend (`origin/main` IS
+`a60ba6a7`; no public-tree delta this time). The Gotchas below were written
+against 0.16.9 and re-verified file-by-file at the 0.17.0 audits
+(2026-10-19/20) and the 3.17.1 audit (2026-11-02 — all invariants held; one
+bridge fix: `CronPauseSelf` joined the default tool denylist); the bundle
 recipe in docs/BACKLOG.md "Verification method" remains the way to re-prove a
 note against the binary. The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
@@ -805,7 +806,13 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   (3) `session/fork` has no tool-face field and its `inherit` copies
   memory/toolSearch/shell but not the lists — a fork runs without the policy
   until its next resume (upstream gap; don't "fix" it with a close+resume
-  cycle on the fork response).
+  cycle on the fork response). 0.17.1 added `CronPauseSelf` (automation
+  run self-pause) to the always-registered set; the bridge's
+  `AUTOMATION_TOOL_DEFAULTS` covers it too (source 2026-11-02: upstream
+  hides it from ordinary turns and keeps it OUT of
+  `AUTOMATION_MUTATION_TOOL_NAMES` — adding it to a TURN list would corrupt
+  nothing, but the session-level default keeps it out of the ToolSearch
+  directory; upstream itself denylists it on remote workspaces).
 - **`turnId` lives on the event ENVELOPE, never the payload** (source
   2026-09-21: `zcodeEventEnvelopeSchema` carries `turnId?`,
   `packages/shared/src/zcode-protocol/index.ts:1029-1041`, while

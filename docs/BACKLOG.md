@@ -177,6 +177,52 @@ exactly the bridge's existing override-over-verdict rule (local
 `workflow.mode` > remote verdict, unset = follow the verdict), so upstream
 moved toward the bridge; nothing to change.
 
+**3.17.1 audit (2026-11-02, commit `a60ba6a7` / source `73158b64` — one
+bridge fix)**: the desktop moved 3.16.3 → 3.17.1 and its `zcode.cjs`
+self-reports CLI `0.17.1` — the checkout's exact CLI (root `3.17.1`,
+`apps/zcode-cli` `0.17.1`), so for the first time since 3.16.2 the public
+tree IS the running backend with no unseen delta. Protocol schema diff
+`packages/shared/src/zcode-protocol/index.ts` +160/−11, additive from the
+bridge's seat: new `session/lifecycle/{changed,getState,ensureReady,stop,
+restart}` family (runtime-instance lifecycle, `SessionLifecycleController` —
+`session/lifecycle/changed` is a standalone JSON-RPC NOTIFICATION, not a
+`session/event`, and the bridge's read loop ignores it; `ensureReady`/
+`getState` are an alignment candidate for replacing the "Session is not
+active" eviction-recovery dance and feeding `backendLoadedSessions`
+staleness), `workspace/mcp/trust` + `workspaceTrust` on mcp status snapshots
+(the bridge injects servers explicitly on create/resume = trusted, no
+impact), `automation/pause`, `turn.started` payload + `automationId`/
+`offPeakTaskId`/`offPeakRunType` (bridge ignores unknown payload fields),
+mcpServer schema + optional `scope`/`cwd` (passthrough unaffected),
+`session/requestRuntimePreferences` + optional `workspace`/
+`directorySessionId` (bridge sends neither), and a `-32032` provider-config
+error family for the request-verification edition — NULL in the open tree
+(`packages/shared/src/request-security-edition/verification-policy.ts`
+returns false/null everywhere), so the bridge's runtime-headers answerer is
+unchanged. Gotchas invariants re-verified at source: `activeAbortController`
+at accept + `-32010 "A prompt is already running"` + `session_compacted`
+reasons (server-operations.ts sendPrompt/compact), provider revision
+`zcode-builtin:<rev>:<sha256(PATH)>` (zcode-builtin-provider-config-source.ts
+`sourceKey` = sha256 of the resolved path; the +32-line diff there only adds
+an in-process last-known-good cache for a deleted bundled dir), `Reasoning
+level is required for <p>/<m>` (provider-registry-selection.ts:136),
+`session-mapper.ts` ZERO diff (plan-mode fold + dynamic_workflow stripping
+intact), v4 `command.ts` sendText payload union ZERO diff (the `_session/
+steering` envelope is untouched; session-flow.ts only added GenUI input
+normalization and dropped `inputPresentation` plumbing — neither is in the
+bridge's payload). The ONE bridge action: `CronPauseSelf` joined the
+always-registered automation tool set (`automationPort` stays unconditional,
+server-operations.ts; core registers it whenever the port exists). Upstream
+HIDES it from ordinary turns (`turn-tool-visibility.ts` — "非执行轮隐藏",
+deliberately NOT in `AUTOMATION_MUTATION_TOOL_NAMES`) and its handler
+hard-rejects without a port call when the turn carries no `automationId`
+(cron.ts "only available while running a scheduled automation") — but it
+stays in the ToolSearch directory, and upstream itself adds it to remote
+workspaces' session denylist (`REMOTE_AUTOMATION_TOOL_NAMES`). The bridge's
+enumerated `AUTOMATION_TOOL_DEFAULTS` therefore gained `CronPauseSelf`
+(src/backend/resolve.ts) — a headless bridge session never carries a run's
+`automationId`, so the tool can never do anything there.
+
 **3.14.0 audit (2026-09-20, app-server 0.16.9 — live-probed end to end)**: the
 dynamic-workflow family (ten model tools led by `CreateWorkflow`) is OFF by
 default headless and enabled per PROCESS via
@@ -406,7 +452,8 @@ bridge reads plugin commands from disk instead).
 **Automation tool gating, corrected against source (2026-09-21)**: there is NO
 backend env gate — `ZCODE_ENABLE_AUTOMATION_TOOLS` exists only in the bridge
 (`src/backend/resolve.ts`). The backend registers `CronCreate/CronList/
-CronUpdate/CronDelete` whenever an `automationPort` is injected
+CronUpdate/CronDelete` (+ `CronPauseSelf` since 0.17.1 — see the 3.17.1
+audit entry) whenever an `automationPort` is injected
 (`core/src/runtime/helpers/runtime-tools.ts:66`), and the legacy protocol
 server injects one for every session create
 (`server-operations.ts:3370`) — so the backend ALWAYS registers them in
@@ -414,7 +461,8 @@ app-server mode. Opting out is entirely the bridge's per-session
 `toolDenylist` on create/resume (the `--disallowed-tools` argv flag is parsed
 but NOT consumed on the app-server path — #340, alignment item 10). Bonus:
 `AUTOMATION_MUTATION_TOOL_NAMES = [CronCreate, CronUpdate, CronDelete]` gets
-special turn-loop treatment (`turn-loop-state.ts:23`).
+special turn-loop treatment (`turn-loop-state.ts:23`; upstream keeps
+`CronPauseSelf` OUT of it by design).
 
 ## Alignment opportunities (2026-09-21, source-verified — ranked)
 

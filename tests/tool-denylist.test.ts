@@ -47,7 +47,7 @@ vi.mock("../src/lazy-sessions.js", () => ({
   lookupModelChoiceByZcodeSid: () => undefined,
 }));
 
-const CRON_DEFAULTS = ["CronCreate", "CronList", "CronUpdate", "CronDelete"];
+const CRON_DEFAULTS = ["CronCreate", "CronList", "CronUpdate", "CronDelete", "CronPauseSelf"];
 
 type Call = { method: string; params: Record<string, unknown> };
 

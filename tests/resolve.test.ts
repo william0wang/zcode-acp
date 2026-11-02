@@ -67,7 +67,7 @@ describe("resolveZcodeCommand Happy Eyeballs args", () => {
       "app-server",
       "--stdio",
       "--disallowed-tools",
-      "CronCreate CronList CronUpdate CronDelete",
+      "CronCreate CronList CronUpdate CronDelete CronPauseSelf",
     ]);
   });
 
@@ -80,7 +80,7 @@ describe("resolveZcodeCommand Happy Eyeballs args", () => {
 });
 
 describe("resolveZcodeCommand disallowed tools", () => {
-  const CRON_DEFAULTS = "CronCreate CronList CronUpdate CronDelete";
+  const CRON_DEFAULTS = "CronCreate CronList CronUpdate CronDelete CronPauseSelf";
 
   it("disallows the Cron* tools by default — the bridge cannot serve automation/* (#192)", () => {
     delete process.env.ZCODE_DISALLOWED_TOOLS;
@@ -135,7 +135,7 @@ describe("resolveZcodeCommand disallowed tools", () => {
 // The array form feeds the per-session `toolDenylist` param (#340) — the
 // argv flag above is parsed but never consumed by the app-server path.
 describe("disallowedToolList (array form for session/create·resume toolDenylist)", () => {
-  const CRON_DEFAULTS = ["CronCreate", "CronList", "CronUpdate", "CronDelete"];
+  const CRON_DEFAULTS = ["CronCreate", "CronList", "CronUpdate", "CronDelete", "CronPauseSelf"];
 
   it("is the Cron* defaults when the env var is unset", () => {
     delete process.env.ZCODE_DISALLOWED_TOOLS;
@@ -153,6 +153,7 @@ describe("disallowedToolList (array form for session/create·resume toolDenylist
       "CronCreate",
       "CronUpdate",
       "CronDelete",
+      "CronPauseSelf",
     ]);
   });
 

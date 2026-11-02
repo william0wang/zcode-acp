@@ -253,9 +253,18 @@ function happyEyeballsArgs(): string[] {
  * which the bridge does not serve (host capability, see docs/BACKLOG.md).
  * Advertised-but-unservable tools trap the model, so they are disallowed by
  * default. `ZCODE_ENABLE_AUTOMATION_TOOLS=1` opts back in for a host that
- * does implement the port (#192).
+ * does implement the port (#192). CronPauseSelf joined the always-registered
+ * set in 0.17.1 (automation run self-pause; upstream hides it from ordinary
+ * turns and puts it in remote workspaces' denylist — the bridge's headless
+ * backend never carries a run's automationId, so it can never be used).
  */
-const AUTOMATION_TOOL_DEFAULTS = ["CronCreate", "CronList", "CronUpdate", "CronDelete"];
+const AUTOMATION_TOOL_DEFAULTS = [
+  "CronCreate",
+  "CronList",
+  "CronUpdate",
+  "CronDelete",
+  "CronPauseSelf",
+];
 
 function disallowedToolsValue(): string | undefined {
   const fromEnv = process.env.ZCODE_DISALLOWED_TOOLS?.trim();
