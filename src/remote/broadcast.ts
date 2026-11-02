@@ -150,6 +150,30 @@ export class ClientRegistry {
     await Promise.all(targets.map((cx) => racedNotify(cx, method, cx.notify(method, params))));
   }
 
+  /**
+   * Notify every client whose connection root is NOT in `excludeRoots` — the
+   * root-identity half of notifyOthers, for echo paths that learned the
+   * originating root EARLIER instead of holding the whole AgentContext
+   * (request wrappers are fresh per call, so contexts cannot be compared
+   * later; roots are stable per connection). The steer-drain echo uses this:
+   * the steering client renders the injected text locally and would
+   * duplicate the echo.
+   */
+  async notifyExceptRoots(
+    excludeRoots: Set<unknown>,
+    method: string,
+    params?: unknown,
+  ): Promise<void> {
+    if (excludeRoots.size === 0) {
+      await notifyAll(this, method, params);
+      return;
+    }
+    const targets = this.snapshot().filter(
+      (cx) => !excludeRoots.has((cx as { connectionContext?: unknown }).connectionContext),
+    );
+    await Promise.all(targets.map((cx) => racedNotify(cx, method, cx.notify(method, params))));
+  }
+
   snapshot(): ClientLike[] {
     return Array.from(this.clients);
   }

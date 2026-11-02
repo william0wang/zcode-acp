@@ -468,21 +468,43 @@ Session state update (usage, etc.).
 ### Steer lifecycle events
 
 When a user input is steered into (queued behind) a running turn, the backend
-emits a pair of lifecycle events (app-server 0.15.2+). The bridge does
-not currently translate these — they are tracked as a future enhancement (see
-[`BACKLOG.md`](./BACKLOG.md)).
+emits a pair of lifecycle events (app-server 0.15.2+). Every drained input is
+a persisted USER message upstream, so the bridge mirrors
+`turn.steerDrained`'s `drainedInputs[].text` to the clients as
+`user_message_chunk` notifications (`echoSteeredInputs`): from the turn loop
+while one is live, and from the session-scoped background listener otherwise
+(gated on `pendingTurns`, so the two paths never double-echo). Clients that
+STEERED via `_session/steering` are excluded from the echo
+(`steerEchoSuppressedRoots` — they render the injected text locally, e.g.
+martty keeps its Send Now cell, and would see it twice); backend-internal
+guides (plan-approval feedback, workflow refine) have no steering client and
+echo to everyone. `turn.steerQueued`
+feeds the steer-swallow guard (a send accepted mid-generation is queued and
+silently dropped when the turn ends — reported to the user at once) but has no
+live "queued" indicator yet (see [`BACKLOG.md`](./BACKLOG.md)).
 
 ```json
 {
   "type": "turn.steerQueued",
-  "payload": {}
+  "payload": {
+    "pendingInputId": "…",
+    "inputPreview": "…",
+    "delivery": "queue",
+    "targetTurnId": "…",
+    "queueLength": 1
+  }
 }
 ```
 
 ```json
 {
   "type": "turn.steerDrained",
-  "payload": {}
+  "payload": {
+    "pendingInputIds": ["…"],
+    "targetTurnId": "…",
+    "injectedMessageIds": ["…"],
+    "drainedInputs": [{ "pendingInputId": "…", "messageId": "…", "text": "…" }]
+  }
 }
 ```
 

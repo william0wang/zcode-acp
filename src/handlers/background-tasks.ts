@@ -40,6 +40,7 @@ import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { armWorkflowRunPoller, stopWorkflowRunPoller } from "../workflow/poller.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
+import { echoSteeredInputs } from "./io.js";
 
 /** Shape of a `session.updated` payload that reports a background task state. */
 interface TaskStatusPayload {
@@ -195,6 +196,23 @@ export class BackgroundTaskListener implements EventListener {
           this.activeNotifyTurnId = null;
           this.firstMessageId = null;
           this.server.notifyTurnActiveSince.delete(this.zcodeSid);
+        }
+        return;
+      }
+      if (event.type === "turn.steerDrained") {
+        // Mirror drained steer inputs in the no-turn-loop window (the zombie
+        // after a bridge-side cancel: the backend turn keeps generating, a
+        // steer drained then has no runEventTurn to echo it — without this
+        // the injected user text stays invisible until the next replay).
+        // While a turn loop is live it owns the echo; both listeners receive
+        // every event, so the pendingTurns gate is what keeps the two paths
+        // from double-echoing.
+        const turnLive = [...this.server.pendingTurns.values()].some(
+          (t) => t.zcodeSid === this.zcodeSid,
+        );
+        if (!turnLive) {
+          const acpSid = this.server.acpSidByZcodeSid.get(this.zcodeSid);
+          if (acpSid) echoSteeredInputs(this.server, acpSid, event.payload);
         }
         return;
       }

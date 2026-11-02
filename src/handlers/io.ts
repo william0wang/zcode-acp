@@ -155,6 +155,63 @@ export function echoUserPromptToOthers(
 }
 
 /**
+ * Echo drained steer inputs (`turn.steerDrained`) to the clients as
+ * `user_message_chunk`s. The backend persists every drained input as a REAL
+ * user message (persistUserPrompt at drain — the same bar its own transcript
+ * shows), but the injection never passes through session/prompt, so no OTHER
+ * client ever sees the text without this echo. Clients that STEERED through
+ * `_session/steering` are excluded (server.steerEchoSuppressedRoots): they
+ * render the injected text locally (martty keeps its Send Now cell on
+ * injected/startedNewTurn) and would see it twice. Backend-internal guides
+ * (plan-approval feedback, workflow refine) have no steering client, so
+ * every connected client hears those. FIFO, one chunk per input, keyed by
+ * the backend's injected message id when present (stable across event
+ * re-delivery — clients that key updates by messageId render it once).
+ * Best-effort: a failed send warns and never breaks the turn.
+ */
+export function echoSteeredInputs(
+  server: ZcodeAcpServer,
+  sessionId: string,
+  payload: unknown,
+): void {
+  const drained = (
+    payload as { drainedInputs?: Array<{ text?: unknown; messageId?: unknown }> } | null
+  )?.drainedInputs;
+  if (!Array.isArray(drained) || drained.length === 0) return;
+  const inputs = drained.flatMap((d) => {
+    const text = typeof d?.text === "string" ? d.text : "";
+    if (text.trim().length === 0) return [];
+    const messageId =
+      typeof d?.messageId === "string" && d.messageId.length > 0
+        ? `steer_${d.messageId}`
+        : `steer_${randomUUID()}`;
+    return [{ text, messageId }];
+  });
+  if (inputs.length === 0) return;
+  const excluded = server.steerEchoExclusions(server.sessionMap.get(sessionId) ?? sessionId);
+  log(
+    `steer drained: echoing ${inputs.length} injected input(s) as user_message_chunk ` +
+      `(${excluded.size > 0 ? `${excluded.size} steering client(s) excluded` : "all clients"})`,
+  );
+  for (const sid of server.sessionAliases(sessionId)) {
+    for (const input of inputs) {
+      void enqueueSessionSend(sid, async () => {
+        await server.clients.notifyExceptRoots(excluded, "session/update", {
+          sessionId: sid,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: input.text },
+            messageId: input.messageId,
+          },
+        });
+      }).catch((e) =>
+        warn(`steer echo failed (sid=${sid}): ${e instanceof Error ? e.message : String(e)}`),
+      );
+    }
+  }
+}
+
+/**
  * Does this cx already reach every client by itself? The broadcast proxy
  * (ClientRegistry.broadcast()) has no `connectionContext` — exactly the field
  * `notifyOthers` filters on — so for a proxy source the "others" fan-out would

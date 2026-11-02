@@ -955,6 +955,31 @@ export class ZcodeAcpServer {
     }
   }
 
+  /**
+   * Connection roots whose clients render steered text locally (martty's
+   * Send Now cell), by backend session. `_session/steering` records the
+   * steerer when the agent takes the message; the drain echo
+   * (echoSteeredInputs) excludes those roots so the steerer does not see
+   * the injected text twice. Bounded per session — most sessions have one
+   * steering client, whose root dedupes to a single entry. Accepted
+   * trade-off: a later backend-internal guide (plan-approval feedback) that
+   * drains for the same session skips that client's echo too.
+   */
+  readonly steerEchoSuppressedRoots = new Map<string, unknown[]>();
+
+  /** Record a steering client's connection root for the drain-echo exclusion. */
+  suppressSteerEcho(zcodeSid: string, root: unknown): void {
+    if (root === undefined || root === null) return;
+    const roots = this.steerEchoSuppressedRoots.get(zcodeSid) ?? [];
+    if (!roots.includes(root)) roots.push(root);
+    this.steerEchoSuppressedRoots.set(zcodeSid, roots.slice(-4));
+  }
+
+  /** Roots to exclude from this session's steer-drain echo (empty = none). */
+  steerEchoExclusions(zcodeSid: string): Set<unknown> {
+    return new Set(this.steerEchoSuppressedRoots.get(zcodeSid) ?? []);
+  }
+
   /** Update a session's discovery summary (title sticky once set). */
   touchSessionSummary(acpSid: string, title?: string): void {
     const existing = this.sessionSummaries.get(acpSid);

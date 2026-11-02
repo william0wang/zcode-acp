@@ -387,8 +387,11 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   broadcast with mutation reason `session_compacted` /
   `session_compact_cancelled` / `session_compact_failed`,
   `server-operations.ts:2082-2119` — real compact failure is now OBSERVABLE
-  on the v3 stream; wiring it into the bridge's success reporting is a
-  pending alignment item, see docs/BACKLOG.md.) Invariants that must stay: single-flight per sid
+  on the v3 stream and WIRED into the bridge's success reporting:
+  `ZcodeBackend.onCompactOutcome` records the reason per session and
+  `compact()` reads it after the lock wait — a `session_compact_failed` /
+  `session_compact_cancelled` outcome warns "context NOT compressed" instead
+  of assuming success from the RPC ack.) Invariants that must stay: single-flight per sid
   (`server.autoCompactInFlight` — keyed by the BACKEND sid and covering manual
   /compact too, not just auto) and the drain gate exempt while it runs. The
   compaction window is reported as BUSY by `compact()` itself (extensions.ts:
@@ -532,7 +535,7 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   stamp is settled by an authoritative probe first** (2026-11-02): the
   backend's `SessionLifecycleController` exposes `session/lifecycle/getState`
   (strict `{sessionId}`, side-effect-free, snapshot `{sessionId, state,
-  generation, revision, lastError}` with states unloaded/starting/ready/
+generation, revision, lastError}` with states unloaded/starting/ready/
   stopping/faulted; a session it no longer STORES answers "Session not found:
   <sid>" — `isSessionGoneError` matches it as-is). `ensureBackendResident`
   probes before reloading: `ready` merely refreshes the stamp (subscribers /
@@ -723,7 +726,16 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   only when the updates arrive AFTER the response on a load/resume path it
   initiated (complete user_message/agent_message updates never fold — verified
   0.2.35; this holds for the boot `session/new` interception too — chunks
-  post-response DO fold). Martty's welcome banner, however, paints INSTEAD of
+  post-response DO fold). Martty STEERS through `_session/steering` (its
+  `steer_route` picks SessionSteering whenever the bridge's initialize
+  advertises `_meta.steering.supported`; Send Now / Ctrl+X) and keeps its own
+  pending cell as the rendering of an injected steer (`steer_ext_deferred`:
+  injected/startedNewTurn → the agent owns it, the cell stays; anything else
+  → hide + client-side requeue). The bridge's steer-drain echo
+  (`echoSteeredInputs`) therefore EXCLUDES the steering client's connection
+  root (`steerEchoSuppressedRoots`, recorded by the steering handler on an
+  accepted ack) — an unconditional echo would double-render in martty.
+  Martty's welcome banner, however, paints INSTEAD of
   the transcript (`ui.rs draw_chat`) and only dives on submitted text, so a
   boot-resumed TUI showed its replayed history only after the user's first
   message. Fix (bridge-side, no upstream dependency): the hub incubates resume

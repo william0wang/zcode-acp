@@ -84,6 +84,7 @@ import { clientConnectionRoot, log, warn, zcodeHomeDir } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
 import {
+  echoSteeredInputs,
   emitSessionTurnState,
   sendAvailableCommandsDeferred,
   sendSessionUpdate,
@@ -4235,6 +4236,16 @@ export async function runEventTurn(
     if (ev.type === "turn.steerQueued" && !translator.turnStarted && gateArmed) {
       await sendTextChunk(cx, acpSid, messages().messageSwallowedByTurn, chunkMsgId);
       return turnResult(translator, "max_turn_requests");
+    }
+    // Steer observability (#352 follow-up): every drained input becomes a
+    // persisted USER message in the backend transcript, but the injection
+    // never passes through session/prompt — no client anywhere rendered it
+    // (the steering requester got the `_session/steering` outcome reply, not
+    // a transcript entry). Echo it to everyone; deliberately BEFORE the
+    // attribution gate, since a drain that lands as boundary residue still
+    // injected a real user message into the session's history.
+    if (ev.type === "turn.steerDrained") {
+      echoSteeredInputs(server, acpSid, ev.payload);
     }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still

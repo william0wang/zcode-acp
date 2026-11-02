@@ -34,7 +34,7 @@ import { randomUUID } from "node:crypto";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import type { ZcodeAcpServer } from "../server.js";
-import { log, warn } from "../utils.js";
+import { clientConnectionRoot, log, warn } from "../utils.js";
 import { ensureRealSession } from "./session.js";
 
 /** v4/command sendText budget — the ack resolves at admission, not injection. */
@@ -104,6 +104,10 @@ async function turnRunning(server: ZcodeAcpServer, zcodeSid: string): Promise<bo
 export async function steering(
   server: ZcodeAcpServer,
   params: { sessionId: string; prompt?: unknown; _meta?: unknown },
+  /** The requesting connection's AgentContext (ctx.client) — read only for
+   * its per-connection root (clientConnectionRoot) to exclude the steerer
+   * from the later drain echo. */
+  origin?: unknown,
 ): Promise<SteeringResult> {
   const zcodeSid = await ensureRealSession(server, params.sessionId);
 
@@ -157,6 +161,14 @@ export async function steering(
   if (ack.status !== "accepted") {
     const detail = ack.message ?? ack.reasonCode ?? ack.status ?? "not accepted";
     throw new RequestError(-32603, `steering rejected by backend: ${detail}`);
+  }
+  // The agent owns the message from here on, and the steering client
+  // renders it LOCALLY (martty keeps its Send Now cell on injected/
+  // startedNewTurn; a priority:"next" client shows its queued state).
+  // Record the origin so the later drain echo (echoSteeredInputs) excludes
+  // it — the steerer must not see the injected text twice.
+  if (origin) {
+    server.suppressSteerEcho(zcodeSid, clientConnectionRoot(origin));
   }
   const delivery = ack.result?.type === "inputAccepted" ? ack.result.delivery : undefined;
   if (delivery === "guide") {

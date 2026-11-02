@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { RequestError } from "@agentclientprotocol/sdk";
 
 import { steering } from "../src/handlers/steering.js";
+import { echoSteeredInputs } from "../src/handlers/io.js";
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeBackend } from "../src/backend/client.js";
 
@@ -104,6 +105,23 @@ describe("_session/steering", () => {
     });
     expect(result).toEqual({ outcome: "queued" });
     expect(commands[0]!["payload"]).toMatchObject({ requestedDelivery: "queue" });
+  });
+
+  it("records the steering client's root for the drain-echo exclusion", async () => {
+    const server = setup();
+    armRunningTurn(server);
+    const root = { connection: "martty" };
+    const origin = { connectionContext: root } as unknown as Parameters<typeof steering>[2];
+
+    await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT }, origin);
+    expect(server.steerEchoExclusions("zs_st").has(root)).toBe(true);
+
+    // promptRequired (message not taken) records nothing.
+    server.steerEchoSuppressedRoots.clear();
+    const idle = setup();
+    const result = await steering(idle, { sessionId: "sess_st", prompt: TEXT_PROMPT }, origin);
+    expect(result).toEqual({ outcome: "promptRequired", reason: "noRunningTurn" });
+    expect(idle.steerEchoSuppressedRoots.size).toBe(0);
   });
 
   it("an idle session answers promptRequired without sending anything", async () => {
@@ -214,5 +232,117 @@ describe("_session/steering", () => {
     expect(commands[0]!["payload"]).toMatchObject({
       text: "stop the current approach\nswitch to the sqlite plan",
     });
+  });
+});
+
+/**
+ * Steer-drain observability: `turn.steerDrained` mirrors the backend's
+ * persisted user inputs to the clients as user_message_chunk (the injection
+ * never passes through session/prompt — no OTHER client ever sees the text).
+ * Clients that steered via `_session/steering` are excluded: they render the
+ * injected text locally (martty's Send Now cell) and would see it twice.
+ */
+describe("echoSteeredInputs (turn.steerDrained → user_message_chunk)", () => {
+  interface Sent {
+    method: string;
+    params: { sessionId: string; update: Record<string, unknown> };
+  }
+  const sent: Sent[] = [];
+  /** Roots the fake registry excludes (steering clients). */
+  let excludedRoots: Set<unknown>;
+
+  function echoServer(): ZcodeAcpServer {
+    sent.length = 0;
+    excludedRoots = new Set();
+    const server = new ZcodeAcpServer();
+    server.registerSession("sess_st", "zs_st");
+    server.registerSession("sess_st2", "zs_st"); // second alias, same backend session
+    server.clients = {
+      notifyExceptRoots: async (
+        exclude: Set<unknown>,
+        _method: string,
+        params: unknown,
+      ): Promise<void> => {
+        excludedRoots = exclude;
+        sent.push({ method: "session/update", params: params as Sent["params"] });
+      },
+    } as unknown as ZcodeAcpServer["clients"];
+    return server;
+  }
+
+  it("echoes every drained input, FIFO, to ALL aliases (no exclusion)", () => {
+    const server = echoServer();
+    echoSteeredInputs(server, "sess_st", {
+      pendingInputIds: ["pi1", "pi2"],
+      targetTurnId: "t1",
+      injectedMessageIds: ["m1", "m2"],
+      drainedInputs: [
+        { pendingInputId: "pi1", messageId: "m1", text: "first steer" },
+        { pendingInputId: "pi2", messageId: "m2", text: "second steer" },
+      ],
+    });
+    expect(sent).toHaveLength(4); // 2 inputs × 2 aliases
+    // Alias-outer fan-out: each client receives its inputs in FIFO order.
+    expect(sent.map((s) => s.params.sessionId)).toEqual([
+      "sess_st",
+      "sess_st",
+      "sess_st2",
+      "sess_st2",
+    ]);
+    for (const s of sent) {
+      expect(s.method).toBe("session/update");
+      expect(s.params.update.sessionUpdate).toBe("user_message_chunk");
+    }
+    expect(sent[0]!.params.update.content).toEqual({ type: "text", text: "first steer" });
+    expect(sent[0]!.params.update.messageId).toBe("steer_m1");
+    expect(sent[1]!.params.update.content).toEqual({ type: "text", text: "second steer" });
+    expect(sent[1]!.params.update.messageId).toBe("steer_m2");
+  });
+
+  it("skips empty/blank texts and missing drainedInputs", () => {
+    const server = echoServer();
+    echoSteeredInputs(server, "sess_st", {
+      targetTurnId: "t1",
+      pendingInputIds: [],
+      injectedMessageIds: [],
+    });
+    echoSteeredInputs(server, "sess_st", { drainedInputs: [{ messageId: "m1", text: "  " }] });
+    echoSteeredInputs(server, "sess_st", "not-an-object");
+    expect(sent).toHaveLength(0);
+  });
+
+  it("mints an id when the backend message id is absent", () => {
+    const server = echoServer();
+    echoSteeredInputs(server, "sess_st", {
+      drainedInputs: [{ pendingInputId: "pi1", text: "anonymous steer" }],
+    });
+    expect(sent).toHaveLength(2);
+    expect(sent[0]!.params.update.messageId).toMatch(/^steer_/);
+  });
+
+  it("excludes the steering client's root — it renders the text locally", () => {
+    const server = echoServer();
+    const steererRoot = { connection: "martty" };
+    server.suppressSteerEcho("zs_st", steererRoot);
+
+    echoSteeredInputs(server, "sess_st", {
+      drainedInputs: [{ pendingInputId: "pi1", messageId: "m1", text: "local cell covers me" }],
+    });
+
+    expect(sent).toHaveLength(2); // still both aliases
+    expect(excludedRoots.has(steererRoot)).toBe(true);
+  });
+
+  it("a steering client on one session does not suppress another session's echo", () => {
+    const server = echoServer();
+    server.registerSession("sess_other", "zs_other");
+    const steererRoot = { connection: "editor" };
+    server.suppressSteerEcho("zs_other", steererRoot);
+
+    echoSteeredInputs(server, "sess_st", {
+      drainedInputs: [{ pendingInputId: "pi1", messageId: "m1", text: "unrelated" }],
+    });
+
+    expect(excludedRoots.size).toBe(0); // zs_st has no suppression
   });
 });

@@ -25,24 +25,56 @@ afterEach(() => {
 /** A minimal fake server: records every session/update it would send. */
 interface FakeServer {
   calls: Array<{ zcodeSid: string; update: Record<string, unknown> }>;
+  /** Broadcast session/updates (echoSteeredInputs path) recorded here. */
+  echoes: Array<{ sessionId: string; update: Record<string, unknown> }>;
   /** Mirrors ZcodeAcpServer.terminalSentData — set by tests to simulate a
    *  tracked launch card so BackgroundTaskListener reuses it. */
   terminalSentData: Map<string, string>;
   /** Mirrors ZcodeAcpServer.notifyTurnActiveSince (notification busy window). */
   notifyTurnActiveSince: Map<string, number>;
+  /** Mirrors ZcodeAcpServer.pendingTurns (steer-echo turn-loop gate). */
+  pendingTurns: Map<number, { zcodeSid: string }>;
+  /** Mirrors ZcodeAcpServer.acpSidByZcodeSid (zcode → acp id reverse index). */
+  acpSidByZcodeSid: Map<string, string>;
 }
 type TestServer = FakeServer & Pick<ZcodeAcpServer, "notifyByZcodeSid">;
 
 function makeServer(): TestServer {
   const calls: TestServer["calls"] = [];
+  const echoes: TestServer["echoes"] = [];
+  const acpSidByZcodeSid = new Map<string, string>([["sess_test", "acp_test"]]);
   const server = {
     calls,
+    echoes,
     terminalSentData: new Map<string, string>(),
     notifyTurnActiveSince: new Map<string, number>(),
+    pendingTurns: new Map<number, { zcodeSid: string }>(),
+    acpSidByZcodeSid,
     // Mirrors ZcodeAcpServer.sessionPlanActive (out-of-turn mode transitions).
     sessionPlanActive: new Set<string>(),
-    // pushTaskTerminal reads the live client count (offline-push gate).
-    clients: { size: 0 },
+    // Mirrors ZcodeAcpServer.sessionMap + steer-echo exclusion (echoSteeredInputs).
+    sessionMap: new Map<string, string>([["acp_test", "sess_test"]]),
+    steerEchoExclusions: () => new Set<unknown>(),
+    // pushTaskTerminal reads the live client count (offline-push gate);
+    // notifyExceptRoots serves the steer-echo fan-out.
+    clients: {
+      size: 0,
+      broadcast: () => ({
+        notify: async (_method: string, params: unknown) => {
+          const p = params as { sessionId: string; update: Record<string, unknown> };
+          echoes.push({ sessionId: p.sessionId, update: p.update });
+        },
+      }),
+      notifyExceptRoots: async (
+        _exclude: Set<unknown>,
+        _method: string,
+        params: unknown,
+      ): Promise<void> => {
+        const p = params as { sessionId: string; update: Record<string, unknown> };
+        echoes.push({ sessionId: p.sessionId, update: p.update });
+      },
+    },
+    sessionAliases: (acpSid: string) => [acpSid],
     async notifyByZcodeSid(zcodeSid: string, update: Record<string, unknown>): Promise<boolean> {
       calls.push({ zcodeSid, update });
       return true;
@@ -315,16 +347,12 @@ describe("BackgroundTaskListener", () => {
     // terminal: its text must not append to the unfinished turn's message.
     const server = makeServer();
     const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
-    l.handleEvent(
-      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t1" }),
-    );
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t1" }));
     await Promise.resolve();
     l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task1 partial" }));
     await Promise.resolve();
     // No terminal for t1 — t2 replaces it directly.
-    l.handleEvent(
-      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t2" }),
-    );
+    l.handleEvent(zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "t2" }));
     await Promise.resolve();
     l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "task2 result" }));
     await Promise.resolve();
@@ -612,6 +640,48 @@ describe("BackgroundTaskListener: background Bash reuses launch card", () => {
     expect(meta.backgroundTask.cancelled).toBe(true);
     expect(meta.terminal_exit.exit_code).toBe(1);
     expect(server.terminalSentData.has("call_bash4")).toBe(false);
+  });
+});
+
+describe("BackgroundTaskListener: steer-drain echo (no-turn-loop window)", () => {
+  it("echoes a drained steer when no turn loop is live (zombie after cancel)", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+
+    l.handleEvent(
+      zcodeEvent("turn.steerDrained", {
+        pendingInputIds: ["pi1"],
+        targetTurnId: "t1",
+        injectedMessageIds: ["m1"],
+        drainedInputs: [{ pendingInputId: "pi1", messageId: "m1", text: "steered mid-zombie" }],
+      }),
+    );
+    await Promise.resolve();
+
+    expect(server.echoes).toHaveLength(1);
+    expect(server.echoes[0]!.sessionId).toBe("acp_test");
+    expect(server.echoes[0]!.update.sessionUpdate).toBe("user_message_chunk");
+    expect(server.echoes[0]!.update.content).toEqual({ type: "text", text: "steered mid-zombie" });
+    expect(server.echoes[0]!.update.messageId).toBe("steer_m1");
+  });
+
+  it("stays silent while a turn loop is live — the turn path owns the echo", async () => {
+    const server = makeServer();
+    server.pendingTurns.set(1, { zcodeSid: "sess_test" });
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+
+    l.handleEvent(
+      zcodeEvent("turn.steerDrained", {
+        pendingInputIds: ["pi1"],
+        targetTurnId: "t1",
+        injectedMessageIds: ["m1"],
+        drainedInputs: [{ pendingInputId: "pi1", messageId: "m1", text: "steered mid-turn" }],
+      }),
+    );
+    await Promise.resolve();
+
+    expect(server.echoes).toHaveLength(0);
+    expect(server.calls).toHaveLength(0);
   });
 });
 
