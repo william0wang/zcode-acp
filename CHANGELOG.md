@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.81.0](https://github.com/william0wang/zcode-acp/compare/v0.80.1...v0.81.0) (2026-11-02)
+
+
+### Features
+
+* restore mid-turn steering via the cross-adapter _session/steering extension over v4/command sendText ([#352](https://github.com/william0wang/zcode-acp/issues/352)) ([279c83b](https://github.com/william0wang/zcode-acp/commit/279c83b2911e9e31807c908d696d0a9fd5687b9a))
+
+
+### Bug Fixes
+
+* attribute background notification events by turnId so foreground replies are not duplicated ([#351](https://github.com/william0wang/zcode-acp/issues/351)) ([292c196](https://github.com/william0wang/zcode-acp/commit/292c196b5f7957e86f473316d682526ee8bbc8b5))
+* denylist the 0.17.1 CronPauseSelf automation tool and record the 3.17.1 source audit ([52aa7e1](https://github.com/william0wang/zcode-acp/commit/52aa7e16546434afb73ce8a0aa355b49cb435e04))
+* send the desktop deviceMid on the manifest request so gray-released builds are visible ([4c9a0a9](https://github.com/william0wang/zcode-acp/commit/4c9a0a91860e7de7dfe6a8a9d8e7c9733969e1ea))
+
 ## [0.80.1](https://github.com/william0wang/zcode-acp/compare/v0.80.0...v0.80.1) (2026-10-30)
 
 
