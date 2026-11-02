@@ -1252,6 +1252,13 @@ export class ZcodeAcpServer {
             "Reads the GLM API key from the ZCode desktop app's credential files (~/.zcode/v2) or a saved zcode-acp account. No editor-side credentials required.",
         },
       ],
+      // Cross-adapter steering extension (#352): `_session/steering` injects
+      // into the running turn via the v4 command API. Convention:
+      // InitializeResponse._meta.steering.supported (codex-acp /
+      // claude-agent-acp); `timings` is this bridge's additive declaration —
+      // `now` (guide into the live turn) and `next` (queue for the next
+      // boundary), carried by the request's _meta.steering.priority.
+      _meta: { steering: { supported: true, timings: ["now", "next"] } },
     };
   }
 }

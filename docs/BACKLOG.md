@@ -310,7 +310,7 @@ Notes per type (the ones with known bridge relevance):
 | `checkpoint.created` / `rewind.triggered`                                | Checkpoint + rewind lifecycle (rewinds initiated elsewhere are observable)                                                                                                                                                                                                                        |
 | `streamRecovery.updated`                                                 | Stream recovery progress — payload is an untyped `jsonObjectSchema` upstream; useful for the replay/gap-fill path                                                                                                                                                                                 |
 | `turn.started` payload extras (`index.ts:1168-1186`)                     | `executionKind:"agent"\|"controlOnly"` (controlOnly = no model turn — the bridge's own boot-resume ack could be classified by this instead of text-matching), `foregroundExecutionId` (feeds the precise v4 stop), `backgroundSource`, `intent`, `originMeta`                                     |
-| `turn.steerQueued` / `turn.steerDrained` payloads (`index.ts:1191-1229`) | Queue length, `commandKind`, `delivery`, `targetTurnId`, drained `injectedMessageIds` — enough to render a proper "queued behind running turn" ACP update. Steer is only reachable via v4 delivery semantics (see Gotchas) — a steer caused by ANOTHER client on the same backend is visible here |
+| `turn.steerQueued` / `turn.steerDrained` payloads (`index.ts:1191-1229`) | Queue length, `commandKind`, `delivery`, `targetTurnId`, drained `injectedMessageIds` — enough to render a proper "queued behind running turn" ACP update. Steer is REACHABLE again since `_session/steering` (#352, `v4/command` sendText) — but only the REQUEST path is wired; a steer caused by ANOTHER client on the same backend is still invisible until these events are translated |
 | `turn.completed` `resultType` + `cacheStats` (`index.ts:1230-1261`)      | `resultType: success\|cancelled\|error_max_turns\|error_max_budget\|error_during_execution\|error_max_tool_calls`; `cacheStats{totalMessages, cachedMessages, lastCacheHit, cacheReadTokens?}` — rich terminal lines + cache-health visibility                                                    |
 | `turn.failed` `turnPhase` (`index.ts:1262-1269`)                         | Failure phase string for better triage                                                                                                                                                                                                                                                            |
 | `model.streaming` kinds (`index.ts:987-1014`)                            | 13 kinds incl. `reasoning_*` deltas — relevant if thinking streams are ever surfaced directly                                                                                                                                                                                                     |
@@ -504,7 +504,9 @@ cache-read tokens`), non-success resultTypes surface verbatim as a
     allow-list env var) is a reasonable follow-up — same two sites,
     `session/send` rejects it. Regression tests: `tests/tool-denylist.test.ts`.
 11. **v4/command channel** as the single implementation surface for
-    rewind/edit/feedback/queue UX later. PENDING.
+    rewind/edit/feedback/queue UX later. The steer half landed (#352):
+    `_session/steering` → `sendText requestedDelivery guide|queue` (src/handlers/steering.ts).
+    PENDING: rewind/edit-turn/feedback/queue UX.
 
 ## Verification method
 

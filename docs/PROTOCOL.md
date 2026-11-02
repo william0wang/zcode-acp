@@ -781,6 +781,51 @@ steering moved to the v4 command/conversation API. The bridge's
 accordingly. Queued inputs still surface as `turn.steerQueued` /
 `turn.steerDrained` events (see above).
 
+### `_session/steering` — cross-adapter steering extension (#352)
+
+The successor, wired onto the v4 command API (`v4/command` `sendText` with
+`requestedDelivery:"guide" | "queue"`). The method name and reply shape follow
+the cross-adapter convention introduced by `@agentclientprotocol/codex-acp`
+and `@agentclientprotocol/claude-agent-acp`; the agent advertises it via
+`InitializeResponse._meta.steering` (`{ supported: true, timings: ["now",
+"next"] }` — `timings` is this bridge's additive field).
+
+**Request:**
+
+```json
+{
+  "id": 14,
+  "method": "_session/steering",
+  "params": {
+    "sessionId": "sess_abc123",
+    "prompt": [{ "type": "text", "text": "use the other approach" }],
+    "_meta": { "steering": { "priority": "now" } }
+  }
+}
+```
+
+- `prompt` — text blocks only (multi-block joins with newlines); the v4 steer
+  channel carries no attachments.
+- `_meta.steering.priority` — `"now"` (default) injects into the live turn
+  (guide); `"next"` queues the text for the next turn boundary.
+- `_meta.steering.idleBehavior` — only `"promptRequired"` is accepted; this
+  bridge never auto-starts a turn from a steering request.
+
+**Reply** — one outcome object:
+
+- `{ "outcome": "injected" }` — the text joined the running turn.
+- `{ "outcome": "queued" }` — delivered at the next boundary (explicit `next`,
+  or the backend demoted guide to queue because the turn kind cannot take
+  live injection).
+- `{ "outcome": "promptRequired", "reason": "noRunningTurn" }` — the session
+  is idle; the client should send a normal `session/prompt` instead.
+- `{ "outcome": "startedNewTurn" }` — the turn ended between the bridge's
+  liveness check and the backend's admission, and the steer text started a
+  new turn (race window, reported honestly).
+
+Steering a turn owned by another client (the desktop app) works — the liveness
+fallback reads the session projection when no bridge turn is registered.
+
 ### `session/setMode`
 
 Switch the session mode.

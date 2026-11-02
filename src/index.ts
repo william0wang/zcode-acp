@@ -40,6 +40,7 @@ import {
 } from "./handlers/extensions.js";
 import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadEarlier } from "./handlers/replay.js";
+import { steering } from "./handlers/steering.js";
 import { resendPendingInteractions } from "./handlers/server-requests.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
 import { loadSkillCommands } from "./config/skill-discovery.js";
@@ -289,6 +290,10 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
       .onRequest("session/set_mode", extParams, (ctx) =>
         setMode(server, ctx.params, server.clients.broadcast()),
       )
+      // Cross-adapter steering extension (codex-acp / claude-agent-acp
+      // convention, #352): inject text into the running turn via the v4
+      // command API — the successor to the v3 session/steer removed in 0.16+.
+      .onRequest("_session/steering", extParams, (ctx) => steering(server, ctx.params))
       .onNotification("session/cancel", (ctx) => cancel(server, ctx.params))
   );
 }
