@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.0](https://github.com/william0wang/zcode-acp/compare/v0.81.0...v0.82.0) (2026-11-02)
+
+
+### Features
+
+* align eviction recovery with the 0.17.1 session/lifecycle family ([aa9a74f](https://github.com/william0wang/zcode-acp/commit/aa9a74fc1748091bd25ec7245288d0c5f9078096))
+* mirror drained steer inputs as user_message_chunk updates ([751c589](https://github.com/william0wang/zcode-acp/commit/751c5897827fcd2f55fcb879fefa4b585df270fe))
+
 ## [0.81.0](https://github.com/william0wang/zcode-acp/compare/v0.80.1...v0.81.0) (2026-11-02)
 
 
