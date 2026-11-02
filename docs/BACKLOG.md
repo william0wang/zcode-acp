@@ -178,18 +178,38 @@ exactly the bridge's existing override-over-verdict rule (local
 moved toward the bridge; nothing to change.
 
 **3.17.1 audit (2026-11-02, commit `a60ba6a7` / source `73158b64` — one
-bridge fix)**: the desktop moved 3.16.3 → 3.17.1 and its `zcode.cjs`
+bridge fix + the lifecycle alignment)**: the desktop moved 3.16.3 → 3.17.1 and its `zcode.cjs`
 self-reports CLI `0.17.1` — the checkout's exact CLI (root `3.17.1`,
 `apps/zcode-cli` `0.17.1`), so for the first time since 3.16.2 the public
 tree IS the running backend with no unseen delta. Protocol schema diff
 `packages/shared/src/zcode-protocol/index.ts` +160/−11, additive from the
 bridge's seat: new `session/lifecycle/{changed,getState,ensureReady,stop,
-restart}` family (runtime-instance lifecycle, `SessionLifecycleController` —
-`session/lifecycle/changed` is a standalone JSON-RPC NOTIFICATION, not a
-`session/event`, and the bridge's read loop ignores it; `ensureReady`/
-`getState` are an alignment candidate for replacing the "Session is not
-active" eviction-recovery dance and feeding `backendLoadedSessions`
-staleness), `workspace/mcp/trust` + `workspaceTrust` on mcp status snapshots
+restart}` family (runtime-instance lifecycle, `SessionLifecycleController`;
+**alignment landed the same day** — the bridge consumes exactly getState +
+changed: `ensureBackendResident` (handlers/session.ts) probes getState when a
+backend-loaded stamp goes stale, `ready` refreshes the stamp and skips the
+blind full-resume reload, "Session not found: <sid>" throws the evicted error
+before any reload, everything else keeps the reload — whose resume carries
+mcpServers #193 + toolDenylist #340, which is why `ensureReady` must NOT
+replace it — and on a still-resident session that reload was always a config
+no-op anyway (upstream `activateSessionRuntime` early-returns the existing
+record without re-applying resume params); the standalone `changed`
+NOTIFICATION (full snapshot payload,
+not a session/event) is routed at `ZcodeBackend.onLifecycleChanged` into
+`applyLifecycleSnapshot` (server.ts) as INVALIDATION only — any non-`ready`
+transition (starting/stopping/unloaded/faulted) voids the stamps of ALL ACP
+aliases of the backend session, so resident-pool evictions surface immediately
+instead of at the 5-min TTL boundary, while `ready` deliberately never
+re-stamps (instance-ready ≠ projection-applied upstream, and a foreign
+activation — the v4 gateway's cold-resume behind renameSession, an automation
+wake — rebuilds the runtime without the bridge's per-load config; blessing it
+would let session/load skip its resume flight + settle and replay a possibly
+mid-hydration prefix — the replay-race hole); the
+availability verdict is pinned per generation (`server.backendLifecycleApi`,
+reset on respawn — pre-0.17.1 builds answer -32601 once and never again);
+`stop`/`restart` stay unused, the bridge's own close/reload semantics are
+already correct). Other additive surface: `workspace/mcp/trust` +
+`workspaceTrust` on mcp status snapshots
 (the bridge injects servers explicitly on create/resume = trusted, no
 impact), `automation/pause`, `turn.started` payload + `automationId`/
 `offPeakTaskId`/`offPeakRunType` (bridge ignores unknown payload fields),

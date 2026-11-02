@@ -75,6 +75,21 @@ export interface ZcodeListResult {
   sessions: ZcodeSessionListItem[];
 }
 
+/**
+ * Resident-runtime lifecycle of one session (app-server >= 0.17.1). The
+ * backend's SessionLifecycleController is the single writer; `ready` is the
+ * only state in which session-scoped RPCs are guaranteed admissible. Arrives
+ * as the `session/lifecycle/getState` result and as the payload of the
+ * standalone `session/lifecycle/changed` notification (not a session/event).
+ */
+export interface ZcodeLifecycleSnapshot {
+  sessionId: string;
+  state: "unloaded" | "starting" | "ready" | "stopping" | "faulted";
+  generation?: number;
+  revision?: number;
+  lastError?: { operation: string; code: string; message: string } | null;
+}
+
 // ---------- event stream ----------
 
 export type ZcodeEventType =

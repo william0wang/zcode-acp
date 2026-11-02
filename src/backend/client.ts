@@ -14,7 +14,7 @@
 import { log } from "../utils.js";
 import { backendCapabilities, type BackendCapabilities, type ServerRequest } from "./adapter.js";
 import { JsonRpcChild } from "./jsonrpc-child.js";
-import type { ZcodeEvent } from "./types.js";
+import type { ZcodeEvent, ZcodeLifecycleSnapshot } from "./types.js";
 
 // The generic wire vocabulary (ServerRequest, EventListener) lives in
 // adapter.ts now; re-exported here so existing `backend/client.js` import
@@ -46,6 +46,14 @@ export class ZcodeBackend extends JsonRpcChild {
    * can report real failure instead of assuming success from the RPC ack.
    */
   onCompactOutcome?: (sessionId: string, reason: string) => void;
+  /**
+   * Push hook for `session/lifecycle/changed` (app-server >= 0.17.1): a
+   * standalone notification carrying the full resident-runtime snapshot. Wired
+   * by ZcodeAcpServer.ensureBackend into the backend-loaded stamps — a
+   * resident eviction becomes visible the moment it happens instead of at the
+   * next TTL boundary.
+   */
+  onLifecycleChanged?: (snapshot: ZcodeLifecycleSnapshot) => void;
 
   constructor(argv: string[], env: NodeJS.ProcessEnv) {
     super({
@@ -79,6 +87,15 @@ export class ZcodeBackend extends JsonRpcChild {
         payload: params,
       };
       this.dispatchEvent(ev);
+      return;
+    }
+    if (method === "session/lifecycle/changed") {
+      // Params ARE the snapshot; validate the identity fields before
+      // forwarding so a malformed push cannot poison the stamp bookkeeping.
+      const snap = params as unknown as ZcodeLifecycleSnapshot;
+      if (typeof snap.sessionId === "string" && typeof snap.state === "string") {
+        this.onLifecycleChanged?.(snap);
+      }
       return;
     }
     if (method === "interaction/providerRuntimeHeadersCancelled") {

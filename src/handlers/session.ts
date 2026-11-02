@@ -691,6 +691,13 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
  * not active". Skipped while a turn is in flight (a running turn proves the
  * resident is live).
  *
+ * On backends that speak `session/lifecycle/getState` (>= 0.17.1) the stale
+ * stamp is first settled by that authoritative probe: `ready` merely refreshes
+ * the stamp (subscribers/interactions keep residents alive well past the TTL —
+ * the full resume reload used to run blindly here), and a not-found answer
+ * fails with the evicted error before any reload. Every other outcome keeps
+ * the reload path below.
+ *
  * Fail-safe on ordinary reload failures (the caller surfaces the backend's
  * own error downstream, as before) — but a session the backend no longer
  * STORES throws the actionable evicted-session error: continuing with the
@@ -707,6 +714,16 @@ async function ensureBackendResident(
   if (server.isBackendSessionLive(acpSid)) return;
   const turnInFlight = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
   if (turnInFlight) return;
+  const residency = await probeLifecycleResidency(server, zcodeSid);
+  if (residency === "ready") {
+    log(`ensureRealSession: ${acpSid} still resident per lifecycle getState — stamp refreshed`);
+    server.markBackendLoaded(acpSid);
+    return;
+  }
+  if (residency === "gone") {
+    warn(`ensureRealSession: ${acpSid} → backend session ${zcodeSid} no longer exists`);
+    throw new Error(messages().sessionEvicted(acpSid));
+  }
   try {
     log(`ensureRealSession: ${acpSid} possibly evicted from backend — reloading`);
     await reloadBackendSession(server, acpSid, zcodeSid);
@@ -720,6 +737,61 @@ async function ensureBackendResident(
         `(${e instanceof Error ? e.message : String(e)})`,
     );
   }
+}
+
+/** Timeout for the `session/lifecycle/getState` residency probe. */
+const LIFECYCLE_PROBE_TIMEOUT_MS = 5000;
+
+/**
+ * Ask the backend whether the session's resident runtime is live, via
+ * `session/lifecycle/getState` (app-server >= 0.17.1).
+ *
+ * - "ready" — provably resident; the caller refreshes the stamp and skips the
+ *   resume reload entirely.
+ * - "gone" — the backend no longer STORES the session (the controller's own
+ *   "Session not found: <sid>", which isSessionGoneError already matches); no
+ *   reload can fix that.
+ * - "unknown" — everything else: method unsupported on this build (verdict
+ *   pinned per backend generation via `server.backendLifecycleApi`, mirroring
+ *   toolDenylistRejected), a transient RPC failure, or a non-ready state
+ *   (unloaded/starting/stopping/faulted) where the safe move is the existing
+ *   reload — its session/resume carries mcpServers (#193) and toolDenylist
+ *   (#340), which the lifecycle family's ensureReady does NOT, so ensureReady
+ *   must not replace the reload.
+ */
+async function probeLifecycleResidency(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+): Promise<"ready" | "gone" | "unknown"> {
+  if (server.backendLifecycleApi === false) return "unknown";
+  let backend: ZcodeBackend;
+  try {
+    backend = await server.ensureBackend();
+  } catch {
+    return "unknown"; // spawn failure — the reload path surfaces it properly
+  }
+  // ensureBackend may have respawned (and reset the verdict to null) while we
+  // waited — the cast re-reads the field without the pre-await narrowing.
+  if ((server.backendLifecycleApi as boolean | null) === false) return "unknown";
+  const resp = await backend.request(
+    server.nextId(),
+    "session/lifecycle/getState",
+    { sessionId: zcodeSid },
+    LIFECYCLE_PROBE_TIMEOUT_MS,
+  );
+  if (resp.error) {
+    const message = resp.error.message ?? "";
+    if (resp.error.code === -32601 || /method not found/i.test(message)) {
+      server.backendLifecycleApi = false;
+      log("lifecycle getState unsupported on this backend build — keeping the TTL reload path");
+      return "unknown";
+    }
+    if (isSessionGoneError(message)) return "gone";
+    return "unknown";
+  }
+  server.backendLifecycleApi = true;
+  const state = (resp.result as { state?: unknown } | undefined)?.state;
+  return state === "ready" ? "ready" : "unknown";
 }
 
 /**

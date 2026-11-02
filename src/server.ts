@@ -15,6 +15,7 @@ import {
   loadZcodeCredentials,
   mergeEnvWithCreds,
   resolveZcodeCommand,
+  type ZcodeLifecycleSnapshot,
   zcodeDataBaseDirEnv,
   ZcodeBackend,
 } from "./backend/index.js";
@@ -308,6 +309,13 @@ export class ZcodeAcpServer {
    * Reset at every spawn.
    */
   toolDenylistRejected = false;
+  /**
+   * `session/lifecycle/getState` availability on the CURRENT backend build:
+   * null = not yet probed, true/false = the pinned verdict (app-server <
+   * 0.17.1 answers method-not-found). Pinned per backend generation like
+   * toolDenylistRejected — a respawned process may be an older build.
+   */
+  backendLifecycleApi: boolean | null = null;
   /**
    * The full slash-command list (set once by buildAgentApp in index.ts).
    * Read by the gate-aware menu catch-up (resendMenuAfterGateSettled in
@@ -797,6 +805,14 @@ export class ZcodeAcpServer {
     backend.onCompactOutcome = (sid, reason) => {
       this.compactOutcomes.set(sid, { reason, at: Date.now() });
     };
+    // Feed `session/lifecycle/changed` pushes (>= 0.17.1) into the
+    // backend-loaded stamps: a resident teardown (idle TTL / LRU eviction,
+    // close) voids the stamps the moment it happens instead of at the next
+    // BACKEND_RESIDENT_TTL_MS boundary. `ready` transitions deliberately do
+    // NOT re-stamp — see applyLifecycleSnapshot.
+    backend.onLifecycleChanged = (snap) => {
+      this.applyLifecycleSnapshot(snap);
+    };
     return backend;
   }
 
@@ -872,6 +888,9 @@ export class ZcodeAcpServer {
     this.observedSendBusyReject = false;
     // …and the toolDenylist schema verdict: the respawned build may accept it.
     this.toolDenylistRejected = false;
+    // …and the session/lifecycle/getState verdict: the respawned build may
+    // predate the family (0.17.1).
+    this.backendLifecycleApi = null;
     // …and the backend-loaded stamps: they vouch for residents of a process
     // that no longer exists. A surviving stamp kept isBackendSessionLive true
     // across a respawn, so session/load skipped the resume RPC and read a
@@ -905,6 +924,35 @@ export class ZcodeAcpServer {
   isBackendSessionLive(acpSid: string): boolean {
     const at = this.backendLoadedSessions.get(acpSid);
     return at !== undefined && Date.now() - at < BACKEND_RESIDENT_TTL_MS;
+  }
+
+  /**
+   * Apply a `session/lifecycle/changed` snapshot (>= 0.17.1) to the
+   * backend-loaded stamps: a teardown transition (starting is the tail of a
+   * teardown-driven re-activation, stopping/unloaded/faulted are the teardown
+   * itself) voids every ACP alias of the backend session so the next use
+   * re-resumes instead of trusting a stamp that predates the transition.
+   *
+   * `ready` deliberately does NOT re-stamp. Instance-ready and
+   * projection-applied are two separate completion conditions upstream, and a
+   * foreign activation (the v4 gateway's cold-resume, an automation wake)
+   * rebuilds the runtime WITHOUT the bridge's per-load mcpServers (#193) and
+   * toolDenylist (#340) — blessing it here would make session/load skip its
+   * resume flight + settle and replay from a possibly mid-hydration
+   * projection. The getState probe in ensureBackendResident is the only
+   * ready-verifier: it fires on non-replay paths alone. Backend sessions
+   * without an ACP mapping (other clients' sessions) are ignored.
+   */
+  applyLifecycleSnapshot(snap: ZcodeLifecycleSnapshot): void {
+    if (snap.state === "ready") return;
+    let touched = false;
+    for (const [acpSid, zcodeSid] of this.sessionMap) {
+      if (zcodeSid !== snap.sessionId) continue;
+      if (this.backendLoadedSessions.delete(acpSid)) touched = true;
+    }
+    if (touched) {
+      log(`lifecycle: ${snap.sessionId} → ${snap.state} — backend-loaded stamps voided`);
+    }
   }
 
   /** Update a session's discovery summary (title sticky once set). */

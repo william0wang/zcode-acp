@@ -36,6 +36,7 @@ export type {
   ZcodeCreateResult,
   ZcodeSessionListItem,
   ZcodeListResult,
+  ZcodeLifecycleSnapshot,
   ZcodeEvent,
   ZcodeEventType,
   ZcodeSubscribeResult,

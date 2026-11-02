@@ -528,7 +528,43 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   ("Unrecognized key") — the resume overlay fallback is legacy-build-only, a
   not-found resume never retries the overlay, and a schema-rejected overlay
   rethrows the ORIGINAL failure (the old code masked "Session not found"
-  behind "Unrecognized key: runtimeModel").
+  behind "Unrecognized key: runtimeModel"). **On >= 0.17.1 backends the stale
+  stamp is settled by an authoritative probe first** (2026-11-02): the
+  backend's `SessionLifecycleController` exposes `session/lifecycle/getState`
+  (strict `{sessionId}`, side-effect-free, snapshot `{sessionId, state,
+  generation, revision, lastError}` with states unloaded/starting/ready/
+  stopping/faulted; a session it no longer STORES answers "Session not found:
+  <sid>" — `isSessionGoneError` matches it as-is). `ensureBackendResident`
+  probes before reloading: `ready` merely refreshes the stamp (subscribers /
+  interactions / queued commands keep residents alive well past the bridge's
+  5-min TTL — the blind full-resume reload ran pointlessly on every stale
+  stamp), `gone` throws the evicted error before any reload, everything else
+  keeps the reload. The availability verdict is pinned per backend generation
+  (`server.backendLifecycleApi`, reset on respawn, mirrors
+  `toolDenylistRejected`) — pre-0.17.1 builds answer -32601 and pay the probe
+  exactly once. The standalone `session/lifecycle/changed` NOTIFICATION (full
+  snapshot payload, NOT a session/event) feeds `applyLifecycleSnapshot`
+  (wired via `ZcodeBackend.onLifecycleChanged`) as INVALIDATION only: every
+  non-`ready` transition (starting/stopping/unloaded/faulted) voids the
+  stamps of ALL ACP aliases mapping to that backend session — a
+  resident-pool eviction surfaces immediately instead of at the next
+  BACKEND_RESIDENT_TTL_MS boundary. `ready` deliberately does NOT re-stamp:
+  instance-ready and projection-applied are two separate completion
+  conditions upstream (session-runtime-lifecycle.md), and a foreign
+  activation (the v4 gateway's cold-resume behind renameSession, an
+  automation wake) rebuilds the runtime WITHOUT the bridge's per-load
+  mcpServers/toolDenylist — blessing it would let session/load skip its
+  resume flight + settle and replay from a possibly mid-hydration projection
+  (the replay-race hole). The getState probe is the ONLY ready-verifier, and
+  it fires on non-replay paths alone. Related wire fact: `session/resume` on
+  an already-resident session is a no-op for config — upstream
+  `activateSessionRuntime` early-returns the existing record without
+  re-applying resume params — so the pre-0.17.1 blind reload never re-sent
+  mcpServers to a still-resident session either. Do NOT replace the reload's
+  `session/resume` with `session/lifecycle/ensureReady`: the resume carries
+  mcpServers (#193) and toolDenylist (#340), which ensureReady has no field
+  for. `stop`/`restart` stay unused (bridge-side close/reload semantics are
+  already correct).
 - **AGENTS.md is workspace-scoped**: the global `~/.zcode/AGENTS.md` also exists;
   this file takes precedence for this repo.
 - **WS proxy frame type**: the SDK's WS server drops non-text frames, and
