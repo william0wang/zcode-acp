@@ -36,7 +36,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { Stats } from "node:fs";
 
-import { log, warn } from "../utils.js";
+import { log, warn, zcodeHomeDir } from "../utils.js";
 import { UpstreamError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
@@ -356,6 +356,35 @@ export function pickReleaseFile(manifest: ReleaseManifest): ReleaseFile | null {
 }
 
 /**
+ * The device identity the manifest request names — the same one the official
+ * desktop app's updater sends, read from the state file that app owns
+ * (`<zcode-home>/v2/telemetry-state.json`, field `deviceMid`; the desktop
+ * creates it before its first window, so it exists wherever the app does).
+ *
+ * The release service grays new stable builds out per device: a request
+ * without a device id only sees fully-released versions, which is how the
+ * app could offer a build this check called "no update" for.
+ *
+ * Read-only on purpose: the id's lifecycle belongs to the desktop app, and a
+ * second, self-made identity would split this machine's gray-release cohort.
+ * A missing, malformed, or non-printable value sends no id at all (the same
+ * tolerance the CLI's device-mid reader applies).
+ */
+const DEVICE_MID_PATTERN = /^[\x20-\x7e]+$/u;
+
+async function readDeviceMid(): Promise<string | undefined> {
+  try {
+    const stateFile = path.join(zcodeHomeDir(), "v2", "telemetry-state.json");
+    const parsed = JSON.parse(await readFile(stateFile, "utf8")) as { deviceMid?: unknown };
+    if (typeof parsed.deviceMid !== "string") return undefined;
+    const deviceMid = parsed.deviceMid.trim();
+    return deviceMid && DEVICE_MID_PATTERN.test(deviceMid) ? deviceMid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fetch and parse the release manifest.
  *
  * `fetchImpl` defaults to the module seam (not bare `fetch`) so a test that
@@ -367,14 +396,17 @@ export async function fetchReleaseManifest(
   fetchImpl: typeof fetch = manifestNetwork,
 ): Promise<ReleaseManifest> {
   const platform = releasePlatform(process.platform, process.arch);
+  const deviceMid = await readDeviceMid();
   const url = new URL(MANIFEST_PATH, apiOrigin(env));
   url.searchParams.set("platform", platform);
   url.searchParams.set("channel", String(CHANNEL_VALUES[channel]));
+  if (deviceMid) url.searchParams.set("device_mid", deviceMid);
   const res = await fetchImpl(url.toString(), {
     headers: {
       Accept: MANIFEST_ACCEPT,
       "X-Platform": platform,
       "X-Release-Channel": String(CHANNEL_VALUES[channel]),
+      ...(deviceMid ? { "X-Device-Mid": deviceMid } : {}),
     },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });

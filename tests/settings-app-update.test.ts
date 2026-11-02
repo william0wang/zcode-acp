@@ -35,6 +35,7 @@ import {
   appUpdateState,
   checkForAppUpdate,
   downloadRelease,
+  fetchReleaseManifest,
   installedAppVersion,
   isNewerVersion,
   parseManifest,
@@ -316,6 +317,72 @@ describe("checkForAppUpdate", () => {
     } finally {
       setManifestNetworkForTest(fetch);
     }
+  });
+});
+
+describe("device id on the manifest request", () => {
+  /**
+   * Point ZCODE_HOME at a temp root and optionally seed the telemetry state
+   * the desktop app owns. `undefined` leaves the file absent.
+   */
+  async function telemetryHome(deviceMid?: unknown): Promise<string> {
+    const home = await mkdtemp(path.join(tmpdir(), "app-update-mid-"));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    vi.stubEnv("ZCODE_HOME", home);
+    if (deviceMid !== undefined) {
+      await mkdir(path.join(home, "v2"), { recursive: true });
+      await writeFile(
+        path.join(home, "v2", "telemetry-state.json"),
+        JSON.stringify({ deviceMid }),
+        "utf8",
+      );
+    }
+    return home;
+  }
+
+  /** A manifest fetch recording the URL and headers it was asked for. */
+  function recordingFetch(): {
+    fetchImpl: typeof fetch;
+    seen: Array<{ url: string; headers: Record<string, string> }>;
+  } {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      seen.push({ url: String(input), headers });
+      return new Response(MANIFEST_YAML, { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetchImpl, seen };
+  }
+
+  it("sends the desktop app's deviceMid as both the query param and the header", async () => {
+    await telemetryHome("b9d0c524-44a3-4ca7-95e7-44effc375be4");
+    const { fetchImpl, seen } = recordingFetch();
+    await fetchReleaseManifest("stable", process.env, fetchImpl);
+    expect(seen[0]!.url).toContain("device_mid=b9d0c524-44a3-4ca7-95e7-44effc375be4");
+    expect(seen[0]!.headers["X-Device-Mid"]).toBe("b9d0c524-44a3-4ca7-95e7-44effc375be4");
+  });
+
+  it("sends no device id when the desktop app has not created one, and invents nothing", async () => {
+    const home = await telemetryHome();
+    const { fetchImpl, seen } = recordingFetch();
+    await fetchReleaseManifest("stable", process.env, fetchImpl);
+    expect(seen[0]!.url).not.toContain("device_mid");
+    expect(seen[0]!.headers["X-Device-Mid"]).toBeUndefined();
+    // Read-only by design: a missing identity must not be created on disk.
+    await expect(stat(path.join(home, "v2", "telemetry-state.json"))).rejects.toThrow();
+  });
+
+  it.each([
+    ["an empty string", ""],
+    ["only whitespace", "   "],
+    ["non-printable bytes", "mid\u0000x"],
+    ["a non-string field", 42],
+  ])("drops a malformed deviceMid (%s)", async (_label: string, deviceMid: unknown) => {
+    await telemetryHome(deviceMid);
+    const { fetchImpl, seen } = recordingFetch();
+    await fetchReleaseManifest("stable", process.env, fetchImpl);
+    expect(seen[0]!.url).not.toContain("device_mid");
+    expect(seen[0]!.headers["X-Device-Mid"]).toBeUndefined();
   });
 });
 
