@@ -12,7 +12,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ServerRequest, ZcodeBackend } from "../src/backend/client.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
@@ -30,9 +30,19 @@ vi.mock("../src/config/account-provider.js", async (importOriginal) => {
     codingPlanRequestAuthFor: vi.fn((providerId: string | undefined): { apiKey: string } | null =>
       providerId === "account:bigmodel-individual-coding-plan" ? { apiKey: "test-key" } : null,
     ),
+    oauthProjectTokenFamilyFor: vi.fn((providerId: string | undefined) =>
+      providerId === "account:zai-individual-coding-plan" ? "zai" : null,
+    ),
   };
 });
 
+const { resolveOAuthProjectToken } = vi.hoisted(() => ({ resolveOAuthProjectToken: vi.fn() }));
+vi.mock("../src/config/project-token.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/config/project-token.js")>();
+  return { ...actual, resolveOAuthProjectToken };
+});
+
+import { ProjectTokenError } from "../src/config/project-token.js";
 import {
   answerProviderRuntimeHeaders,
   handleServerRequests,
@@ -168,5 +178,65 @@ describe("answerProviderRuntimeHeaders (arrival-time responder)", () => {
     const [id, result] = vi.mocked(backend.sendReply).mock.calls[0]!;
     expect(id).toBe("zid-1");
     expect((result as { headersApplied?: boolean }).headersApplied).toBe(false);
+  });
+});
+
+describe("answerProviderRuntimeHeaders — OAuth-derived project token (3.15+ layout)", () => {
+  beforeEach(() => resolveOAuthProjectToken.mockReset());
+
+  const params = {
+    providerId: "account:zai-individual-coding-plan",
+    rejectedProjectTokenFingerprint: "a".repeat(64),
+    expectedAccountScope: "b".repeat(64),
+  };
+
+  it("answers with the traded project token once the exchange settles", async () => {
+    resolveOAuthProjectToken.mockResolvedValueOnce({
+      token: "project-token",
+      apiKeyId: "key-id",
+      accountScope: "b".repeat(64),
+    });
+    const backend = makeBackend([]);
+    expect(
+      answerProviderRuntimeHeaders(
+        backend,
+        91,
+        "interaction/requestProviderRuntimeHeaders",
+        params,
+      ),
+    ).toBe(true);
+    await vi.waitFor(() => expect(backend.sendReply).toHaveBeenCalledTimes(1));
+    expect(resolveOAuthProjectToken).toHaveBeenCalledWith("zai", {
+      rejectedFingerprint: "a".repeat(64),
+      expectedAccountScope: "b".repeat(64),
+    });
+    // accountScope is what enables the backend's 401 → refresh → retry recovery.
+    expect(backend.sendReply).toHaveBeenCalledWith(91, {
+      headersApplied: true,
+      requestAuth: { apiKey: "project-token", apiKeyId: "key-id", accountScope: "b".repeat(64) },
+    });
+  });
+
+  it("declines with the fixed failure code when the exchange fails", async () => {
+    resolveOAuthProjectToken.mockRejectedValueOnce(
+      new ProjectTokenError("project_token_key_missing"),
+    );
+    const backend = makeBackend([]);
+    answerProviderRuntimeHeaders(backend, 92, "interaction/requestProviderRuntimeHeaders", params);
+    await vi.waitFor(() => expect(backend.sendReply).toHaveBeenCalledTimes(1));
+    const [id, result] = vi.mocked(backend.sendReply).mock.calls[0]!;
+    expect(id).toBe(92);
+    expect((result as { headersApplied?: boolean }).headersApplied).toBe(false);
+    expect((result as { errorMessage?: string }).errorMessage).toContain(
+      "project_token_key_missing",
+    );
+  });
+
+  it("keeps a static key ahead of the OAuth exchange", () => {
+    const backend = makeBackend([]);
+    answerProviderRuntimeHeaders(backend, 93, "interaction/requestProviderRuntimeHeaders", {
+      providerId: "account:bigmodel-individual-coding-plan",
+    });
+    expect(resolveOAuthProjectToken).not.toHaveBeenCalled();
   });
 });

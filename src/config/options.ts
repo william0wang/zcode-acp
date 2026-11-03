@@ -27,7 +27,7 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor } from "./account-provider.js";
+import { configProviderIdFor, entitledCodingPlanModels } from "./account-provider.js";
 import { readCredentialConfig } from "./bridge-accounts.js";
 import { initialSessionMode } from "./settings.js";
 
@@ -292,13 +292,7 @@ export function loadAllModels(): ModelRef[] {
     // re-advertise exactly the unusable provider — or one absent from the
     // user's config — and switching to it fails in applyModelSwitch.
     if (out.length === 0 && Object.keys(cfg.provider ?? {}).length === 0) {
-      return [
-        {
-          providerId: DEFAULT_PROVIDER_ID,
-          providerName: DEFAULT_PROVIDER_NAME,
-          modelId: DEFAULT_MODEL_ID,
-        },
-      ];
+      return entitledOrDefaultModels(pinned);
     }
     return out;
   } catch {
@@ -307,14 +301,25 @@ export function loadAllModels(): ModelRef[] {
     const out: ModelRef[] = [];
     if (personal) appendPersonalOnlyProviders(out, personal, process.env.ZCODE_PROVIDER);
     if (out.length > 0) return out;
-    return [
-      {
-        providerId: DEFAULT_PROVIDER_ID,
-        providerName: DEFAULT_PROVIDER_NAME,
-        modelId: DEFAULT_MODEL_ID,
-      },
-    ];
+    return entitledOrDefaultModels(process.env.ZCODE_PROVIDER);
   }
+}
+
+/**
+ * No usable config.json provider: advertise the coding plans the account
+ * ladder entitles (a 3.15+ desktop-only layout), and only then the
+ * fresh-install default.
+ */
+function entitledOrDefaultModels(pinned: string | undefined): ModelRef[] {
+  const entitled = entitledCodingPlanModels().filter((m) => !pinned || m.providerId === pinned);
+  if (entitled.length > 0) return entitled;
+  return [
+    {
+      providerId: DEFAULT_PROVIDER_ID,
+      providerName: DEFAULT_PROVIDER_NAME,
+      modelId: DEFAULT_MODEL_ID,
+    },
+  ];
 }
 
 /** Look up a provider entry by id (any provider, not just enabled).

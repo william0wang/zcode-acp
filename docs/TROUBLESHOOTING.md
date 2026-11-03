@@ -118,6 +118,24 @@ lands in `~/.zcode/v2/provider_config.json` as a
 request-key source. Start-plan providers stay
 declined (Aliyun captcha — desktop app only, issue #123).
 
+**Desktop 3.15+ after an OAuth sign-in:** the store holds no plan key at all,
+only the sign-in (`oauth:<family>:access_token`), and `setting.json` records the
+plan as `providerFamilyConnectionSelections` (`{"zai":{"kind":"individual-coding-plan"}}`).
+The bridge then entitles that family's individual plan and, like the desktop
+host, trades the sign-in for a short-lived project access token before each
+request (`config/project-token.ts`, in memory only). A failure is reported as a
+fixed `project_token_*` code in the turn error:
+
+| Code                                                                                            | Fix                                                                                                           |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `project_token_key_missing`                                                                     | Open the ZCode desktop app once; it provisions the account's `zcode-api-key` (the bridge never creates keys). |
+| `project_token_login_required`, `project_token_scope_invalidated`, `project_token_http_401/403` | Sign in again in the ZCode desktop app.                                                                       |
+| `project_token_disabled`, `project_token_project_unavailable`                                   | Check in the ZCode desktop app that the account's Coding Plan is active.                                      |
+| `project_token_timeout`, `project_token_network_error`, `project_token_http_5xx`                | Network path to the Coding Plan API (`api.z.ai` / `bigmodel.cn`); retry.                                      |
+
+`zcode-acp setup` still works as an explicit override: a saved key always wins
+over the OAuth exchange.
+
 ### Authentication / credential errors (401, provider auth failed)
 
 **Symptom:** turns fail with authentication errors (e.g. `401`, `provider auth failed`, `invalid api key`), or `~/.zcode/v2/config.json` is missing.
@@ -299,7 +317,7 @@ Transient errors are identified by the nested `error.cause.code`
 **One-shot gateway failures are retried even when marked non-retryable.**
 The upstream classifier tags provider 4xx/unknown answers
 (`invalid_model_request`, `model_request_failed`, `provider_not_configured`)
-with `retryable: false` — a verdict about the *request shape*, not the
+with `retryable: false` — a verdict about the _request shape_, not the
 gateway's health. Relay gateways break that assumption: a forwarding blip
 surfaces as a one-shot 400 on a request the same session accepts moments
 later (observed 2026-10-28 with an OpenAI-compatible relay intermittently

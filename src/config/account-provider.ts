@@ -34,6 +34,7 @@ import type { ZcodeBackend } from "../backend/client.js";
 import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js";
 import { log, warn, zcodePersonalProviderPath, ZCODE_CREDS_PATH } from "../utils.js";
 import { bridgeOverlays, readCredentialConfig } from "./bridge-accounts.js";
+import { type CodingPlanFamily, hasOAuthLogin, isCodingPlanFamily } from "./project-token.js";
 
 /** The bundled provider-table file the CLI boots from. */
 const PROVIDER_CONFIG_NAME = "zcode-builtin.json";
@@ -222,7 +223,10 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  *      so it only speaks when no verdict-bearing source said anything at all,
  *      and only for individual plans (see storeIndividualCodingPlanKey).
  *   4. `setting.json` — last resort: the Settings UI's remembered pick per
- *      family. A SELECTION record, not an entitlement.
+ *      family. A SELECTION record, not an entitlement. 3.15+ spells it
+ *      `providerFamilyConnectionSelections`; that form counts only for an
+ *      individual coding plan backed by an OAuth sign-in in the store, whose
+ *      request auth project-token.ts mints on demand.
  *
  * Bridge accounts (`acp-accounts.json`, written by `zcode-acp setup`) sit
  * above the whole ladder: an explicit user key entitles its family's
@@ -395,15 +399,95 @@ function desktopEntitledBuiltinProviders(): Set<string> {
   try {
     const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
       modelProviderFamilySelectedKeys?: Record<string, string>;
+      providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
     };
     for (const selected of Object.values(setting.modelProviderFamilySelectedKeys ?? {})) {
       const m = /(builtin:[a-z0-9-]+)/.exec(selected);
       if (m) out.add(m[1]!);
     }
+    // 3.15+ renamed the record to `providerFamilyConnectionSelections`
+    // (`{zai: {kind: "individual-coding-plan"}}`) and stopped writing every
+    // source above. Its selection only counts for an individual coding plan
+    // the desktop is signed in to via OAuth: that is the one plan the bridge
+    // can serve headless (project-token.ts) — start-plan needs the captcha
+    // session (#123) and team keys are not entitlement evidence.
+    for (const [family, selection] of Object.entries(
+      setting.providerFamilyConnectionSelections ?? {},
+    )) {
+      if (selection?.kind !== "individual-coding-plan") continue;
+      if (!isCodingPlanFamily(family) || !hasOAuthLogin(family)) continue;
+      out.add(`builtin:${family}-coding-plan`);
+    }
   } catch {
     // setting.json absent (headless-only) — nothing to infer
   }
   return out;
+}
+
+/**
+ * Dropdown entries for the entitled individual coding plans, straight from the
+ * bundled table: the models a desktop-only layout with no config.json (3.15+
+ * after an OAuth sign-in) can actually run. Without them the dropdown fell
+ * back to the fresh-install BigModel default, which an account entitled to
+ * another family cannot use ("Select a model before continuing").
+ */
+export function entitledCodingPlanModels(): Array<{
+  providerId: string;
+  providerName: string;
+  modelId: string;
+}> {
+  const rules =
+    readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.filter(
+      (r) =>
+        r.config?.access?.type === "zhipu-account" &&
+        r.config.access.mode === "individual-coding-plan",
+    ) ?? [];
+  if (rules.length === 0) return [];
+  const entitled = entitledBuiltinProviders();
+  const out: Array<{ providerId: string; providerName: string; modelId: string }> = [];
+  for (const rule of rules) {
+    const providerId = configProviderIdFor(rule.providerId);
+    if (!entitled.has(providerId)) continue;
+    for (const modelId of rule.config?.builtinModelIds ?? []) {
+      out.push({ providerId, providerName: rule.providerName ?? providerId, modelId });
+    }
+  }
+  return out;
+}
+
+/**
+ * The family whose OAuth sign-in can mint request auth for `accountProviderId`
+ * (an entitled individual coding plan with no static key anywhere), or null.
+ * Checked only after `codingPlanRequestAuthFor` found no key, so a bridge
+ * account, config.json, a manual key or a stored plan key always wins.
+ */
+export function oauthProjectTokenFamilyFor(
+  accountProviderId: string | undefined,
+): CodingPlanFamily | null {
+  const legacyId = entitledIndividualPlanLegacyId(accountProviderId);
+  const family = legacyId ? /^builtin:([a-z0-9]+)-coding-plan$/u.exec(legacyId)?.[1] : undefined;
+  if (!family || !isCodingPlanFamily(family) || !hasOAuthLogin(family)) return null;
+  return family;
+}
+
+/**
+ * The legacy `builtin:<family>-coding-plan` id of `accountProviderId` when it
+ * is an INDIVIDUAL coding plan the account ladder entitles, else null — the
+ * shared gate of every request-auth source (static keys and the OAuth
+ * project-token exchange alike).
+ */
+function entitledIndividualPlanLegacyId(accountProviderId: string | undefined): string | null {
+  if (!accountProviderId?.startsWith("account:")) return null;
+  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+    (r) => r.providerId === accountProviderId,
+  );
+  const individual =
+    rule?.config?.access?.mode === "individual-coding-plan" ||
+    (!rule && accountProviderId.endsWith("-individual-coding-plan"));
+  if (!individual) return null;
+  const legacyId = configProviderIdFor(accountProviderId);
+  if (legacyId === accountProviderId) return null;
+  return entitledBuiltinProviders().has(legacyId) ? legacyId : null;
 }
 
 /**
@@ -424,17 +508,8 @@ function desktopEntitledBuiltinProviders(): Set<string> {
 export function codingPlanRequestAuthFor(
   accountProviderId: string | undefined,
 ): { apiKey: string } | null {
-  if (!accountProviderId?.startsWith("account:")) return null;
-  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
-    (r) => r.providerId === accountProviderId,
-  );
-  const individual =
-    rule?.config?.access?.mode === "individual-coding-plan" ||
-    (!rule && accountProviderId.endsWith("-individual-coding-plan"));
-  if (!individual) return null;
-  const legacyId = configProviderIdFor(accountProviderId);
-  if (legacyId === accountProviderId) return null;
-  if (!entitledBuiltinProviders().has(legacyId)) return null;
+  const legacyId = entitledIndividualPlanLegacyId(accountProviderId);
+  if (!legacyId || !accountProviderId) return null;
   // A bridge account's key, then config.json (the pre-3.12 builtin: provider's
   // own spelling), merged by readCredentialConfig. A fresh desktop-only layout
   // has neither, so the stored plan key answers.
