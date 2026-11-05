@@ -61,6 +61,8 @@ import {
   buildAccountProviderConfig,
   codingPlanRequestAuthFor,
   configProviderIdFor,
+  entitledCodingPlanModels,
+  oauthProjectTokenFamilyFor,
   readBuiltinTable,
   zcodeCredentialsPresent,
 } from "../src/config/account-provider.js";
@@ -571,5 +573,72 @@ describe("authenticate (#344)", () => {
       code = (e as RequestError).code;
     }
     expect(code).toBe(-32602);
+  });
+});
+
+describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelections", () => {
+  function writeSetting(selections: Record<string, unknown>): void {
+    writeFileSync(
+      path.join(dataRoot.value, "setting.json"),
+      JSON.stringify({ providerFamilyConnectionSelections: selections }),
+    );
+  }
+
+  it("entitles the selected family's individual plan when the store holds its OAuth sign-in", () => {
+    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    const payload = buildAccountProviderConfig();
+    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
+    // The table's default (bigmodel) must not win over the user's selection.
+    expect(payload!.providers["account:bigmodel-individual-coding-plan"]!.access.entitled).toBe(
+      false,
+    );
+    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
+    expect(zcodeCredentialsPresent()).toBe(true);
+    // The dropdown offers the entitled plan's models, not the BigModel default.
+    expect(entitledCodingPlanModels()).toEqual([
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3",
+      },
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3-Flash",
+      },
+    ]);
+  });
+
+  it("ignores the selection without an OAuth sign-in for that family", () => {
+    writeCredentialStore({ "oauth:bigmodel:access_token": "login-jwt" });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    const payload = buildAccountProviderConfig();
+    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
+    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBeNull();
+  });
+
+  it("counts only individual coding-plan selections", () => {
+    writeCredentialStore({ "oauth:bigmodel:access_token": "login-jwt" });
+    writeSetting({ bigmodel: { kind: "team-coding-plan" } });
+    const payload = buildAccountProviderConfig();
+    expect(payload!.providers["account:bigmodel-individual-coding-plan"]!.access.entitled).toBe(
+      false,
+    );
+    expect(oauthProjectTokenFamilyFor("account:bigmodel-team-coding-plan")).toBeNull();
+  });
+
+  it("never lets the selection override an explicit desktop verdict", () => {
+    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    writeFileSync(
+      path.join(dataRoot.value, "coding-plan-cache.json"),
+      JSON.stringify({
+        entryStatus: { items: { "builtin:bigmodel-coding-plan": { status: "available" } } },
+      }),
+    );
+    const payload = buildAccountProviderConfig();
+    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
+    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBeNull();
   });
 });

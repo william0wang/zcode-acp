@@ -47,7 +47,11 @@ import {
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../interaction/adapter.js";
-import { codingPlanRequestAuthFor } from "../config/account-provider.js";
+import {
+  codingPlanRequestAuthFor,
+  oauthProjectTokenFamilyFor,
+} from "../config/account-provider.js";
+import { ProjectTokenError, resolveOAuthProjectToken } from "../config/project-token.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
@@ -1349,12 +1353,52 @@ export function answerProviderRuntimeHeaders(
   // (observed 2026-09-17: switch stuck, every send died with "unknown").
   const sel = (params as { modelSelection?: { providerId?: string }; providerId?: string })
     .modelSelection?.providerId;
-  const requestAuth = codingPlanRequestAuthFor(
-    sel ?? (params as { providerId?: string }).providerId,
-  );
+  const providerId = sel ?? (params as { providerId?: string }).providerId;
+  const requestAuth = codingPlanRequestAuthFor(providerId);
   if (requestAuth) {
     log("  provider runtime headers: serving the coding-plan API key (config.json or store)");
     sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth });
+    return true;
+  }
+  // 3.15+ desktop layouts store no plan key at all: the desktop host trades
+  // its OAuth sign-in for a short-lived project access token before every
+  // request. Do the same exchange (project-token.ts) and answer once it
+  // settles — the backend waits for this reply, so answering asynchronously
+  // is what the desktop does too.
+  const oauthFamily = oauthProjectTokenFamilyFor(providerId);
+  if (oauthFamily) {
+    const recovery = params as {
+      rejectedProjectTokenFingerprint?: unknown;
+      expectedAccountScope?: unknown;
+    };
+    const asString = (value: unknown) => (typeof value === "string" ? value : undefined);
+    void resolveOAuthProjectToken(oauthFamily, {
+      rejectedFingerprint: asString(recovery.rejectedProjectTokenFingerprint),
+      expectedAccountScope: asString(recovery.expectedAccountScope),
+    }).then(
+      (material) => {
+        log("  provider runtime headers: serving an OAuth-derived project token");
+        // accountScope enables the backend's one-shot "PAT rejected → refresh
+        // → retry" recovery after a model 401 (account-request-retry.ts).
+        sendZcodeReply(backend, reqId, {
+          headersApplied: true,
+          requestAuth: {
+            apiKey: material.token,
+            apiKeyId: material.apiKeyId,
+            accountScope: material.accountScope,
+          },
+        });
+      },
+      (error: unknown) => {
+        const code =
+          error instanceof ProjectTokenError ? error.code : "project_token_request_failed";
+        warn(`  ⚠ provider runtime headers: project token exchange failed (${code})`);
+        sendZcodeReply(backend, reqId, {
+          headersApplied: false,
+          errorMessage: projectTokenUnavailableMessage(code),
+        });
+      },
+    );
     return true;
   }
   // Start Plan providers (zcode-plan endpoints) ask their host to solve an
@@ -1385,3 +1429,24 @@ const PROVIDER_RUNTIME_HEADERS_UNAVAILABLE =
   "Start Plan providers require an Aliyun captcha session that only the " +
   "ZCode desktop app can provide. Use a GLM Coding Plan provider for " +
   "headless/editor sessions (see docs/TROUBLESHOOTING.md).";
+
+/**
+ * Reason surfaced when the OAuth project-token exchange fails. `code` is a
+ * fixed `project_token_*` identifier — never a token, id or response body.
+ */
+function projectTokenUnavailableMessage(code: string): string {
+  const hint =
+    code === "project_token_key_missing"
+      ? "Open the ZCode desktop app once so it provisions the account's zcode-api-key"
+      : code === "project_token_login_required" ||
+          code === "project_token_scope_invalidated" ||
+          /^project_token_http_40[13]$/u.test(code)
+        ? "Sign in again in the ZCode desktop app"
+        : code === "project_token_disabled" || code === "project_token_project_unavailable"
+          ? "Check in the ZCode desktop app that the account's Coding Plan is active"
+          : "Retry, or check the network path to the Coding Plan API";
+  return (
+    `Could not obtain a Coding Plan request token from the ZCode sign-in (${code}). ` +
+    `${hint}, or save a key with \`zcode-acp setup\` (see docs/TROUBLESHOOTING.md).`
+  );
+}
