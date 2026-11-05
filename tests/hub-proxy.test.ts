@@ -1729,12 +1729,16 @@ describe("hub Desktop Presence (ADR-0016 amendment)", () => {
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.kind).toBe("serve");
     expect(spawnCalls[0]!.launch).toBeUndefined();
-    // The create session bind rides the env unchanged: the attaching client
-    // and the headless bridge still share the hub-pre-generated session id.
-    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBe("1");
-    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
-    );
+    // NO boot handshake on a headless spawn. A serve bridge does NOT ignore
+    // these: the binding is per-bridge and permanent
+    // (server.bootCreateBindSession), and Desktop Presence reuses this same
+    // bridge for every later create — so an armed bind made each later
+    // connection's first session/new return the conversation that was
+    // already open, and the desktop app could not start a new session at all
+    // while one existed (observed 2026-11-04).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.DSH_TUI_AUTOPROMPT).toBeUndefined();
     await registerServeBridge(hub, "serve-headless", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1825,9 +1829,13 @@ describe("hub Desktop Presence (ADR-0016 amendment)", () => {
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.kind).toBe("serve");
     expect(spawnCalls[0]!.launch).toBeUndefined();
-    // The resume id still rides the env (a serve bridge ignores it; the
-    // attaching desktop's session/load is what resumes the conversation).
-    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_closed");
+    // Same rule as the create above: the headless bridge never boots a TUI,
+    // so a resume target would sit unread on it — and the NEXT session/new on
+    // this reused bridge would be served as a load of that stale conversation
+    // (the create bug's resume-shaped twin). The desktop attaches and
+    // session/loads the id itself.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.DSH_TUI_AUTOPROMPT).toBeUndefined();
     await registerServeBridge(hub, "resume-headless", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1871,9 +1879,15 @@ describe("hub Desktop Presence (ADR-0016 amendment)", () => {
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.kind).toBe("serve");
     expect(spawnCalls[0]!.launch).toBeUndefined();
-    // The create-session bind env rides along unchanged (a serve bridge
-    // ignores it; the attaching client's session/new is what mints the id).
-    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBe("1");
+    // NO boot handshake on a headless spawn. The bind is per-bridge and
+    // permanent (server.bootCreateBindSession), and the hub keeps REUSING
+    // this bridge for later creates — arming it made every later
+    // connection's first session/new return the session that was already
+    // open (2026-11-04: three new-session clicks all landed on the
+    // previously opened conversation).
+    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.DSH_TUI_AUTOPROMPT).toBeUndefined();
     await registerServeBridge(hub, "cold-headless", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1886,7 +1900,13 @@ describe("hub Desktop Presence (ADR-0016 amendment)", () => {
     await new Promise((r) => setTimeout(r, 400)); // one poll tick
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.kind).toBe("serve");
-    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBe("sess_closed");
+    // Same rule as the create above: a headless bridge must never carry a
+    // boot-resume target. It never boots a TUI, so the env sits unread on the
+    // bridge — and the NEXT session/new on this reused bridge would be served
+    // as a load of that stale conversation (the create bug's resume-shaped
+    // twin). The desktop client loads the session itself after attach.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.DSH_TUI_AUTOPROMPT).toBeUndefined();
     await registerServeBridge(hub, "cold-resume", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
     const res = await pending;
     expect(res.status).toBe(200);
@@ -1955,6 +1975,33 @@ describe("hub Desktop Presence (ADR-0016 amendment)", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ id: "live-serve", reused: true });
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("a headless spawn never arms the boot-create bind the reused bridge would leak", async () => {
+    // Regression, 2026-11-04: a desktop create on a COLD hub spawned a
+    // headless serve bridge that still carried ZCODE_ACP_BOOT_CREATE_SESSION
+    // + a pre-generated id. server.bootCreateBindSession is per-bridge and
+    // never cleared, while Desktop Presence then REUSES that same bridge for
+    // every later create — so each later connection claimed the stale id on
+    // its first session/new and "created" the conversation that was already
+    // open. The App could not start a new session at all while one existed.
+    const hub = await startTestHub({ spawnServe: spawnServeSpy() });
+    const first = postDesktop(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.kind).toBe("serve");
+    // The root cause: no handshake env on a spawn that never opens a window.
+    expect(spawnCalls[0]!.env.ZCODE_ACP_BOOT_CREATE_SESSION).toBeUndefined();
+    expect(spawnCalls[0]!.env.ZCODE_ACP_RESUME_SESSION).toBeUndefined();
+    await registerServeBridge(hub, "cold-headless", spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE);
+    expect(await (await first).json()).toEqual({ id: "cold-headless", reused: false });
+    // Later creates reuse that bridge (Desktop Presence) — and because the
+    // bridge was spawned WITHOUT the bind, its first session/new is a genuine
+    // fresh mint, not the previously opened conversation.
+    const second = await postDesktop(hub, { workspacePath: PROJECT });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ id: "cold-headless", reused: true });
+    expect(spawnCalls).toHaveLength(1);
   });
 
   it("under presence a phone resume reuses the live serve bridge too (no window, no spawn)", async () => {

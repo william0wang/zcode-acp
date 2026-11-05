@@ -1502,7 +1502,18 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // exported in their shell lives only in the login shell's environment.
     const statsFilter = tuiStatsSegments(env);
     if (statsFilter !== undefined) env.DSH_TUI_STATS = statsFilter;
-    if (kind === "resume") {
+    // Desktop Presence (amendment to ADR-0016): while the desktop app is
+    // present — a proxied connection, the request's own identity header, or a
+    // stamped call within the presence TTL (see desktopPresence) —
+    // session-create AND resume incubate in the headless serve form: the
+    // desktop app is the presenting surface, so a terminal window would
+    // re-render the same stream for nobody (a resume's window was ADR-0017's
+    // mobile surface; a desktop-originated resume loads the session itself
+    // after attach). Decided HERE, before the env: the boot handshake vars
+    // below exist for the visible TUI surface, and arming them on a headless
+    // spawn breaks the bridge for every LATER connection (see the guards).
+    const desktopPresent = (kind === "tui" || kind === "resume") && desktop !== null;
+    if (kind === "resume" && !desktopPresent) {
       // ADR-0017: the requested session rides the env — terminalTuiScript
       // exports every ZCODE_ACP_* var into the terminal's fresh shell, so the
       // TUI boots into it. The detached serve fallback ignores it; the
@@ -1514,7 +1525,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // Must ride the env verbatim — martty reads it once at process start.
       env.DSH_TUI_AUTOPROMPT = BOOT_RESUME_TRIGGER;
     }
-    if (kind === "tui") {
+    if (kind === "tui" && !desktopPresent) {
       // Remote session-create binding: pre-generate the ACP session id BOTH
       // the TUI window and the attaching phone adopt on their first
       // session/new (ZCODE_ACP_BOOT_CREATE_SESSION tells the bridge to MINT it
@@ -1523,6 +1534,17 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // phone's conversation invisible in the window (verified by the
       // 2026-09-06 diagnosis: martty drops every update addressed to the
       // phone's session id, and its banner never yields).
+      //
+      // NEVER under Desktop Presence: that spawn is headless, so there is no
+      // window to bind to — and the bind is PER-BRIDGE and permanent
+      // (server.bootCreateBindSession), while the hub KEEPS REUSING this one
+      // serve bridge for later creates. Every later connection would claim
+      // the same stale id on its first session/new and "create" the session
+      // that is already open (observed 2026-11-04: three new-session clicks
+      // all landed on the previously opened conversation). Same reasoning for
+      // the resume env above: a headless bridge that never boot-resumed still
+      // carries ZCODE_ACP_RESUME_SESSION, and the next session/new on it
+      // would be served as a load of the old conversation.
       env.ZCODE_ACP_RESUME_SESSION = randomUUID();
       env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
       // Same banner handshake as resume: the auto-submitted trigger drops
@@ -1537,22 +1559,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // never churns when the bridge takes over the script's initial printf.
       env.ZCODE_ACP_TAB_TITLE = sessionTabTitle(tabTitle, workspacePath);
     }
-    // Desktop Presence (amendment to ADR-0016): while the desktop app is
-    // present — a proxied connection, the request's own identity header, or a
-    // stamped call within the presence TTL (see desktopPresence) —
-    // session-create AND resume incubate in the headless serve form: the
-    // desktop app is the presenting surface, so a terminal window would
-    // re-render the same stream for nobody (a resume's window was ADR-0017's
-    // mobile surface; a desktop-originated resume loads the session itself
-    // after attach). Equivalent to the exhausted-terminal-list fallback: the
-    // launch list is empty, so openNextTerminal yields to the detached serve
-    // spawn at once. The verdict was taken at the endpoint, once per request.
-    // The listing was already headless; `ZCODE_ACP_HUB_TERMINAL=0` stays the
-    // static variant.
-    const desktopPresent = (kind === "tui" || kind === "resume") && desktop !== null;
+    // Desktop Presence already decided above (before the boot env, which it
+    // gates); warn here because the daemon's stderr is null in production, so
+    // the diary is the only place this state change is observable.
     if (desktopPresent) {
-      // warn (not log): the daemon's stderr is null in production, so the
-      // diary is the only place this state change is observable.
       warn(
         `hub: desktop app present (${desktop}) — incubating ${workspacePath} headless (Desktop Presence)`,
       );
