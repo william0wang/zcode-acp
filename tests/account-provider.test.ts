@@ -67,6 +67,7 @@ import {
   zcodeCredentialsPresent,
 } from "../src/config/account-provider.js";
 import { saveBridgeAccount } from "../src/config/bridge-accounts.js";
+import { loadAllModels } from "../src/config/options.js";
 import { authenticate } from "../src/handlers/authenticate.js";
 import { messages } from "../src/i18n.js";
 
@@ -640,5 +641,137 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
     const payload = buildAccountProviderConfig();
     expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
     expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBeNull();
+  });
+
+  it("does not let a leftover pre-3.12 config.json static key shadow 3.15+ OAuth, while keeping bridge and manual overrides", async () => {
+    vi.stubEnv("ZCODE_HOME", path.join(root, ".zcode"));
+    writeCredentialStore({
+      "oauth:zai:access_token": "login-jwt",
+      "account-provider:coding-plan:account:zai-individual-coding-plan:account:108:api-key":
+        "stale-pre-3.15-store-key",
+    });
+    writeFileSync(
+      path.join(dataRoot.value, "setting.json"),
+      JSON.stringify({
+        modelProviderFamilyModes: { zai: "oauth" },
+        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
+      }),
+    );
+    // Leftover pre-3.12 config.json with an expired static key on zai.
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: {
+          "builtin:zai-coding-plan": {
+            enabled: true,
+            options: { apiKey: "stale-pre-3.12-key" },
+            models: { "GLM-5.3": {}, "GLM-5.3-Flash": {} },
+          },
+        },
+      }),
+    );
+    // Static request-auth returns null so answerProviderRuntimeHeaders proceeds
+    // to oauthProjectTokenFamilyFor -> resolveOAuthProjectToken("zai").
+    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toBeNull();
+    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
+
+    // A manual coding-plan key in 3.12+ provider_config.json still wins.
+    writePersonalRules([
+      {
+        providerId: "zai-api",
+        config: {
+          access: { type: "zhipu-coding-plan-api-key", apiKey: "manual-zai-key" },
+          api: { baseUrl: "https://api.z.ai/api/anthropic" },
+        },
+      },
+    ]);
+    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
+      apiKey: "manual-zai-key",
+    });
+
+    // An explicit `zcode-acp setup` bridge account wins above everything.
+    await saveBridgeAccount("zai", "bridge-zai-key");
+    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
+      apiKey: "bridge-zai-key",
+    });
+  });
+
+  it("advertises entitled OAuth coding-plan models alongside personal custom providers and leftover config.json entries", () => {
+    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    // Leftover pre-3.12 config.json where builtin:zai-coding-plan was disabled
+    // and a custom provider was later disabled in 3.12+ provider_config.json,
+    // while another personal custom provider is enabled.
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: {
+          "custom:cliproxyapi": {
+            name: "CLIProxyAPI",
+            enabled: true,
+            options: { apiKey: "old-proxy-key", baseURL: "http://127.0.0.1:8317/v1" },
+            models: { "claude-opus-4-6-thinking": {} },
+          },
+          "builtin:zai-coding-plan": {
+            enabled: false,
+            models: { "GLM-5.3": {}, "GLM-5.3-Flash": {} },
+          },
+        },
+      }),
+    );
+    writeFileSync(
+      path.join(dataRoot.value, "provider_config.json"),
+      JSON.stringify({
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              {
+                providerId: "custom:cliproxyapi",
+                providerName: "CLIProxyAPI",
+                enabled: false,
+                config: { access: { type: "api-key", apiKey: "old-proxy-key" } },
+              },
+              {
+                providerId: "custom:active",
+                providerName: "ActiveCustom",
+                enabled: true,
+                config: {
+                  access: { type: "api-key", apiKey: "active-key" },
+                  api: { baseUrl: "https://api.example.test/v1" },
+                },
+              },
+            ],
+          },
+          modelConfigRules: {
+            providerModelRules: [
+              {
+                providerId: "custom:active",
+                modelId: "custom-model-1",
+                config: { enabled: true },
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    const models = loadAllModels();
+    expect(models).toEqual([
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3",
+      },
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3-Flash",
+      },
+      {
+        providerId: "custom:active",
+        providerName: "ActiveCustom",
+        modelId: "custom-model-1",
+      },
+    ]);
   });
 });

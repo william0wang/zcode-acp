@@ -251,24 +251,88 @@ function appendPersonalOnlyProviders(
 }
 
 /**
+ * Append entitled coding-plan models (from the bundled table via the account
+ * entitlement ladder) for any coding-plan provider not already added from
+ * config.json. On 3.12+/3.15+ layouts where entitlement comes from OAuth
+ * (`setting.json` + `credentials.json`), the encrypted store (#320), or a
+ * manual coding-plan key in `provider_config.json` (#344), the plan's models
+ * do not live in `config.json` — appending them here keeps them selectable
+ * even when `config.json` still holds legacy entries or `provider_config.json`
+ * also defines custom providers.
+ */
+function appendEntitledCodingPlanModels(
+  out: ModelRef[],
+  personal: PersonalModels | null,
+  pinned: string | undefined,
+): void {
+  const known = new Set(out.map((m) => m.providerId));
+  const byProvider = new Map<string, { providerName: string; models: Set<string> }>();
+  for (const m of entitledCodingPlanModels()) {
+    if (known.has(m.providerId)) continue;
+    if (pinned && m.providerId !== pinned) continue;
+    let group = byProvider.get(m.providerId);
+    if (!group) {
+      group = { providerName: m.providerName, models: new Set() };
+      byProvider.set(m.providerId, group);
+    }
+    group.models.add(m.modelId);
+  }
+  for (const [pid, group] of byProvider) {
+    for (const extra of personal?.modelsByProvider.get(pid) ?? []) {
+      group.models.add(extra);
+    }
+    for (const modelId of group.models) {
+      out.push({ providerId: pid, providerName: group.providerName, modelId });
+    }
+  }
+}
+
+/**
  * Collect models from config.json for the dropdown, UNIONED with the desktop's
  * provider_config.json (3.12+): models the user added in the desktop app land
  * there and never reach legacy config.json, so without the merge the dropdown
  * silently misses them (observed 2026-09). config.json stays authoritative for
- * provider enablement/credentials; the personal config contributes model ids
- * per provider, plus whole providers it describes and config.json does not.
+ * provider enablement/credentials unless overridden by a custom provider's
+ * rule in provider_config.json (3.12+ writes custom provider toggles there,
+ * never back to config.json); the personal config contributes model ids per
+ * provider, plus whole providers it describes and config.json does not.
  */
 export function loadAllModels(): ModelRef[] {
   const personal = loadPersonalModels();
+  const pinned = process.env.ZCODE_PROVIDER;
   try {
     const cfg = readConfig() as ConfigShape;
     const out: ModelRef[] = [];
     // ZCODE_PROVIDER pins the dropdown to one provider id.
-    const pinned = process.env.ZCODE_PROVIDER;
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
       if (pinned && pid !== pinned) continue;
-      if (!providerSelectable(pid, p)) continue;
-      const providerName = p.name ?? pid;
+      // Custom providers toggled or updated in the 3.12+ desktop app write
+      // their new `enabled` / `apiKey` / `baseUrl` / `providerName` only to
+      // `provider_config.json`, leaving legacy `config.json` frozen at its
+      // pre-3.12 state. Overlay the personal rule before checking selectability
+      // so a provider disabled in 3.12+ does not stay selectable via config.json.
+      const personalRule = !isBuiltinProvider(pid)
+        ? personal?.providers.find((entry) => entry.pid === pid)?.rule
+        : undefined;
+      const effective: ProviderEntry | undefined =
+        p && personalRule
+          ? {
+              ...p,
+              name: personalRule.providerName ?? p.name,
+              enabled: personalRule.enabled ?? p.enabled,
+              options: {
+                ...p.options,
+                ...(personalRule.config?.access?.apiKey !== undefined
+                  ? { apiKey: personalRule.config.access.apiKey }
+                  : {}),
+                ...(personalRule.config?.api?.baseUrl !== undefined
+                  ? { baseURL: personalRule.config.api.baseUrl }
+                  : {}),
+              },
+            }
+          : p;
+      if (!providerSelectable(pid, effective)) continue;
+      const providerName = effective?.name ?? pid;
       // Custom providers: once the personal config tracks the provider's
       // models, THAT list is authoritative. Additions AND deletions land only
       // there (config.json stopped syncing), and the backend registry knows no
@@ -285,6 +349,7 @@ export function loadAllModels(): ModelRef[] {
         out.push({ providerId: pid, providerName, modelId });
       }
     }
+    appendEntitledCodingPlanModels(out, personal, pinned);
     if (personal) appendPersonalOnlyProviders(out, personal, pinned);
     // The default-provider fallback applies only to a MISSING/empty provider
     // map (fresh install). When providers ARE configured but none is usable
@@ -296,12 +361,13 @@ export function loadAllModels(): ModelRef[] {
     }
     return out;
   } catch {
-    // config.json unreadable — a personal-config-only setup still advertises
-    // its providers before the fresh-install default kicks in.
+    // config.json unreadable — a personal-config-only or OAuth setup still
+    // advertises its providers before the fresh-install default kicks in.
     const out: ModelRef[] = [];
-    if (personal) appendPersonalOnlyProviders(out, personal, process.env.ZCODE_PROVIDER);
+    appendEntitledCodingPlanModels(out, personal, pinned);
+    if (personal) appendPersonalOnlyProviders(out, personal, pinned);
     if (out.length > 0) return out;
-    return entitledOrDefaultModels(process.env.ZCODE_PROVIDER);
+    return entitledOrDefaultModels(pinned);
   }
 }
 

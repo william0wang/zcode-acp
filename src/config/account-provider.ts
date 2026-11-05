@@ -341,18 +341,51 @@ function entitledBuiltinProviders(): Set<string> {
   return out;
 }
 
+/**
+ * Coding-plan families whose 3.15+ desktop connection is an active OAuth
+ * individual coding plan (`setting.json` `providerFamilyConnectionSelections`
+ * + an `oauth:<family>:access_token` in the credential store, not switched to
+ * `apiKey` mode in `modelProviderFamilyModes`).
+ */
+function oauthSelectedCodingPlanFamilies(
+  credsDir = path.dirname(ZCODE_CREDS_PATH),
+): Set<CodingPlanFamily> {
+  const out = new Set<CodingPlanFamily>();
+  try {
+    const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
+      modelProviderFamilyModes?: Record<string, unknown>;
+      providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
+    };
+    for (const [family, selection] of Object.entries(
+      setting.providerFamilyConnectionSelections ?? {},
+    )) {
+      if (selection?.kind !== "individual-coding-plan") continue;
+      if (setting.modelProviderFamilyModes?.[family] === "apiKey") continue;
+      if (!isCodingPlanFamily(family) || !hasOAuthLogin(family)) continue;
+      out.add(family);
+    }
+  } catch {
+    // setting.json absent (headless-only) — nothing to infer
+  }
+  return out;
+}
+
 /** Sources 1-4 above, read from the raw desktop files only. */
 function desktopEntitledBuiltinProviders(): Set<string> {
   const out = new Set<string>();
   const credsDir = path.dirname(ZCODE_CREDS_PATH);
   let sawVerdict = false;
+  let sawCacheVerdict = false;
   // 1) Desktop availability cache (authoritative: the resolved verdict).
   try {
     const cache = JSON.parse(
       readFileSync(path.join(credsDir, "coding-plan-cache.json"), "utf8"),
     ) as { entryStatus?: { items?: Record<string, { status?: string }> } };
     const items = Object.entries(cache.entryStatus?.items ?? {});
-    if (items.length > 0) sawVerdict = true;
+    if (items.length > 0) {
+      sawVerdict = true;
+      sawCacheVerdict = true;
+    }
     for (const [pid, entry] of items) {
       if (entry?.status === "available") out.add(pid);
     }
@@ -373,6 +406,17 @@ function desktopEntitledBuiltinProviders(): Set<string> {
     if (builtinEntries > 0) sawVerdict = true;
   } catch {
     // unreadable config — the other sources decide
+  }
+  // 3.15+ renamed the record to `providerFamilyConnectionSelections`
+  // (`{zai: {kind: "individual-coding-plan"}}`) and stopped writing
+  // `coding-plan-cache.json` and `config.json`. On a machine upgraded from
+  // < 3.12, a leftover `config.json` still sits on disk: union the 3.15+
+  // OAuth-backed selection whenever no `coding-plan-cache.json` verdict spoke,
+  // so an old `config.json` entry does not hide the active OAuth family.
+  if (!sawCacheVerdict) {
+    for (const family of oauthSelectedCodingPlanFamilies(credsDir)) {
+      out.add(`builtin:${family}-coding-plan`);
+    }
   }
   if (out.size > 0) return out;
   // 3) Fresh desktop-only layout (#320): no verdict-bearing source spoke, but
@@ -399,24 +443,10 @@ function desktopEntitledBuiltinProviders(): Set<string> {
   try {
     const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
       modelProviderFamilySelectedKeys?: Record<string, string>;
-      providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
     };
     for (const selected of Object.values(setting.modelProviderFamilySelectedKeys ?? {})) {
       const m = /(builtin:[a-z0-9-]+)/.exec(selected);
       if (m) out.add(m[1]!);
-    }
-    // 3.15+ renamed the record to `providerFamilyConnectionSelections`
-    // (`{zai: {kind: "individual-coding-plan"}}`) and stopped writing every
-    // source above. Its selection only counts for an individual coding plan
-    // the desktop is signed in to via OAuth: that is the one plan the bridge
-    // can serve headless (project-token.ts) — start-plan needs the captcha
-    // session (#123) and team keys are not entitlement evidence.
-    for (const [family, selection] of Object.entries(
-      setting.providerFamilyConnectionSelections ?? {},
-    )) {
-      if (selection?.kind !== "individual-coding-plan") continue;
-      if (!isCodingPlanFamily(family) || !hasOAuthLogin(family)) continue;
-      out.add(`builtin:${family}-coding-plan`);
     }
   } catch {
     // setting.json absent (headless-only) — nothing to infer
@@ -510,23 +540,39 @@ export function codingPlanRequestAuthFor(
 ): { apiKey: string } | null {
   const legacyId = entitledIndividualPlanLegacyId(accountProviderId);
   if (!legacyId || !accountProviderId) return null;
-  // A bridge account's key, then config.json (the pre-3.12 builtin: provider's
-  // own spelling), merged by readCredentialConfig. A fresh desktop-only layout
-  // has neither, so the stored plan key answers.
-  try {
-    const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as {
-      provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
-    };
-    const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
-    if (apiKey) return { apiKey };
-  } catch {
-    // unreadable/absent config — the manual key or the store decides
+  const family = /^builtin:([a-z0-9]+)-coding-plan$/u.exec(legacyId)?.[1];
+  // 1) Explicit bridge account (`zcode-acp setup`) always wins, even over a
+  //    3.15+ OAuth sign-in.
+  if (family && isCodingPlanFamily(family)) {
+    const bridgeKey = bridgeOverlays()[family]?.apiKey?.trim();
+    if (bridgeKey) return { apiKey: bridgeKey };
+  }
+  // When 3.15+ `setting.json` selects this family's individual coding plan in
+  // OAuth mode (backed by an `oauth:<family>:access_token` in the store), any
+  // static key left in pre-3.12 `config.json` or pre-3.15 `credentials.json`
+  // is a stale pre-upgrade artifact (3.12+ stopped writing `config.json`, and
+  // 3.15+ switched OAuth plans to short-lived project tokens). Skip those so
+  // `answerProviderRuntimeHeaders` falls through to `resolveOAuthProjectToken`.
+  const oauthActive =
+    Boolean(family && isCodingPlanFamily(family)) &&
+    oauthSelectedCodingPlanFamilies().has(family as CodingPlanFamily);
+  if (!oauthActive) {
+    try {
+      const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as {
+        provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
+      };
+      const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
+      if (apiKey) return { apiKey };
+    } catch {
+      // unreadable/absent config — the manual key or the store decides
+    }
   }
   // The desktop's own manual plan key (#344): 3.12+ writes it to
   // provider_config.json, never config.json — rank it above the encrypted
   // store (a fresh-install account key) but below the bridge's own setups.
   const manual = manualCodingPlanKeys().get(legacyId);
   if (manual) return { apiKey: manual };
+  if (oauthActive) return null;
   const stored = storeIndividualCodingPlanKey(accountProviderId);
   return stored ? { apiKey: stored } : null;
 }

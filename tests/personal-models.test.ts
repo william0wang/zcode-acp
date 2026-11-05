@@ -189,6 +189,30 @@ describe("loadAllModels with provider_config.json", () => {
     expect(pids).not.toContain("uuid-keyless-remote");
   });
 
+  it("excludes a custom provider present in legacy config.json when provider_config.json disables it", () => {
+    fakePersonal = {
+      ...FAKE_PERSONAL,
+      config: {
+        ...FAKE_PERSONAL.config,
+        providerConfigRules: {
+          providerRules: [
+            {
+              providerId: "uuid-provider",
+              providerName: "OcGo",
+              enabled: false,
+              config: {
+                access: { type: "api-key", apiKey: "k-ocgo-personal" },
+                api: { type: "openai-responses", baseUrl: "http://localhost:18586/openai/v1" },
+              },
+            },
+          ],
+        },
+      },
+    };
+    const pids = loadAllModels().map((m) => m.providerId);
+    expect(pids).not.toContain("uuid-provider");
+  });
+
   it("normalizes account: spelling onto the builtin config.json provider", () => {
     const models = loadAllModels();
     expect(models).toContainEqual({
