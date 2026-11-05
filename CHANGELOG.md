@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.82.1](https://github.com/william0wang/zcode-acp/compare/v0.82.0...v0.82.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* never arm boot handshake env on Desktop Presence headless spawns ([1775328](https://github.com/william0wang/zcode-acp/commit/177532830a60ca6e327296976c6c0182fbb959ed))
+* serve OAuth-derived project tokens on 3.15+ desktop layouts ([#355](https://github.com/william0wang/zcode-acp/issues/355)) ([2a87dad](https://github.com/william0wang/zcode-acp/commit/2a87dad003bec92a789bbf8b15748918167fdf2b))
+
 ## [0.82.0](https://github.com/william0wang/zcode-acp/compare/v0.81.0...v0.82.0) (2026-11-02)
 
 
