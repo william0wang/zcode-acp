@@ -210,43 +210,42 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  *
  * On-disk signals, ranked by authority:
  *
- *   1. `coding-plan-cache.json` — the desktop's own availability verdict
- *      (`{items: {"builtin:bigmodel-coding-plan": {status:"available" | "unavailable"}}}`).
- *      Carries the resolved available/not-entitled decision, not a raw flag.
- *      Desktop-only, so a headless-only machine falls through.
- *   2. `config.json` (legacy CLI config) — `builtin:*` entries with
+ *   1. `config.json` (legacy CLI config) — `builtin:*` entries with
  *      `enabled:true` AND an apiKey. Still written by the app.
- *   3. The encrypted credential store (#320) — a fresh desktop-only install
- *      writes NEITHER of the above; its plan api-keys live only in
- *      `~/.zcode/v2/credentials.json`. Weaker evidence than a verdict (the
+ *      (`coding-plan-cache.json`, the 3.12–3.14 desktop's availability
+ *      verdict, is deliberately NOT read: those were transitional releases,
+ *      and a leftover cache surviving a 3.15+ upgrade would suppress the
+ *      OAuth union below — #359.)
+ *   2. The encrypted credential store (#320) — a fresh desktop-only install
+ *      writes no config.json; its plan api-keys live only in
+ *      `~/.zcode/v2/credentials.json`. Weaker evidence than enablement (the
  *      store also keeps keys for plans the account does not currently hold),
  *      so it only speaks when no verdict-bearing source said anything at all,
  *      and only for individual plans (see storeIndividualCodingPlanKey).
- *   4. `setting.json` — last resort: the Settings UI's remembered pick per
+ *   3. `setting.json` — last resort: the Settings UI's remembered pick per
  *      family. A SELECTION record, not an entitlement. The 3.15+ spelling
  *      (`providerFamilyConnectionSelections`, an individual coding plan
  *      backed by an OAuth sign-in in the store) is stronger than a mere pick:
- *      it names the connection the desktop CURRENTLY runs, so besides this
- *      last-resort tier it is also UNIONED right after source 2 whenever
- *      `coding-plan-cache.json` carried no verdict — a leftover config.json
- *      entry for another family must not hide the active OAuth plan (its
- *      request auth project-token.ts mints on demand).
+ *      it names the connection the desktop CURRENTLY runs, and both of its
+ *      signals only exist on a 3.15+ layout — so it is also UNIONED with the
+ *      sources above UNCONDITIONALLY: no older on-disk signal can speak
+ *      against it, and a leftover config.json entry for another family must
+ *      not hide the active OAuth plan (its request auth project-token.ts
+ *      mints on demand).
  *
  * Bridge accounts (`acp-accounts.json`, written by `zcode-acp setup`) sit
  * above the whole ladder: an explicit user key entitles its family's
- * individual coding plan even over an `unavailable` verdict, because
- * deliberate user input beats a possibly stale cache. Only families the
- * credential overlay applied count (see bridgeOverlays), so a family whose
- * installed catalog is unusable gains nothing. They never count as a
- * verdict, so an account for one family leaves source 3 open for the other.
+ * individual coding plan, because deliberate user input beats any stale
+ * on-disk signal. Only families the credential overlay applied count (see
+ * bridgeOverlays), so a family whose installed catalog is unusable gains
+ * nothing. They never count as a verdict, so an account for one family
+ * leaves source 2 open for the other.
  *
  * Manual plan keys from provider_config.json (`zhipu-coding-plan-api-key`
- * rules, #344) sit at the source-2 tier — see manualCodingPlanKeys below.
+ * rules, #344) sit at the source-1 tier — see manualCodingPlanKeys below.
  *
- * Verified 2026-09 against the desktop's own pushed account snapshot: sources
- * 1+2 produced exactly its entitlement set (bigmodel individual true, every
- * zai/start/team plan false); source 3 restores the same outcome on fresh
- * desktop-only layouts (verified 2026-10 against a real store).
+ * Verified 2026-09/10 against the desktop's own pushed account snapshot and
+ * a real credential store.
  */
 /**
  * Manual coding-plan api keys from provider_config.json (#344).
@@ -258,9 +257,9 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  * every account model switch failed with "Provider Registry 中不存在 Model"
  * and the reporter had to copy the key into config.json by hand. These rules
  * are the same tier as config.json's builtin entries — an explicit user key,
- * not a verdict — so they ADD to the ladder without arming sawVerdict, and a
- * coding-plan-cache `unavailable` verdict (about the ACCOUNT plan, not manual
- * keys) does not suppress them.
+ * not an enablement signal — so they ADD to the ladder without arming
+ * sawVerdict, and a config.json disable on the same family does not suppress
+ * them.
  *
  * The family comes from the rule's api.baseUrl (the official coding-plan
  * endpoints; the rule id itself — e.g. `zai-api` — is user-chosen and carries
@@ -374,29 +373,12 @@ function oauthSelectedCodingPlanFamilies(
   return out;
 }
 
-/** Sources 1-4 above, read from the raw desktop files only. */
+/** Sources 1-3 above, read from the raw desktop files only. */
 function desktopEntitledBuiltinProviders(): Set<string> {
   const out = new Set<string>();
   const credsDir = path.dirname(ZCODE_CREDS_PATH);
   let sawVerdict = false;
-  let sawCacheVerdict = false;
-  // 1) Desktop availability cache (authoritative: the resolved verdict).
-  try {
-    const cache = JSON.parse(
-      readFileSync(path.join(credsDir, "coding-plan-cache.json"), "utf8"),
-    ) as { entryStatus?: { items?: Record<string, { status?: string }> } };
-    const items = Object.entries(cache.entryStatus?.items ?? {});
-    if (items.length > 0) {
-      sawVerdict = true;
-      sawCacheVerdict = true;
-    }
-    for (const [pid, entry] of items) {
-      if (entry?.status === "available") out.add(pid);
-    }
-  } catch {
-    // cache absent/unreadable — the other sources decide
-  }
-  // 2) Legacy config.json (still the app's own provider enablement).
+  // 1) Legacy config.json (still the app's own provider enablement).
   try {
     const cfg = JSON.parse(readFileSync(ZCODE_CREDS_PATH, "utf8")) as {
       provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
@@ -411,19 +393,18 @@ function desktopEntitledBuiltinProviders(): Set<string> {
   } catch {
     // unreadable config — the other sources decide
   }
-  // 3.15+ renamed the record to `providerFamilyConnectionSelections`
-  // (`{zai: {kind: "individual-coding-plan"}}`) and stopped writing
-  // `coding-plan-cache.json` and `config.json`. On a machine upgraded from
-  // < 3.12, a leftover `config.json` still sits on disk: union the 3.15+
-  // OAuth-backed selection whenever no `coding-plan-cache.json` verdict spoke,
-  // so an old `config.json` entry does not hide the active OAuth family.
-  if (!sawCacheVerdict) {
-    for (const family of oauthSelectedCodingPlanFamilies(credsDir)) {
-      out.add(`builtin:${family}-coding-plan`);
-    }
+  // The 3.15+ OAuth selection (`providerFamilyConnectionSelections` + an
+  // OAuth login in the store) is UNIONED unconditionally: both signals only
+  // exist on a 3.15+ layout, so no older on-disk signal can speak against
+  // it — and a leftover config.json entry for another family must not hide
+  // the active OAuth family (#357). The 3.12–3.14 availability cache is
+  // deliberately not consulted (transitional releases; a leftover cache
+  // surviving a 3.15+ upgrade would suppress this union — #359).
+  for (const family of oauthSelectedCodingPlanFamilies(credsDir)) {
+    out.add(`builtin:${family}-coding-plan`);
   }
   if (out.size > 0) return out;
-  // 3) Fresh desktop-only layout (#320): no verdict-bearing source spoke, but
+  // 2) Fresh desktop-only layout (#320): no verdict-bearing source spoke, but
   //    the encrypted store holds the account's individual plan key.
   if (!sawVerdict) {
     const rules =
@@ -438,7 +419,7 @@ function desktopEntitledBuiltinProviders(): Set<string> {
     }
   }
   if (out.size > 0) return out;
-  // 4) Last resort only (everything above empty — a machine that has never
+  // 3) Last resort only (everything above empty — a machine that has never
   //    written them): the Settings UI's remembered pick per family. This is a
   //    SELECTION record, not an entitlement — `zai` sitting there means the
   //    user opened that family's picker, not that the plan is held (observed
