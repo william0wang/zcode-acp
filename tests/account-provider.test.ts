@@ -473,7 +473,7 @@ describe("manual coding-plan keys from provider_config.json (#344)", () => {
     });
   });
 
-  it("ranks the manual key above the encrypted store and below config.json", () => {
+  it("ranks the manual key above the frozen config.json and the encrypted store", () => {
     writeCredentialStore({
       "account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:108:api-key":
         "stored-individual-key",
@@ -491,6 +491,8 @@ describe("manual coding-plan keys from provider_config.json (#344)", () => {
     expect(codingPlanRequestAuthFor("account:bigmodel-individual-coding-plan")).toEqual({
       apiKey: "manual-bigmodel-key",
     });
+    // A manual rule implies a 3.12+ layout, where config.json is frozen at its
+    // pre-3.12 state — the leftover key there must not outrank the fresh rule.
     writeFileSync(
       zcodeCfgPath.value,
       JSON.stringify({
@@ -500,7 +502,41 @@ describe("manual coding-plan keys from provider_config.json (#344)", () => {
       }),
     );
     expect(codingPlanRequestAuthFor("account:bigmodel-individual-coding-plan")).toEqual({
-      apiKey: "legacy-key",
+      apiKey: "manual-bigmodel-key",
+    });
+  });
+
+  it("serves the fresh manual key over the stale config.json key in apiKey mode", () => {
+    // The desktop "Use API key" flow: mode switches to apiKey and the new key
+    // lands in provider_config.json, while a leftover pre-3.12 config.json
+    // keeps its expired key frozen — the sibling of the OAuth-mode shadowing.
+    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
+    writeFileSync(
+      path.join(dataRoot.value, "setting.json"),
+      JSON.stringify({
+        modelProviderFamilyModes: { zai: "apiKey" },
+        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
+      }),
+    );
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: {
+          "builtin:zai-coding-plan": { enabled: true, options: { apiKey: "stale-pre-3.12-key" } },
+        },
+      }),
+    );
+    writePersonalRules([
+      {
+        providerId: "zai-api",
+        config: {
+          access: { type: "zhipu-coding-plan-api-key", apiKey: "fresh-manual-key" },
+          api: { baseUrl: "https://api.z.ai/api/anthropic" },
+        },
+      },
+    ]);
+    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
+      apiKey: "fresh-manual-key",
     });
   });
 

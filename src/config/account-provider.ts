@@ -223,10 +223,14 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  *      so it only speaks when no verdict-bearing source said anything at all,
  *      and only for individual plans (see storeIndividualCodingPlanKey).
  *   4. `setting.json` — last resort: the Settings UI's remembered pick per
- *      family. A SELECTION record, not an entitlement. 3.15+ spells it
- *      `providerFamilyConnectionSelections`; that form counts only for an
- *      individual coding plan backed by an OAuth sign-in in the store, whose
- *      request auth project-token.ts mints on demand.
+ *      family. A SELECTION record, not an entitlement. The 3.15+ spelling
+ *      (`providerFamilyConnectionSelections`, an individual coding plan
+ *      backed by an OAuth sign-in in the store) is stronger than a mere pick:
+ *      it names the connection the desktop CURRENTLY runs, so besides this
+ *      last-resort tier it is also UNIONED right after source 2 whenever
+ *      `coding-plan-cache.json` carried no verdict — a leftover config.json
+ *      entry for another family must not hide the active OAuth plan (its
+ *      request auth project-token.ts mints on demand).
  *
  * Bridge accounts (`acp-accounts.json`, written by `zcode-acp setup`) sit
  * above the whole ladder: an explicit user key entitles its family's
@@ -528,12 +532,13 @@ function entitledIndividualPlanLegacyId(accountProviderId: string | undefined): 
  * model request on a `zhipu-account` provider (bundle-verified: the only other
  * suppliers are the desktop host and the CLI's own "standalone" credential
  * pair, whose identity half this machine never wrote). The desktop answers
- * with the plan's API key; the bridge serves the same plan's key from legacy
- * config.json when written, and otherwise from the encrypted credential store
- * — a fresh desktop-only install writes no config.json, its plan key lives
- * only there (#320). Only the individual coding plan is served: start-plan
- * needs an Aliyun captcha (stays refused, issue #123), and team keys are not
- * entitlement evidence (see storeIndividualCodingPlanKey).
+ * with the plan's API key; the bridge serves the same plan's key from
+ * whichever source is CURRENT: a manual key in provider_config.json (3.12+,
+ * #344) outranks the frozen legacy config.json, and a fresh desktop-only
+ * install writes no config.json at all — its plan key lives only in the
+ * encrypted credential store (#320). Only the individual coding plan is
+ * served: start-plan needs an Aliyun captcha (stays refused, issue #123), and
+ * team keys are not entitlement evidence (see storeIndividualCodingPlanKey).
  */
 export function codingPlanRequestAuthFor(
   accountProviderId: string | undefined,
@@ -547,6 +552,14 @@ export function codingPlanRequestAuthFor(
     const bridgeKey = bridgeOverlays()[family]?.apiKey?.trim();
     if (bridgeKey) return { apiKey: bridgeKey };
   }
+  // 2) The desktop's own manual plan key (#344): 3.12+ writes it to
+  //    provider_config.json, never config.json — a `zhipu-coding-plan-api-key`
+  //    rule can only exist on a 3.12+ layout, where config.json is frozen at
+  //    its pre-3.12 state. Rank it ABOVE that frozen file (and above the
+  //    3.15+ OAuth exchange: an explicit key the user typed beats the login),
+  //    but below the bridge's own setups.
+  const manual = manualCodingPlanKeys().get(legacyId);
+  if (manual) return { apiKey: manual };
   // When 3.15+ `setting.json` selects this family's individual coding plan in
   // OAuth mode (backed by an `oauth:<family>:access_token` in the store), any
   // static key left in pre-3.12 `config.json` or pre-3.15 `credentials.json`
@@ -564,14 +577,9 @@ export function codingPlanRequestAuthFor(
       const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
       if (apiKey) return { apiKey };
     } catch {
-      // unreadable/absent config — the manual key or the store decides
+      // unreadable/absent config — the store decides
     }
   }
-  // The desktop's own manual plan key (#344): 3.12+ writes it to
-  // provider_config.json, never config.json — rank it above the encrypted
-  // store (a fresh-install account key) but below the bridge's own setups.
-  const manual = manualCodingPlanKeys().get(legacyId);
-  if (manual) return { apiKey: manual };
   if (oauthActive) return null;
   const stored = storeIndividualCodingPlanKey(accountProviderId);
   return stored ? { apiKey: stored } : null;
