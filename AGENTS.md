@@ -212,16 +212,21 @@ ZCode protocol types into ACP notifications directly — always translate.
   never did; `builtinProviderEnv` now injects both vars). 3.12 also renamed
   the config-file model spelling to `custom:<urlencoded providerId>:<modelId>`
   (see `~/.zcode/agents/*.md`); `parseModelValue` accepts it. Entitlement
-  comes from `coding-plan-cache.json`
-  (desktop's resolved availability verdict) → legacy `config.json`
+  comes from legacy `config.json`
   (`builtin:*` enabled + apiKey) → manual plan keys in `provider_config.json`
   (access.type `zhipu-coding-plan-api-key`, family by official baseUrl —
-  `manualCodingPlanKeys`, the source-2 tier, #344); `setting.json`'s
+  `manualCodingPlanKeys`, the source-1 tier, #344); a 3.15+ OAuth selection
+  (`providerFamilyConnectionSelections` + `oauth:<family>:access_token`)
+  unions in UNCONDITIONALLY — both signals only exist on 3.15+ layouts, so
+  nothing older can speak against it; `setting.json`'s
   `modelProviderFamilySelectedKeys` is a _selection_ record, not an
-  entitlement — only as a last resort when both are empty. A bridge account
+  entitlement — only as a last resort when both are empty.
+  `coding-plan-cache.json` (the 3.12–3.14 verdict) is deliberately NOT read —
+  transitional releases, and a leftover cache surviving a 3.15+ upgrade would
+  suppress the OAuth union (#359). A bridge account
   (`acp-accounts.json`, `zcode-acp setup`) entitles its own family's
-  individual coding plan on top of that ladder, even over an `unavailable`
-  verdict, and never counts as a verdict. It entitles only when the overlay
+  individual coding plan on top of that ladder and never counts as a verdict.
+  It entitles only when the overlay
   applied (`bridgeOverlays`), so a family the installed catalog lacks gains
   nothing. The #320 store fallback must still
   see only the raw desktop files (`desktopEntitledBuiltinProviders`) — the

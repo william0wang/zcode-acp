@@ -206,7 +206,10 @@ describe("readBuiltinTable memo", () => {
 });
 
 describe("buildAccountProviderConfig", () => {
-  it("entitles only the plans the desktop availability cache marks available", () => {
+  it("ignores a coding-plan-cache.json left over from 3.12–3.14 (#359)", () => {
+    // The cache was the 3.12–3.14 desktop's availability verdict; 3.15+
+    // stopped writing it and transitional-release machines are gone. A stale
+    // cache must contribute NOTHING — neither entitlement nor suppression.
     writeFileSync(
       path.join(root, ".zcode", "v2", "coding-plan-cache.json"),
       JSON.stringify({
@@ -222,17 +225,10 @@ describe("buildAccountProviderConfig", () => {
       }),
     );
     const payload = buildAccountProviderConfig();
-    expect(payload).not.toBeNull();
+    // No other entitlement source speaks: the cache's "available" must not
+    // entitle, and its "unavailable" must not suppress anything either.
     expect(payload!.providers["account:bigmodel-individual-coding-plan"]).toMatchObject({
-      access: { type: "zhipu-account", entitled: true },
-      builtinModelIds: ["GLM-5.3", "GLM-5.3-Flash"],
-    });
-    expect(payload!.providers["account:zai-individual-coding-plan"]).toMatchObject({
       access: { entitled: false },
-    });
-    expect(payload!.states["account:bigmodel-individual-coding-plan"]).toMatchObject({
-      availability: "available",
-      entitled: true,
     });
   });
 
@@ -342,22 +338,6 @@ describe("fresh desktop-only layout — encrypted store entitlement (#320)", () 
     expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
   });
 
-  it("never lets the store override an explicit desktop verdict", () => {
-    writeCredentialStore({ [INDIVIDUAL_KEY]: "stored-individual-key" });
-    writeFileSync(
-      path.join(root, ".zcode", "v2", "coding-plan-cache.json"),
-      JSON.stringify({
-        entryStatus: {
-          items: { "builtin:bigmodel-coding-plan": { status: "unavailable" } },
-        },
-      }),
-    );
-    expect(
-      buildAccountProviderConfig()!.providers["account:bigmodel-individual-coding-plan"]!.access
-        .entitled,
-    ).toBe(false);
-  });
-
   it("never lets the store override config.json's builtin enablement signal", () => {
     writeCredentialStore({ [INDIVIDUAL_KEY]: "stored-individual-key" });
     // A builtin entry that is present but disabled is still a verdict-bearing
@@ -422,19 +402,8 @@ describe("fresh desktop-only layout — encrypted store entitlement (#320)", () 
     });
   });
 
-  it("lets a bridge account override an unavailable desktop verdict for its own plan only", async () => {
+  it("lets a bridge account entitle only its own family", async () => {
     vi.stubEnv("ZCODE_HOME", path.join(root, ".zcode"));
-    writeFileSync(
-      path.join(root, ".zcode", "v2", "coding-plan-cache.json"),
-      JSON.stringify({
-        entryStatus: {
-          items: {
-            "builtin:zai-coding-plan": { status: "unavailable" },
-            "builtin:bigmodel-coding-plan": { status: "unavailable" },
-          },
-        },
-      }),
-    );
     await saveBridgeAccount("zai", "bridge-zai-key");
     const { providers } = buildAccountProviderConfig()!;
     expect(providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
@@ -665,18 +634,20 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
     expect(oauthProjectTokenFamilyFor("account:bigmodel-team-coding-plan")).toBeNull();
   });
 
-  it("never lets the selection override an explicit desktop verdict", () => {
+  it("unions the OAuth selection even under a stale 3.12–3.14 coding-plan-cache (#359)", () => {
     writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
     writeSetting({ zai: { kind: "individual-coding-plan" } });
+    // A leftover cache from before the 3.15+ upgrade — its verdict must not
+    // suppress the active OAuth connection (the cache is no longer read).
     writeFileSync(
       path.join(dataRoot.value, "coding-plan-cache.json"),
       JSON.stringify({
-        entryStatus: { items: { "builtin:bigmodel-coding-plan": { status: "available" } } },
+        entryStatus: { items: { "builtin:zai-coding-plan": { status: "unavailable" } } },
       }),
     );
     const payload = buildAccountProviderConfig();
-    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
-    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBeNull();
+    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
+    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
   });
 
   it("does not let a leftover pre-3.12 config.json static key shadow 3.15+ OAuth, while keeping bridge and manual overrides", async () => {

@@ -343,12 +343,6 @@ describe("overlay failures keep Desktop credentials", () => {
     parsed.config.providerConfigRules.providerRules[0].config.builtinModelIds = [];
     writeFileSync(table, JSON.stringify(parsed));
     writeFileSync(
-      path.join(root, "coding-plan-cache.json"),
-      JSON.stringify({
-        entryStatus: { items: { "builtin:zai-coding-plan": { status: "unavailable" } } },
-      }),
-    );
-    writeFileSync(
       ZCODE_CREDS_PATH,
       JSON.stringify({
         provider: {
