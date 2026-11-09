@@ -302,8 +302,14 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     bridge answers `headersApplied:true, requestAuth:{apiKey}` with the plan's
     config.json key for individual coding plans
     (`answerProviderRuntimeHeaders`, server-requests.ts) — the same key the
-    pre-3.12 `builtin:` provider used; start-plan stays declined (Aliyun
-    captcha, #123). **The answer is wired at frame ARRIVAL**
+    pre-3.12 `builtin:` provider used. On 3.15+ / 3.17.x OAuth layouts where
+    upstream sets `captcha.skip_model_request: true`, the desktop host
+    (`AccountProviderRequestAuthService.resolveCurrent` +
+    `respondAccountRequestAuthWithoutInteraction`) also answers
+    `account:<family>-start-plan` directly with `{apiKey: zcodejwttoken}` from
+    `~/.zcode/v2/credentials.json` (`startPlanRequestAuthFor`) and injects
+    `ZCODE_APP_VERSION` into the backend env (`builtinProviderEnv`); Start Plan
+    asks with no local credential stay declined (#123). **The answer is wired at frame ARRIVAL**
     (`ZcodeBackend.providerRuntimeHeadersResponder`, set in ensureBackend), not
     just the turn-loop queue: a headers ask that lands while no turn loop is
     polling — compact's internal turn above all — used to sit unanswered until
@@ -1023,15 +1029,16 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   display shows the underlying mode until the first transition event/setMode;
   do NOT "fix" the fold away, and do not read the mode from settings expecting
   "plan".
-- **Start Plan providers are desktop-only — do NOT "fix" this with an
-  unofficial provider client**: `zcode-plan` requests need an Aliyun captcha
-  session only the desktop renderer can provide; the bridge answers
-  `interaction/requestProviderRuntimeHeaders` with `headersApplied:false` +
+- **Start Plan providers use only the official host credential path — never an
+  unofficial provider client**: on 3.15+ / 3.17.x (`captcha.skip_model_request:
+true`), the desktop host serves `zcodejwttoken` from `~/.zcode/v2/credentials.json`
+  over `interaction/requestProviderRuntimeHeaders` (`startPlanRequestAuthFor`)
+  with `ZCODE_APP_VERSION` injected from the desktop bundle
+  (`builtinProviderEnv`). When no Start Plan credential exists (or if upstream
+  re-enables per-request captcha), the bridge answers `headersApplied:false` +
   an actionable error (PR #128). Impersonating the desktop client, bypassing
-  the captcha/signing anti-abuse measures, or copying from the unlicensed
-  third-party proxies that do this are legal no-gos for a distributed tool
-  (ADR-0019) — decline the feature request and point users at GLM Coding
-  Plan or the desktop app.
+  captcha/signing anti-abuse measures, or copying from unlicensed third-party
+  proxies remain legal no-gos (ADR-0019).
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast

@@ -33,6 +33,9 @@ vi.mock("../src/config/account-provider.js", async (importOriginal) => {
     oauthProjectTokenFamilyFor: vi.fn((providerId: string | undefined) =>
       providerId === "account:zai-individual-coding-plan" ? "zai" : null,
     ),
+    startPlanRequestAuthFor: vi.fn((providerId: string | undefined): { apiKey: string } | null =>
+      providerId === "account:zai-start-plan" ? { apiKey: "start-plan-jwt" } : null,
+    ),
   };
 });
 
@@ -238,5 +241,19 @@ describe("answerProviderRuntimeHeaders — OAuth-derived project token (3.15+ la
       providerId: "account:bigmodel-individual-coding-plan",
     });
     expect(resolveOAuthProjectToken).not.toHaveBeenCalled();
+  });
+
+  it("serves the Start Plan JWT when startPlanRequestAuthFor resolves it (#363)", () => {
+    const backend = makeBackend([]);
+    expect(
+      answerProviderRuntimeHeaders(backend, 94, "interaction/requestProviderRuntimeHeaders", {
+        providerId: "account:zai-start-plan",
+        modelSelection: { providerId: "account:zai-start-plan", modelId: "GLM-5.3-Flash" },
+      }),
+    ).toBe(true);
+    expect(backend.sendReply).toHaveBeenCalledWith(94, {
+      headersApplied: true,
+      requestAuth: { apiKey: "start-plan-jwt" },
+    });
   });
 });

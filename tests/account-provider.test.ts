@@ -64,6 +64,7 @@ import {
   entitledCodingPlanModels,
   oauthProjectTokenFamilyFor,
   readBuiltinTable,
+  startPlanRequestAuthFor,
   zcodeCredentialsPresent,
 } from "../src/config/account-provider.js";
 import { saveBridgeAccount } from "../src/config/bridge-accounts.js";
@@ -780,5 +781,127 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
         modelId: "custom-model-1",
       },
     ]);
+  });
+
+  it("entitles Start Plan alongside Coding Plan when zcodejwttoken is in the credential store (#363)", () => {
+    writeFileSync(
+      tablePath,
+      JSON.stringify({
+        ...TABLE,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              ...TABLE.config.providerConfigRules.providerRules,
+              {
+                providerId: "account:zai-start-plan",
+                providerName: "Start Plan",
+                config: {
+                  access: { type: "zhipu-account", mode: "start-plan", accountType: "zai" },
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                },
+              },
+              {
+                providerId: "account:bigmodel-start-plan",
+                providerName: "Start Plan",
+                config: {
+                  access: { type: "zhipu-account", mode: "start-plan", accountType: "bigmodel" },
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    writeCredentialStore({
+      "oauth:zai:access_token": "login-jwt",
+      zcodejwttoken: "start-plan-jwt-token",
+    });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
+    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(true);
+    expect(payload.providers["account:bigmodel-start-plan"]!.access.entitled).toBe(false);
+    expect(startPlanRequestAuthFor("account:zai-start-plan")).toEqual({
+      apiKey: "start-plan-jwt-token",
+    });
+    expect(startPlanRequestAuthFor("account:bigmodel-start-plan")).toBeNull();
+    expect(entitledCodingPlanModels()).toEqual([
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3",
+      },
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3-Flash",
+      },
+      {
+        providerId: "builtin:zai-start-plan",
+        providerName: "Start Plan",
+        modelId: "GLM-5.3-Flash",
+      },
+      {
+        providerId: "builtin:zai-start-plan",
+        providerName: "Start Plan",
+        modelId: "GLM-5.2",
+      },
+      {
+        providerId: "builtin:zai-start-plan",
+        providerName: "Start Plan",
+        modelId: "GLM-5-Turbo",
+      },
+    ]);
+  });
+
+  it("entitles Start Plan alone for a Start Plan-only OAuth user with no Coding Plan selection", () => {
+    writeFileSync(
+      tablePath,
+      JSON.stringify({
+        ...TABLE,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              ...TABLE.config.providerConfigRules.providerRules,
+              {
+                providerId: "account:zai-start-plan",
+                providerName: "Start Plan",
+                config: {
+                  access: { type: "zhipu-account", mode: "start-plan", accountType: "zai" },
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    writeCredentialStore({
+      "oauth:active_provider": "zai",
+      "oauth:zai:access_token": "login-jwt",
+      zcodejwttoken: "start-plan-only-jwt",
+    });
+    // Leftover pre-3.12 config.json key must not shadow the 3.15+ OAuth JWT.
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: {
+          "builtin:zai-start-plan": {
+            enabled: true,
+            options: { apiKey: "stale-pre-3.12-start-key" },
+          },
+        },
+      }),
+    );
+
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
+    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(true);
+    expect(startPlanRequestAuthFor("account:zai-start-plan")).toEqual({
+      apiKey: "start-plan-only-jwt",
+    });
+    expect(zcodeCredentialsPresent()).toBe(true);
   });
 });

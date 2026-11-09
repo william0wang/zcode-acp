@@ -205,6 +205,18 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
 }
 
 /**
+ * The decrypted `zcodejwttoken` from the encrypted credential store — the
+ * Start Plan bearer JWT the 3.15+ desktop host serves for `account:*-start-plan`
+ * over `interaction/requestProviderRuntimeHeaders` (`AccountProviderRequestAuthService.resolveCurrent`).
+ */
+const ZCODE_JWT_CREDENTIAL_KEY = "zcodejwttoken";
+const OAUTH_ACTIVE_PROVIDER_KEY = "oauth:active_provider";
+
+function storeStartPlanJwt(): string | null {
+  return readCredentialStoreSync()[ZCODE_JWT_CREDENTIAL_KEY]?.trim() || null;
+}
+
+/**
  * The plans the user actually holds, keyed by the LEGACY `builtin:<family>-<plan>`
  * id — the id every entitlement source below speaks.
  *
@@ -373,6 +385,70 @@ function oauthSelectedCodingPlanFamilies(
   return out;
 }
 
+/**
+ * Families whose 3.15+ desktop OAuth sign-in entitles Start Plan (`zcodejwttoken`
+ * + `oauth:<family>:access_token` in the credential store, not switched to
+ * `apiKey` mode in `modelProviderFamilyModes`).
+ *
+ * When `setting.json` or the store names an active/selected family
+ * (`providerFamilyDomain`, `providerFamilyConnectionSelections`, or
+ * `oauth:active_provider`), only those families are candidates because
+ * `zcodejwttoken` is a single store key belonging to the active OAuth session;
+ * when none is named (minimal store fixture), any family with an OAuth login
+ * qualifies.
+ */
+function oauthEntitledStartPlanFamilies(
+  credsDir = path.dirname(ZCODE_CREDS_PATH),
+): Set<CodingPlanFamily> {
+  const out = new Set<CodingPlanFamily>();
+  if (!storeStartPlanJwt()) return out;
+  let modes: Record<string, unknown> | undefined;
+  const candidates = new Set<CodingPlanFamily>();
+  let sawExplicitFamily = false;
+  try {
+    const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
+      modelProviderFamilyModes?: Record<string, unknown>;
+      providerFamilyDomain?: unknown;
+      providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
+    };
+    modes = setting.modelProviderFamilyModes;
+    if (
+      typeof setting.providerFamilyDomain === "string" &&
+      isCodingPlanFamily(setting.providerFamilyDomain)
+    ) {
+      sawExplicitFamily = true;
+      candidates.add(setting.providerFamilyDomain);
+    }
+    for (const [family, selection] of Object.entries(
+      setting.providerFamilyConnectionSelections ?? {},
+    )) {
+      if (selection?.kind !== "individual-coding-plan" && selection?.kind !== "start-plan") {
+        continue;
+      }
+      if (!isCodingPlanFamily(family)) continue;
+      sawExplicitFamily = true;
+      candidates.add(family);
+    }
+  } catch {
+    // setting.json absent (headless-only) — fall through to store
+  }
+  const activeProvider = readCredentialStoreSync()[OAUTH_ACTIVE_PROVIDER_KEY]?.trim();
+  if (activeProvider && isCodingPlanFamily(activeProvider)) {
+    sawExplicitFamily = true;
+    candidates.add(activeProvider);
+  }
+  if (!sawExplicitFamily) {
+    candidates.add("zai");
+    candidates.add("bigmodel");
+  }
+  for (const family of candidates) {
+    if (modes?.[family] === "apiKey") continue;
+    if (!hasOAuthLogin(family)) continue;
+    out.add(family);
+  }
+  return out;
+}
+
 /** Sources 1-3 above, read from the raw desktop files only. */
 function desktopEntitledBuiltinProviders(): Set<string> {
   const out = new Set<string>();
@@ -402,6 +478,9 @@ function desktopEntitledBuiltinProviders(): Set<string> {
   // surviving a 3.15+ upgrade would suppress this union — #359).
   for (const family of oauthSelectedCodingPlanFamilies(credsDir)) {
     out.add(`builtin:${family}-coding-plan`);
+  }
+  for (const family of oauthEntitledStartPlanFamilies(credsDir)) {
+    out.add(`builtin:${family}-start-plan`);
   }
   if (out.size > 0) return out;
   // 2) Fresh desktop-only layout (#320): no verdict-bearing source spoke, but
@@ -455,7 +534,8 @@ export function entitledCodingPlanModels(): Array<{
     readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.filter(
       (r) =>
         r.config?.access?.type === "zhipu-account" &&
-        r.config.access.mode === "individual-coding-plan",
+        (r.config.access.mode === "individual-coding-plan" ||
+          r.config.access.mode === "start-plan"),
     ) ?? [];
   if (rules.length === 0) return [];
   const entitled = entitledBuiltinProviders();
@@ -564,6 +644,59 @@ export function codingPlanRequestAuthFor(
   if (oauthActive) return null;
   const stored = storeIndividualCodingPlanKey(accountProviderId);
   return stored ? { apiKey: stored } : null;
+}
+
+/**
+ * The legacy `builtin:<family>-start-plan` id of `accountProviderId` when it is
+ * a Start Plan provider the account ladder entitles, else null.
+ */
+function entitledStartPlanLegacyId(accountProviderId: string | undefined): string | null {
+  if (!accountProviderId?.startsWith("account:")) return null;
+  const rule = readBuiltinTable()?.table.config?.providerConfigRules?.providerRules?.find(
+    (r) => r.providerId === accountProviderId,
+  );
+  const isStartPlan =
+    rule?.config?.access?.mode === "start-plan" ||
+    (!rule && accountProviderId.endsWith("-start-plan"));
+  if (!isStartPlan) return null;
+  const legacyId = configProviderIdFor(accountProviderId);
+  if (legacyId === accountProviderId) return null;
+  return entitledBuiltinProviders().has(legacyId) ? legacyId : null;
+}
+
+/**
+ * The request auth the bridge can serve for an `account:<family>-start-plan`
+ * model, or null when it cannot answer.
+ *
+ * Since 3.15+ / 3.17.x (`/api/v1/client/configs` `captcha.skip_model_request:
+ * true`), the desktop host (`AccountProviderRequestAuthService.resolveCurrent`
+ * + `respondAccountRequestAuthWithoutInteraction`) answers Start Plan model
+ * requests directly with `{ apiKey: zcodeJwtToken }` from `credentials.json`
+ * without a browser captcha interaction. When 3.15+ OAuth Start Plan is active,
+ * any stale pre-3.12 `config.json` key is skipped so the fresh store JWT wins.
+ */
+export function startPlanRequestAuthFor(
+  accountProviderId: string | undefined,
+): { apiKey: string } | null {
+  const legacyId = entitledStartPlanLegacyId(accountProviderId);
+  if (!legacyId) return null;
+  const family = /^builtin:([a-z0-9]+)-start-plan$/u.exec(legacyId)?.[1];
+  const oauthActive =
+    Boolean(family && isCodingPlanFamily(family)) &&
+    oauthEntitledStartPlanFamilies().has(family as CodingPlanFamily);
+  if (!oauthActive) {
+    try {
+      const cfg = readCredentialConfig(ZCODE_CREDS_PATH) as {
+        provider?: Record<string, { enabled?: boolean; options?: { apiKey?: string } }>;
+      };
+      const apiKey = cfg.provider?.[legacyId]?.options?.apiKey?.trim();
+      if (apiKey) return { apiKey };
+    } catch {
+      // unreadable/absent config — the store decides
+    }
+  }
+  const jwt = storeStartPlanJwt();
+  return jwt ? { apiKey: jwt } : null;
 }
 
 /**
