@@ -50,6 +50,7 @@ import {
 import {
   codingPlanRequestAuthFor,
   oauthProjectTokenFamilyFor,
+  startPlanRequestAuthFor,
 } from "../config/account-provider.js";
 import { ProjectTokenError, resolveOAuthProjectToken } from "../config/project-token.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
@@ -1401,15 +1402,16 @@ export function answerProviderRuntimeHeaders(
     );
     return true;
   }
-  // Start Plan providers (zcode-plan endpoints) ask their host to solve an
-  // Aliyun captcha and inject X-Aliyun-Captcha-Verify-* headers before every
-  // model request; the desktop renderer does this from a browser environment.
-  // The headless bridge has neither a browser nor the captcha credential, so
-  // the only honest answer is headersApplied:false — the backend then fails
-  // with its -32031 error carrying our message. Without this, the request
-  // fell through to the generic unsupported-request error and the backend
-  // fell back to client signing with the provider's OAuth JWT, dying with the
-  // misleading "must contain one separator" invalid-config error (#123).
+  const startPlanAuth = startPlanRequestAuthFor(providerId);
+  if (startPlanAuth) {
+    log("  provider runtime headers: serving the Start Plan JWT (store or config.json)");
+    sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth: startPlanAuth });
+    return true;
+  }
+  // Start Plan providers with no local credential (or when upstream requires an
+  // Aliyun captcha session) cannot be answered headlessly — reply
+  // headersApplied:false so the backend fails with its -32031 error carrying
+  // our message instead of falling back to client signing (#123).
   warn(
     "  ⚠ provider runtime headers requested (Start Plan captcha session); " +
       "the headless bridge cannot provide it — declining",

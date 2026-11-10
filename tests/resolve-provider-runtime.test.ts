@@ -22,12 +22,14 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  APP_VERSION_ENV,
   builtinProviderEnv,
   BUILTIN_PROVIDER_ENV,
   PERSONAL_PROVIDER_ENV,
 } from "../src/backend/resolve.js";
 
 const SAVED = {
+  ZCODE_APP_VERSION: process.env.ZCODE_APP_VERSION,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE,
   ZCODE_BIN: process.env.ZCODE_BIN,
   ZCODE_HOME: process.env.ZCODE_HOME,
@@ -40,6 +42,7 @@ let personal: string;
 beforeEach(() => {
   scratch = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
   process.env.ZCODE_HOME = path.join(scratch, "data");
+  delete process.env.ZCODE_APP_VERSION;
   personal = path.join(process.env.ZCODE_HOME, "v2", "provider_config.json");
 });
 
@@ -136,5 +139,69 @@ describe("builtinProviderEnv", () => {
   it("returns {} for a non-JS or missing entry", () => {
     expect(builtinProviderEnv("/usr/bin/zcode")).toEqual({});
     expect(builtinProviderEnv("/nonexistent/zcode.cjs")).toEqual({});
+  });
+
+  it("injects ZCODE_APP_VERSION from macOS Info.plist when present", () => {
+    const contents = path.join(scratch, "ZCode.app", "Contents");
+    const resources = path.join(contents, "Resources");
+    const entry = makeAppBundle(resources);
+    writeFileSync(
+      path.join(contents, "Info.plist"),
+      [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<plist version="1.0"><dict>',
+        "  <key>CFBundleShortVersionString</key>",
+        "  <string>3.17.2</string>",
+        "</dict></plist>",
+      ].join("\n"),
+    );
+
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: path.join(resources, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
+      [APP_VERSION_ENV]: "3.17.2",
+    });
+  });
+
+  it("injects ZCODE_APP_VERSION from app.asar package.json on Linux/Windows bundle layouts", () => {
+    const resources = path.join(scratch, "resources");
+    const entry = makeAppBundle(resources);
+    const pkgBytes = Buffer.from(JSON.stringify({ name: "@zcode/desktop", version: "3.17.2" }));
+    const headerBytes = Buffer.from(
+      JSON.stringify({
+        files: { "package.json": { size: pkgBytes.length, offset: "0" } },
+      }),
+    );
+    const alignedHeaderLen = Math.ceil(headerBytes.length / 4) * 4;
+    const pre = Buffer.alloc(16);
+    pre.writeUInt32LE(4, 0);
+    pre.writeUInt32LE(8 + alignedHeaderLen, 4);
+    pre.writeUInt32LE(4 + alignedHeaderLen, 8);
+    pre.writeUInt32LE(headerBytes.length, 12);
+    const paddedHeader = Buffer.alloc(alignedHeaderLen);
+    headerBytes.copy(paddedHeader);
+    writeFileSync(path.join(resources, "app.asar"), Buffer.concat([pre, paddedHeader, pkgBytes]));
+
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: path.join(resources, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
+      [APP_VERSION_ENV]: "3.17.2",
+    });
+  });
+
+  it("does not override an explicit ZCODE_APP_VERSION in process.env", () => {
+    const contents = path.join(scratch, "ZCode.app", "Contents");
+    const resources = path.join(contents, "Resources");
+    const entry = makeAppBundle(resources);
+    writeFileSync(
+      path.join(contents, "Info.plist"),
+      "<plist><dict><key>CFBundleShortVersionString</key><string>3.17.2</string></dict></plist>",
+    );
+    process.env.ZCODE_APP_VERSION = "9.9.9";
+
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: path.join(resources, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
+    });
   });
 });

@@ -115,8 +115,10 @@ log into the ZCode desktop app once so it exists. A coding-plan key added in
 the desktop's Settings → Model Provider ("Use API key") counts too (#344): it
 lands in `~/.zcode/v2/provider_config.json` as a
 `zhipu-coding-plan-api-key` rule and the bridge reads it as an entitlement +
-request-key source. Start-plan providers stay
-declined (Aliyun captcha — desktop app only, issue #123).
+request-key source. On 3.15+ / 3.17.x OAuth installs where `~/.zcode/v2/credentials.json`
+holds `zcodejwttoken` (and `captcha.skip_model_request` is enabled upstream),
+Start Plan (`account:<family>-start-plan`) is also entitled and served via
+`startPlanRequestAuthFor`; keyless Start Plan requests stay declined (issue #123).
 
 **Desktop 3.15+ after an OAuth sign-in:** the store holds no plan key at all,
 only the sign-in (`oauth:<family>:access_token`), and `setting.json` records the
@@ -544,16 +546,17 @@ headless bridge has neither a browser nor the captcha credential. GLM Coding
 Plan providers are unaffected — they use an `id.secret` API key and sign
 requests themselves.
 
-**Workaround:** switch the session's provider to a GLM Coding Plan one
-(model dropdown, or re-enable it in the desktop app so
-`~/.zcode/v2/config.json` marks it `enabled`). The bridge answers the captcha
-request with `headersApplied:false` and the backend surfaces a clear error;
-full Start Plan support headless would require solving the Aliyun captcha
-outside a browser, which this bridge does not do. That boundary is
-deliberate: unofficial clients or proxies that impersonate the desktop app or
-bypass the captcha check won't be shipped or supported here — if the provider
-ever offers an official headless credential path, this bridge will adopt it
-(see #123).
+**Workaround:** sign in to the ZCode desktop app (3.15+ / 3.17.x) so
+`~/.zcode/v2/credentials.json` holds both `oauth:<family>:access_token` and
+`zcodejwttoken` — with `captcha.skip_model_request: true` upstream, the bridge
+serves `zcodejwttoken` over `interaction/requestProviderRuntimeHeaders`
+(`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` from the desktop
+bundle (`builtinProviderEnv`), matching the desktop host's own
+`AccountProviderRequestAuthService`. If no Start Plan credential is present on
+disk (or if upstream requires a browser captcha session), switch the session's
+provider to a GLM Coding Plan one; the bridge answers with
+`headersApplied:false` and the backend surfaces a clear error rather than
+bypassing captcha checks (see #123, #363).
 
 ### Interactive TUI / `script` / `expect` fails with `Operation not permitted` under the sandbox
 

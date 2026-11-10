@@ -7,11 +7,11 @@
  * "app-server", "--stdio"]` with an explicit, sqlite-capable Node binary.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { execFileSync } from "node:child_process";
 
 import { log, warn, zcodePersonalProviderPath } from "../utils.js";
 
@@ -134,6 +134,85 @@ function discoverZcodeBin(): string | null {
 const PROVIDER_CONFIG_NAME = "zcode-builtin.json";
 export const BUILTIN_PROVIDER_ENV = "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE";
 export const PERSONAL_PROVIDER_ENV = "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE";
+export const APP_VERSION_ENV = "ZCODE_APP_VERSION";
+
+/**
+ * Read `package.json#version` from an Electron `app.asar` archive header
+ * without unpacking it (cross-platform fallback for Linux/Windows bundles that
+ * carry no macOS `Info.plist`).
+ */
+function readAsarPackageVersion(asarPath: string): string | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(asarPath, "r");
+    const pre = Buffer.alloc(16);
+    if (readSync(fd, pre, 0, 16, 0) < 16) return null;
+    const headerPickleSize = pre.readUInt32LE(4);
+    const headerStringSize = pre.readUInt32LE(12);
+    if (headerStringSize === 0 || headerStringSize > 16 * 1024 * 1024) return null;
+    const headerBuf = Buffer.alloc(headerStringSize);
+    if (readSync(fd, headerBuf, 0, headerStringSize, 16) < headerStringSize) return null;
+    const header = JSON.parse(headerBuf.toString("utf8")) as {
+      files?: Record<string, { size?: unknown; offset?: unknown }>;
+    };
+    const pkgMeta = header.files?.["package.json"];
+    const size = typeof pkgMeta?.size === "number" ? pkgMeta.size : 0;
+    const offset = Number(pkgMeta?.offset);
+    if (!(size > 0 && size <= 1024 * 1024) || !Number.isFinite(offset) || offset < 0) {
+      return null;
+    }
+    const pkgBuf = Buffer.alloc(size);
+    const dataStart = 8 + headerPickleSize;
+    if (readSync(fd, pkgBuf, 0, size, dataStart + offset) < size) return null;
+    const pkg = JSON.parse(pkgBuf.toString("utf8")) as { version?: unknown };
+    return typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close error
+      }
+    }
+  }
+}
+
+/**
+ * Resolve the desktop app version adjacent to the bundled CLI directory (`glm/`).
+ *
+ * The desktop host injects `ZCODE_APP_VERSION` into its spawned app-server env
+ * (`buildHostProcessEnv`), and the CLI's `buildCliZCodeSourceHeaders` reads it
+ * to populate `User-Agent: ZCode/<version>` and `X-ZCode-App-Version: <version>`.
+ * Without it, headless launches send `User-Agent: ZCode/unknown` and omit
+ * `X-ZCode-App-Version`, which the Start Plan gateway (`zcode-plan/anthropic`)
+ * rejects even when `requestAuth` carries a valid `zcodejwttoken`.
+ */
+function readDesktopAppVersion(dir: string): string | null {
+  for (const plist of [
+    path.join(dir, "..", "..", "Info.plist"),
+    path.join(dir, "..", "Info.plist"),
+  ]) {
+    if (!existsSync(plist)) continue;
+    try {
+      const text = readFileSync(plist, "utf8");
+      const match = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/u.exec(
+        text,
+      );
+      const ver = match?.[1]?.trim();
+      if (ver) return ver;
+    } catch {
+      // try next candidate
+    }
+  }
+  for (const asar of [path.join(dir, "..", "app.asar"), path.join(dir, "..", "..", "app.asar")]) {
+    if (!existsSync(asar)) continue;
+    const ver = readAsarPackageVersion(asar);
+    if (ver) return ver;
+  }
+  return null;
+}
 
 /**
  * Env vars pointing the CLI at its provider tables, mirroring the desktop
@@ -180,7 +259,15 @@ export function builtinProviderEnv(entryArg?: string): NodeJS.ProcessEnv {
   const personal = zcodePersonalProviderPath();
   // A missing personal table is valid: the backend reads it as an empty layer.
   // Both paths must still be explicit to keep the builtin revision path stable.
-  return { [BUILTIN_PROVIDER_ENV]: found, [PERSONAL_PROVIDER_ENV]: personal };
+  const env: NodeJS.ProcessEnv = {
+    [BUILTIN_PROVIDER_ENV]: found,
+    [PERSONAL_PROVIDER_ENV]: personal,
+  };
+  if (!process.env[APP_VERSION_ENV]?.trim()) {
+    const appVersion = readDesktopAppVersion(dir);
+    if (appVersion) env[APP_VERSION_ENV] = appVersion;
+  }
+  return env;
 }
 
 /**
