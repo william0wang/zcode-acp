@@ -132,7 +132,13 @@ describe("cliproxy client", () => {
   it("api-call relays with the antigravity client UA and accepts an upstream 2xx", async () => {
     const route = `${BASE}/v8/management/requests/api-call`;
     const f = fakeFetch({ [route]: { status: 200, body: relay({ groups: [] }, 200) } });
-    const out = await real().fetchQuotaSummary(BASE, KEY, "0", "proj", f.impl as unknown as typeof fetch);
+    const out = await real().fetchQuotaSummary(
+      BASE,
+      KEY,
+      "0",
+      "proj",
+      f.impl as unknown as typeof fetch,
+    );
     expect(out?.status).toBe(200);
     expect(f.calls).toHaveLength(1); // first URL variant satisfied — ladder stops
     const payload = JSON.parse(f.calls[0]!.body!) as {
@@ -162,12 +168,19 @@ describe("cliproxy client", () => {
     ]);
     const calls: string[] = [];
     const impl = async (url: string, init?: RequestInit) => {
-      if (url !== route) return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+      if (url !== route)
+        return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
       const payload = JSON.parse(String(init?.body)) as { url: string };
       calls.push(payload.url);
       return new Response(byUpstream.get(payload.url) ?? relay({}, 500), { status: 200 });
     };
-    const out = await real().fetchQuotaSummary(BASE, KEY, "0", undefined, impl as unknown as typeof fetch);
+    const out = await real().fetchQuotaSummary(
+      BASE,
+      KEY,
+      "0",
+      undefined,
+      impl as unknown as typeof fetch,
+    );
     expect(out).not.toBeNull();
     expect(relayUpstreamStatus(out!.text)).toBe(200);
     expect(calls).toEqual([...QUOTA_SUMMARY_URLS]);
@@ -177,7 +190,13 @@ describe("cliproxy client", () => {
     const v8 = `${BASE}/v8/management/requests/api-call`;
     const v0 = `${BASE}/v0/management/api-call`;
     const f = fakeFetch({ [v0]: { status: 200, body: relay({}, 200) } });
-    const out = await real().fetchQuotaSummary(BASE, KEY, "0", undefined, f.impl as unknown as typeof fetch);
+    const out = await real().fetchQuotaSummary(
+      BASE,
+      KEY,
+      "0",
+      undefined,
+      f.impl as unknown as typeof fetch,
+    );
     expect(out?.status).toBe(200);
     expect(f.calls.map((c) => c.url)).toEqual([v8, v0]);
     // Winner cached: the next URL variant goes straight to v0.
@@ -372,7 +391,7 @@ describe("queryCpUsage orchestration", () => {
   it("maps 401 to auth_error, other statuses to unavailable", async () => {
     mockedCreds.mockResolvedValue({ status: 401, text: "{}" });
     expect((await queryCpUsage()).result.kind).toBe("auth_error");
-    clearCpCache(); // the 10s TTL would otherwise serve the same verdict below
+    clearCpCache(); // the caches would otherwise serve the same verdict below
     mockedCreds.mockResolvedValue({ status: 500, text: "{}" });
     expect((await queryCpUsage()).result.kind).toBe("unavailable");
     clearCpCache();
@@ -391,7 +410,9 @@ describe("queryCpUsage orchestration", () => {
     });
     mockedRelay.mockResolvedValue(
       relayResp({
-        groups: [{ displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.25 }] }],
+        groups: [
+          { displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.25 }] },
+        ],
       }),
     );
     const { result, otherCount } = await queryCpUsage();
@@ -440,6 +461,76 @@ describe("queryCpUsage orchestration", () => {
     mockedRelay.mockResolvedValue(relayResp({ groups: [] })); // no model buckets
     const { result } = await queryCpUsage();
     expect(result.kind).toBe("unavailable"); // the only Gemini account yielded nothing
+  });
+
+  it("a transient failure keeps the last success on display (sticky) and retries past the failure gate", async () => {
+    // Observed live 2026-11-10: the credentials listing times out
+    // intermittently, and one blip used to blank the card for the whole TTL.
+    vi.useFakeTimers();
+    try {
+      mockedCreds.mockResolvedValue({
+        status: 200,
+        text: JSON.stringify([{ auth_index: "0", provider: "antigravity" }]),
+      });
+      mockedRelay.mockResolvedValue(
+        relayResp({
+          groups: [
+            { displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.25 }] },
+          ],
+        }),
+      );
+      const ok = await queryCpUsage();
+      expect(ok.result.kind).toBe("success");
+
+      // Past the success TTL the next sweep blips — the stale success serves.
+      vi.setSystemTime(Date.now() + 5 * 60_000 + 1_000);
+      mockedCreds.mockRejectedValue(new Error("The operation timed out."));
+      const sticky = await queryCpUsage();
+      expect(sticky.result.kind).toBe("success"); // NOT unavailable
+      expect(mockedCreds).toHaveBeenCalledTimes(2);
+
+      // Inside the failure gate: no re-query, still the last success.
+      expect((await queryCpUsage()).result.kind).toBe("success");
+      expect(mockedCreds).toHaveBeenCalledTimes(2);
+
+      // Past the gate: the sweep retries and recovers with FRESH data.
+      vi.setSystemTime(Date.now() + 60_000 + 1_000);
+      mockedCreds.mockResolvedValue({
+        status: 200,
+        text: JSON.stringify([{ auth_index: "0", provider: "antigravity" }]),
+      });
+      const fresh = await queryCpUsage();
+      expect(fresh.result.kind).toBe("success");
+      expect(mockedCreds).toHaveBeenCalledTimes(3);
+      if (fresh.result.kind !== "success" || ok.result.kind !== "success") return;
+      expect(fresh.result.fetchedAt).toBeGreaterThan(ok.result.fetchedAt);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("auth_error surfaces instead of the stale success (durable, actionable)", async () => {
+    vi.useFakeTimers();
+    try {
+      mockedCreds.mockResolvedValue({
+        status: 200,
+        text: JSON.stringify([{ auth_index: "0", provider: "antigravity" }]),
+      });
+      mockedRelay.mockResolvedValue(
+        relayResp({
+          groups: [
+            { displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.25 }] },
+          ],
+        }),
+      );
+      expect((await queryCpUsage()).result.kind).toBe("success");
+
+      vi.setSystemTime(Date.now() + 5 * 60_000 + 1_000);
+      mockedCreds.mockResolvedValue({ status: 401, text: "{}" }); // key rotated
+      expect((await queryCpUsage()).result.kind).toBe("auth_error");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -497,7 +588,9 @@ describe("formatCpSection", () => {
       week.getMinutes(),
     ).padStart(2, "0")}`;
     expect(sec.body[0]).toMatch(
-      new RegExp(`Gemini Models\\s+Week\\s+[█░]+\\s+30% · ${stamp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+      new RegExp(
+        `Gemini Models\\s+Week\\s+[█░]+\\s+30% · ${stamp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      ),
     );
     // 5h has no reset reported by either account — no stamp.
     expect(sec.body[1]).toMatch(/^\s{22}5h\s+[█░]+\s+20%$/);
