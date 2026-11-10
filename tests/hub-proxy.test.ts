@@ -2375,3 +2375,212 @@ describe("remote projectRoots widening + GET /api/fs/list (browse-and-create)", 
     expect(((await knownRes.json()) as { creatable: boolean }).creatable).toBe(true);
   });
 });
+
+describe("hub stale-bridge reuse (new work never lands on old code)", () => {
+  // Reported 2026-11-10: a Start Plan entitlement fix was released, rebuilt
+  // and RELOADED locally, yet every "new" conversation still offered the old
+  // model list. Cause: one serve bridge per workspace, reused forever — a
+  // process loads its modules once, so its handlers and model list are frozen
+  // at spawn time. Reuse therefore has to consider WHICH CODE the bridge runs,
+  // not just whether it is alive.
+  const PROJECT = "/Users/dev/Develop/demo";
+  const auth = { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" };
+  const desktop = (hub: HubHandle, body: Record<string, unknown>): Promise<Response> =>
+    fetch(`http://127.0.0.1:${hub.port}/api/instances`, {
+      method: "POST",
+      headers: { ...auth, "x-zcode-client": DESKTOP_CLIENT_NAME },
+      body: JSON.stringify(body),
+    });
+
+  let fakeChild: EventEmitter & { pid: number; exitCode: number | null; signalCode: string | null };
+  let spawnCalls: Array<{
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    kind: "tui" | "serve";
+    launch?: unknown;
+  }>;
+  /** Fake dist: `code-fingerprint.json` + one .js whose mtime is the "build". */
+  let distDir: string;
+
+  beforeEach(async () => {
+    listKnownWorkspacesMock.mockReset();
+    listKnownWorkspacesMock.mockResolvedValue([
+      { workspacePath: PROJECT, sessions: 3, lastActive: 1234 },
+    ]);
+    fakeChild = new EventEmitter() as typeof fakeChild;
+    fakeChild.pid = 4242;
+    fakeChild.exitCode = null;
+    fakeChild.signalCode = null;
+    spawnCalls = [];
+    distDir = await mkdtemp(path.join(tmpdir(), "hub-stale-dist-"));
+    cleanups.push(() => rm(distDir, { recursive: true, force: true }));
+    await writeShip("current");
+  });
+
+  /** Publish a build to the fake dist: fingerprint + a freshly written .js. */
+  async function writeShip(fingerprint: string): Promise<void> {
+    await writeFile(path.join(distDir, "index.js"), `// ${fingerprint}\n`);
+    await writeFile(
+      path.join(distDir, "code-fingerprint.json"),
+      JSON.stringify({ fingerprint, fileCount: 1 }),
+    );
+  }
+
+  function spawnServeSpy() {
+    return (opts: { cwd: string; env: NodeJS.ProcessEnv; kind: "tui" | "serve" }) => {
+      spawnCalls.push(opts);
+      return fakeChild as unknown as import("node:child_process").ChildProcess;
+    };
+  }
+
+  async function register(
+    hub: HubHandle,
+    id: string,
+    extra: Record<string, unknown> = {},
+  ): Promise<void> {
+    const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        registerBody({
+          id,
+          workspace: PROJECT,
+          origin: "serve",
+          port: BASE_PORT + 70,
+          pid: 4242,
+          ...extra,
+        }),
+      ),
+    });
+    expect(res.ok).toBe(true);
+  }
+
+  /** A hub whose /api/upgrade-style disk view is the fake dist, not this repo. */
+  const startStaleHub = (): Promise<HubHandle> =>
+    startTestHub({
+      spawnServe: spawnServeSpy(),
+      codePaths: {
+        packageJson: path.join(distDir, "package.json"),
+        distDir,
+      },
+    });
+
+  it("a create does not reuse a bridge running older code (it incubates a fresh one)", async () => {
+    const hub = await startStaleHub();
+    // Registered with the PREVIOUS build's fingerprint; the disk now has another.
+    await register(hub, "serve-stale", { codeFingerprint: "previous" });
+    const pending = desktop(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400)); // one poll tick
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.kind).toBe("serve");
+    await register(hub, "serve-fresh", {
+      codeFingerprint: "current",
+      nonce: spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    const res = await pending;
+    expect(await res.json()).toEqual({ id: "serve-fresh", reused: false });
+  });
+
+  it("reuses a bridge whose fingerprint matches the disk", async () => {
+    const hub = await startStaleHub();
+    await register(hub, "serve-current", { codeFingerprint: "current" });
+    const res = await desktop(hub, { workspacePath: PROJECT });
+    expect(await res.json()).toEqual({ id: "serve-current", reused: true });
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("an mtime-only build change (fingerprint-less bridge) also counts as stale", async () => {
+    const hub = await startStaleHub();
+    // No codeFingerprint (an older bridge): the mtime signal must carry it.
+    await register(hub, "serve-legacy", { startedAt: 1 });
+    const pending = desktop(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(spawnCalls).toHaveLength(1);
+    await register(hub, "serve-rebuilt", {
+      codeFingerprint: "current",
+      nonce: spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    expect(await (await pending).json()).toEqual({ id: "serve-rebuilt", reused: false });
+  });
+
+  it("a resume of a live conversation still lands on its holder, stale or not", async () => {
+    // Two bridges must never load one conversation. Code staleness justifies a
+    // fresh bridge for NEW work only — never a second load of a live session.
+    const hub = await startStaleHub();
+    await register(hub, "serve-stale", {
+      codeFingerprint: "previous",
+      sessions: [{ sessionId: "sess_live", title: "live", updatedAt: 5 }],
+    });
+    const res = await desktop(hub, { workspacePath: PROJECT, sessionId: "sess_live" });
+    expect(await res.json()).toEqual({ id: "serve-stale", reused: true });
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  /** A real HTTP stand-in for a serve bridge's /sessions history route. */
+  async function startBridgeHttp(): Promise<{ server: Server; port: number }> {
+    const server = createServer((req, res) => {
+      expect(req.url).toContain("/sessions");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ sessions: [] }));
+    });
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve(typeof addr === "object" && addr ? addr.port : 0);
+      });
+    });
+    cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    return { server, port };
+  }
+
+  it("the listing prefers the fresh bridge and later attaches follow that id", async () => {
+    // The listing is the client's ENTRY POINT: it browses here and attaches to
+    // the id it got back, so naming the stale bridge would pin every later
+    // resume to the old process.
+    const hub = await startStaleHub();
+    const bridge = await startBridgeHttp();
+    await register(hub, "serve-stale", { codeFingerprint: "previous" });
+    const pending = fetch(
+      `http://127.0.0.1:${hub.port}/api/projects/sessions?workspacePath=${encodeURIComponent(PROJECT)}`,
+      { headers: auth },
+    );
+    await new Promise((r) => setTimeout(r, 400));
+    expect(spawnCalls).toHaveLength(1); // incubated: the stale one was skipped
+    await register(hub, "serve-fresh", {
+      codeFingerprint: "current",
+      port: bridge.port,
+      nonce: spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { instance: { id: string } }).instance.id).toBe("serve-fresh");
+  });
+
+  it("never kills the stale bridge — it stays registered with its sessions", async () => {
+    // The old bridge may be mid-turn with clients attached. Only routing
+    // changes: nothing here signals, prunes or shuts it down for being stale
+    // (it exits on its own serve idle window once its work is done).
+    const hub = await startStaleHub();
+    await register(hub, "serve-stale", {
+      codeFingerprint: "previous",
+      sessions: [{ sessionId: "sess_busy", title: "busy", updatedAt: 9 }],
+    });
+    // Trigger the staleness verdict twice: a create and a history listing.
+    const create = desktop(hub, { workspacePath: PROJECT });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(spawnCalls).toHaveLength(1); // it WAS judged stale…
+    const list = (await (await listInstances(hub)).json()) as Array<{
+      id: string;
+      sessions: Array<{ sessionId: string }>;
+    }>;
+    const stale = list.find((i) => i.id === "serve-stale");
+    expect(stale).toBeDefined(); // …and still registered
+    expect(stale!.sessions.map((s) => s.sessionId)).toContain("sess_busy");
+    // Finish the incubation so the create does not dangle.
+    await register(hub, "serve-fresh", {
+      codeFingerprint: "current",
+      nonce: spawnCalls[0]!.env.ZCODE_ACP_SPAWN_NONCE,
+    });
+    expect(await (await create).json()).toEqual({ id: "serve-fresh", reused: false });
+  });
+});

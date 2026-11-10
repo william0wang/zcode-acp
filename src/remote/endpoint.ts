@@ -29,6 +29,7 @@ import { WebSocketServer } from "ws";
 import { runtimeSpawnParts } from "../runtime.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { AGENT_INFO, log, warn } from "../utils.js";
+import { readCodeFingerprint } from "./code-fingerprint.js";
 import { createFileHandler } from "./file-endpoint.js";
 import { envWithLoginShell } from "./login-shell-env.js";
 import { createSessionCloseHandler } from "./session-close-endpoint.js";
@@ -334,6 +335,11 @@ export async function startRemoteEndpoint(
       ? tuiPidRaw
       : undefined;
 
+  // Read ONCE, at startup: this is the code this process is running, and it
+  // must not drift if a rebuild lands while the bridge lives — that drift is
+  // exactly what the hub's reuse check needs to see.
+  const processCodeFingerprint = readCodeFingerprint();
+
   const payload = (sessions: AdvertisedSession[]) => ({
     token: config.token,
     id: instanceId,
@@ -361,6 +367,12 @@ export async function startRemoteEndpoint(
     // Lets the hub detect that it is older than this bridge and restart
     // itself (we then re-spawn it from this dist — see registerOnce).
     version: AGENT_INFO.version,
+    // Frozen code identity of THIS process, for the hub's reuse staleness
+    // check: a bridge whose fingerprint differs from the dist on disk is
+    // running other code than a fresh spawn would load, so new sessions must
+    // not be routed to it (`bridgeRunsStaleCode` in hub-server.ts). Null on a
+    // build without the fingerprint step — the hub then falls back to version/mtime.
+    ...(processCodeFingerprint ? { codeFingerprint: processCodeFingerprint } : {}),
   });
 
   const spawnHub = async (): Promise<void> => {
