@@ -783,7 +783,59 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
     ]);
   });
 
-  it("entitles Start Plan alongside Coding Plan when zcodejwttoken is in the credential store (#363)", () => {
+  it("does not entitle Start Plan from a Coding Plan OAuth login alone (#363 follow-up)", () => {
+    // Observed 2026-11-10: an OAuth sign-in for the individual Coding Plan
+    // leaves zcodejwttoken in the store — a login is NOT a Start Plan
+    // holding. Upstream decides entitlement from the billing/balance plans;
+    // the only on-disk mirror is the connection selection's kind.
+    writeFileSync(
+      tablePath,
+      JSON.stringify({
+        ...TABLE,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              ...TABLE.config.providerConfigRules.providerRules,
+              {
+                providerId: "account:zai-start-plan",
+                providerName: "Start Plan",
+                config: {
+                  access: { type: "zhipu-account", mode: "start-plan", accountType: "zai" },
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    writeCredentialStore({
+      "oauth:zai:access_token": "login-jwt",
+      zcodejwttoken: "start-plan-jwt-token",
+    });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
+    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(false);
+    expect(startPlanRequestAuthFor("account:zai-start-plan")).toBeNull();
+    // No start-plan models leak into the dropdown (GLM-5.2 / GLM-5-Turbo are
+    // the bundled table's start-plan list).
+    expect(entitledCodingPlanModels()).toEqual([
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3",
+      },
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3-Flash",
+      },
+    ]);
+  });
+
+  it("entitles Start Plan when the desktop connection selection is start-plan (#363)", () => {
     writeFileSync(
       tablePath,
       JSON.stringify({
@@ -817,27 +869,17 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
       "oauth:zai:access_token": "login-jwt",
       zcodejwttoken: "start-plan-jwt-token",
     });
-    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    writeSetting({ zai: { kind: "start-plan" } });
 
     const payload = buildAccountProviderConfig()!;
-    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
     expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(true);
+    // No selection (and no login) for bigmodel — its Start Plan stays off.
     expect(payload.providers["account:bigmodel-start-plan"]!.access.entitled).toBe(false);
     expect(startPlanRequestAuthFor("account:zai-start-plan")).toEqual({
       apiKey: "start-plan-jwt-token",
     });
     expect(startPlanRequestAuthFor("account:bigmodel-start-plan")).toBeNull();
     expect(entitledCodingPlanModels()).toEqual([
-      {
-        providerId: "builtin:zai-coding-plan",
-        providerName: "builtin:zai-coding-plan",
-        modelId: "GLM-5.3",
-      },
-      {
-        providerId: "builtin:zai-coding-plan",
-        providerName: "builtin:zai-coding-plan",
-        modelId: "GLM-5.3-Flash",
-      },
       {
         providerId: "builtin:zai-start-plan",
         providerName: "Start Plan",
@@ -883,6 +925,9 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
       "oauth:zai:access_token": "login-jwt",
       zcodejwttoken: "start-plan-only-jwt",
     });
+    // The connection selection IS Start Plan — that is the on-disk holding
+    // signal (a login alone is not, see the #363 follow-up test).
+    writeSetting({ zai: { kind: "start-plan" } });
     // Leftover pre-3.12 config.json key must not shadow the 3.15+ OAuth JWT.
     writeFileSync(
       zcodeCfgPath.value,

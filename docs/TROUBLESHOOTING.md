@@ -115,11 +115,16 @@ log into the ZCode desktop app once so it exists. A coding-plan key added in
 the desktop's Settings → Model Provider ("Use API key") counts too (#344): it
 lands in `~/.zcode/v2/provider_config.json` as a
 `zhipu-coding-plan-api-key` rule and the bridge reads it as an entitlement +
-request-key source. On 3.15+ / 3.17.x OAuth installs where `~/.zcode/v2/credentials.json`
-holds `zcodejwttoken` (0.17.x backends answer Start Plan without interaction —
-the request-security edition disables per-request verification outright),
-Start Plan (`account:<family>-start-plan`) is also entitled and served via
-`startPlanRequestAuthFor`; keyless Start Plan requests stay declined (issue #123).
+request-key source. On 3.15+ / 3.17.x OAuth installs, Start Plan
+(`account:<family>-start-plan`) is entitled ONLY when `~/.zcode/v2/setting.json`
+records that family's connection as `kind: "start-plan"` AND the store holds
+`zcodejwttoken` (0.17.x backends answer Start Plan without interaction — the
+request-security edition disables per-request verification outright); a plain
+OAuth login leaves `zcodejwttoken` in the store but is NOT a Start Plan
+holding — upstream decides entitlement from the billing/balance plans
+(observed 2026-11-10: a Coding Plan login lit up Start Plan models
+GLM-5.2/GLM-5-Turbo for an account that never activated it). Keyless Start
+Plan requests stay declined (issue #123).
 
 **Desktop 3.15+ after an OAuth sign-in:** the store holds no plan key at all,
 only the sign-in (`oauth:<family>:access_token`), and `setting.json` records the
@@ -547,14 +552,19 @@ headless bridge has neither a browser nor the captcha credential. GLM Coding
 Plan providers are unaffected — they use an `id.secret` API key and sign
 requests themselves.
 
-**Workaround:** sign in to the ZCode desktop app (3.15+ / 3.17.x) so
-`~/.zcode/v2/credentials.json` holds both `oauth:<family>:access_token` and
-`zcodejwttoken` — on 0.17.x backends (per-request verification disabled at the
+**Workaround:** in the ZCode desktop app (3.15+ / 3.17.x), connect the family
+via Start Plan (Settings → Model Provider), which writes both
+`zcodejwttoken` to `~/.zcode/v2/credentials.json` and a
+`kind: "start-plan"` connection selection to `setting.json` — on 0.17.x
+backends (per-request verification disabled at the
 edition level; the interactive branch is unreachable), the bridge
 serves `zcodejwttoken` over `interaction/requestProviderRuntimeHeaders`
 (`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` from the desktop
 bundle (`builtinProviderEnv`), matching the desktop host's own
-`AccountProviderRequestAuthService`. If no Start Plan credential is present on
+`AccountProviderRequestAuthService`. A plain OAuth login (Coding Plan) is not
+enough — it leaves the JWT in the store but no start-plan selection, and the
+bridge correctly keeps Start Plan unentitled. If no Start Plan credential is
+present on
 disk (or if a future edition re-enables browser captcha), switch the session's
 provider to a GLM Coding Plan one; the bridge answers with
 `headersApplied:false` and the backend surfaces a clear error rather than

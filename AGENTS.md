@@ -313,7 +313,14 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     verification, expect gateway 403s — revisit then). The bridge mirrors the
     host (`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` into the
     backend env (`builtinProviderEnv`); Start Plan asks with no local
-    credential stay declined (#123). **The answer is wired at frame ARRIVAL**
+    credential stay declined (#123). Start Plan ENTITLEMENT is gated on the
+    desktop's own connection record (`providerFamilyConnectionSelections`
+    kind `start-plan` + `zcodejwttoken`), NOT on the login alone — an OAuth
+    sign-in for the Coding Plan leaves the JWT in the store but holds no
+    Start Plan, and the login-based union once listed GLM-5.2/GLM-5-Turbo
+    (the table's start-plan rule) for accounts that never activated it
+    (observed 2026-11-10; upstream reads entitlement from billing/balance
+    `hasActiveStartPlan`). **The answer is wired at frame ARRIVAL**
     (`ZcodeBackend.providerRuntimeHeadersResponder`, set in ensureBackend), not
     just the turn-loop queue: a headers ask that lands while no turn loop is
     polling — compact's internal turn above all — used to sit unanswered until

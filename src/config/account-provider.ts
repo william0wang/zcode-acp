@@ -210,7 +210,6 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  * over `interaction/requestProviderRuntimeHeaders` (`AccountProviderRequestAuthService.resolveCurrent`).
  */
 const ZCODE_JWT_CREDENTIAL_KEY = "zcodejwttoken";
-const OAUTH_ACTIVE_PROVIDER_KEY = "oauth:active_provider";
 
 function storeStartPlanJwt(): string | null {
   return readCredentialStoreSync()[ZCODE_JWT_CREDENTIAL_KEY]?.trim() || null;
@@ -386,16 +385,19 @@ function oauthSelectedCodingPlanFamilies(
 }
 
 /**
- * Families whose 3.15+ desktop OAuth sign-in entitles Start Plan (`zcodejwttoken`
- * + `oauth:<family>:access_token` in the credential store, not switched to
- * `apiKey` mode in `modelProviderFamilyModes`).
+ * Families whose 3.15+ desktop connection is Start Plan (`zcodejwttoken` in
+ * the credential store + `providerFamilyConnectionSelections[family]` of kind
+ * `start-plan`, not switched to `apiKey` mode, with the family's OAuth login).
  *
- * When `setting.json` or the store names an active/selected family
- * (`providerFamilyDomain`, `providerFamilyConnectionSelections`, or
- * `oauth:active_provider`), only those families are candidates because
- * `zcodejwttoken` is a single store key belonging to the active OAuth session;
- * when none is named (minimal store fixture), any family with an OAuth login
- * qualifies.
+ * A login alone is NOT entitlement (observed 2026-11-10: an OAuth sign-in for
+ * the individual Coding Plan leaves `zcodejwttoken` in the store, and the
+ * bridge lit up Start Plan — GLM-5.2/GLM-5-Turbo from the bundled table's
+ * start-plan rule — for a Start Plan the account never activated). Upstream
+ * decides entitlement from the billing/balance plans (`hasActiveStartPlan`),
+ * which no local file mirrors; the connection selection is the only on-disk
+ * signal that the user actually connected via Start Plan.
+ * `providerFamilyDomain` / `oauth:active_provider` name the ACTIVE family,
+ * not a plan holding — deliberately not entitlement sources.
  */
 function oauthEntitledStartPlanFamilies(
   credsDir = path.dirname(ZCODE_CREDS_PATH),
@@ -404,42 +406,24 @@ function oauthEntitledStartPlanFamilies(
   if (!storeStartPlanJwt()) return out;
   let modes: Record<string, unknown> | undefined;
   const candidates = new Set<CodingPlanFamily>();
-  let sawExplicitFamily = false;
   try {
     const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
       modelProviderFamilyModes?: Record<string, unknown>;
-      providerFamilyDomain?: unknown;
       providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
     };
     modes = setting.modelProviderFamilyModes;
-    if (
-      typeof setting.providerFamilyDomain === "string" &&
-      isCodingPlanFamily(setting.providerFamilyDomain)
-    ) {
-      sawExplicitFamily = true;
-      candidates.add(setting.providerFamilyDomain);
-    }
     for (const [family, selection] of Object.entries(
       setting.providerFamilyConnectionSelections ?? {},
     )) {
-      if (selection?.kind !== "individual-coding-plan" && selection?.kind !== "start-plan") {
-        continue;
-      }
+      // ONLY a start-plan connection speaks for Start Plan — an
+      // individual-coding-plan selection is a different plan that merely
+      // shares the OAuth login and the store's JWT.
+      if (selection?.kind !== "start-plan") continue;
       if (!isCodingPlanFamily(family)) continue;
-      sawExplicitFamily = true;
       candidates.add(family);
     }
   } catch {
-    // setting.json absent (headless-only) — fall through to store
-  }
-  const activeProvider = readCredentialStoreSync()[OAUTH_ACTIVE_PROVIDER_KEY]?.trim();
-  if (activeProvider && isCodingPlanFamily(activeProvider)) {
-    sawExplicitFamily = true;
-    candidates.add(activeProvider);
-  }
-  if (!sawExplicitFamily) {
-    candidates.add("zai");
-    candidates.add("bigmodel");
+    // setting.json absent (headless-only) — nothing entitles
   }
   for (const family of candidates) {
     if (modes?.[family] === "apiKey") continue;
@@ -674,8 +658,8 @@ function entitledStartPlanLegacyId(accountProviderId: string | undefined): strin
  * (`AccountProviderRequestAuthService.resolveCurrent` +
  * `respondAccountRequestAuthWithoutInteraction`) answers Start Plan model
  * requests directly with `{ apiKey: zcodeJwtToken }` from `credentials.json`.
- * When 3.15+ OAuth Start Plan is active,
- * any stale pre-3.12 `config.json` key is skipped so the fresh store JWT wins.
+ * When the desktop's connection selection is Start Plan (3.15+), any stale
+ * pre-3.12 `config.json` key is skipped so the fresh store JWT wins.
  */
 export function startPlanRequestAuthFor(
   accountProviderId: string | undefined,
