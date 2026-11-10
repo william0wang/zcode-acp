@@ -668,11 +668,13 @@ function entitledStartPlanLegacyId(accountProviderId: string | undefined): strin
  * The request auth the bridge can serve for an `account:<family>-start-plan`
  * model, or null when it cannot answer.
  *
- * Since 3.15+ / 3.17.x (`/api/v1/client/configs` `captcha.skip_model_request:
- * true`), the desktop host (`AccountProviderRequestAuthService.resolveCurrent`
- * + `respondAccountRequestAuthWithoutInteraction`) answers Start Plan model
- * requests directly with `{ apiKey: zcodeJwtToken }` from `credentials.json`
- * without a browser captcha interaction. When 3.15+ OAuth Start Plan is active,
+ * Since 0.17.x (the request-security edition stubs `requiresRequestVerification()`
+ * to `false`, so the host answers Start Plan without interaction — the remote
+ * client-config captcha flag is never read), the desktop host
+ * (`AccountProviderRequestAuthService.resolveCurrent` +
+ * `respondAccountRequestAuthWithoutInteraction`) answers Start Plan model
+ * requests directly with `{ apiKey: zcodeJwtToken }` from `credentials.json`.
+ * When 3.15+ OAuth Start Plan is active,
  * any stale pre-3.12 `config.json` key is skipped so the fresh store JWT wins.
  */
 export function startPlanRequestAuthFor(

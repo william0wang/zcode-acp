@@ -302,14 +302,18 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     bridge answers `headersApplied:true, requestAuth:{apiKey}` with the plan's
     config.json key for individual coding plans
     (`answerProviderRuntimeHeaders`, server-requests.ts) — the same key the
-    pre-3.12 `builtin:` provider used. On 3.15+ / 3.17.x OAuth layouts where
-    upstream sets `captcha.skip_model_request: true`, the desktop host
-    (`AccountProviderRequestAuthService.resolveCurrent` +
-    `respondAccountRequestAuthWithoutInteraction`) also answers
-    `account:<family>-start-plan` directly with `{apiKey: zcodejwttoken}` from
-    `~/.zcode/v2/credentials.json` (`startPlanRequestAuthFor`) and injects
-    `ZCODE_APP_VERSION` into the backend env (`builtinProviderEnv`); Start Plan
-    asks with no local credential stay declined (#123). **The answer is wired at frame ARRIVAL**
+    pre-3.12 `builtin:` provider used. On 0.17.x backends the desktop host also
+    answers `account:<family>-start-plan` directly with `{apiKey:
+    zcodejwttoken}` from `~/.zcode/v2/credentials.json` — the 0.17.1
+    request-security edition stubs `requiresRequestVerification()` to `false`
+    and `requestVerificationInteractionAvailable` to `false`
+    (verification-policy.ts; zcodeAgentService.ts:1754-1763), so
+    `respondAccountRequestAuthWithoutInteraction` ALWAYS runs and the remote
+    client-config captcha flag is never read (if a future edition re-enables
+    verification, expect gateway 403s — revisit then). The bridge mirrors the
+    host (`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` into the
+    backend env (`builtinProviderEnv`); Start Plan asks with no local
+    credential stay declined (#123). **The answer is wired at frame ARRIVAL**
     (`ZcodeBackend.providerRuntimeHeadersResponder`, set in ensureBackend), not
     just the turn-loop queue: a headers ask that lands while no turn loop is
     polling — compact's internal turn above all — used to sit unanswered until
@@ -1030,15 +1034,17 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   do NOT "fix" the fold away, and do not read the mode from settings expecting
   "plan".
 - **Start Plan providers use only the official host credential path — never an
-  unofficial provider client**: on 3.15+ / 3.17.x (`captcha.skip_model_request:
-true`), the desktop host serves `zcodejwttoken` from `~/.zcode/v2/credentials.json`
+  unofficial provider client**: on 0.17.x backends (the request-security
+  edition disables per-request verification outright — `requiresRequestVerification()`
+  stubbed `false`, interactive branch unreachable, remote captcha config never
+  read), the desktop host serves `zcodejwttoken` from `~/.zcode/v2/credentials.json`
   over `interaction/requestProviderRuntimeHeaders` (`startPlanRequestAuthFor`)
   with `ZCODE_APP_VERSION` injected from the desktop bundle
-  (`builtinProviderEnv`). When no Start Plan credential exists (or if upstream
-  re-enables per-request captcha), the bridge answers `headersApplied:false` +
-  an actionable error (PR #128). Impersonating the desktop client, bypassing
-  captcha/signing anti-abuse measures, or copying from unlicensed third-party
-  proxies remain legal no-gos (ADR-0019).
+  (`builtinProviderEnv`). When no Start Plan credential exists (or if a future
+  edition re-enables per-request verification), the bridge answers
+  `headersApplied:false` + an actionable error (PR #128). Impersonating the
+  desktop client, bypassing captcha/signing anti-abuse measures, or copying
+  from unlicensed third-party proxies remain legal no-gos (ADR-0019).
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast

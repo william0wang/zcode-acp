@@ -116,7 +116,8 @@ the desktop's Settings → Model Provider ("Use API key") counts too (#344): it
 lands in `~/.zcode/v2/provider_config.json` as a
 `zhipu-coding-plan-api-key` rule and the bridge reads it as an entitlement +
 request-key source. On 3.15+ / 3.17.x OAuth installs where `~/.zcode/v2/credentials.json`
-holds `zcodejwttoken` (and `captcha.skip_model_request` is enabled upstream),
+holds `zcodejwttoken` (0.17.x backends answer Start Plan without interaction —
+the request-security edition disables per-request verification outright),
 Start Plan (`account:<family>-start-plan`) is also entitled and served via
 `startPlanRequestAuthFor`; keyless Start Plan requests stay declined (issue #123).
 
@@ -548,12 +549,13 @@ requests themselves.
 
 **Workaround:** sign in to the ZCode desktop app (3.15+ / 3.17.x) so
 `~/.zcode/v2/credentials.json` holds both `oauth:<family>:access_token` and
-`zcodejwttoken` — with `captcha.skip_model_request: true` upstream, the bridge
+`zcodejwttoken` — on 0.17.x backends (per-request verification disabled at the
+edition level; the interactive branch is unreachable), the bridge
 serves `zcodejwttoken` over `interaction/requestProviderRuntimeHeaders`
 (`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` from the desktop
 bundle (`builtinProviderEnv`), matching the desktop host's own
 `AccountProviderRequestAuthService`. If no Start Plan credential is present on
-disk (or if upstream requires a browser captcha session), switch the session's
+disk (or if a future edition re-enables browser captcha), switch the session's
 provider to a GLM Coding Plan one; the bridge answers with
 `headersApplied:false` and the backend surfaces a clear error rather than
 bypassing captcha checks (see #123, #363).
