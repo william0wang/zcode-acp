@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.2](https://github.com/william0wang/zcode-acp/compare/v0.83.1...v0.83.2) (2026-11-10)
+
+
+### Bug Fixes
+
+* entitle Start Plan only when the desktop connection selection is start-plan ([d8ceee1](https://github.com/william0wang/zcode-acp/commit/d8ceee1e868edca096abc3c2bc12677e1d27d4c0))
+
 ## [0.83.1](https://github.com/william0wang/zcode-acp/compare/v0.83.0...v0.83.1) (2026-11-10)
 
 
