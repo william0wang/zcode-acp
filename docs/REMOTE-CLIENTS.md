@@ -230,7 +230,7 @@ zcode-acp-remote-desktop` (every desktop hub call is); or such a stamped
   already holding that session live, whatever its origin — and only a
   workspace without one spawns, headless. Attach and `session/new` /
   `session/load` exactly as after a headless fallback.
-- **A reuse target must run the CURRENT code** (bridge ≥0.84): every bridge
+- **A reuse target must run the CURRENT code** (bridge ≥0.83.3): every bridge
   reports a `codeFingerprint` (with its `version`) on each registration. When
   that fingerprint differs from the dist on disk — i.e. a rebuild or release
   landed after the bridge started — the hub treats it as stale for NEW work:
