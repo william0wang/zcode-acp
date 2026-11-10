@@ -28,8 +28,14 @@ vi.mock("../src/handlers/server-requests.js", async (importOriginal) => {
   return { ...orig, askSessionPick: askSessionPickMock };
 });
 
-/** History per zcode session id; everything else answers minimally. */
-function fakeBackend(historyBySid: Record<string, ZcodeMessage[]>): {
+/**
+ * History per zcode session id; everything else answers minimally.
+ * `listAnswer` overrides every `session/list` reply (by-id lookups included).
+ */
+function fakeBackend(
+  historyBySid: Record<string, ZcodeMessage[]>,
+  listAnswer?: (params: Record<string, unknown>) => unknown,
+): {
   backend: ZcodeBackend;
   sent: Array<{ method: string; params: unknown }>;
 } {
@@ -41,6 +47,7 @@ function fakeBackend(historyBySid: Record<string, ZcodeMessage[]>): {
         case "session/resume":
           return { result: {} };
         case "session/list":
+          if (listAnswer) return listAnswer(params);
           return {
             result: {
               sessions: Object.keys(historyBySid).map((sid) => ({
@@ -72,13 +79,16 @@ function fakeBackend(historyBySid: Record<string, ZcodeMessage[]>): {
 interface SentUpdate {
   sessionUpdate: string;
   content?: { type: string; text: string };
+  title?: string;
+  /** Envelope sessionId, copied in by the recorder. */
+  sessionId?: string;
 }
 
 function recordingCx(): { cx: acp.AgentContext; updates: SentUpdate[] } {
   const updates: SentUpdate[] = [];
   const cx = {
-    notify: async (_method: string, params: { update?: SentUpdate }) => {
-      if (params.update) updates.push(params.update);
+    notify: async (_method: string, params: { sessionId?: string; update?: SentUpdate }) => {
+      if (params.update) updates.push({ ...params.update, sessionId: params.sessionId });
     },
     request: async () => ({}),
   } as unknown as acp.AgentContext;
@@ -159,6 +169,69 @@ describe("resumeIntoSession", () => {
 
     const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
     expect(result.ok).toBe(false);
+  });
+
+  it("names the editor thread after the adopted conversation", async () => {
+    // Zed titles a fresh thread with the first prompt's first line until the
+    // agent pushes a title — for an adopting thread that line is the /resume
+    // command itself, which stuck as the conversation's title (2026-11-10).
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend({ ztarget: HISTORY });
+    server.backend = backend;
+    const acpSid = seedPlaceholder(server);
+    const { cx, updates } = recordingCx();
+    // Title changes fan out through the client registry (like /rename).
+    server.clients.add(cx);
+
+    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
+    expect(result).toEqual({ ok: true, title: "t-ztarget" });
+    expect(updates).toContainEqual(
+      expect.objectContaining({
+        sessionUpdate: "session_info_update",
+        title: "t-ztarget",
+        sessionId: acpSid,
+      }),
+    );
+  });
+
+  it.each([
+    ["asks by id: the bare listing's recency window misses an old session", false],
+    ["falls back to the bare listing when the backend rejects sessionIds", true],
+  ])("adopts an older conversation's title — %s", async (_name, rejectsById) => {
+    // A bare session/list is the 50 most recent sessions across EVERY
+    // workspace (upstream default limit) — an old conversation is absent.
+    const old = { sessionId: "ztarget", title: "old work", updatedAt: 1 };
+    const { backend } = fakeBackend({ ztarget: HISTORY }, (params) => {
+      if (params.sessionIds) {
+        return rejectsById
+          ? { error: { code: -32602, message: "Unrecognized key: sessionIds" } }
+          : { result: { sessions: [old] } };
+      }
+      return { result: { sessions: rejectsById ? [old] : [] } };
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const acpSid = seedPlaceholder(server);
+    const { cx } = recordingCx();
+
+    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
+    expect(result).toEqual({ ok: true, title: "old work" });
+  });
+
+  it("drops a /rename made on the placeholder before the adoption", async () => {
+    // The pin AND the title belonged to the discarded placeholder thread; a
+    // leftover title would also short-circuit the stored-title adoption.
+    const server = new ZcodeAcpServer();
+    const { backend } = fakeBackend({ ztarget: HISTORY });
+    server.backend = backend;
+    const acpSid = seedPlaceholder(server);
+    server.sessionTitles.set(acpSid, "placeholder name");
+    server.titleUserSetBy.add(acpSid);
+    const { cx } = recordingCx();
+
+    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
+    expect(result).toEqual({ ok: true, title: "t-ztarget" });
+    expect(server.titleUserSetBy.has(acpSid)).toBe(false);
   });
 });
 

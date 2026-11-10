@@ -1149,10 +1149,19 @@ async function adoptStoredTitle(
     // Best-effort consult — fall through to the backend's stored title.
   }
   // Tier 3 — the backend's session/list: the only title source for sessions
-  // born in a previous bridge lifetime.
+  // born in a previous bridge lifetime. Asked BY ID: a bare listing is only
+  // the 50 most recent sessions across every workspace (upstream default
+  // limit), so an older conversation — exactly what /resume digs up — was
+  // never found. A backend rejecting `sessionIds` gets the bare listing.
   try {
     const backend = await server.ensureBackend();
-    const resp = await backend.request(server.nextId(), "session/list", {}, 15000);
+    let resp = await backend.request(
+      server.nextId(),
+      "session/list",
+      { sessionIds: [zcodeSid] },
+      15000,
+    );
+    if (resp.error) resp = await backend.request(server.nextId(), "session/list", {}, 15000);
     if (resp.error) return;
     const result = (resp.result ?? {}) as ZcodeListResult;
     const hit = (result.sessions ?? []).find((s) => s.sessionId === zcodeSid);
@@ -1467,9 +1476,11 @@ export async function resumeIntoSession(
   // The adopted session's stored title wins over the placeholder's first-
   // prompt auto-title.
   server.titleEligibleSessions.delete(acpSid);
-  // Same for the user-rename pin: it belonged to the discarded placeholder
-  // thread, not the adopted conversation.
+  // Same for a pre-adoption /rename (pin AND title): it belonged to the
+  // discarded placeholder thread, not the adopted conversation — a leftover
+  // title would also short-circuit adoptStoredTitle below.
   server.titleUserSetBy.delete(acpSid);
+  server.sessionTitles.delete(acpSid);
 
   const cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
   // Settled history when a resume flight ran (performer OR joiner — the
@@ -1496,6 +1507,23 @@ export async function resumeIntoSession(
   } catch (e) {
     warn(`/resume: adopting ${zcodeTarget} failed (${e instanceof Error ? e.message : String(e)})`);
     return { ok: false, error: messages().slashResumeFailed };
+  }
+
+  // Name the editor thread after the adopted conversation. Zed shows the first
+  // prompt's first line as a PROVISIONAL thread title until the agent pushes
+  // one — for an adopting thread that line is the `/resume` command itself,
+  // and adoptStoredTitle records the title bridge-side only, so the thread
+  // kept "/resume" as its title (observed 2026-11-10). Broadcast like every
+  // other title change; sent before the replay batch below takes the guard.
+  const adoptedTitle = server.sessionTitles.get(acpSid);
+  if (adoptedTitle) {
+    void sendSessionUpdate(server.clients.broadcast(), acpSid, {
+      sessionUpdate: "session_info_update",
+      title: adoptedTitle,
+      updatedAt: new Date().toISOString(),
+    }).catch((e) =>
+      log(`/resume: session_info_update failed: ${e instanceof Error ? e.message : String(e)}`),
+    );
   }
 
   // Fetch inside the batch (see replayResumeHistory): the guard must cover

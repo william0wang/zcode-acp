@@ -1141,7 +1141,18 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   adopted the stale title and reset it); `adoptStoredTitle` is pin-first
   (sibling alias title → durable `title_overridden` title via `readTaskTitle`
   → backend `session/list`); a placeholder renamed before first use replays
-  the rename at materialization (`ensureRealSession`).
+  the rename at materialization (`ensureRealSession`). `/resume` into an
+  editor thread broadcasts the adopted title as a `session_info_update` right
+  after the adoption flight: Zed derives a PROVISIONAL thread title from the
+  first prompt's first line (conversation_view/thread_view.rs) and only a
+  pushed title replaces it — for an adopting thread that line is the
+  `/resume` command itself, so without the push the conversation stayed
+  titled "/resume" (observed 2026-11-10). The push rides BEFORE the replay
+  batch takes the session's send guard. `adoptStoredTitle`'s backend tier
+  asks `session/list {sessionIds:[id]}` first — the BARE listing is the 50
+  most recent sessions across ALL workspaces (upstream default limit), so an
+  old conversation was never found; a backend rejecting the key (strict zod)
+  falls back to the bare listing.
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish

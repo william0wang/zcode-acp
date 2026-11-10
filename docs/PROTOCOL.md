@@ -1097,7 +1097,13 @@ skipped from then on), so `session/list` reads, resume title re-emission, and
 the desktop app's v4 projection all converge on the user's title.
 `adoptStoredTitle` (load/resume) is pin-first: a sibling alias's known title,
 then the durable `title_overridden` title, and only then the backend's stored
-title.
+title (asked `session/list {sessionIds:[id]}` — the bare listing is only the
+50 most recent sessions across all workspaces, so older conversations need the
+by-id lookup; backends that reject the key fall back to the bare listing).
+The `/resume` slash command additionally broadcasts the adopted title as a
+`session_info_update`: editors derive a thread title from the first prompt —
+which for an adopting thread is the `/resume` command itself — and only a
+pushed title replaces that provisional name.
 
 ### `session/cancelBackgroundTask`
 
