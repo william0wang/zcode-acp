@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.1](https://github.com/william0wang/zcode-acp/compare/v0.83.0...v0.83.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* name the editor thread after the conversation adopted by /resume ([e7acb87](https://github.com/william0wang/zcode-acp/commit/e7acb872dd9b22a3381197955f947729b24a555c))
+
 ## [0.83.0](https://github.com/william0wang/zcode-acp/compare/v0.82.3...v0.83.0) (2026-11-10)
 
 
