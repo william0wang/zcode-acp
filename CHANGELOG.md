@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.0](https://github.com/william0wang/zcode-acp/compare/v0.82.3...v0.83.0) (2026-11-10)
+
+
+### Features
+
+* **account-provider:** support official 3.15+ Start Plan runtime auth and models ([#365](https://github.com/william0wang/zcode-acp/issues/365)) ([7316e9a](https://github.com/william0wang/zcode-acp/commit/7316e9ab32cde98690e704886d4a5395591fd124)), closes [#364](https://github.com/william0wang/zcode-acp/issues/364) [#363](https://github.com/william0wang/zcode-acp/issues/363)
+
+
+### Bug Fixes
+
+* keep serving the last successful CLIProxy quota when a refresh fails ([5fe36e2](https://github.com/william0wang/zcode-acp/commit/5fe36e25b727e80e1f2065369eaf7c7568f36287))
+
 ## [0.82.3](https://github.com/william0wang/zcode-acp/compare/v0.82.2...v0.82.3) (2026-11-07)
 
 
