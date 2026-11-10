@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.83.3](https://github.com/william0wang/zcode-acp/compare/v0.83.2...v0.83.3) (2026-11-10)
+
+
+### Bug Fixes
+
+* never reuse a serve bridge that runs code older than the on-disk dist ([#369](https://github.com/william0wang/zcode-acp/issues/369)) ([e8396e6](https://github.com/william0wang/zcode-acp/commit/e8396e6b537a13a2b6348b5c92d31f264f02e3e8))
+
 ## [0.83.2](https://github.com/william0wang/zcode-acp/compare/v0.83.1...v0.83.2) (2026-11-10)
 
 
