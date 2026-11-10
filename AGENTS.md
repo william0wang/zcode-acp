@@ -303,8 +303,8 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     config.json key for individual coding plans
     (`answerProviderRuntimeHeaders`, server-requests.ts) — the same key the
     pre-3.12 `builtin:` provider used. On 0.17.x backends the desktop host also
-    answers `account:<family>-start-plan` directly with `{apiKey:
-    zcodejwttoken}` from `~/.zcode/v2/credentials.json` — the 0.17.1
+    answers `account:<family>-start-plan` directly with
+    `{apiKey: zcodejwttoken}` from `~/.zcode/v2/credentials.json` — the 0.17.1
     request-security edition stubs `requiresRequestVerification()` to `false`
     and `requestVerificationInteractionAvailable` to `false`
     (verification-policy.ts; zcodeAgentService.ts:1754-1763), so
@@ -1145,10 +1145,17 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
 - **Releases are fully automated** (release-please + npm OIDC trusted
   publishing, zero npm secrets): land conventional commits on `main`, merge
   the `chore(main): release X.Y.Z` PR, and tag + GitHub Release + npm publish
-  happen by themselves. Never hand-bump `package.json` version. A publish
-  failure with 404 on PUT is an npm-side trusted-publisher mismatch, not the
-  workflow. Public doc: `docs/RELEASING.md`; setup + troubleshooting runbook:
-  `.zcode/docs/releasing-runbook.md` (gitignored).
+  happen by themselves. Never hand-bump `package.json` version. **After the
+  release PR merges: local sync FIRST, publish check LAST** — `git pull` +
+  `pnpm build` (the hub auto-upgrades) right away; the release commit is on
+  `main` the moment the merge lands, so the local sync needs nothing from the
+  publish job, while `npm view` lags the CDN by minutes — watching the job or
+  waiting on npm first only stalls the local update (a recurring miss, last
+  at v0.83.0). A publish failure with 404 on PUT is an npm-side
+  trusted-publisher mismatch, not the workflow. Public doc:
+  `docs/RELEASING.md`; routine flow (gh write prefix, post-merge order) +
+  setup + troubleshooting: `.zcode/docs/releasing-runbook.md` (gitignored) —
+  read it BEFORE releasing.
 
 ## Docs to read before sensitive changes
 
