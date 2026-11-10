@@ -223,6 +223,16 @@ interface InstanceEntry {
   tuiPid?: number;
   /** First failed ?probe=1 timestamp; a bridge alive enough to re-register clears it. */
   unhealthySince?: number;
+  /**
+   * The bridge's own self-reported code identity, echoed on every heartbeat
+   * (`codeFingerprint` + `version`). The reuse decision compares it against
+   * the code on disk NOW: a bridge that cannot match it is running different
+   * code than a fresh spawn would load, so new work must not be routed there
+   * (see `bridgeRunsStaleCode`). Absent on bridges older than the fingerprint
+   * protocol — those fall back to the mtime/version signals.
+   */
+  version?: string;
+  codeFingerprint?: string;
 }
 
 const HEARTBEAT_TIMEOUT_MS = 30_000;
@@ -1432,6 +1442,72 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     findServeInstances(workspacePath)[0];
 
   /**
+   * The code a fresh spawn would load RIGHT NOW. Read per decision instead of
+   * cached: a rebuild that landed seconds ago is exactly the thing this
+   * guards, and the read is one small JSON plus a shallow dist walk.
+   */
+  const diskCodeNow = async (): Promise<{
+    fingerprint: string | null;
+    newestMtime: number | null;
+  }> => ({
+    fingerprint: readCodeFingerprint(codePaths.distDir),
+    newestMtime: await newestJsMtime(codePaths.distDir),
+  });
+
+  /**
+   * Does this bridge run OTHER code than a fresh spawn would? Node loads a
+   * module graph once per process, so a bridge started before the current
+   * build keeps serving its old handlers and its old model list forever — a
+   * new conversation routed to it inherits all of that (reported 2026-11-10:
+   * a Start Plan fix released, rebuilt, and still absent from every "new"
+   * session because the workspace's serve bridge predated the build).
+   *
+   * Fingerprint first: it compares IDENTITY against the same disk a spawn
+   * would load, not two processes, so "differs" is meaningful here (unlike
+   * the version votes, where a hash has no ordering). Fingerprint-less
+   * builds fall back to the mtime signal. Unknown never counts as stale.
+   */
+  const bridgeRunsStaleCode = (
+    entry: InstanceEntry,
+    disk: { fingerprint: string | null; newestMtime: number | null },
+  ): boolean => {
+    if (entry.codeFingerprint && disk.fingerprint) {
+      return entry.codeFingerprint !== disk.fingerprint;
+    }
+    return disk.newestMtime !== null && disk.newestMtime > Math.floor(entry.startedAt);
+  };
+
+  /**
+   * The serve instance NEW WORK should land on (a new session, a resume of a
+   * conversation nobody holds live, a listing that needs a bridge), if any.
+   *
+   * Reuse exists to avoid a second process per workspace, not to preserve a
+   * process on purpose: a stale bridge is skipped so the caller incubates a
+   * fresh one. The stale bridge is deliberately NOT killed — it keeps serving
+   * whatever its own clients are running and idles out on its own schedule
+   * (SERVE_IDLE_MS once its last client/turn ends).
+   */
+  const pickServeForNewWork = async (workspacePath: string): Promise<InstanceEntry | undefined> => {
+    const candidates = findServeInstances(workspacePath).filter(
+      (e) => e.unhealthySince === undefined,
+    );
+    if (candidates.length === 0) return undefined;
+    const disk = await diskCodeNow();
+    const fresh = candidates.find((e) => !bridgeRunsStaleCode(e, disk));
+    if (!fresh) {
+      // warn (not log): on the detached daemon the diary is the only place
+      // this decision is observable, and it is the explanation for a
+      // duplicate process per workspace.
+      warn(
+        `hub: serve bridge ${candidates.map((e) => e.id).join(", ")} for ${workspacePath} ` +
+          `runs code older than the dist on disk — incubating a fresh bridge instead of ` +
+          `reusing (the old one keeps its sessions and idles out)`,
+      );
+    }
+    return fresh;
+  };
+
+  /**
    * Spawn a bridge and poll until it registers (or fails fast on child exit /
    * timeout). Shared by every incubating endpoint for this workspace — all
    * joiners see the same outcome. Kind picks the spawn surface and the
@@ -1662,9 +1738,21 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     const preexisting = new Set<string>(
       kind === "serve" ? [] : findServeInstances(workspacePath).map((e) => e.id),
     );
+    // A "serve" incubation exists to ensure a bridge that can serve NEW work,
+    // so a registration running code older than the disk does NOT satisfy it:
+    // without this, the stale bridge the caller deliberately skipped answers
+    // its own replacement's poll (the "accept any live registration" rule
+    // below) and the fresh spawn is wasted — the reported "new session, old
+    // model list" bug would survive the fix. Read once: a rebuild landing
+    // mid-incubation is not this poll's business.
+    const spawnDisk = kind === "serve" ? await diskCodeNow() : null;
+    const acceptable = (e: InstanceEntry): boolean =>
+      spawnDisk === null || !bridgeRunsStaleCode(e, spawnDisk);
     for (;;) {
       await new Promise<void>((resolve) => setTimeout(resolve, SERVE_REGISTER_POLL_MS).unref?.());
-      const candidates = findServeInstances(workspacePath).filter((e) => !preexisting.has(e.id));
+      const candidates = findServeInstances(workspacePath).filter(
+        (e) => !preexisting.has(e.id) && acceptable(e),
+      );
       const entry = candidates.find((e) => e.nonce === nonce) ?? candidates.find((e) => !e.nonce);
       if (entry) return { id: entry.id, reused: false };
       // The child dying is the honest fast-fail (missing cwd perms, port
@@ -1685,7 +1773,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         // own and is merely closable (ADR-0014 semantics unchanged — the
         // headless serve spawn is already the documented no-GUI fallback).
         if (kind === "tui") {
-          const fallback = findServeInstance(workspacePath);
+          // Prefer a bridge on the current code — this create is about to be
+          // handed to it, and an old one would serve old handlers/model lists.
+          const fallback =
+            (await pickServeForNewWork(workspacePath)) ??
+            findServeInstances(workspacePath).find((e) => e.unhealthySince === undefined);
           if (fallback) {
             warn(
               `hub: TUI for ${workspacePath} slow to register — ` +
@@ -2035,6 +2127,11 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           startedAt: e.startedAt,
           workspace: e.workspace,
           origin: e.origin,
+          // Code identity (absent on bridges older than the fingerprint
+          // protocol): lets a client see which instances a fresh spawn would
+          // NOT match, i.e. why a new conversation landed on a new id.
+          ...(e.version !== undefined ? { version: e.version } : {}),
+          ...(e.codeFingerprint !== undefined ? { codeFingerprint: e.codeFingerprint } : {}),
           sessions: e.sessions.filter((s) => winners.get(s.sessionId)?.instance === e),
         }));
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -2304,14 +2401,30 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         return;
       }
       try {
-        let entry = findServeInstance(workspacePath);
+        // The listing is the client's entry point: it browses history here and
+        // then attaches/resumes into the instance id it got back, so the
+        // preferred target is a bridge running the CURRENT code. A stale-only
+        // workspace therefore incubates a fresh one (that is the whole point
+        // of the reuse check) instead of pinning every later attach to the
+        // old process. Order: fresh → incubate → any healthy (spawn failed:
+        // showing history from an old bridge still beats 502ing).
+        let entry = await pickServeForNewWork(workspacePath);
         if (!entry) {
           // "serve": a background listing must not pop a terminal window
           // (ADR-0015) — only session-create does (ADR-0016). joinIncubation
           // makes concurrent listings (and a listing racing a create) share
-          // one spawn instead of doubling bridges.
-          await joinIncubation(workspacePath, "serve");
-          entry = findServeInstance(workspacePath);
+          // one spawn instead of doubling bridges. The incubation's OWN id is
+          // the target — re-looking-up with findServeInstance would name the
+          // stale bridge again (it sorts oldest-first).
+          try {
+            const incubated = await joinIncubation(workspacePath, "serve");
+            entry =
+              instances.get(incubated.id) ??
+              findServeInstances(workspacePath).find((x) => x.unhealthySince === undefined);
+          } catch (e) {
+            warn(`hub: listing incubation failed: ${e instanceof Error ? e.message : String(e)}`);
+            entry = findServeInstances(workspacePath).find((x) => x.unhealthySince === undefined);
+          }
         }
         if (!entry) {
           throw new Error("serve bridge did not register");
@@ -2441,13 +2554,16 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       // duplicate, the status quo before this reuse.
       const desktop = desktopPresence(req);
       if (desktop) {
+        // A resume must still land on the bridge that holds the conversation
+        // LIVE, stale code or not: two bridges loading one session is a
+        // double-write. Only NEW work (a create, or a resume of an idle
+        // conversation) takes the staleness check.
         const holder = resumeSid
           ? Array.from(instances.values()).find((e) =>
               e.sessions.some((s) => s.sessionId === resumeSid),
             )
           : undefined;
-        const live =
-          holder ?? findServeInstances(workspacePath).find((e) => e.unhealthySince === undefined);
+        const live = holder ?? (await pickServeForNewWork(workspacePath));
         if (live) {
           // warn (not log): the diary is the only place this decision is
           // observable on the detached daemon (the phone's create that
@@ -2959,6 +3075,14 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
           ...(typeof body.nonce === "string" && body.nonce ? { nonce: body.nonce } : {}),
           ...(typeof body.tuiPid === "number" && Number.isInteger(body.tuiPid) && body.tuiPid > 1
             ? { tuiPid: body.tuiPid }
+            : {}),
+          // Code identity for the reuse staleness check
+          // (bridgeRunsStaleCode). A
+          // re-registration refreshes it: the value is frozen in the bridge's
+          // process, so it only ever changes when the process does.
+          ...(typeof body.version === "string" ? { version: body.version } : {}),
+          ...(typeof body.codeFingerprint === "string"
+            ? { codeFingerprint: body.codeFingerprint }
             : {}),
         });
         // A registration advertising a tombstoned session again is fresh

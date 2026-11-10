@@ -267,7 +267,22 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
     say the disk is newer (`restartSoon` → `respawnSelf`); verified live
     2026-10-01 — the 0.60.0 rebuild auto-updated the running hub with no
     manual restart. A newly started bridge on the newer build votes a stale
-    hub out the same way via the register reply. `workspace/updateProviderRegistry` is
+    hub out the same way via the register reply. **A stale bridge is never
+    REUSED for new work (2026-11-10)**: the hub's `pickServeForNewWork` skips
+    any serve bridge whose self-reported `codeFingerprint` differs from the
+    dist on disk (mtime fallback for fingerprint-less builds), so a create or
+    a resume of an idle conversation incubates a bridge on the CURRENT code —
+    and `incubateServe`'s poll likewise refuses a stale registration, or the
+    skipped bridge would answer its own replacement's poll and the spawn would
+    be wasted. Those skips were the whole "Start Plan models still listed after
+    the release" report: one serve bridge per workspace, reused forever, so new
+    conversations kept the pre-build model list (the editor list is computed
+    per-process by `loadAllModels`, never by the hub — the hub is a byte proxy
+    and knows nothing of `configOptions`). Two invariants: a resume that has a
+    LIVE holder (any origin) always wins over the staleness check (two bridges
+    must never load one conversation), and the stale bridge is NOT killed — it
+    keeps serving attached clients/turns and idles out on its own
+    `SERVE_IDLE_MS`. `workspace/updateProviderRegistry` is
     GONE in 3.12+ (method-not-found) — the bridge logs it as a no-op, not a
     failure. Also note `session.model_selection.persist_failed` ("FOREIGN KEY
     constraint failed") — ROOT CAUSE found in source (2026-09-21): the

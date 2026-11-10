@@ -230,6 +230,21 @@ zcode-acp-remote-desktop` (every desktop hub call is); or such a stamped
   already holding that session live, whatever its origin — and only a
   workspace without one spawns, headless. Attach and `session/new` /
   `session/load` exactly as after a headless fallback.
+- **A reuse target must run the CURRENT code** (bridge ≥0.84): every bridge
+  reports a `codeFingerprint` (with its `version`) on each registration. When
+  that fingerprint differs from the dist on disk — i.e. a rebuild or release
+  landed after the bridge started — the hub treats it as stale for NEW work:
+  a create, a resume of an idle conversation, and the history listing all
+  incubate a fresh bridge instead, and `incubateServe`'s registration poll
+  refuses a stale registration so the spawn cannot be answered by the bridge
+  it was meant to replace. Node loads its modules once per process, so a
+  reused pre-build bridge otherwise served its OLD handlers and model list
+  forever (reported 2026-11-10: a released entitlement fix appeared absent
+  from every "new" session). Two invariants: a resume whose session is LIVE
+  on some bridge always lands there, staleness notwithstanding (two bridges
+  must never load one conversation), and a stale bridge is never killed — it
+  keeps its attached clients and running turns and exits on its own idle
+  window.
 - Lifetime depends on the surface: a terminal-TUI instance lives while its
   window lives (the owner closing it retires the bridge — re-create on
   demand); the headless fallback exists for remote interest only and exits
