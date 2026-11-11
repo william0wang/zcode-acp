@@ -20,14 +20,18 @@ methods and streams events back as ACP `session/update` notifications.
 
 ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
-to source root 3.17.1 = app-server/`apps/zcode-cli` 0.17.1, commit `a60ba6a7`,
-audited 2026-11-02 — see docs/BACKLOG.md). The bridge runs desktop 3.17.1,
-whose bundled `zcode.cjs` self-reports CLI 0.17.1 — the SAME CLI the checkout
-carries, so the source is EXACTLY the running backend (`origin/main` IS
-`a60ba6a7`; no public-tree delta this time). The Gotchas below were written
+to source root 3.18.0 — the CLI still self-reports 0.17.1 across desktop
+versions — commit `b95ebaff`, audited 2026-11-11 — see docs/BACKLOG.md). The
+bridge runs desktop 3.17.2 (same CLI string; audited 2026-11-11, zero
+impact), and 3.18.0 is the NEXT desktop update target — its audit found the
+protocol surface purely additive EXCEPT that ADR-0031's "no physical delete
+path" premise is gone: upstream added a v4-only permanent-deletion face
+(`storage/sessionData/*`, `bootstrap/src/zcode-protocol/session-data/
+permanent-deletion.ts`; follow-up in #371). The Gotchas below were written
 against 0.16.9 and re-verified file-by-file at the 0.17.0 audits
-(2026-10-19/20) and the 3.17.1 audit (2026-11-02 — all invariants held; one
-bridge fix: `CronPauseSelf` joined the default tool denylist); the bundle
+(2026-10-19/20), the 3.17.1 audit (2026-11-02 — all invariants held; one
+bridge fix: `CronPauseSelf` joined the default tool denylist), and the
+3.17.2/3.18.0 audit (2026-11-11 — all invariants held); the bundle
 recipe in docs/BACKLOG.md "Verification method" remains the way to re-prove a
 note against the binary. The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
@@ -1111,11 +1115,20 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   (`{acpSessionId, runId, toolCallId}`) and closes it only when the bridge
   itself created it and the ack was not accepted.
 - **Project/session delete is a tasks-index TOMBSTONE — there is no physical
-  delete path, and none may be added** (ADR-0031, 2026-09-29): upstream's own
+  delete path, and none may be added** (ADR-0031, 2026-09-29; revised for
+  3.18.0 — see below): upstream's own
   `deleteTask` sets the App tasks-index row `deleted=1` and keeps the CLI
   store intact ("标记为列表不可见；CLI session 内容继续保留"), and the v3
   protocol has no delete RPC at all (`session/close` only releases the
-  runtime). The bridge mirrors exactly that: `POST /api/projects/delete` and
+  runtime). **3.18.0 revision (audited 2026-11-11, #371)**: upstream added a
+  REAL two-phase physical-deletion face — but V4-ONLY
+  (`storage/sessionData/*` preview→execute,
+  `session-data/permanent-deletion.ts`; no v3 delete RPC exists), so the
+  "none may be added" invariant narrows to "the bridge never mints deletes;
+  physical delete goes through the upstream v4 face only" — every rule below
+  still binds unchanged, and the bridge's tombstone/revive behavior vs a
+  physically deleted session is the open follow-up. The bridge mirrors
+  exactly that: `POST /api/projects/delete` and
   `POST /api/instances/{id}/sessions/{sid}/delete` write tombstones
   (`src/tasks-index.ts` softDelete* — a session with no tasks row gets a
   born-tombstoned INSERT), `listSessions` filters `deleted=1 OR archived=1`

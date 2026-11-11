@@ -243,6 +243,61 @@ enumerated `AUTOMATION_TOOL_DEFAULTS` therefore gained `CronPauseSelf`
 (src/backend/resolve.ts) — a headless bridge session never carries a run's
 `automationId`, so the tool can never do anything there.
 
+**3.17.2 + 3.18.0 audit (2026-11-11, commits `a9fe401e`/`b95ebaff` — checkout
+synced, purely additive protocol, ONE follow-up = #371)**: the machine's
+desktop auto-updated 3.17.1 → 3.17.2 (runtime provider sync already ran; its
+`zcode.cjs` still self-reports CLI `0.17.1`). 3.17.2's schema diff is +4
+lines: the `sessionLifecycleWorkspace` runtime capability and a new
+`sessionLifecycleActivationParamsSchema` (optional `workspace`) that
+`lifecycle/ensureReady`/`restart` now parse — `getState` and the `changed`
+notification are untouched, and the bridge consumes only those two, so 3.17.2
+is a zero-impact ride for the running bridge.
+
+3.18.0 (`b95ebaff`, 5,099 files) is the NEXT desktop update target; audited
+from the synced checkout. The shared protocol schema
+(`packages/shared/src/zcode-protocol/index.ts`) is +107/−0 — purely additive:
+new runtime capability bits (`highspeedCardOwner`, `pluginDiscoveryUi`,
+`worktreeCwd`, `extensionInputSource`, `conversationQuoteComment`,
+`pluginExtensionSummary`), new methods (`session/releaseUnderDirectory`,
+`plugins/readUserOptions`, `plugins/mentionItems`, the `appControl*` family,
+`interaction/requestCredentialCipher`), optional params (`session/messages`
+`direction`, `session/send` `modelSelectionBasis`, plugins overview
+`includeExtensionSummary`, `pluginInfo.dataPath`), the
+`startup/pluginsDegraded` notification, and defensive optional fields on
+strict event payloads (`turn.started` `workflowLaunch`/`epilogueStart`/
+`inputOrigin`, `turn.steerQueued` `inputPresentation`/`automationId` — the
+bridge ignores unknown payload fields). The dispatch switch only GROWS (no
+method removed). The new server→client ask
+`interaction/requestCredentialCipher` is a desktop login-flow request
+(docs/design/v2/auth-login.md; no app-server emission on the bridge's paths)
+— the unhandled-request error path covers it regardless. `session-mapper.ts`
+strips MORE v4-only fields from legacy payloads (`toolCall.started`
+`readOnly`/`sideEffectScope`, permission `fullAccessSupported`) — protection
+FOR old clients, the bridge included. Verified zero-diff on every
+Gotchas-cited behavior file: `verification-policy.ts` (request-security
+stubs), `provider-runtime-env.ts`, `registry-service.ts`,
+`execution-state.ts` (the plan-mode fold), `model-catalog-port.ts` (the
+reasoning ladder), the toolDenylist projection, and the compact/setModel/
+send-busy semantics in `server-operations.ts` (its 614-line diff is
+refactoring: goal-continuation extraction + unified legacy/V4 model admission
++ `releaseUnderDirectory` wiring — no hunk touches stop/compact/-32010), the
+lifecycle `getState` schema, and the v4 surfaces the bridge consumes
+(`renameSession`/`resumeWorkflowRun`/`workflowRuns` queries: 0 changes; v4
+rows gained a per-line `unreadable` degradation row + worktree rows —
+display-layer only).
+
+The ONE substantive follow-up — ADR-0031's "no physical delete path"
+premise is GONE in 3.18.0: upstream added a real two-phase permanent
+deletion face (`bootstrap/src/zcode-protocol/session-data/permanent-deletion.ts`,
+v4 `storage/sessionData/*` preview→execute with a revision guard,
+retained-artifact allowlist, busy/in-use blocking, `forgetIndexedSession`
+sweeping the sessions-index projections). The bridge needs NO change to keep
+running (a physically deleted session resume hits the existing
+`isSessionGoneError` → sessionEvicted path), but `reviveTombstonesOnActivity`
+can resurrect tombstoned rows whose bytes are gone (garbage in /resume), and
+the hub's delete endpoints can now be upgraded to REAL deletion — tracked in
+#371.
+
 **3.14.0 audit (2026-09-20, app-server 0.16.9 — live-probed end to end)**: the
 dynamic-workflow family (ten model tools led by `CreateWorkflow`) is OFF by
 default headless and enabled per PROCESS via
