@@ -211,7 +211,7 @@ function storeIndividualCodingPlanKey(accountProviderId: string): string | null 
  */
 const ZCODE_JWT_CREDENTIAL_KEY = "zcodejwttoken";
 
-function storeStartPlanJwt(): string | null {
+export function storeStartPlanJwt(): string | null {
   return readCredentialStoreSync()[ZCODE_JWT_CREDENTIAL_KEY]?.trim() || null;
 }
 
