@@ -177,7 +177,9 @@ export async function convertPromptContent(
           try {
             location = fileURLToPath(location);
           } catch {
-            invalid("Invalid local file URI");
+            // Not locally addressable on this platform (drive-less POSIX path
+            // on Windows, UNC/host form, …). Keep the URI as-is in the
+            // reference instead of rejecting the whole prompt.
           }
         }
         const reference = `[related resource: ${block.name || location}](${location})`;
