@@ -72,24 +72,37 @@ describe("candidateNodeBinaries", () => {
 describe("bundledZcodeCandidates", () => {
   it.skipIf(!isWin)("covers both Windows install layouts", () => {
     const cands = bundledZcodeCandidates();
-    expect(cands.some((c) => c.toLowerCase().includes("localappdata") || /appdata[/\\]local/i.test(c))).toBe(true);
+    expect(
+      cands.some((c) => c.toLowerCase().includes("localappdata") || /appdata[/\\]local/i.test(c)),
+    ).toBe(true);
     expect(cands.some((c) => /program files[/\\]zcode/i.test(c))).toBe(true);
   });
 });
 
 describe("resolveZcodeCommand", () => {
-  it(
-    "launches a .cjs entry through an explicit sqlite-capable node",
-    { timeout: 30000 },
-    () => {
+  it("launches a .cjs entry through an explicit sqlite-capable node", { timeout: 30000 }, () => {
+    // Deterministic inputs (tests/resolve.test.ts pattern): bare discovery
+    // depends on the machine having the desktop app or zcode on PATH — a
+    // CI runner has neither, so the resolver legitimately falls back to the
+    // bare `zcode` name and the node assertion below would fail there.
+    const prevBin = process.env.ZCODE_BIN;
+    const prevNode = process.env.ZCODE_NODE;
+    process.env.ZCODE_BIN = "/nonexistent/zcode.cjs";
+    process.env.ZCODE_NODE = process.execPath;
+    try {
       const argv = resolveZcodeCommand();
       expect(argv.length).toBeGreaterThanOrEqual(4);
       expect(argv[0]!.toLowerCase()).toMatch(/node(\.exe)?$/);
       expect(argv).toContain("app-server");
       expect(argv).toContain("--stdio");
       expect(argv.some((a) => /zcode(\.cjs)?$/i.test(a))).toBe(true);
-    },
-  );
+    } finally {
+      if (prevBin === undefined) delete process.env.ZCODE_BIN;
+      else process.env.ZCODE_BIN = prevBin;
+      if (prevNode === undefined) delete process.env.ZCODE_NODE;
+      else process.env.ZCODE_NODE = prevNode;
+    }
+  });
 
   it.skipIf(!isWin)("resolves the real desktop zcode.cjs on this machine layout", () => {
     const desktop = "C:\\Program Files\\ZCode\\resources\\glm\\zcode.cjs";
