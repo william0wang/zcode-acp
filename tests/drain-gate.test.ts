@@ -74,6 +74,9 @@ function makeFixtures(turn: PendingTurn, escalateAfterMs = 0): DrainFixtures {
     hydrationWatermark: new Map<string, number>(),
     // stopBackendTurn consults this (compaction kill guard) — same rule.
     autoCompactInFlight: new Set<string>(),
+    // closeBackendSession drops foreign-turn tracking on runtime teardown —
+    // same rule (stub servers must mirror the real shape).
+    foreignActiveTurns: new Map<string, string>(),
   } as unknown as ZcodeAcpServer;
   const pollOnce = vi.fn();
   const listener = { resubscribe: vi.fn(async () => true) };

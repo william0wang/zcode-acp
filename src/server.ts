@@ -28,7 +28,7 @@ import {
   type WorkflowGate,
 } from "./config/workflow-gate.js";
 import { BackgroundTaskListener } from "./handlers/background-tasks.js";
-import { enqueueSessionSend, TURN_STATE_METHODS } from "./handlers/io.js";
+import { emitSessionTurnState, enqueueSessionSend, TURN_STATE_METHODS } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import {
   answerProviderRuntimeHeaders,
@@ -577,6 +577,29 @@ export class ZcodeAcpServer {
    */
   readonly notifyTurnActiveSince = new Map<string, number>();
   /**
+   * Backend sessions (zcodeSid → turnId) whose CURRENT turn was NOT driven by
+   * a bridge prompt — background-subagent wake turns (`inputSource:
+   * "background_task"`), `subagent_message` turns, control-only turns. The
+   * turn loop only exists while a bridge-driven prompt is registered, so
+   * without this bookkeeping those turns produce messages (via the background
+   * listener's forwarding) while every running indicator reads idle: no
+   * `turnState running:true`, `/status` idle, `replayMeta.turnActive` false —
+   * the desktop showed a live streaming conversation as idle (observed live
+   * 2026-11-12 on the mapon session: a sub-agent Review returned after the
+   * main turn ended, the backend auto-continued for an hour, desktop idle).
+   *
+   * Upstream parity: the app-server's own taskActivityTracker
+   * (packages/zcode-server-cli/src/server-core/taskActivityTracker.ts) keys
+   * its running-session set off `turn.started` / `turn.terminal` facts
+   * regardless of origin, and deriveZCodeTaskStatus reads
+   * `runtime.activeTurnId` — a turn is a turn whoever started it. This map is
+   * the bridge's mirror of that fact, fed by BackgroundTaskListener (which
+   * sees every session event out-of-band). Maintained per turnId so an
+   * interleaved turn's terminal cannot clear a newer active one; cleared on
+   * backend respawn (resetBackendGeneration) and session close.
+   */
+  readonly foreignActiveTurns = new Map<string, string>();
+  /**
    * Last USER-originated action (session/prompt or session/cancel, stamped via
    * noteUserActivity) on this bridge, epoch ms. Read by pushSettled's quiet
    * window: a settle within `push.quietMs` of it means the user is still at
@@ -898,6 +921,23 @@ export class ZcodeAcpServer {
     // (the backend's "Session is not active" is swallowed by fetchMessages),
     // or a prefix when a sibling client's re-resume was still hydrating.
     this.backendLoadedSessions.clear();
+    // …and the foreign-turn tracking: the turns it holds ran on the dead
+    // process and no terminal event will ever arrive for them. Best-effort
+    // settle broadcast so a client left mid-"running" by the crash doesn't
+    // spin until the session is next used — but the value is the /status
+    // union (pendingTurns ∪ remaining foreign entries): a backend-lost
+    // recovery respawn happens INSIDE runOneTurn with the turn still
+    // registered, and a bare false would read the recovering session as idle
+    // for the whole recovery turn (found in review 2026-11).
+    for (const zcodeSid of [...this.foreignActiveTurns.keys()]) {
+      this.foreignActiveTurns.delete(zcodeSid);
+      const acpSid = this.acpSidByZcodeSid.get(zcodeSid);
+      if (!acpSid) continue;
+      const stillBusy =
+        [...this.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid) ||
+        this.foreignActiveTurns.has(zcodeSid);
+      void emitSessionTurnState(this, acpSid, stillBusy);
+    }
   }
 
   /**

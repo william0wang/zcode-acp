@@ -266,6 +266,10 @@ async function handleClose(
   // observable contract. The liveness cache must go too, or a later resume
   // would skip the backend's session/resume RPC on a stale "still loaded".
   server.backendLoadedSessions.delete(sessionId);
+  // The runtime eviction below kills any in-flight FOREIGN turn (background
+  // wake / subagent_message) with no terminal event arriving — drop the
+  // tracking entry or the retired conversation would keep reporting running.
+  if (zcodeSid) server.foreignActiveTurns.delete(zcodeSid);
   if (zcodeSid && server.backend && !server.backend.isDead) {
     try {
       server.backend.send("session/close", { sessionId: zcodeSid });

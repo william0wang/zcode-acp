@@ -148,6 +148,14 @@ prompted). Two signals cover it:
   new prompt interrupts an in-flight one) the old turn's exit reports
   `running: true`: the preempting turn took over, so the session is still busy.
 
+"Any turn" includes turns the BACKEND started on its own, with no client
+prompt at all — a background sub-agent's completion wake
+(`inputSource:"background_task"`), a `subagent_message` turn, a control-only
+turn. These stream messages into the conversation while no bridge turn loop
+exists; the bridge tracks them the same way upstream's taskActivityTracker
+keys its running-session set off `turn.started` / `turn.terminal` regardless
+of origin, and `GET /status` reports them `running` too.
+
 The notification is **dual-emitted under two names** (#311): the deprecated
 `$/zcode/turnState` (LSP-style prefix) and the spec-compliant
 `_zcode/turnState` (ACP reserves `_`-prefixed names for extension

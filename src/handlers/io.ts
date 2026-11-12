@@ -413,9 +413,12 @@ export const TURN_STATE_METHODS = ["$/zcode/turnState", "_zcode/turnState"] as c
  * session ({@link TURN_STATE_METHODS} — see its doc for the naming story).
  *
  * The single emit path for ALL turn-state reporting — the turn loop, the
- * cancel/early-return paths and the auto-compact busy window (which reports
- * running:true at start and settles it only if this run raised it) — so a
- * client that tracks only turns reads every busy window, not just model turns.
+ * cancel/early-return paths, the auto-compact busy window (which reports
+ * running:true at start and settles it only if this run raised it) and the
+ * foreign-turn tracking in BackgroundTaskListener (turns the backend started
+ * on its own: background-subagent wakes, subagent_message, control-only) —
+ * so a client that tracks only turns reads every busy window, not just model
+ * turns the bridge itself prompted.
  * `cx` targets one connection; without it the notification fans out to every
  * attached client. The turn LIFECYCLE transitions (runOneTurn's start/end)
  * must broadcast — attach-only clients clear their running state and flush

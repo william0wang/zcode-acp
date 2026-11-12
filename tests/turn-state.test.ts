@@ -643,3 +643,43 @@ describe("backend-loaded stamp after backend-lost turns", () => {
     expect(server.isBackendSessionLive("sess_ts")).toBe(true);
   });
 });
+
+/**
+ * resetBackendGeneration's foreign-turn settle broadcast (review 2026-11):
+ * a backend-lost recovery respawn happens INSIDE runOneTurn with the turn
+ * still registered — the settle value must be the /status union, not a bare
+ * false, or the recovering session reads idle for the whole recovery turn.
+ */
+describe("resetBackendGeneration foreign-turn settle", () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("settles idle when nothing else holds the session busy", async () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("sess_ts", "zs_ts");
+    const { turnStates, turnStatesV2 } = collectCx(server);
+    server.foreignActiveTurns.set("zs_ts", "turn_dead");
+
+    server.resetBackendGeneration();
+    await flush();
+
+    expect(server.foreignActiveTurns.has("zs_ts")).toBe(false);
+    // Dual-emitted: one copy per method spelling (collectCx splits them).
+    expect(turnStates.map((t) => t.running)).toEqual([false]);
+    expect(turnStatesV2.map((t) => t.running)).toEqual([false]);
+  });
+
+  it("keeps running:true for a session with a pendingTurn (backend-lost recovery)", async () => {
+    const server = new ZcodeAcpServer();
+    server.registerSession("sess_ts", "zs_ts");
+    const { turnStates, turnStatesV2 } = collectCx(server);
+    server.foreignActiveTurns.set("zs_ts", "turn_dead");
+    // The recovering turn is still registered (respawn inside runOneTurn).
+    server.pendingTurns.set(1, { zcodeSid: "zs_ts", cancelled: false });
+
+    server.resetBackendGeneration();
+    await flush();
+
+    expect(turnStates.map((t) => t.running)).toEqual([true]);
+    expect(turnStatesV2.map((t) => t.running)).toEqual([true]);
+  });
+});

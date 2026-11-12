@@ -2,8 +2,8 @@
  * Session status endpoint (ADR-0005): the bridge-side /status handler,
  * exercised through a real loopback HTTP server backed by an in-memory
  * ZcodeAcpServer. Proves the running/idle derivation from pendingTurns and
- * the membership gates (hasActivity, resolvable sid), plus the handler's
- * method handling.
+ * foreignActiveTurns and the membership gates (hasActivity, resolvable sid),
+ * plus the handler's method handling.
  */
 
 import { randomUUID } from "node:crypto";
@@ -93,6 +93,19 @@ describe("status endpoint derivation", () => {
     const base = await bootStatus(server);
 
     expect((await getStatus(base)).sessions[0]!.status).toBe("running");
+  });
+
+  it("reports running for a FOREIGN backend turn (no bridge turn loop)", async () => {
+    // Upstream taskActivityTracker parity: a background-subagent wake turn
+    // runs with no pendingTurns entry — /status must still say running.
+    const server = new ZcodeAcpServer();
+    const { zcodeSid, acpSid } = seedSession(server, { title: "wake" });
+    server.foreignActiveTurns.set(zcodeSid, "turn_wake");
+    const base = await bootStatus(server);
+
+    const body = await getStatus(base);
+    expect(body.sessions).toHaveLength(1);
+    expect(body.sessions[0]).toMatchObject({ sessionId: acpSid, status: "running" });
   });
 
   it("hides sessions without activity or without a backend mapping", async () => {

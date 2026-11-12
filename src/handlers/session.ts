@@ -1777,8 +1777,12 @@ export async function loadSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   // A turn from a prior client may still be in flight (the bridge runs it to
   // completion regardless of who prompted); flag it so re-attaching clients
-  // restore their running state. Editor-initiated turns land here too.
-  const turnActive = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
+  // restore their running state. Editor-initiated turns land here too — as do
+  // foreign turns the BACKEND started on its own (background-subagent wake,
+  // subagent_message; tracked by the background listener).
+  const turnActive =
+    [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid) ||
+    server.foreignActiveTurns.has(zcodeSid);
   const result = {
     modes,
     configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
@@ -2430,10 +2434,15 @@ export async function runOneTurn(
     // catch up immediately instead of waiting for the 60s interval.
     void forceRefreshQuota();
     // Report "running" only while no other turn for the session took over
-    // (preempt): the preempting turn's own running:true must survive. The
+    // (preempt): the preempting turn's own running:true must survive. A
+    // foreign turn (background-subagent wake / subagent_message — tracked in
+    // server.foreignActiveTurns) that started mid-loop also keeps the flag
+    // up: this END transition must not clear a turn it doesn't own. The
     // usage extras ride along only when the turn reported usage — a bare
     // end keeps the exact pre-extras payload shape.
-    const stillBusy = [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
+    const stillBusy =
+      [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid) ||
+      server.foreignActiveTurns.has(zcodeSid);
     await emitTurnState(
       stillBusy,
       lastUsage ? { usage: lastUsage, turnMs: Date.now() - turnStartedAt } : undefined,
@@ -3070,6 +3079,10 @@ async function closeBackendSession(server: ZcodeAcpServer, zcodeSid: string): Pr
       `  [stop] session/close send failed (ignored): ${e instanceof Error ? e.message : String(e)}`,
     );
   }
+  // The runtime teardown kills any in-flight FOREIGN turn with no terminal
+  // event ever arriving for it — drop the tracking entry or the loop's
+  // finally would read the stale entry as stillBusy (false-running forever).
+  server.foreignActiveTurns.delete(zcodeSid);
 }
 
 /** Dependencies of drainBackendAfterCancel, injectable for tests. */

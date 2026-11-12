@@ -27,11 +27,15 @@ interface FakeServer {
   calls: Array<{ zcodeSid: string; update: Record<string, unknown> }>;
   /** Broadcast session/updates (echoSteeredInputs path) recorded here. */
   echoes: Array<{ sessionId: string; update: Record<string, unknown> }>;
+  /** Broadcast turnState notifications (foreign-turn tracking) recorded here. */
+  turnStates: Array<{ method: string; sessionId: string; running: boolean }>;
   /** Mirrors ZcodeAcpServer.terminalSentData — set by tests to simulate a
    *  tracked launch card so BackgroundTaskListener reuses it. */
   terminalSentData: Map<string, string>;
   /** Mirrors ZcodeAcpServer.notifyTurnActiveSince (notification busy window). */
   notifyTurnActiveSince: Map<string, number>;
+  /** Mirrors ZcodeAcpServer.foreignActiveTurns (foreign-turn running state). */
+  foreignActiveTurns: Map<string, string>;
   /** Mirrors ZcodeAcpServer.pendingTurns (steer-echo turn-loop gate). */
   pendingTurns: Map<number, { zcodeSid: string }>;
   /** Mirrors ZcodeAcpServer.acpSidByZcodeSid (zcode → acp id reverse index). */
@@ -42,12 +46,15 @@ type TestServer = FakeServer & Pick<ZcodeAcpServer, "notifyByZcodeSid">;
 function makeServer(): TestServer {
   const calls: TestServer["calls"] = [];
   const echoes: TestServer["echoes"] = [];
+  const turnStates: TestServer["turnStates"] = [];
   const acpSidByZcodeSid = new Map<string, string>([["sess_test", "acp_test"]]);
   const server = {
     calls,
     echoes,
+    turnStates,
     terminalSentData: new Map<string, string>(),
     notifyTurnActiveSince: new Map<string, number>(),
+    foreignActiveTurns: new Map<string, string>(),
     pendingTurns: new Map<number, { zcodeSid: string }>(),
     acpSidByZcodeSid,
     // Mirrors ZcodeAcpServer.sessionPlanActive (out-of-turn mode transitions).
@@ -60,9 +67,17 @@ function makeServer(): TestServer {
     clients: {
       size: 0,
       broadcast: () => ({
-        notify: async (_method: string, params: unknown) => {
-          const p = params as { sessionId: string; update: Record<string, unknown> };
-          echoes.push({ sessionId: p.sessionId, update: p.update });
+        notify: async (method: string, params: unknown) => {
+          const p = params as {
+            sessionId: string;
+            update?: Record<string, unknown>;
+            running?: boolean;
+          };
+          if (method.endsWith("turnState")) {
+            turnStates.push({ method, sessionId: p.sessionId, running: p.running === true });
+          } else {
+            echoes.push({ sessionId: p.sessionId, update: p.update ?? {} });
+          }
         },
       }),
       notifyExceptRoots: async (
@@ -737,5 +752,126 @@ describe("emitShutdownRecords (#194)", () => {
     expect(meta.backgroundTask.shutdown).toBe(true);
     expect(meta.terminal_exit.exit_code).toBe(1);
     expect(server.terminalSentData.has("call_bash9")).toBe(false);
+  });
+});
+
+/**
+ * Foreign-turn running state (upstream taskActivityTracker parity).
+ *
+ * The app-server's taskActivityTracker keys its running-session set off
+ * turn.started / turn.terminal facts regardless of origin; the bridge mirrors
+ * that via server.foreignActiveTurns + turnState broadcasts, because the turn
+ * loop only exists while a bridge-driven prompt is registered. Without this,
+ * a background-subagent wake turn streams messages into a session every
+ * consumer reports as idle (observed live 2026-11-12, the mapon session).
+ */
+describe("BackgroundTaskListener foreign turn running state", () => {
+  /** Flush the async turnState broadcast (Promise.allSettled chain). */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("tracks a background_task notification turn and broadcasts running:true/false", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "background_task" }, { turnId: "turn_f1" }),
+    );
+    await flush();
+    expect(server.foreignActiveTurns.get("sess_test")).toBe("turn_f1");
+    // Both spellings, running:true, addressed per alias.
+    expect(server.turnStates).toEqual([
+      { method: "$/zcode/turnState", sessionId: "acp_test", running: true },
+      { method: "_zcode/turnState", sessionId: "acp_test", running: true },
+    ]);
+    l.handleEvent(zcodeEvent("turn.completed", { resultType: "success" }));
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates.slice(2)).toEqual([
+      { method: "$/zcode/turnState", sessionId: "acp_test", running: false },
+      { method: "_zcode/turnState", sessionId: "acp_test", running: false },
+    ]);
+  });
+
+  it("tracks subagent_message turns (no notification forwarding, just running state)", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(
+      zcodeEvent("turn.started", { inputSource: "subagent_message" }, { turnId: "turn_f2" }),
+    );
+    await flush();
+    expect(server.foreignActiveTurns.get("sess_test")).toBe("turn_f2");
+    expect(server.turnStates.every((t) => t.running)).toBe(true);
+    // No text forwarding for a non-background_task turn.
+    l.handleEvent(zcodeEvent("model.streaming", { kind: "text_delta", delta: "wake" }));
+    await Promise.resolve();
+    expect(server.calls).toHaveLength(0);
+    l.handleEvent(zcodeEvent("turn.completed", {}, { turnId: "turn_f2" }));
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates.at(-1)?.running).toBe(false);
+  });
+
+  it("defers to the turn loop while a bridge-driven turn is registered", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    // A bridge-driven turn owns the session (the turn loop emits its own
+    // turnState and its finally re-checks this map).
+    server.pendingTurns.set(1, { zcodeSid: "sess_test" });
+    l.handleEvent(zcodeEvent("turn.started", {}, { turnId: "turn_loop" }));
+    await flush();
+    // OWNERSHIP AT START: a loop-owned turn is NOT tracked at all — writing
+    // it would poison the loop's stillBusy re-check after an ESC cancel
+    // whose terminal never arrives (review 2026-11: a [true,true] sequence
+    // and a permanent running entry). No map write, no broadcast.
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates).toHaveLength(0);
+    // The loop exits (cancel/finalize) WITHOUT a terminal event ever
+    // arriving: the map stays clean — /status, turnActive and stillBusy all
+    // correctly read idle.
+    server.pendingTurns.delete(1);
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    // A LATE terminal (straggler after the loop exited) settles the clients
+    // with a harmless running:false — the value matches reality.
+    l.handleEvent(zcodeEvent("turn.completed", {}, { turnId: "turn_loop" }));
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates.map((t) => t.running)).toEqual([false, false]);
+  });
+
+  it("an interleaved turn's terminal does not clear a newer active entry", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(zcodeEvent("turn.started", {}, { turnId: "turn_a" }));
+    await flush();
+    server.turnStates.length = 0;
+    // A control-only turn landed mid-loop and became the newest active entry.
+    l.handleEvent(
+      zcodeEvent("turn.started", { executionKind: "controlOnly" }, { turnId: "turn_b" }),
+    );
+    await flush();
+    expect(server.foreignActiveTurns.get("sess_test")).toBe("turn_b");
+    server.turnStates.length = 0;
+    // turn_a's (out-of-order) terminal must NOT clear turn_b nor emit idle.
+    l.handleEvent(zcodeEvent("turn.completed", {}, { turnId: "turn_a" }));
+    await flush();
+    expect(server.foreignActiveTurns.get("sess_test")).toBe("turn_b");
+    expect(server.turnStates).toHaveLength(0);
+    // turn_b's terminal closes the state.
+    l.handleEvent(zcodeEvent("turn.completed", {}, { turnId: "turn_b" }));
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates.map((t) => t.running)).toEqual([false, false]);
+  });
+
+  it("a legacy terminal without a turnId clears unconditionally", async () => {
+    const server = makeServer();
+    const l = new BackgroundTaskListener(server as unknown as ZcodeAcpServer, "sess_test");
+    l.handleEvent(zcodeEvent("turn.started", {}, { turnId: "turn_legacy" }));
+    await flush();
+    server.turnStates.length = 0;
+    l.handleEvent(zcodeEvent("turn.failed", { error: { code: "x" } }));
+    await flush();
+    expect(server.foreignActiveTurns.has("sess_test")).toBe(false);
+    expect(server.turnStates.map((t) => t.running)).toEqual([false, false]);
   });
 });

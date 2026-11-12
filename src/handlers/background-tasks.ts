@@ -23,6 +23,16 @@
  *     of a notification turn; its `model.streaming text_delta` is forwarded
  *     as `agent_message_chunk` so the user sees the background result.
  *
+ * It is ALSO the running-state authority for turns this bridge did not drive
+ * (`server.foreignActiveTurns`): the turn loop only exists while a
+ * bridge-initiated prompt is registered, so a background-subagent wake, a
+ * `subagent_message` turn or a control-only turn would otherwise stream
+ * messages into a session every consumer reports as idle. Upstream keys its
+ * own running indicators off `turn.started` / `turn.terminal` facts
+ * regardless of origin (taskActivityTracker), so the listener mirrors that:
+ * foreign `turn.started` → `$/zcode/turnState running:true` broadcast +
+ * `/status` running + `replayMeta.turnActive`; the terminal clears it.
+ *
  * Everything else is ignored — the turn loop handles normal turns and normal
  * tool calls. Per the design decision, background agents' INTERNAL tool calls
  * are NOT expanded here (only the task-level card + the final result message).
@@ -40,7 +50,7 @@ import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { armWorkflowRunPoller, stopWorkflowRunPoller } from "../workflow/poller.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
-import { echoSteeredInputs } from "./io.js";
+import { echoSteeredInputs, emitSessionTurnState } from "./io.js";
 
 /** Shape of a `session.updated` payload that reports a background task state. */
 interface TaskStatusPayload {
@@ -197,6 +207,11 @@ export class BackgroundTaskListener implements EventListener {
           this.firstMessageId = null;
           this.server.notifyTurnActiveSince.delete(this.zcodeSid);
         }
+        // Foreign-turn running state (upstream taskActivityTracker parity):
+        // a turn.started from ANY source — background_task wake, subagent_message,
+        // control-only — marks the session running for every consumer that has
+        // no turn loop of its own to derive it from.
+        this.trackForeignTurn(turnId, true);
         return;
       }
       if (event.type === "turn.steerDrained") {
@@ -255,8 +270,19 @@ export class BackgroundTaskListener implements EventListener {
           // session gets its own — otherwise the editor would merge/overwrite
           // distinct tasks' outputs under one shared messageId.
           this.firstMessageId = null;
+          this.trackForeignTurn(eventTurnId, false);
           return;
         }
+      }
+      // Terminal outside any active notification turn: a pure foreign turn
+      // (subagent_message wake, control-only) ending — close its running
+      // state the same way.
+      if (event.type === "turn.completed" || event.type === "turn.failed") {
+        const eventTurnId =
+          (event.turnId as string | undefined) ??
+          (event.payload?.["turnId"] as string | undefined) ??
+          "";
+        this.trackForeignTurn(eventTurnId, false);
       }
     } catch (e) {
       warn(
@@ -265,6 +291,47 @@ export class BackgroundTaskListener implements EventListener {
         }`,
       );
     }
+  }
+
+  /**
+   * Maintain `server.foreignActiveTurns` for a turn this bridge did not drive
+   * (no `pendingTurns` entry exists for it) and broadcast the matching
+   * `turnState` transition when no bridge turn loop owns the session.
+   *
+   * OWNERSHIP IS DECIDED AT START: a turn.started arriving while a
+   * bridge-driven turn is registered belongs to the turn loop — it is neither
+   * tracked here nor emitted. Tracking it would poison the loop's finally
+   * (its stillBusy re-check reads this map): after an ESC cancel whose
+   * terminal never arrives, the map would hold the cancelled turn's own id
+   * and the session would report running forever (observed in review with a
+   * [true, true] broadcast sequence). The pendingTurns entry is registered
+   * before the send, so every bridge-driven turn's own turn.started lands
+   * behind it. A genuinely foreign start (background wake, subagent_message)
+   * can only begin when no bridge turn is registered — turns are serialized
+   * upstream-side.
+   *
+   * Terminal deletion is per turnId: interleaved turns' terminals must not
+   * clear a newer active entry; legacy envelopes without a turnId clear
+   * unconditionally. Emission stays gated on the pendingTurns emptiness —
+   * while a turn loop owns the session, its own start/finally emissions are
+   * the only transitions clients see.
+   */
+  private trackForeignTurn(turnId: string, started: boolean): void {
+    const turnLoopLive = [...this.server.pendingTurns.values()].some(
+      (t) => t.zcodeSid === this.zcodeSid,
+    );
+    if (started) {
+      if (turnLoopLive) return;
+      this.server.foreignActiveTurns.set(this.zcodeSid, turnId);
+    } else {
+      const current = this.server.foreignActiveTurns.get(this.zcodeSid);
+      if (turnId && current && current !== turnId) return;
+      this.server.foreignActiveTurns.delete(this.zcodeSid);
+    }
+    if (turnLoopLive) return;
+    const acpSid = this.server.acpSidByZcodeSid.get(this.zcodeSid);
+    if (!acpSid) return;
+    void emitSessionTurnState(this.server, acpSid, started);
   }
 
   /** Handle a `session.updated` carrying a background task status. */

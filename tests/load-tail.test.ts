@@ -543,6 +543,19 @@ describe("replayMeta.turnActive", () => {
       false,
     );
   });
+
+  it("flags a FOREIGN backend turn (background wake, no bridge turn loop)", async () => {
+    const server = new ZcodeAcpServer();
+    server.backend = fakeBackend(hist());
+    const { cx } = collectCx();
+    await loadSession(server, loadParams(), cx);
+    const zcodeSid = server.resolveSid("sess_tail");
+    expect(zcodeSid).toBeDefined();
+    server.foreignActiveTurns.set(zcodeSid!, "turn_wake");
+
+    const result = await loadSession(server, loadParams(), cx);
+    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(true);
+  });
 });
 
 describe("fetchMessages (P1: slow reads must not read as empty)", () => {

@@ -35,11 +35,15 @@ function sendText(res: ServerResponse, code: number, message: string): void {
 /**
  * zcode session ids with a turn still in flight. Matches the `turnActive`
  * derivation in `session/load`: a cancelled-but-finalising turn counts as
- * running — the conversation is still busy until its loop unwinds.
+ * running — the conversation is still busy until its loop unwinds — and so
+ * does a FOREIGN turn the backend started on its own (background-subagent
+ * wake, `subagent_message`, control-only; upstream taskActivityTracker
+ * parity — a turn is a turn whoever started it).
  */
 export function runningZcodeSids(server: ZcodeAcpServer): Set<string> {
   const running = new Set<string>();
   for (const turn of server.pendingTurns.values()) running.add(turn.zcodeSid);
+  for (const zcodeSid of server.foreignActiveTurns.keys()) running.add(zcodeSid);
   return running;
 }
 
