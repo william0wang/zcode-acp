@@ -186,9 +186,12 @@ describe("zcodeDataBaseDirEnv (ZCODE_HOME → ZCODE_DATA_BASE_DIR)", () => {
     const { zcodeDataBaseDirEnv } = await import("../src/backend/resolve.js");
     process.env.ZCODE_HOME = "/tmp/isolated/.zcode";
     // ZCODE_HOME replaces ~/.zcode OUTRIGHT, and the backend's contract is the
-    // PARENT of .zcode — so the translation is a plain dirname.
+    // PARENT of .zcode — so the translation is a plain dirname. The expected
+    // value goes through the same resolve() the implementation uses, so a
+    // drive-letter prefix on Windows matches instead of comparing raw POSIX
+    // literals ("/tmp/isolated" → "C:\tmp\isolated").
     expect(zcodeDataBaseDirEnv()).toEqual({
-      ZCODE_DATA_BASE_DIR: "/tmp/isolated",
+      ZCODE_DATA_BASE_DIR: path.dirname(path.resolve("/tmp/isolated/.zcode")),
     });
   });
 

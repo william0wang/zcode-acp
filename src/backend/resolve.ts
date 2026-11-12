@@ -15,8 +15,36 @@ import process from "node:process";
 
 import { log, warn, zcodePersonalProviderPath } from "../utils.js";
 
+/**
+ * `which bin` — resolve a binary on PATH without external deps.
+ *
+ * Windows has no `which` (and GUI-launched processes have a stripped PATH):
+ * scan the PATH entries ourselves, honoring PATHEXT so `zcode` finds
+ * `zcode.cmd` / `zcode.exe`.
+ */
+export function windowsPathWhich(bin: string): string | null {
+  const dirs = (process.env.PATH ?? "").split(";").filter(Boolean);
+  const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+    .split(";")
+    .map((e) => e.toLowerCase())
+    .filter(Boolean);
+  const names = [bin.toLowerCase(), ...exts.map((e) => bin.toLowerCase() + e)];
+  for (const dir of dirs) {
+    for (const name of names) {
+      try {
+        const full = path.join(dir, name);
+        if (existsSync(full)) return full;
+      } catch {
+        // unreadable PATH entry — skip
+      }
+    }
+  }
+  return null;
+}
+
 /** `which bin` — resolve a binary on PATH without external deps. */
 function whichSync(bin: string): string | null {
+  if (process.platform === "win32") return windowsPathWhich(bin);
   try {
     const out = execFileSync("which", [bin], {
       encoding: "utf8",
@@ -48,12 +76,25 @@ function zedBundledNodes(): string[] {
 /**
  * Candidate Node binaries in priority order. Deduped, order-preserving.
  * Falls back to the Zed-bundled Node glob as a last resort.
+ *
+ * Windows: `which node` is unavailable and the POSIX hardcodes don't exist,
+ * so the bridge's own executable (this bridge ships with engines >=22, and a
+ * GUI-launched bridge is exactly the no-PATH case the candidates exist for;
+ * skipped under Electron where execPath is the Electron binary) and the
+ * standard Program Files install are prepended.
  */
-function candidateNodeBinaries(): string[] {
+export function candidateNodeBinaries(): string[] {
   const cands: string[] = [];
   const envNode = process.env.ZCODE_NODE;
   if (envNode) cands.push(envNode);
-  cands.push("/opt/homebrew/bin/node", "/usr/local/bin/node");
+  if (process.platform === "win32") {
+    const isElectron = Boolean((process.versions as { electron?: string }).electron);
+    if (!isElectron) cands.push(process.execPath);
+    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+    cands.push(path.join(programFiles, "nodejs", "node.exe"));
+  } else {
+    cands.push("/opt/homebrew/bin/node", "/usr/local/bin/node");
+  }
   const whichNode = whichSync("node");
   if (whichNode) cands.push(whichNode);
   cands.push(...zedBundledNodes());
@@ -88,11 +129,17 @@ function nodeSupportsSqlite(nodeBin: string): boolean {
  * (mirrors the per-platform table in README). The app never adds the CLI to
  * PATH, so a bare terminal launch of the REPL/editor bridge finds it here.
  */
-function bundledZcodeCandidates(): string[] {
+export function bundledZcodeCandidates(): string[] {
   const home = os.homedir();
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
-    return [path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs")];
+    const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
+    // Two observed install layouts: per-user (LOCALAPPDATA) and machine-wide
+    // (Program Files — the desktop installer's default when elevating).
+    return [
+      path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs"),
+      path.join(programFiles, "ZCode", "resources", "glm", "zcode.cjs"),
+    ];
   }
   return [
     "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
