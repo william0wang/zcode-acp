@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.2](https://github.com/william0wang/zcode-acp/compare/v0.84.1...v0.84.2) (2026-11-12)
+
+
+### Bug Fixes
+
+* **turn-state:** track backend-initiated foreign turns so wake/subagent turns report running ([c4e8251](https://github.com/william0wang/zcode-acp/commit/c4e825173d1982931befa33850e465fec0ca6c57))
+
 ## [0.84.1](https://github.com/william0wang/zcode-acp/compare/v0.84.0...v0.84.1) (2026-11-12)
 
 
