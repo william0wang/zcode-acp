@@ -75,6 +75,7 @@ import {
   extractLocations,
   formatTurnError,
   isBackendLostError,
+  isContentLiveDelivered,
   isGatewayBlipTurnError,
   isTransientTurnError,
   ProjectionDiffer,
@@ -4047,7 +4048,7 @@ export async function runEventTurn(
     if (!emittedText) {
       const reply = await fetchLastReply(server, turn.zcodeSid, differ);
       if (reply) {
-        registerFetchedReply(translator, reply);
+        registerFetchedReply(translator, differ, reply);
         await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
       } else if (!emittedOutput) {
         // No text and no output → suspected failure.
@@ -4106,7 +4107,7 @@ export async function runEventTurn(
         } else {
           const reply = await fetchLastReply(server, turn.zcodeSid, differ);
           if (reply) {
-            registerFetchedReply(translator, reply);
+            registerFetchedReply(translator, differ, reply);
             await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
             turn.stallRecovered = true;
             log(
@@ -4314,6 +4315,14 @@ export async function runEventTurn(
     }
     for (const iev of internalEvents) {
       if (iev.kind === "TextDelta" || iev.kind === "ReasoningDelta") emittedText = true;
+      // Track live-delivered content per kind so the turn-completion replay
+      // can content-suppress a journal copy even when the two id systems
+      // failed to meet (see the completion loop below).
+      if (iev.kind === "TextDelta") {
+        differ.noteLiveTextDelta("text", iev.text, iev.messageId);
+      } else if (iev.kind === "ReasoningDelta") {
+        differ.noteLiveTextDelta("reasoning", iev.text, iev.messageId);
+      }
       if (iev.kind === "ToolCallNew" || iev.kind === "ToolCallUpdate") emittedOutput = true;
       // Sync usage to the differ so the turn-completion diff doesn't re-emit a
       // UsageDelta for the same value (the differ's lastUsage baseline is
@@ -4475,7 +4484,7 @@ export async function runEventTurn(
       if (!emittedText) {
         const reply = await fetchLastReply(server, turn.zcodeSid, differ);
         if (reply) {
-          registerFetchedReply(translator, reply);
+          registerFetchedReply(translator, differ, reply);
           await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
         }
       }
@@ -4519,6 +4528,29 @@ export async function runEventTurn(
               ? translator.deliveredMessageIds
               : translator.deliveredReasoningMessageIds;
           if (iev.messageId && delivered.has(iev.messageId)) continue;
+          // Belt under the id bridge: ids delivered live through paths this
+          // translator never saw (background notification forwarding,
+          // fetchLastReply), then content-level suppression — the live stream
+          // and the journal read can disagree on ids (3.18.0's wire spelled
+          // them `messageId`, older providers stream without any id), and
+          // re-dispatching already-seen text renders a verbatim duplicate
+          // bubble in every ACP client.
+          const liveContent =
+            iev.kind === "TextDelta" ? differ.liveTextDelivered : differ.liveReasoningDelivered;
+          const liveDelivered =
+            iev.kind === "TextDelta" && iev.messageId
+              ? differ.liveTextMessageIds.has(iev.messageId)
+              : false;
+          if (liveDelivered || isContentLiveDelivered(liveContent, iev.text)) {
+            warn(
+              `  ⚠ completion replay suppressed (${iev.kind} already delivered live; ` +
+                `messageId=${iev.messageId ?? "<no-id>"}, delivered ids: ` +
+                `[${[...delivered].join(", ")}] live-ids: [${[...differ.liveTextMessageIds].join(
+                  ", ",
+                )}])`,
+            );
+            continue;
+          }
         }
         await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
@@ -4559,12 +4591,16 @@ export function shouldDropEventForTurnAttribution(
  * (the differ never saw this message — its live events were lost — so its
  * diff would re-emit the TextDelta). Reasoning is NOT registered: it was
  * never streamed either, so the replay dispatching it is pure gain.
+ * Registers on the differ's live-delivery tracker too (id + content) so a
+ * reply without a usable journal id is still content-suppressed.
  */
 function registerFetchedReply(
   translator: EventTranslator,
-  reply: { messageId: string | null },
+  differ: ProjectionDiffer,
+  reply: { text: string; messageId: string | null },
 ): void {
   if (reply.messageId) translator.deliveredMessageIds.add(reply.messageId);
+  differ.noteLiveTextDelta("text", reply.text, reply.messageId ?? undefined);
 }
 
 /**

@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 import { preemptInFlightTurn, shouldDropEventForTurnAttribution } from "../src/handlers/session.js";
-import { ProjectionDiffer } from "../src/translators/projection-differ.js";
+import { isContentLiveDelivered, ProjectionDiffer } from "../src/translators/projection-differ.js";
 import { EventTranslator } from "../src/translators/event-translator.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
 
@@ -209,6 +209,147 @@ describe("turn-completion replay: re-emit text never streamed live, dedup by mes
     });
     // And the already-streamed text must still be deduped.
     expect(replayed.find((e) => e.kind === "TextDelta")).toBeUndefined();
+  });
+});
+
+describe("turn-completion replay: content-level belt under the id bridge (2026-11-12 duplicate bug)", () => {
+  /**
+   * Mirrors runEventTurn's completion-loop filter: id check against the
+   * translator's delivered sets ∪ the differ's live-delivery ids, then the
+   * content-level belt against the differ's live-delivered text.
+   */
+  function filterReplayed(
+    events: ReturnType<ProjectionDiffer["diff"]>,
+    translator: EventTranslator,
+    differ: ProjectionDiffer,
+  ) {
+    return events.filter((e) => {
+      if (e.kind !== "TextDelta" && e.kind !== "ReasoningDelta") return true;
+      const delivered =
+        e.kind === "TextDelta"
+          ? translator.deliveredMessageIds
+          : translator.deliveredReasoningMessageIds;
+      if (e.messageId && delivered.has(e.messageId)) return false;
+      const liveDelivered =
+        e.kind === "TextDelta" && e.messageId ? differ.liveTextMessageIds.has(e.messageId) : false;
+      if (liveDelivered) return false;
+      const liveContent =
+        e.kind === "TextDelta" ? differ.liveTextDelivered : differ.liveReasoningDelivered;
+      return !isContentLiveDelivered(liveContent, e.text);
+    });
+  }
+
+  function assistantMsg(id: string, text: string): ZcodeMessage {
+    return { info: { id, role: "assistant" }, parts: [{ type: "text", text }] };
+  }
+
+  it("isContentLiveDelivered: containment, trimmed equality, empty never suppresses", () => {
+    expect(isContentLiveDelivered("hello world", "hello world")).toBe(true);
+    // Multi-message turns concatenate live text — each message is a substring.
+    expect(isContentLiveDelivered("part one. part two.", "part two.")).toBe(true);
+    // Journal may store edge whitespace the stream didn't.
+    expect(isContentLiveDelivered("reply", "reply\n")).toBe(true);
+    expect(isContentLiveDelivered("", "reply")).toBe(false);
+    expect(isContentLiveDelivered("reply", "")).toBe(false);
+    expect(isContentLiveDelivered("a different reply", "the reply")).toBe(false);
+  });
+
+  it("live stream without assistantMessageId must not be replayed as a second message", () => {
+    // 3.18.0-era failure shape: the live deltas carried no id (or ids the
+    // journal disagrees with), so the client rendered the full text once under
+    // chunkMsgId (live) and once under the journal id (completion replay).
+    const differ = new ProjectionDiffer();
+    const translator = new EventTranslator();
+    translator.translate({
+      type: "model.streaming",
+      payload: { kind: "text_delta", delta: "the whole reply" },
+    });
+    // Turn-loop side: note every dispatched live delta (mirrors runEventTurn).
+    differ.noteLiveTextDelta("text", "the whole reply");
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_journal_1", "the whole reply")],
+    });
+    const texts = filterReplayed(events, translator, differ).filter((e) => e.kind === "TextDelta");
+    expect(texts).toHaveLength(0);
+  });
+
+  it("live assistantMessageId that differs from the journal id is content-suppressed", () => {
+    const differ = new ProjectionDiffer();
+    const translator = new EventTranslator();
+    translator.translate({
+      type: "model.streaming",
+      payload: { kind: "text_delta", delta: "the whole reply", assistantMessageId: "msg_live_x" },
+    });
+    differ.noteLiveTextDelta("text", "the whole reply", "msg_live_x");
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_journal_y", "the whole reply")],
+    });
+    const texts = filterReplayed(events, translator, differ).filter((e) => e.kind === "TextDelta");
+    expect(texts).toHaveLength(0);
+  });
+
+  it("a message that never streamed live still replays (no listener was attached)", () => {
+    const differ = new ProjectionDiffer();
+    const translator = new EventTranslator();
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_missing", "produced while no listener was attached")],
+    });
+    const texts = filterReplayed(events, translator, differ).filter((e) => e.kind === "TextDelta");
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatchObject({ messageId: "msg_missing" });
+  });
+
+  it("live-delivered text does not suppress a DIFFERENT message's replay", () => {
+    const differ = new ProjectionDiffer();
+    const translator = new EventTranslator();
+    differ.noteLiveTextDelta("text", "first message streamed live");
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_other", "an entirely different reply")],
+    });
+    const texts = filterReplayed(events, translator, differ).filter((e) => e.kind === "TextDelta");
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toMatchObject({ messageId: "msg_other" });
+  });
+
+  it("background-notification text registered on the differ is id-suppressed at completion", () => {
+    // forwardText notes the backend id so the user turn's completion replay
+    // (the notification turn's rows land after the turn's anchor, invisible to
+    // the user translator's delivered sets) cannot re-forward them.
+    const differ = new ProjectionDiffer();
+    const translator = new EventTranslator();
+    differ.noteLiveTextDelta("text", "task finished ok", "msg_bg_1");
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_bg_1", "task finished ok")],
+    });
+    const texts = filterReplayed(events, translator, differ).filter((e) => e.kind === "TextDelta");
+    expect(texts).toHaveLength(0);
+  });
+
+  it("resetTurn clears the live-delivery window", () => {
+    const differ = new ProjectionDiffer();
+    differ.noteLiveTextDelta("text", "old turn text", "msg_old");
+    differ.resetTurn();
+    expect(differ.liveTextDelivered).toBe("");
+    expect(differ.liveTextMessageIds.size).toBe(0);
+
+    const events = differ.diff({
+      projection: { status: "idle" },
+      messages: [assistantMsg("msg_next", "old turn text")],
+    });
+    const texts = filterReplayed(events, new EventTranslator(), differ).filter(
+      (e) => e.kind === "TextDelta",
+    );
+    expect(texts).toHaveLength(1);
   });
 });
 

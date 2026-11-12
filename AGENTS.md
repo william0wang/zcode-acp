@@ -1103,6 +1103,39 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   needlessly destroy working logins — map everything the bridge cannot serve
   to `CREDENTIAL_SECURE_STORAGE_UNAVAILABLE`. Fixed in 0.84.0 (#374, with
   parity tests against upstream's seal/open).
+- **3.18.0 changed the `session/messages` wire shape from Core rows
+  (`info.id`) to the legacy-protocol mapper (`info.messageId`) — the bridge
+  normalizes in `fetchMessages`, and the completion replay additionally
+  content-suppresses already-delivered text** (observed live 2026-11-12, the
+  "整条 assistant 消息重复" duplicate-message bug): 3.18.0's `readMessages`
+  began serving history through upstream `message-mapper.ts` (message info
+  `messageId`/`sessionId`, parts `callId`/`messageId`/`partId`) instead of raw
+  Core rows, while `model.streaming` still carries `assistantMessageId`. The
+  bridge read `info.id` everywhere, so every id-based consumer silently
+  degraded to its id-less fallback — the turn-completion diff replayed EVERY
+  live-streamed turn's full text under `chunkMsgId` (clients render "two ids,
+  same content" as two bubbles; re-attach showed one copy because the journal
+  holds one row), and `dedupeMessages`/`historyAnchor`/replay cursors were
+  equally dead. `normalizeWireMessages` (src/handlers/replay.ts, applied
+  inside `fetchMessages` — the single history seam) maps `info.messageId` →
+  `info.id` and warns ONCE per process on first detection — that warn is the
+  wire-drift signal, not noise. Belt under the id bridge:
+  `ProjectionDiffer.noteLiveTextDelta` accumulates live-delivered
+  text/reasoning per turn window (fed by the turn loop's dispatch,
+  `fetchLastReply` via `registerFetchedReply`, and background-notification
+  `forwardText`, which also registers its backend ids into
+  `liveTextMessageIds` so a notification landing mid-user-turn is never
+  replayed over its forwarded copy); the completion loop suppresses a
+  replayed TextDelta/ReasoningDelta whose id was live-delivered through
+  another path or whose content is covered by the live stream
+  (`isContentLiveDelivered` — containment plus trimmed equality; an empty
+  accumulator never suppresses, so "replay a turn that ran while no listener
+  was attached" stays intact). The suppression emits a `⚠ completion replay
+  suppressed` warn — treat that line as "the id bridge failed again". Do not
+  "simplify" either layer away: the normalization is the fix, the content
+  belt is what keeps the NEXT silent id drift from double-rendering every
+  reply. Reproduction/discrimination tooling: `.zcode/scratch/probe-duplicate/`
+  (a stdio-ACP probe that records every agent_message_chunk's messageId).
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast

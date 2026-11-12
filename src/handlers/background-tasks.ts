@@ -529,6 +529,10 @@ export class BackgroundTaskListener implements EventListener {
    * otherwise the lazily-allocated generated id keeps one id per turn.
    */
   private async forwardText(delta: string, backendMessageId?: string): Promise<void> {
+    // Register on the session differ's live-delivery tracker so the in-flight
+    // user turn's completion diff (the notification turn's journal rows land
+    // after its anchor) doesn't replay this text over the forwarded copy.
+    this.server.differs?.get(this.zcodeSid)?.noteLiveTextDelta("text", delta, backendMessageId);
     // Allocate the messageId lazily so an empty-result turn emits nothing.
     let msgId = backendMessageId ?? this.activeMessageId();
     if (!msgId) {

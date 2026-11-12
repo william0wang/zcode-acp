@@ -56,6 +56,36 @@ export class ProjectionDiffer {
   historyAnchor: string | null = null;
   /** Whether any TextDelta fired this turn (used by fallback detection). */
   emittedTextThisTurn = false;
+  /**
+   * Live-delivered assistant TEXT this turn window: the raw concatenation of
+   * every text delta dispatched to clients, plus the backend message ids
+   * those deltas carried. The turn-completion replay uses this as the
+   * content-level belt under the deliveredMessageIds bridge: when the live
+   * stream and the journal read disagree on ids (a backend wire drift like
+   * 3.18.0's messageId spelling, or a provider streaming without
+   * assistantMessageId), id-based dedup alone would re-dispatch the whole
+   * reply a second time under chunkMsgId. Text and reasoning accumulate
+   * separately — per-kind, same contract as the translator's delivered sets.
+   */
+  liveTextDelivered = "";
+  liveReasoningDelivered = "";
+  /** Backend message ids of TEXT live-delivered through paths OTHER than this
+   * turn's translator (background notification forwarding, fetchLastReply) —
+   * unioned into the completion replay's id check so their journal rows are
+   * not replayed over the already-forwarded text. */
+  readonly liveTextMessageIds = new Set<string>();
+
+  /** Record a live-dispatched delta so the completion replay can suppress a
+   * journal copy of content the client already received. Per content kind. */
+  noteLiveTextDelta(kind: "text" | "reasoning", text: string, messageId?: string): void {
+    if (!text) return;
+    if (kind === "text") {
+      this.liveTextDelivered += text;
+      if (messageId) this.liveTextMessageIds.add(messageId);
+    } else {
+      this.liveReasoningDelivered += text;
+    }
+  }
 
   /** Mark all given messages as seen (baseline so we don't re-emit history). */
   markSeen(messages: ZcodeMessage[]): void {
@@ -89,6 +119,12 @@ export class ProjectionDiffer {
   /** Reset per-turn flags (does NOT reset seenMessageIds). */
   resetTurn(): void {
     this.emittedTextThisTurn = false;
+    // Live-delivery tracking is per turn window: everything committed before
+    // the next turn's baseline markSeen is replay-suppressed by seen ids, so
+    // stale content here could only mis-suppress legitimate replays.
+    this.liveTextDelivered = "";
+    this.liveReasoningDelivered = "";
+    this.liveTextMessageIds.clear();
   }
 
   /** Set the usage baseline so the next diff won't re-emit the same value. */
@@ -252,6 +288,21 @@ export class ProjectionDiffer {
       return `__fallback::${role}::${String(m.parts).slice(0, 200)}`;
     }
   }
+}
+
+/**
+ * Content-level duplicate guard for the turn-completion replay: whether a
+ * journal message's full text was already delivered to clients by the live
+ * stream of this turn window. Containment (multi-message turns concatenate
+ * their live text under one accumulator) plus a trimmed-equality fallback for
+ * journals that store leading/trailing whitespace the stream didn't. An empty
+ * accumulator (nothing streamed — the legitimate "replay a turn that ran
+ * while no listener was attached" case) never suppresses.
+ */
+export function isContentLiveDelivered(live: string, replayText: string): boolean {
+  if (!live || !replayText) return false;
+  if (live.includes(replayText)) return true;
+  return live.trim() === replayText.trim();
 }
 
 /** Deterministic JSON string with recursively sorted object keys, mirroring

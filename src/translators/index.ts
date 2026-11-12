@@ -1,7 +1,7 @@
 /** Translators barrel: internal event types + EventTranslator + ProjectionDiffer + helpers. */
 
 export { EventTranslator } from "./event-translator.js";
-export { ProjectionDiffer } from "./projection-differ.js";
+export { isContentLiveDelivered, ProjectionDiffer } from "./projection-differ.js";
 export {
   TOOL_KIND_MAP,
   summarizeToolInput,

@@ -11,6 +11,7 @@ import { enqueueSessionSend, sendSessionUpdate, withReplayBatch } from "../src/h
 import {
   MAX_REPLAY_LIMIT,
   fullSlice,
+  normalizeWireMessages,
   readTailLimit,
   replayMessages,
   sliceBefore,
@@ -768,5 +769,37 @@ describe("replayMessages toolTurnWindow (TUI condensation)", () => {
       .map((p) => (p.update as Record<string, unknown>).title)
       .filter((t): t is string => typeof t === "string");
     expect(toolTitles).toEqual(["Run t1", "Run t2", "Read · /tmp/a"]);
+  });
+});
+
+describe("normalizeWireMessages (3.18+ wire shape: info.messageId, no info.id)", () => {
+  it("maps the wire messageId spelling onto info.id", () => {
+    const wire = [
+      {
+        info: { messageId: "msg_u1", sessionId: "sess", role: "user" },
+        parts: [{ type: "text", text: "one" }],
+      },
+      {
+        info: { messageId: "msg_a1", sessionId: "sess", role: "assistant" },
+        parts: [{ type: "text", text: "A1" }],
+      },
+    ] as unknown as ZcodeMessage[];
+    const out = normalizeWireMessages(wire);
+    expect(out.map((m) => m.info.id)).toEqual(["msg_u1", "msg_a1"]);
+  });
+
+  it("passes id-carrying (pre-3.18 Core shape) messages through untouched", () => {
+    const core = [msg("m1", "user", "one"), msg("m2", "assistant", "A1")];
+    const before = JSON.stringify(core);
+    normalizeWireMessages(core);
+    expect(JSON.stringify(core)).toBe(before);
+  });
+
+  it("leaves genuinely id-less messages id-less (no fabricated ids)", () => {
+    const bare = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "one" }] },
+    ] as unknown as ZcodeMessage[];
+    const out = normalizeWireMessages(bare);
+    expect(out[0]?.info?.id).toBeUndefined();
   });
 });

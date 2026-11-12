@@ -231,6 +231,43 @@ export function readLoadIntent(params: acp.LoadSessionRequest): "auto" | "user" 
 }
 
 /**
+ * Normalize the 3.18+ `session/messages` wire shape onto the bridge's
+ * `info.id` spelling. 3.18.0 started serving history through the legacy
+ * protocol mapper (upstream `message-mapper.ts`), whose message info spells
+ * the id `messageId` — the Core shape the bridge was built against carries
+ * `info.id`. Without this mapping every id-based consumer silently degrades
+ * to its id-less fallback (differ dedup/anchor, replay pagination cursors,
+ * edit-diff tool lookup), and the turn-completion replay re-dispatches
+ * live-streamed text under chunkMsgId — the duplicate-message bug observed
+ * live 2026-11-12. Messages that already carry `info.id` (pre-3.18 backends)
+ * pass through untouched.
+ */
+export function normalizeWireMessages(messages: ZcodeMessage[]): ZcodeMessage[] {
+  let rewired = false;
+  for (const m of messages) {
+    const info = m?.info as { id?: unknown; messageId?: unknown } | undefined;
+    if (typeof info?.id !== "string" || !info.id) {
+      if (typeof info?.messageId === "string" && info.messageId) {
+        (m.info as { id?: string }).id = info.messageId;
+        rewired = true;
+      }
+    }
+  }
+  if (rewired) warnOnceMessageIdWire();
+  return messages;
+}
+
+let messageIdWireWarned = false;
+function warnOnceMessageIdWire(): void {
+  if (messageIdWireWarned) return;
+  messageIdWireWarned = true;
+  warn(
+    "session/messages carries the 3.18+ wire shape (info.messageId, no info.id) — " +
+      "normalized onto info.id for all id-based consumers",
+  );
+}
+
+/**
  * Drop duplicate entries the backend can return for the same message id
  * (observed in live session/messages payloads: the same id appears at
  * multiple, non-adjacent positions with identical content). Replaying every
@@ -346,7 +383,7 @@ export async function fetchMessages(
     result = await read();
   }
   if (result === null) return [];
-  return dedupeMessages(result.messages ?? []);
+  return dedupeMessages(normalizeWireMessages(result.messages ?? []));
 }
 
 /**
