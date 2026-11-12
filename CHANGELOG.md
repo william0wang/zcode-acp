@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.0](https://github.com/william0wang/zcode-acp/compare/v0.83.3...v0.84.0) (2026-11-12)
+
+
+### Features
+
+* **creds:** support the enc:v2:os OS-keyring credential store (desktop 3.18+ migration) ([#374](https://github.com/william0wang/zcode-acp/issues/374)) ([a9f29ac](https://github.com/william0wang/zcode-acp/commit/a9f29ac144b3144d25f2a87eb36793c395abfdf3))
+* **win:** resolve the zcode cli and a sqlite-capable node on Windows ([#373](https://github.com/william0wang/zcode-acp/issues/373)) ([1fa57f7](https://github.com/william0wang/zcode-acp/commit/1fa57f7a3e2287e43ec25bc2f6f424ace7a5a194))
+
+
+### Bug Fixes
+
+* **prompt-content:** keep unaddressable file URIs as references ([#372](https://github.com/william0wang/zcode-acp/issues/372)) ([9b407bb](https://github.com/william0wang/zcode-acp/commit/9b407bbf77dbd7beb60ed95379f20a6fd979ca84))
+
 ## [0.83.3](https://github.com/william0wang/zcode-acp/compare/v0.83.2...v0.83.3) (2026-11-10)
 
 
