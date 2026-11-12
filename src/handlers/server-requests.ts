@@ -400,15 +400,33 @@ async function handleOne(
   if (method === "interaction/requestCredentialCipher") {
     // The CLI delegates credential encrypt/decrypt to its host when the store
     // is v2 (OS keyring, unreadable without the keyring key) — serve both ops
-    // via the same @napi-rs/keyring entry the CLI's own keyStore uses.
-    const op = (params as { operation?: string; value?: string }) ?? {};
+    // via the same @napi-rs/keyring entry the CLI's own keyStore uses. The CLI
+    // correlates replies by requestId over a strict zod schema
+    // ({requestId, result:{ok,…}}) and treats anything else as an invalid
+    // payload, so the reply MUST echo the requestId and nest the outcome.
+    const op = (params as { requestId?: unknown; operation?: unknown; value?: unknown }) ?? {};
+    const requestId = typeof op.requestId === "string" ? op.requestId : "";
+    if (!requestId) {
+      warn("  ⚠ credential cipher: ask without requestId — declining");
+      sendZcodeError(backend, zcodeReqId, "credential cipher request missing requestId");
+      return;
+    }
     const out = credentialCipherOp(String(op.operation ?? ""), String(op.value ?? ""));
     if (out !== null) {
       log("  credential cipher: served a " + String(op.operation ?? "?") + " op");
-      sendZcodeReply(backend, zcodeReqId, { ok: true, value: out });
+      sendZcodeReply(backend, zcodeReqId, { requestId, result: { ok: true, value: out } });
     } else {
       warn("  ⚠ credential cipher: no OS-keyring key — declining");
-      sendZcodeError(backend, zcodeReqId, "credential cipher unavailable on this machine");
+      sendZcodeReply(backend, zcodeReqId, {
+        requestId,
+        result: {
+          ok: false,
+          error: {
+            code: "CREDENTIAL_SECURE_STORAGE_UNAVAILABLE",
+            message: "System credential storage is unavailable on the bridge host",
+          },
+        },
+      });
     }
     return;
   }
@@ -559,15 +577,31 @@ async function settleOrphan(
     }
     if (req.method === "interaction/requestCredentialCipher") {
       // Arrival-time path (no active turn loop): the CLI asks mid-boot for its
-      // credential ops — serve the same way, no session needed.
-      const op = (params as { operation?: string; value?: string }) ?? {};
+      // credential ops — serve the same way (requestId-correlated reply), no
+      // session needed.
+      const op = (params as { requestId?: unknown; operation?: unknown; value?: unknown }) ?? {};
+      const requestId = typeof op.requestId === "string" ? op.requestId : "";
+      if (!requestId) {
+        warn("  ⚠ credential cipher (arrival): ask without requestId — declining");
+        sendZcodeError(backend, req.id, "credential cipher request missing requestId");
+        return;
+      }
       const out = credentialCipherOp(String(op.operation ?? ""), String(op.value ?? ""));
       if (out !== null) {
         log("  credential cipher (arrival): served a " + String(op.operation ?? "?") + " op");
-        sendZcodeReply(backend, req.id, { ok: true, value: out });
+        sendZcodeReply(backend, req.id, { requestId, result: { ok: true, value: out } });
       } else {
         warn("  ⚠ credential cipher (arrival): no OS-keyring key — declining");
-        sendZcodeError(backend, req.id, "credential cipher unavailable on this machine");
+        sendZcodeReply(backend, req.id, {
+          requestId,
+          result: {
+            ok: false,
+            error: {
+              code: "CREDENTIAL_SECURE_STORAGE_UNAVAILABLE",
+              message: "System credential storage is unavailable on the bridge host",
+            },
+          },
+        });
       }
       return;
     }
