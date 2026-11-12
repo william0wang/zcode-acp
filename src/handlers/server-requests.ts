@@ -51,7 +51,9 @@ import {
   codingPlanRequestAuthFor,
   oauthProjectTokenFamilyFor,
   startPlanRequestAuthFor,
+  storeStartPlanJwt,
 } from "../config/account-provider.js";
+import { credentialCipherOp } from "../backend/credential-store.js";
 import { ProjectTokenError, resolveOAuthProjectToken } from "../config/project-token.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
@@ -395,6 +397,22 @@ async function handleOne(
     return;
   }
 
+  if (method === "interaction/requestCredentialCipher") {
+    // The CLI delegates credential encrypt/decrypt to its host when the store
+    // is v2 (OS keyring, unreadable without the keyring key) — serve both ops
+    // via the same @napi-rs/keyring entry the CLI's own keyStore uses.
+    const op = (params as { operation?: string; value?: string }) ?? {};
+    const out = credentialCipherOp(String(op.operation ?? ""), String(op.value ?? ""));
+    if (out !== null) {
+      log("  credential cipher: served a " + String(op.operation ?? "?") + " op");
+      sendZcodeReply(backend, zcodeReqId, { ok: true, value: out });
+    } else {
+      warn("  ⚠ credential cipher: no OS-keyring key — declining");
+      sendZcodeError(backend, zcodeReqId, "credential cipher unavailable on this machine");
+    }
+    return;
+  }
+
   if (!perm && !(isUserInputRequestUnchecked(method) && (epm || ask))) {
     warn(`  ⚠ unhandled server→client request: ${method} (id=${zcodeReqId})`);
     sendZcodeError(backend, zcodeReqId, `bridge unsupported: ${method}`);
@@ -537,6 +555,20 @@ async function settleOrphan(
     }
     if (isProviderRuntimeHeadersRequest(req.method)) {
       answerProviderRuntimeHeaders(backend, req.id, req.method, params);
+      return;
+    }
+    if (req.method === "interaction/requestCredentialCipher") {
+      // Arrival-time path (no active turn loop): the CLI asks mid-boot for its
+      // credential ops — serve the same way, no session needed.
+      const op = (params as { operation?: string; value?: string }) ?? {};
+      const out = credentialCipherOp(String(op.operation ?? ""), String(op.value ?? ""));
+      if (out !== null) {
+        log("  credential cipher (arrival): served a " + String(op.operation ?? "?") + " op");
+        sendZcodeReply(backend, req.id, { ok: true, value: out });
+      } else {
+        warn("  ⚠ credential cipher (arrival): no OS-keyring key — declining");
+        sendZcodeError(backend, req.id, "credential cipher unavailable on this machine");
+      }
       return;
     }
     if (isPermissionRequest(req.method) && isSessionAlwaysTool(`${params["toolName"] ?? ""}`)) {
@@ -1407,6 +1439,19 @@ export function answerProviderRuntimeHeaders(
     log("  provider runtime headers: serving the Start Plan JWT (store or config.json)");
     sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth: startPlanAuth });
     return true;
+  }
+  // CLI 0.17.1 sends this ask WITHOUT a providerId: the backend needs a
+  // credential before it can even attempt a request, but the ask carries no
+  // hint about which plan applies. When the store holds a start-plan login
+  // JWT, serve it — the gateway rejects mismatched plans with a clear
+  // business error, which is strictly better than a hang.
+  if (providerId === undefined) {
+    const jwt = storeStartPlanJwt();
+    if (jwt) {
+      log("  provider runtime headers: serving the Start Plan JWT (no providerId in ask)");
+      sendZcodeReply(backend, reqId, { headersApplied: true, requestAuth: { apiKey: jwt } });
+      return true;
+    }
   }
   // Start Plan providers with no local credential (or when upstream requires an
   // Aliyun captcha session) cannot be answered headlessly — reply
