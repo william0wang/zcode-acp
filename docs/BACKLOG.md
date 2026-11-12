@@ -298,6 +298,17 @@ can resurrect tombstoned rows whose bytes are gone (garbage in /resume), and
 the hub's delete endpoints can now be upgraded to REAL deletion — tracked in
 #371.
 
+**Correction (2026-11-12)**: the audit above scoped "no bridge change" to the
+PROTOCOL surface only — hours after the machine took the 3.18.0 update, the
+credential-store migration knocked every bridge session down (all turns
+`model_request_failed`; the values moved to `enc:v2:os` OS-keyring
+encryption, unreadable to the pre-v2 reader which passed the ciphertext
+through as plaintext). Fixed in 0.84.0 (#374): keyring-backed reads via
+@napi-rs/keyring, the `interaction/requestCredentialCipher` host delegation
+with the strict `{requestId, result}` reply shape, and no
+ciphertext-as-plaintext passthrough — full Gotcha in AGENTS.md. The
+tombstone follow-up above is unaffected and stays open.
+
 **3.14.0 audit (2026-09-20, app-server 0.16.9 — live-probed end to end)**: the
 dynamic-workflow family (ten model tools led by `CreateWorkflow`) is OFF by
 default headless and enabled per PROCESS via

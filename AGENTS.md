@@ -22,16 +22,19 @@ ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
 to source root 3.18.0 — the CLI still self-reports 0.17.1 across desktop
 versions — commit `b95ebaff`, audited 2026-11-11 — see docs/BACKLOG.md). The
-bridge runs desktop 3.17.2 (same CLI string; audited 2026-11-11, zero
-impact), and 3.18.0 is the NEXT desktop update target — its audit found the
-protocol surface purely additive EXCEPT that ADR-0031's "no physical delete
-path" premise is gone: upstream added a v4-only permanent-deletion face
+bridge runs desktop **3.18.0** (installed 2026-11-12; same CLI string).
+Its audit found the protocol surface purely additive EXCEPT that ADR-0031's
+"no physical delete path" premise is gone: upstream added a v4-only
+permanent-deletion face
 (`storage/sessionData/*`, `bootstrap/src/zcode-protocol/session-data/
-permanent-deletion.ts`; follow-up in #371). The Gotchas below were written
+permanent-deletion.ts`; follow-up in #371), AND its credential store
+migrated to `enc:v2:os` OS-keyring encryption (the 2026-11-12 outage — see
+the credential-store Gotcha below; fixed in 0.84.0, #374). The Gotchas below were written
 against 0.16.9 and re-verified file-by-file at the 0.17.0 audits
 (2026-10-19/20), the 3.17.1 audit (2026-11-02 — all invariants held; one
-bridge fix: `CronPauseSelf` joined the default tool denylist), and the
-3.17.2/3.18.0 audit (2026-11-11 — all invariants held); the bundle
+bridge fix: `CronPauseSelf` joined the default tool denylist), the
+3.17.2/3.18.0 audit (2026-11-11 — all invariants held), and the live
+3.18.0 credential-migration incident (2026-11-12); the bundle
 recipe in docs/BACKLOG.md "Verification method" remains the way to re-prove a
 note against the binary. The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
@@ -1071,6 +1074,35 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   `headersApplied:false` + an actionable error (PR #128). Impersonating the
   desktop client, bypassing captcha/signing anti-abuse measures, or copying
   from unlicensed third-party proxies remain legal no-gos (ADR-0019).
+- **Desktop 3.18.0 migrated the credential store to `enc:v2:os` OS-keyring
+  encryption — the bridge MUST read it via @napi-rs/keyring, and ciphertext
+  must never pass through as plaintext** (observed live 2026-11-12: the
+  desktop update rewrote EVERY `~/.zcode/v2/credentials.json` value to
+  `enc:v2:os:<fp24>:<iv>.<tag>.<data>`; the pre-v2 reader returned
+  unparseable values unchanged, `answerProviderRuntimeHeaders` then handed
+  ciphertext to the gateway and EVERY bridge turn failed with
+  `model_request_failed` — desktop-owned sessions kept working, masking the
+  scope). Source of truth: `packages/shared/src/credential-security/
+  systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
+  the key is a random 32-byte base64url secret in the platform vault under
+  service `"ZCode Credential Encryption"`, account = hex(sha256(RESOLVED
+  credentials.json path)) — resolve the path the same way or you read a
+  different entry; on Linux the Entry MUST pin `{linux:{store:
+  "secret-service"}}` (upstream's AsyncEntry does — the default store differs
+  and reads a vault the desktop never wrote); `<fp24>` =
+  hex(sha256(key)).slice(0,24) is a KEY CHECKSUM, not a free-form source tag.
+  The backend also DELEGATES its own cipher ops to its host over
+  `interaction/requestCredentialCipher` (bootstrap's
+  `createProtocolCredentialCipher` — "只委托已连接 Host") — the reply is the
+  RPC RESULT validated by strict zod `credentialCipherReplySchema`:
+  `{requestId, result:{ok:true,value} | {ok:false,error:{code,message}}}` —
+  anything else is an invalid payload and every op fails as "host
+  unavailable". Declines ride the SAME `ok:false` result shape (never a bare
+  RPC error): upstream's OAuth recovery deletes stored logins only on
+  `ZCODE_CREDENTIAL_DECRYPT_FAILED`, so an uncorrelated error would
+  needlessly destroy working logins — map everything the bridge cannot serve
+  to `CREDENTIAL_SECURE_STORAGE_UNAVAILABLE`. Fixed in 0.84.0 (#374, with
+  parity tests against upstream's seal/open).
 - **ACP wire method names are snake_case** (`session/request_permission`,
   not `session/requestPermission`) — the camelCase spelling is silently
   method-not-found (-32601) on real clients, and an `as never` param cast
