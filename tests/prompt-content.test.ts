@@ -1,6 +1,20 @@
 import { mkdtemp, readFile, readdir, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+/**
+ * Mirror the production fallback in prompt-content.ts: decode a file URI when
+ * this platform can address it locally, else keep the URI verbatim (a
+ * drive-less POSIX path throws on Windows, and vice versa for UNC forms).
+ */
+const localOrUri = (uri: string): string => {
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return uri;
+  }
+};
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { convertPromptContent, PROMPT_LIMITS } from "../src/handlers/prompt-content.js";
@@ -59,7 +73,7 @@ describe("embedded resource conversion", () => {
       await directory(),
     );
     expect(result.text).toBe(
-      "prefix  \n[embedded resource: memory://text]\nTEXT736\n[related resource: doc](/tmp/my doc.txt)\n[related resource: remote](https://example.invalid/reference)",
+      `prefix  \n[embedded resource: memory://text]\nTEXT736\n[related resource: doc](${localOrUri("file:///tmp/my%20doc.txt")})\n[related resource: remote](https://example.invalid/reference)`,
     );
     expect(result.attachments).toEqual([]);
   });
@@ -68,7 +82,7 @@ describe("embedded resource conversion", () => {
       [{ type: "resource_link", name: "", uri: "file:///tmp/my%20x.txt" }],
       await directory(),
     );
-    expect(result.text).toBe("[related resource: /tmp/my x.txt](/tmp/my x.txt)");
+    expect(result.text).toBe(`[related resource: ${localOrUri("file:///tmp/my%20x.txt")}](${localOrUri("file:///tmp/my%20x.txt")})`);
   });
   it("names attachments from decoded URIs, or by position among attachments and MIME subtype", async () => {
     const result = await convertPromptContent(
@@ -98,7 +112,7 @@ describe("embedded resource conversion", () => {
     );
     const attachment = result.attachments[0];
     expect(attachment.kind).toBe("file");
-    expect(attachment.localPath?.startsWith(storage + "/")).toBe(true);
+    expect(attachment.localPath?.startsWith(storage + sep) || attachment.localPath?.startsWith(storage + "/")).toBe(true);
     expect(await readFile(attachment.localPath!)).toEqual(Buffer.from("\0binary736"));
     if (process.platform !== "win32") {
       expect((await stat(storage)).mode & 0o777).toBe(0o700);
