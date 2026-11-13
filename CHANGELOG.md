@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.84.3](https://github.com/william0wang/zcode-acp/compare/v0.84.2...v0.84.3) (2026-11-13)
+
+
+### Bug Fixes
+
+* **delete:** retire tombstones for backend-unusable sessions; opt-in physical purge via upstream v4 face ([#376](https://github.com/william0wang/zcode-acp/issues/376)) ([ccc2eaa](https://github.com/william0wang/zcode-acp/commit/ccc2eaad004715ad0c9329478eb87fc50c5e32d5))
+
 ## [0.84.2](https://github.com/william0wang/zcode-acp/compare/v0.84.1...v0.84.2) (2026-11-12)
 
 
