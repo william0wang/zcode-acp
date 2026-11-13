@@ -9,7 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { loadUserConfig, userConfigPath } from "../src/config/user-config.js";
+import { hardDeleteArmed, loadUserConfig, userConfigPath } from "../src/config/user-config.js";
 
 let scratch: string;
 
@@ -320,5 +320,36 @@ describe("loadUserConfig", () => {
 
     writeConfig(JSON.stringify({ workflow: "junk" }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
+
+  it("parses delete.purge; non-booleans drop with a warn", () => {
+    writeConfig(JSON.stringify({ delete: { purge: true } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ delete: { purge: true } });
+
+    writeConfig(JSON.stringify({ delete: { purge: "yes" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+
+    writeConfig(JSON.stringify({ delete: "junk" }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
+});
+
+describe("hardDeleteArmed", () => {
+  it("config file wins, env is the fallback, default false", () => {
+    // No file, no env — disarmed.
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch })).toBe(false);
+
+    // Env arms it (file absent).
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "1" })).toBe(true);
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "true" })).toBe(
+      true,
+    );
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "0" })).toBe(false);
+
+    // The file outranks the env in BOTH directions.
+    writeConfig(JSON.stringify({ delete: { purge: true } }));
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "0" })).toBe(true);
+    writeConfig(JSON.stringify({ delete: { purge: false } }));
+    expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "1" })).toBe(false);
   });
 });

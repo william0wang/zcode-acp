@@ -1191,8 +1191,35 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   `session-data/permanent-deletion.ts`; no v3 delete RPC exists), so the
   "none may be added" invariant narrows to "the bridge never mints deletes;
   physical delete goes through the upstream v4 face only" — every rule below
-  still binds unchanged, and the bridge's tombstone/revive behavior vs a
-  physically deleted session is the open follow-up. The bridge mirrors
+  still binds unchanged. The tombstone-vs-physical-delete follow-up is
+  DELIVERED (2026-11-13, #376; ADR-0031's 2026-11-13 amendment): (a)
+  **RETIREMENT** — a tombstone whose session the backend can no longer resume
+  (physically deleted via the v4 face, or upstream-soft-deleted:
+  `time_deleted`, which upstream `resumeFromStore` refuses with the same
+  "Session not found") gets `archived=1` on top of `deleted=1`
+  (`retireTasks`) and is never revived again; triggered proactively by the
+  revival pre-pass (`reviveTombstonesOnActivity`'s `probeGone` callback, fed
+  by `probeGoneBackendSessions` — `session/list {sessionIds}` batch oracle,
+  64/request schema cap, per-generation verdict `server.sessionIdsQueryRejected`
+  like toolDenylistRejected, per-id `session/lifecycle/getState` fallback,
+  EXISTING backend only — never spawns; ANY probe failure = empty set = blind
+  revival, the pre-#376 behavior) and lazily by the eviction paths
+  (`ensureBackendResident` gone branches + `translateResumeFailure`
+  fire-and-forget `retireTasks`). The task-scope revival flip now excludes
+  `archived=1` — flipping it would leave a deleted=0+archived=1 row that
+  masquerades as a user archive in the App's Archives view. Bridge-tombstoned
+  sessions (no `time_deleted`) keep the self-heal contract unchanged.
+  (b) **OPT-IN PURGE** — both delete endpoints accept `{"purge": true}` AND a
+  machine arming switch (`delete.purge` config / `ZCODE_ACP_DELETE_PURGE=1`,
+  live-read; 403 when unarmed, before any tombstone) to destroy bytes through
+  the upstream v4 face (`v4/storage/sessionData/deletionPreview|Execute`,
+  params `{sessionId, workspace:{workspacePath}, revision, operationId}` —
+  the workspace must match the store's record or the preview answers
+  identity-mismatch; tombstone FIRST so failures degrade to the soft delete;
+  running/in-use/changed → 409; not-found → retire; deleted → the tasks row
+  is REMOVED, `deleteTaskRows`). Project purge (hub) loops task ids through a
+  serve bridge (≤4 concurrent, ≤200 ids; no serve bridge → tombstones stand +
+  per-id `skipped` + `warning`). The bridge mirrors
   exactly that: `POST /api/projects/delete` and
   `POST /api/instances/{id}/sessions/{sid}/delete` write tombstones
   (`src/tasks-index.ts` softDelete* — a session with no tasks row gets a

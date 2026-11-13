@@ -40,6 +40,7 @@ const tasksIndexMock = vi.hoisted(() => ({
   workspaces: [] as Array<{ workspacePath: string; sessions: number; lastActive: number }>,
   deletedSids: new Set<string>(),
   workspaceDeletes: [] as Array<{ workspacePath: string; dbPath?: string }>,
+  taskIds: [] as string[],
 }));
 vi.mock("../src/tasks-index.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/tasks-index.js")>();
@@ -53,6 +54,7 @@ vi.mock("../src/tasks-index.js", async (importOriginal) => {
         .filter((w) => w.workspacePath === workspacePath)
         .reduce((n, w) => n + w.sessions, 0);
     },
+    workspaceTaskIds: async () => tasksIndexMock.taskIds,
   };
 });
 
@@ -780,6 +782,7 @@ describe("hub project/session delete", () => {
     tasksIndexMock.workspaces = [];
     tasksIndexMock.deletedSids = new Set();
     tasksIndexMock.workspaceDeletes = [];
+    tasksIndexMock.taskIds = [];
   });
 
   describe("POST /api/projects/delete", () => {
@@ -868,6 +871,215 @@ describe("hub project/session delete", () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ ok: true, deleted: true });
     expect(seen).toEqual(["POST /sessions/s1/delete"]);
+  });
+
+  describe("POST /api/projects/delete {purge:true} (#376)", () => {
+    const PROJECT = "/Users/dev/Develop/demo";
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("refuses purge while the machine is not armed — no tombstones either", async () => {
+      tasksIndexMock.workspaces = [{ workspacePath: PROJECT, sessions: 2, lastActive: 1 }];
+      const hub = await startTestHub();
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT, purge: true }),
+      });
+      expect(res.status).toBe(403);
+      expect(tasksIndexMock.workspaceDeletes).toEqual([]);
+    });
+
+    it("tombstones and relays every session's purge through the serve bridge", async () => {
+      vi.stubEnv("ZCODE_ACP_DELETE_PURGE", "1");
+      tasksIndexMock.workspaces = [{ workspacePath: PROJECT, sessions: 2, lastActive: 1 }];
+      tasksIndexMock.taskIds = ["s1", "s2", "s3"];
+      const relays: Array<{ path: string; body: string }> = [];
+      const bridge = track(
+        await new Promise<{ server: Server; port: number }>((resolve) => {
+          const server = createServer((req, res) => {
+            const chunks: Buffer[] = [];
+            req.on("data", (c: Buffer) => chunks.push(c));
+            req.on("end", () => {
+              relays.push({ path: req.url ?? "", body: Buffer.concat(chunks).toString("utf8") });
+              if ((req.url ?? "").endsWith("/s2/delete")) {
+                res.writeHead(409, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ deleted: true, purged: false, reason: "running" }));
+                return;
+              }
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, deleted: true, purged: true }));
+            });
+          });
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+          });
+        }),
+        ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+      );
+      const hub = await startTestHub();
+      // The serve bridge of THIS workspace — pickServeForNewWork's target.
+      const reg = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          registerBody({
+            id: `serve-${PROJECT}`,
+            workspace: PROJECT,
+            origin: "serve",
+            port: bridge.port,
+            pid: 4242,
+          }),
+        ),
+      });
+      expect(reg.ok).toBe(true);
+
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT, purge: true }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        ok: boolean;
+        deletedTasks: number;
+        purged: string[];
+        skipped: Array<{ id: string; reason: string }>;
+      };
+      expect(body.ok).toBe(true);
+      expect(body.deletedTasks).toBe(2);
+      expect(body.purged.sort()).toEqual(["s1", "s3"]);
+      expect(body.skipped).toEqual([{ id: "s2", reason: "running" }]);
+      // Every relay carried the purge opt-in.
+      expect(relays.map((r) => r.path).sort()).toEqual([
+        "/sessions/s1/delete",
+        "/sessions/s2/delete",
+        "/sessions/s3/delete",
+      ]);
+      expect(relays.every((r) => r.body === '{"purge":true}')).toBe(true);
+      // The tombstones applied regardless of per-id purge outcomes.
+      expect(tasksIndexMock.workspaceDeletes).toEqual([
+        { workspacePath: PROJECT, dbPath: undefined },
+      ]);
+    });
+
+    it("purge with no ids stays a plain tombstone (no serve bridge needed)", async () => {
+      vi.stubEnv("ZCODE_ACP_DELETE_PURGE", "1");
+      tasksIndexMock.workspaces = [{ workspacePath: PROJECT, sessions: 1, lastActive: 1 }];
+      const hub = await startTestHub();
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT, purge: true }),
+      });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({
+        ok: true,
+        deletedTasks: 1,
+        purged: [],
+        skipped: [],
+      });
+    });
+
+    it("a purge that cannot reach a serve bridge degrades to tombstones + warning", async () => {
+      vi.stubEnv("ZCODE_ACP_DELETE_PURGE", "1");
+      tasksIndexMock.workspaces = [{ workspacePath: PROJECT, sessions: 1, lastActive: 1 }];
+      tasksIndexMock.taskIds = ["s1"];
+      // The incubation spawns a child that dies during startup — the hub ends
+      // up with no serve bridge for the workspace (hub-proxy's death pattern).
+      const fakeChild = new (await import("node:events")).EventEmitter() as {
+        pid: number;
+        exitCode: number | null;
+        signalCode: string | null;
+      };
+      fakeChild.pid = 4242;
+      fakeChild.exitCode = null;
+      fakeChild.signalCode = null;
+      const hub = await startTestHub({
+        spawnServe: () => fakeChild as unknown as import("node:child_process").ChildProcess,
+      });
+
+      const pending = fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT, purge: true }),
+      });
+      await new Promise((r) => setTimeout(r, 400));
+      fakeChild.exitCode = 1;
+      const res = await pending;
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        ok: boolean;
+        deletedTasks: number;
+        purged: string[];
+        skipped: Array<{ id: string; reason: string }>;
+        warning?: string;
+      };
+      expect(body.ok).toBe(true);
+      expect(body.deletedTasks).toBe(1);
+      expect(body.purged).toEqual([]);
+      expect(body.skipped).toEqual([{ id: "s1", reason: "no serve bridge" }]);
+      expect(body.warning).toMatch(/no serve bridge/);
+    });
+
+    it("reports ids past the per-request cap as skipped — never a silent truncation", async () => {
+      vi.stubEnv("ZCODE_ACP_DELETE_PURGE", "1");
+      tasksIndexMock.workspaces = [{ workspacePath: PROJECT, sessions: 201, lastActive: 1 }];
+      tasksIndexMock.taskIds = Array.from({ length: 201 }, (_, i) => `s${i}`);
+      let relayed = 0;
+      const bridge = track(
+        await new Promise<{ server: Server; port: number }>((resolve) => {
+          const server = createServer((req, res) => {
+            req.resume();
+            relayed++;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: true, deleted: true, purged: true }));
+          });
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            resolve({ server, port: typeof addr === "object" && addr ? addr.port : 0 });
+          });
+        }),
+        ({ server }) => new Promise<void>((resolve) => server.close(() => resolve())),
+      );
+      const hub = await startTestHub();
+      const reg = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          registerBody({
+            id: `serve-${PROJECT}`,
+            workspace: PROJECT,
+            origin: "serve",
+            port: bridge.port,
+            pid: 4242,
+          }),
+        ),
+      });
+      expect(reg.ok).toBe(true);
+
+      const res = await fetch(`http://127.0.0.1:${hub.port}/api/projects/delete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspacePath: PROJECT, purge: true }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        purged: string[];
+        skipped: Array<{ id: string; reason: string }>;
+      };
+      // Only the first 200 ids were relayed…
+      expect(relayed).toBe(200);
+      expect(body.purged).toHaveLength(200);
+      // …and the overflow is REPORTED, so the client knows bytes remain.
+      expect(body.skipped).toEqual([
+        { id: "s200", reason: expect.stringContaining("purge request cap") },
+      ]);
+    });
   });
 });
 

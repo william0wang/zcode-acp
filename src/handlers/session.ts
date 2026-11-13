@@ -617,7 +617,15 @@ export async function newSession(
   // mock factories throw on reading an export they do not define).
   try {
     const tasksIndexAtNew = await import("../tasks-index.js");
-    void tasksIndexAtNew.reviveTombstonesOnActivity({ workspacePath: cwd }).catch(() => {});
+    // probeGone (#376) is safe here even though lazy session/new spawns no
+    // backend: the probe uses an EXISTING backend only and answers empty
+    // (blind revival) when there is none.
+    void tasksIndexAtNew
+      .reviveTombstonesOnActivity({
+        workspacePath: cwd,
+        probeGone: (ids) => server.probeGoneBackendSessions(ids),
+      })
+      .catch(() => {});
   } catch {
     // tasks-index unavailable — revival is best-effort.
   }
@@ -724,6 +732,7 @@ async function ensureBackendResident(
   }
   if (residency === "gone") {
     warn(`ensureRealSession: ${acpSid} → backend session ${zcodeSid} no longer exists`);
+    retireGoneSessionTasks(zcodeSid);
     throw new Error(messages().sessionEvicted(acpSid));
   }
   try {
@@ -732,6 +741,7 @@ async function ensureBackendResident(
   } catch (e) {
     if (isSessionGoneError(e)) {
       warn(`ensureRealSession: ${acpSid} → backend session ${zcodeSid} no longer exists`);
+      retireGoneSessionTasks(zcodeSid);
       throw new Error(messages().sessionEvicted(acpSid));
     }
     log(
@@ -1064,7 +1074,15 @@ export async function listSessions(
     if (listCwd && listCwd !== "/") {
       try {
         const { reviveTombstonesOnActivity } = await import("../tasks-index.js");
-        await reviveTombstonesOnActivity({ workspacePath: listCwd });
+        // probeGone (#376): before a mass revival, ids the backend can no
+        // longer serve (physically deleted upstream / soft-deleted) retire
+        // instead of resurrecting. The backend is alive in this scope (it just
+        // answered the listing); a probe failure answers empty → blind
+        // revival, the pre-#376 behavior.
+        await reviveTombstonesOnActivity({
+          workspacePath: listCwd,
+          probeGone: (ids) => server.probeGoneBackendSessions(ids),
+        });
       } catch {
         // revival unavailable — filter as-is.
       }
@@ -1287,6 +1305,23 @@ async function replayResumeHistory(
 }
 
 /**
+ * Fire-and-forget tombstone retirement (#376): a session the backend refuses
+ * to serve (physically deleted upstream, or soft-deleted — resume answers
+ * "Session not found" either way) must stop being revivable, or every future
+ * `reviveTombstonesOnActivity` resurrects a zombie row whose only use is a
+ * sessionEvicted error. Guarded typeof: test suites mock tasks-index
+ * partially. Best-effort, never blocks the error path.
+ */
+function retireGoneSessionTasks(zcodeSid: string): void {
+  if (!zcodeSid) return;
+  void import("../tasks-index.js")
+    .then((tasksIndex) =>
+      typeof tasksIndex.retireTasks === "function" ? tasksIndex.retireTasks([zcodeSid]) : 0,
+    )
+    .catch(() => undefined);
+}
+
+/**
  * Surface a resume failure honestly, keyed on WHY the id is known. Always
  * throws. Two not-found shapes get an actionable message:
  * - raw (id unknown to bridge AND alias store): a placeholder whose durable
@@ -1300,6 +1335,7 @@ function translateResumeFailure(
   methodLabel: "session/resume" | "session/load",
   acpSid: string,
   origin: "mapped" | "placeholder" | "raw",
+  zcodeSid: string,
   e: unknown,
 ): never {
   const raw = e instanceof Error ? e.message : String(e);
@@ -1309,6 +1345,7 @@ function translateResumeFailure(
     throw new Error(messages().loadUnknownAlias(acpSid));
   }
   warn(`${methodLabel}: ${acpSid} → backend session no longer exists (backend said: ${raw})`);
+  retireGoneSessionTasks(zcodeSid);
   throw new Error(messages().sessionEvicted(acpSid));
 }
 
@@ -1359,7 +1396,7 @@ export async function resumeSession(
       const outcome = await resumePreservingModel(server, zcParams);
       resumeResult = outcome.result;
     } catch (e) {
-      translateResumeFailure("session/resume", acpSid, origin, e);
+      translateResumeFailure("session/resume", acpSid, origin, zcodeSid, e);
     }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);
@@ -1653,7 +1690,7 @@ export async function loadSession(
       resumeResult = outcome.result;
       settledHistory = outcome.history;
     } catch (e) {
-      translateResumeFailure("session/load", acpSid, origin, e);
+      translateResumeFailure("session/load", acpSid, origin, zcodeSid, e);
     }
     // The resume RPC succeeded — the session is now loaded in this backend.
     server.markBackendLoaded(acpSid);

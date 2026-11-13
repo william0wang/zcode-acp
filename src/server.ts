@@ -35,11 +35,16 @@ import {
   sweepOrphanedServerRequests,
 } from "./handlers/server-requests.js";
 import { SessionTitleListener } from "./handlers/session-titles.js";
+import { isSessionGoneError } from "./handlers/session.js";
 import { pushInteractionIfOffline } from "./push/push.js";
 import { ClientRegistry } from "./remote/broadcast.js";
 import { envWithLoginShell } from "./remote/login-shell-env.js";
 import { stopAllWorkflowRunPollers } from "./workflow/poller.js";
 import { AGENT_INFO, clientConnectionRoot, PROTOCOL_VERSION, log, warn } from "./utils.js";
+
+/** `session/list`'s `sessionIds` array schema cap (upstream index.ts) — the
+ * batch tombstone-liveness oracle chunks at this bound. */
+const SESSION_IDS_QUERY_BATCH = 64;
 
 /** Client capabilities advertised in the initialize request. */
 export interface ClientCapabilities {
@@ -316,6 +321,13 @@ export class ZcodeAcpServer {
    * toolDenylistRejected — a respawned process may be an older build.
    */
   backendLifecycleApi: boolean | null = null;
+  /**
+   * `session/list`'s `sessionIds` key acceptance on the CURRENT backend build:
+   * null = not yet probed, true = rejected (strict zod "Unrecognized key" —
+   * fall back to per-id lifecycle probes), false = accepted. Pinned per
+   * backend generation like toolDenylistRejected.
+   */
+  sessionIdsQueryRejected: boolean | null = null;
   /**
    * The full slash-command list (set once by buildAgentApp in index.ts).
    * Read by the gate-aware menu catch-up (resendMenuAfterGateSettled in
@@ -914,6 +926,9 @@ export class ZcodeAcpServer {
     // …and the session/lifecycle/getState verdict: the respawned build may
     // predate the family (0.17.1).
     this.backendLifecycleApi = null;
+    // …and the session/list sessionIds-key verdict: the respawned build may
+    // accept the batch query.
+    this.sessionIdsQueryRejected = null;
     // …and the backend-loaded stamps: they vouch for residents of a process
     // that no longer exists. A surviving stamp kept isBackendSessionLive true
     // across a respawn, so session/load skipped the resume RPC and read a
@@ -1094,6 +1109,108 @@ export class ZcodeAcpServer {
   }
 
   /**
+   * Which of `ids` the CURRENT backend can no longer serve — the oracle
+   * behind tombstone retirement (#376). Uses the EXISTING backend only
+   * (never spawns: the session/new revival path is fire-and-forget and must
+   * stay free) and answers with the ids ABSENT from
+   * `session/list {sessionIds}` — upstream drops both physically deleted and
+   * soft-deleted (time_deleted) sessions there, and resume refuses both the
+   * same way, so both deserve retirement while bridge-tombstoned sessions
+   * (no time_deleted) keep reviving per the ADR-0031 self-heal contract.
+   *
+   * A backend whose schema predates the `sessionIds` key (strict zod
+   * "Unrecognized key", verdict pinned per generation) falls back to per-id
+   * `session/lifecycle/getState` probes (>= 0.17.1). Failure semantics: a
+   * chunk that ERRORS or a thrown transport aborts further probing and
+   * returns what earlier chunks already PROVED gone (each entry carries its
+   * own positive evidence); an id with no verdict is simply absent — the
+   * caller treats it as "revive blindly" (the pre-#376 behavior): a probe
+   * hiccup must never un-revive a session the store still has.
+   */
+  async probeGoneBackendSessions(ids: string[]): Promise<Set<string>> {
+    const gone = new Set<string>();
+    const backend = this.backend;
+    const unique = [...new Set(ids)].filter((id) => typeof id === "string" && id);
+    if (!backend || unique.length === 0) return gone;
+    try {
+      if (this.sessionIdsQueryRejected !== true) {
+        for (let i = 0; i < unique.length; i += SESSION_IDS_QUERY_BATCH) {
+          const chunk = unique.slice(i, i + SESSION_IDS_QUERY_BATCH);
+          const resp = await backend.request(
+            this.nextId(),
+            "session/list",
+            { sessionIds: chunk },
+            15000,
+          );
+          if (resp.error) {
+            if (
+              this.sessionIdsQueryRejected === null &&
+              /unrecognized key/i.test(resp.error.message ?? "")
+            ) {
+              this.sessionIdsQueryRejected = true;
+              log(
+                "session/list sessionIds unsupported on this backend build — per-id lifecycle probes",
+              );
+            }
+            if (this.sessionIdsQueryRejected === true) {
+              // Redo the whole set through the per-id probe — chunking state
+              // before the rejection is not worth carrying.
+              return await this.probeGoneViaLifecycle(backend, unique);
+            }
+            return gone; // transient RPC failure — no verdict
+          }
+          this.sessionIdsQueryRejected = false;
+          const present = new Set(
+            (
+              (resp.result as { sessions?: Array<{ sessionId?: string }> } | undefined)?.sessions ??
+              []
+            )
+              .map((s) => s.sessionId)
+              .filter((sid): sid is string => typeof sid === "string"),
+          );
+          for (const id of chunk) if (!present.has(id)) gone.add(id);
+        }
+        return gone;
+      }
+      return await this.probeGoneViaLifecycle(backend, unique);
+    } catch {
+      return gone; // best-effort: no verdict
+    }
+  }
+
+  /** Per-id fallback oracle: `session/lifecycle/getState`'s "Session not
+   * found" is the same resume-refused verdict as the batch face. Unavailable
+   * on pre-0.17.1 builds — no oracle, no retirement. */
+  private async probeGoneViaLifecycle(backend: ZcodeBackend, ids: string[]): Promise<Set<string>> {
+    const gone = new Set<string>();
+    if (this.backendLifecycleApi === false) return gone;
+    for (const id of ids) {
+      try {
+        const resp = await backend.request(
+          this.nextId(),
+          "session/lifecycle/getState",
+          { sessionId: id },
+          5000,
+        );
+        if (resp.error) {
+          const message = resp.error.message ?? "";
+          if (resp.error.code === -32601 || /method not found/i.test(message)) {
+            this.backendLifecycleApi = false;
+            log("lifecycle getState unsupported on this backend build — no retirement oracle");
+            return gone;
+          }
+          if (isSessionGoneError(message)) gone.add(id);
+          continue; // other errors: no verdict for this id
+        }
+        this.backendLifecycleApi = true;
+      } catch {
+        // per-id failure: no verdict for this id
+      }
+    }
+    return gone;
+  }
+
+  /**
    * Tombstone revival behind markSessionActive. Guarded, not destructured:
    * several test suites mock tasks-index PARTIALLY (without this export), and
    * a missing index or unknown cwd must never surface on the activity path.
@@ -1105,6 +1222,7 @@ export class ZcodeAcpServer {
       await tasksIndex.reviveTombstonesOnActivity({
         taskId: this.resolveSid(acpSid) ?? acpSid,
         workspacePath: this.sessionCwds.get(acpSid),
+        probeGone: (ids) => this.probeGoneBackendSessions(ids),
       });
     } catch {
       // best-effort — a tombstone revival failure must never break a turn

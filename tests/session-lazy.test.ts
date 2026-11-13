@@ -184,7 +184,9 @@ describe("session/new lazy creation", () => {
     // But the PROJECT-OPEN revival fires at session/new (ADR-0031 amendment):
     // opening a workspace cancels its project-delete hide so the /resume
     // picker is never empty — no backend, no materialization needed.
-    expect(mockReviveCalls).toEqual([{ workspacePath: "/tmp/ws" }]);
+    expect(mockReviveCalls).toEqual([
+      { workspacePath: "/tmp/ws", probeGone: expect.any(Function) },
+    ]);
     // Fresh sessions stay auto-title-eligible on first end_turn.
     expect(server.titleEligibleSessions.has(resp.sessionId)).toBe(true);
   });
@@ -233,7 +235,9 @@ describe("ensureRealSession", () => {
     expect(mockUpsertCalls[0]).toMatchObject({ workspaceKey: "/tmp/ws", taskId: sid });
     // The project-open revival fired once at session/new; lazy
     // materialization does not fire it again.
-    expect(mockReviveCalls).toEqual([{ workspacePath: "/tmp/ws" }]);
+    expect(mockReviveCalls).toEqual([
+      { workspacePath: "/tmp/ws", probeGone: expect.any(Function) },
+    ]);
 
     // Idempotent: a second call reuses the mapping, no new create.
     await expect(ensureRealSession(server, resp.sessionId)).resolves.toBe(sid);

@@ -61,7 +61,7 @@ import { resolveRuntime, runtimeSpawnParts } from "../runtime.js";
 import { sessionTabTitle } from "../terminal-title.js";
 import { AGENT_INFO, compareVersions, log, warn } from "../utils.js";
 import { recordClosedSessionIds } from "../closed-sessions.js";
-import { expandHomePath, type TerminalPrefs } from "../config/user-config.js";
+import { expandHomePath, hardDeleteArmed, type TerminalPrefs } from "../config/user-config.js";
 import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
 import { remoteEnabledLive, remoteProjectRoots, remoteTerminalPrefs } from "./config.js";
@@ -80,7 +80,12 @@ import { queryCpUsage } from "../quota/cliproxy/index.js";
 import { queryQuota } from "../quota/index.js";
 import { queryOcUsage } from "../quota/ollama-cloud/index.js";
 import { queryGoUsage } from "../quota/opencode-go/index.js";
-import { isTaskDeleted, listKnownWorkspaces, softDeleteWorkspaceTasks } from "../tasks-index.js";
+import {
+  isTaskDeleted,
+  listKnownWorkspaces,
+  softDeleteWorkspaceTasks,
+  workspaceTaskIds,
+} from "../tasks-index.js";
 import { buildWorkflowOverview } from "./workflow-overview.js";
 import { collectSystemStats } from "./system-stats.js";
 
@@ -1127,6 +1132,74 @@ function relayShutdownClose(port: number, sid: string): Promise<string[] | null>
       },
     );
     req.setTimeout(SHUTDOWN_CLOSE_TIMEOUT_MS, () => req.destroy()); // 'error' resolves null
+    req.on("error", () => resolve(null));
+    req.end(body);
+  });
+}
+
+/**
+ * Per-id relay bound for the project hard-delete loop: the bridge's purge
+ * path runs deletionPreview + deletionExecute against its backend (30s each),
+ * so the relay must outlive both with margin.
+ */
+const SESSION_PURGE_TIMEOUT_MS = 90_000;
+
+/**
+ * Relay one `{"purge": true}` session delete to a serve bridge's loopback
+ * route (the same handler POST /api/instances/{id}/sessions/{sid}/delete
+ * proxies to). Resolves `{purged, reason?}` from the bridge's answer, or
+ * null when the bridge did not answer a decision (unreachable / invalid
+ * body) — the caller reports that as a skip, never a failure of the whole
+ * project delete. Never rejects.
+ */
+function relaySessionPurge(
+  port: number,
+  sid: string,
+): Promise<{ purged: boolean; reason?: string } | null> {
+  const body = Buffer.from(JSON.stringify({ purge: true }));
+  return new Promise((resolve) => {
+    const req = httpRequest(
+      {
+        host: "127.0.0.1",
+        port,
+        path: `/sessions/${sid}/delete`,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(body.length),
+        },
+      },
+      (up) => {
+        const chunks: Buffer[] = [];
+        up.on("data", (chunk: Buffer) => chunks.push(chunk));
+        up.on("error", () => resolve(null));
+        up.on("end", () => {
+          let parsed: { purged?: unknown; reason?: unknown } | null = null;
+          try {
+            parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              purged?: unknown;
+              reason?: unknown;
+            };
+          } catch {
+            parsed = null;
+          }
+          if (parsed && typeof parsed.purged === "boolean") {
+            resolve({
+              purged: parsed.purged,
+              ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}),
+            });
+            return;
+          }
+          // 409s carry a text/plain reason; anything unparseable is "no decision".
+          const text = Buffer.concat(chunks).toString("utf8").slice(0, 200);
+          resolve({
+            purged: false,
+            reason: `bridge answered ${up.statusCode ?? "?"}${text ? `: ${text}` : ""}`,
+          });
+        });
+      },
+    );
+    req.setTimeout(SESSION_PURGE_TIMEOUT_MS, () => req.destroy()); // 'error' resolves null
     req.on("error", () => resolve(null));
     req.end(body);
   });
@@ -2329,6 +2402,13 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     // bytes; a NEW session in that project re-adds a fresh row and the
     // project reappears — a hide, not a ban. Idempotent: 0 rows flipped is
     // still ok (already deleted / never known).
+    //
+    // `{"purge": true}` (machine-armed via delete.purge config / env, #376):
+    // after tombstoning, physically destroy each session's bytes through a
+    // serve bridge's v4 deletion face — the same per-session handler the
+    // instance delete proxy uses. The tombstones apply first regardless, so
+    // a failed/unavailable purge degrades to the plain soft delete (reported
+    // per id in `skipped`, never as a failed request).
     if (url.pathname === "/api/projects/delete" && req.method === "POST") {
       if (!authorized(req, url, token)) {
         res.writeHead(401, { "Content-Type": "text/plain" });
@@ -2343,9 +2423,82 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
         res.end("workspacePath required");
         return;
       }
+      const purge = (body as { purge?: unknown } | undefined)?.purge === true;
+      if (purge && !hardDeleteArmed()) {
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        res.end(
+          "purge disabled — arm it via delete.purge in the user config or ZCODE_ACP_DELETE_PURGE=1",
+        );
+        return;
+      }
       const deletedTasks = await softDeleteWorkspaceTasks(workspacePath, projectsDbPath);
+      // One purge request bounds its relay fan-out; ids past the cap stay
+      // tombstoned and are REPORTED as skipped — a silent truncation would
+      // read as "bytes destroyed" for sessions nobody purged.
+      const PURGE_REQUEST_CAP = 200;
+      const allIds = purge ? await workspaceTaskIds(workspacePath, projectsDbPath) : [];
+      const ids = allIds.slice(0, PURGE_REQUEST_CAP);
+      const overflowSkipped = allIds
+        .slice(PURGE_REQUEST_CAP)
+        .map((id) => ({
+          id,
+          reason: `purge request cap (${PURGE_REQUEST_CAP}) — re-issue to continue`,
+        }));
+      if (!purge || ids.length === 0) {
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(
+          JSON.stringify({ ok: true, deletedTasks, ...(purge ? { purged: [], skipped: [] } : {}) }),
+        );
+        return;
+      }
+      // Same serve-bridge selection order as the history listing (fresh →
+      // incubate → any healthy): the v4 deletion face runs on the bridge's
+      // backend, and the hub is only a byte proxy with no backend of its own.
+      let entry = await pickServeForNewWork(workspacePath);
+      if (!entry) {
+        try {
+          const incubated = await joinIncubation(workspacePath, "serve");
+          entry =
+            instances.get(incubated.id) ??
+            findServeInstances(workspacePath).find((x) => x.unhealthySince === undefined);
+        } catch (e) {
+          warn(`hub: purge incubation failed: ${e instanceof Error ? e.message : String(e)}`);
+          entry = findServeInstances(workspacePath).find((x) => x.unhealthySince === undefined);
+        }
+      }
+      if (!entry) {
+        // Tombstones already applied — partial success, not a failure: the
+        // client may re-issue the purge once a serve bridge exists.
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            deletedTasks,
+            purged: [],
+            skipped: ids.map((id) => ({ id, reason: "no serve bridge" })),
+            warning: "tombstones applied; no serve bridge available for the purge",
+          }),
+        );
+        return;
+      }
+      const target = entry;
+      const purged: string[] = [];
+      const skipped: Array<{ id: string; reason: string }> = [...overflowSkipped];
+      let next = 0;
+      // Bounded fan-out: 4 concurrent relays is enough throughput for the
+      // per-id preview→execute round-trips without hammering one backend.
+      const workers = Array.from({ length: Math.min(4, ids.length) }, async () => {
+        while (next < ids.length) {
+          const id = ids[next++]!;
+          const out = await relaySessionPurge(target.port, id);
+          if (out === null) skipped.push({ id, reason: "bridge unreachable" });
+          else if (out.purged) purged.push(id);
+          else skipped.push({ id, reason: out.reason ?? "not purged" });
+        }
+      });
+      await Promise.all(workers);
       res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ ok: true, deletedTasks }));
+      res.end(JSON.stringify({ ok: true, deletedTasks, purged, skipped }));
       return;
     }
     // GET /api/projects/sessions?workspacePath=… — the project's backend

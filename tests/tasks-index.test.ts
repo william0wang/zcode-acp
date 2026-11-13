@@ -238,6 +238,38 @@ function makeStatement(sql: string) {
       },
     };
   }
+  // SELECT task_id AS id FROM tasks WHERE workspace_path=? AND deleted=1 AND
+  // archived=0 (reviveTombstonesOnActivity pre-pass — the probe candidate set)
+  if (
+    /^SELECT task_id AS id FROM tasks WHERE workspace_path=\? AND deleted=1 AND archived=0$/i.test(
+      sql,
+    )
+  ) {
+    return {
+      all(workspacePath: string) {
+        const out: Array<{ id: string }> = [];
+        for (const r of rows.values()) {
+          if (r.workspace_path === workspacePath && r.deleted === 1 && r.archived === 0) {
+            out.push({ id: r.task_id });
+          }
+        }
+        return out;
+      },
+    };
+  }
+  // SELECT task_id AS id FROM tasks WHERE workspace_path=? (workspaceTaskIds —
+  // the project hard-delete id list, no flag filter)
+  if (/^SELECT task_id AS id FROM tasks WHERE workspace_path=\?$/i.test(sql)) {
+    return {
+      all(workspacePath: string) {
+        const out: Array<{ id: string }> = [];
+        for (const r of rows.values()) {
+          if (r.workspace_path === workspacePath) out.push({ id: r.task_id });
+        }
+        return out;
+      },
+    };
+  }
   // SELECT task_id AS id FROM tasks WHERE deleted=1 OR archived=1
   // (hiddenTaskIds)
   if (/^SELECT task_id AS id/i.test(sql)) {
@@ -313,14 +345,14 @@ function makeStatement(sql: string) {
       },
     };
   }
-  // UPDATE tasks SET deleted=0, updated_at=? WHERE task_id=? AND deleted=1
-  // (reviveTombstonesOnActivity task flip)
+  // UPDATE tasks SET deleted=0, updated_at=? WHERE task_id=? AND deleted=1 AND
+  // archived=0 (reviveTombstonesOnActivity task flip — retired rows stay put)
   if (/^UPDATE tasks SET deleted=0.*WHERE task_id/i.test(sql)) {
     return {
       run(updatedAt: number, taskId: string) {
         let changes = 0;
         for (const r of rows.values()) {
-          if (r.task_id === taskId && r.deleted === 1) {
+          if (r.task_id === taskId && r.deleted === 1 && r.archived === 0) {
             r.deleted = 0;
             r.updated_at = updatedAt;
             changes++;
@@ -386,6 +418,54 @@ function makeStatement(sql: string) {
       },
     };
   }
+  // UPDATE tasks SET archived=1, updated_at=? WHERE task_id IN (…) AND
+  // deleted=1 (retireTasks — tombstones whose session bytes are gone)
+  if (/^UPDATE tasks SET archived=1, updated_at=\? WHERE task_id IN/i.test(sql)) {
+    return {
+      run(updatedAt: number, ...ids: string[]) {
+        let changes = 0;
+        const want = new Set(ids);
+        for (const r of rows.values()) {
+          if (want.has(r.task_id) && r.deleted === 1) {
+            r.archived = 1;
+            r.updated_at = updatedAt;
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
+  // DELETE FROM tasks WHERE task_id IN (…) (deleteTaskRows — the hard-delete
+  // success path; bytes gone, row goes with them)
+  if (/^DELETE FROM tasks WHERE task_id IN/i.test(sql)) {
+    return {
+      run(...ids: string[]) {
+        let changes = 0;
+        const want = new Set(ids);
+        for (const key of [...rows.keys()]) {
+          const r = rows.get(key)!;
+          if (want.has(r.task_id)) {
+            rows.delete(key);
+            changes++;
+          }
+        }
+        return { changes };
+      },
+    };
+  }
+  // SELECT workspace_path AS p FROM tasks WHERE task_id=? (taskWorkspacePath —
+  // the hard-delete face's workspace attribution)
+  if (/^SELECT workspace_path AS p FROM tasks/i.test(sql)) {
+    return {
+      get(taskId: string) {
+        for (const r of rows.values()) {
+          if (r.task_id === taskId) return { p: r.workspace_path } as const;
+        }
+        return undefined;
+      },
+    };
+  }
   throw new Error(`unexpected SQL in tasks-index test fake: ${sql}`);
 }
 
@@ -426,16 +506,20 @@ vi.mock("node:fs", async () => {
 });
 
 import {
+  deleteTaskRows,
   hiddenTaskIds,
   isTaskDeleted,
   overriddenTaskTitles,
   readTaskTitle,
   renameSessionTask,
+  retireTasks,
   reviveTombstonesOnActivity,
   softDeleteTask,
   softDeleteWorkspaceTasks,
+  taskWorkspacePath,
   updateSessionTitle,
   upsertSessionTask,
+  workspaceTaskIds,
 } from "../src/tasks-index.js";
 
 describe("tasks-index session sync", () => {
@@ -854,6 +938,120 @@ describe("tasks-index session sync", () => {
       await softDeleteWorkspaceTasks("/proj");
       expect(await reviveTombstonesOnActivity({ workspacePath: "/proj" })).toBe(1);
       expect(await reviveTombstonesOnActivity({ workspacePath: "/proj" })).toBe(0);
+    });
+
+    it("probeGone splits a mass revival: gone ids retire, stored ids revive (#376)", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_kept", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_purged", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_softdel", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+
+      const probed: string[][] = [];
+      const revived = await reviveTombstonesOnActivity({
+        workspacePath: "/proj",
+        probeGone: async (ids) => {
+          probed.push([...ids]);
+          // Upstream dropped s_purged's bytes and soft-deleted s_softdel —
+          // resume refuses both, so both retire.
+          return new Set(["s_purged", "s_softdel"]);
+        },
+      });
+      expect(probed).toEqual([["s_kept", "s_purged", "s_softdel"]]);
+      expect(revived).toBe(1);
+      expect(rows.get("/proj\u0000s_kept")!.deleted).toBe(0);
+      expect(rows.get("/proj\u0000s_kept")!.archived).toBe(0);
+      // Retired rows keep deleted=1 AND gain archived=1 — hidden forever,
+      // never revived again, and the hub's deleted-resume guard still fires.
+      expect(rows.get("/proj\u0000s_purged")!.deleted).toBe(1);
+      expect(rows.get("/proj\u0000s_purged")!.archived).toBe(1);
+      expect(rows.get("/proj\u0000s_softdel")!.deleted).toBe(1);
+      expect(rows.get("/proj\u0000s_softdel")!.archived).toBe(1);
+      // Still hidden from every listing.
+      expect((await hiddenTaskIds()).size).toBe(2);
+    });
+
+    it("probeGone throwing degrades to the blind revival (no verdict)", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s1", title: "" });
+      await softDeleteWorkspaceTasks("/proj");
+
+      const revived = await reviveTombstonesOnActivity({
+        workspacePath: "/proj",
+        probeGone: async () => {
+          throw new Error("probe boom");
+        },
+      });
+      expect(revived).toBe(1);
+      expect(rows.get("/proj\u0000s1")!.deleted).toBe(0);
+    });
+
+    it("probeGone is not consulted while a visible row remains (common path costs nothing)", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_live", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_tomb", title: "" });
+      await softDeleteTask({ taskId: "s_tomb", workspacePath: "/proj" });
+
+      let probed = 0;
+      const revived = await reviveTombstonesOnActivity({
+        workspacePath: "/proj",
+        probeGone: async () => {
+          probed++;
+          return new Set<string>();
+        },
+      });
+      expect(probed).toBe(0);
+      expect(revived).toBe(0);
+      expect(rows.get("/proj\u0000s_tomb")!.deleted).toBe(1);
+    });
+
+    it("the task-scope flip skips retired rows even when the id is used directly", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_retired", title: "" });
+      await softDeleteTask({ taskId: "s_retired", workspacePath: "/proj" });
+      expect(await retireTasks(["s_retired"])).toBe(1);
+
+      // A direct "use" of the retired id flips nothing — the row must not
+      // degrade into a deleted=0+archived=1 pseudo-user-archive.
+      const revived = await reviveTombstonesOnActivity({ taskId: "s_retired" });
+      expect(revived).toBe(0);
+      expect(rows.get("/proj\u0000s_retired")!.deleted).toBe(1);
+      expect(rows.get("/proj\u0000s_retired")!.archived).toBe(1);
+    });
+  });
+
+  describe("retireTasks / deleteTaskRows / taskWorkspacePath / workspaceTaskIds (#376)", () => {
+    it("retireTasks only touches tombstoned rows — live rows keep their flags", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_live", title: "" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s_tomb", title: "" });
+      await softDeleteTask({ taskId: "s_tomb", workspacePath: "/ws" });
+
+      expect(await retireTasks(["s_live", "s_tomb", "absent_id"])).toBe(1);
+      expect(rows.get("/ws\u0000s_live")!.archived).toBe(0);
+      expect(rows.get("/ws\u0000s_live")!.deleted).toBe(0);
+      expect(rows.get("/ws\u0000s_tomb")!.archived).toBe(1);
+      expect(rows.get("/ws\u0000s_tomb")!.deleted).toBe(1);
+    });
+
+    it("deleteTaskRows removes the rows outright (hard-delete success path)", async () => {
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s1", title: "" });
+      await upsertSessionTask({ workspaceKey: "/ws", taskId: "s2", title: "" });
+
+      expect(await deleteTaskRows(["s1", "absent_id"])).toBe(1);
+      expect(rows.has("/ws\u0000s1")).toBe(false);
+      expect(rows.has("/ws\u0000s2")).toBe(true);
+    });
+
+    it("taskWorkspacePath reads the recorded workspace, null when absent", async () => {
+      await upsertSessionTask({ workspaceKey: "/recorded/ws", taskId: "s1", title: "" });
+      expect(await taskWorkspacePath("s1")).toBe("/recorded/ws");
+      expect(await taskWorkspacePath("never_created")).toBeNull();
+    });
+
+    it("workspaceTaskIds lists every id of the workspace regardless of flags", async () => {
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_live", title: "" });
+      await upsertSessionTask({ workspaceKey: "/proj", taskId: "s_tomb", title: "" });
+      await upsertSessionTask({ workspaceKey: "/other", taskId: "s_x", title: "" });
+      await softDeleteTask({ taskId: "s_tomb", workspacePath: "/proj" });
+
+      const ids = await workspaceTaskIds("/proj");
+      expect(ids.sort()).toEqual(["s_live", "s_tomb"]);
     });
   });
 

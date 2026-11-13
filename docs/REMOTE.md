@@ -195,6 +195,13 @@ anything: live conversations are refused (`409`), tombstoned resume ids get
 `404`, and deletes are self-healing — opening the project anywhere (the CLI's
 `/resume` picker, an editor tab) or using any session again cancels the hide;
 a fully deleted project comes back whole the moment it is reopened.
+Tombstones for sessions whose bytes are gone upstream (physically deleted via
+the 3.18+ v4 face, or `time_deleted` — resume refuses both) RETIRE instead of
+reviving (`archived=1` on top of `deleted=1`, hidden forever). Both endpoints
+also take `{"purge": true}` (machine-armed via `delete.purge` in the user
+config or `ZCODE_ACP_DELETE_PURGE=1`) to physically destroy bytes through the
+upstream v4 deletion face — tombstone first, failures degrade to the soft
+delete, `403` when unarmed.
 See `docs/REMOTE-CLIENTS.md` ("Deleting a project or session").
 
 `sessions` lists the project's **currently running** conversations (live

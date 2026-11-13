@@ -67,9 +67,10 @@ describe("tombstone revival wiring", () => {
     const server = new ZcodeAcpServer();
     await newSession(server, { cwd: "/tmp/proj" } as acp.NewSessionRequest);
 
-    // Fire-and-forget at new; flushed before any picker could open.
+    // Fire-and-forget at new; flushed before any picker could open. probeGone
+    // (#376) rides along — the probe itself answers empty with no backend.
     await flushMicrotasks();
-    expect(reviveCalls).toEqual([{ workspacePath: "/tmp/proj" }]);
+    expect(reviveCalls).toEqual([{ workspacePath: "/tmp/proj", probeGone: expect.any(Function) }]);
   });
 
   it("session/list awaits the revival BEFORE reading the tombstone filter", async () => {
@@ -78,7 +79,7 @@ describe("tombstone revival wiring", () => {
 
     const resp = await listSessions(server, { cwd: "/tmp/proj" } as acp.ListSessionsRequest);
 
-    expect(reviveCalls).toEqual([{ workspacePath: "/tmp/proj" }]);
+    expect(reviveCalls).toEqual([{ workspacePath: "/tmp/proj", probeGone: expect.any(Function) }]);
     // The filter read happened AFTER the revival resolved — this very listing
     // sees the revived rows (no empty-picker race).
     expect(hiddenReadAfterRevives).toBe(1);
@@ -101,7 +102,9 @@ describe("tombstone revival wiring", () => {
     server.markSessionActive("acp_1");
     await flushMicrotasks();
 
-    expect(reviveCalls).toEqual([{ taskId: "zc_1", workspacePath: "/tmp/proj" }]);
+    expect(reviveCalls).toEqual([
+      { taskId: "zc_1", workspacePath: "/tmp/proj", probeGone: expect.any(Function) },
+    ]);
   });
 
   it("direct sessions revive under their own id; an unknown cwd is omitted", async () => {
@@ -110,7 +113,7 @@ describe("tombstone revival wiring", () => {
     server.markSessionActive("sess_direct");
     await flushMicrotasks();
 
-    expect(reviveCalls).toEqual([{ taskId: "sess_direct" }]);
+    expect(reviveCalls).toEqual([{ taskId: "sess_direct", probeGone: expect.any(Function) }]);
   });
 
   it("a throwing revival helper never breaks the activity path", async () => {

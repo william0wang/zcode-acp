@@ -231,6 +231,19 @@ export interface WorkflowUserConfig {
   mode?: "disabled" | "onDemand" | "alwaysOn";
 }
 
+/** The `delete` section: destructive-delete opt-ins. */
+export interface DeleteUserConfig {
+  /**
+   * true = the remote delete endpoints may PHYSICALLY delete session bytes
+   * through the upstream v4 deletion face (3.18+ `storage/sessionData/
+   * deletionPreview|Execute`) when a request asks for `{"purge": true}`.
+   * Default false — a delete stays a reversible list-hide and the request
+   * flag alone never purges (a stolen token must not be able to destroy
+   * bytes). Machine-level arming: the per-request opt-in comes from the App.
+   */
+  purge?: boolean;
+}
+
 export interface UserConfig {
   remote?: RemoteUserConfig;
   quota?: QuotaUserConfig;
@@ -246,6 +259,7 @@ export interface UserConfig {
   tui?: TuiUserConfig;
   push?: PushUserConfig;
   workflow?: WorkflowUserConfig;
+  delete?: DeleteUserConfig;
 }
 
 /** Resolve the config file path: $XDG_CONFIG_HOME/zcode-acp or ~/.config/zcode-acp. */
@@ -445,6 +459,16 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     return w;
   });
 
+  result.delete = parseSection(parsed, "delete", file, (body, label) => {
+    const d: DeleteUserConfig = {};
+    const purge = body["purge"];
+    if (purge !== undefined) {
+      if (typeof purge === "boolean") d.purge = purge;
+      else warn(`config: ${label}.purge=${JSON.stringify(purge)} is not a boolean — ignoring`);
+    }
+    return d;
+  });
+
   result.push = parseSection(parsed, "push", file, (body, label) => {
     const p: PushUserConfig = {};
     if (body["enabled"] === undefined) {
@@ -529,6 +553,19 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     }
   }
   return result;
+}
+
+/**
+ * Whether hard delete (physical purge) is ARMED on this machine: config-file
+ * `delete.purge` > env `ZCODE_ACP_DELETE_PURGE` > default false. Read LIVE per
+ * delete request — the hub and serve bridges are long-lived processes whose
+ * birth env rotates between launchd GUI spawns and interactive shells.
+ */
+export function hardDeleteArmed(env: NodeJS.ProcessEnv = process.env): boolean {
+  const fromFile = loadUserConfig(env).delete?.purge;
+  if (fromFile !== undefined) return fromFile;
+  const v = (env.ZCODE_ACP_DELETE_PURGE ?? "").trim().toLowerCase();
+  return v === "1" || v === "true";
 }
 
 /**

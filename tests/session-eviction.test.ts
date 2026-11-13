@@ -31,9 +31,14 @@ import {
 import { BACKEND_RESIDENT_TTL_MS, ZcodeAcpServer } from "../src/server.js";
 import { ZCODE_CREDS_PATH } from "../src/utils.js";
 
+const retireMock = vi.hoisted(() => ({ calls: [] as string[][] }));
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
   updateSessionTitle: async () => true,
+  retireTasks: async (ids: string[]) => {
+    retireMock.calls.push(ids);
+    return ids.length;
+  },
 }));
 
 interface Call {
@@ -234,6 +239,10 @@ describe("ensureRealSession() eviction guard", () => {
     await expect(ensureRealSession(server, "sess_ts")).rejects.toThrow("sess_ts");
     // No overlay retry — no overlay can resurrect a deleted session.
     expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(1);
+    // #376: a session the backend refuses to serve also RETIRES its
+    // tombstone row (fire-and-forget) — it must stop being revivable.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(retireMock.calls).toEqual([["zs_ts"]]);
   });
 });
 

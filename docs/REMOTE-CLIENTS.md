@@ -1008,6 +1008,64 @@ this bridge, `502` bridge unreachable, `503` tasks index unavailable
 (session delete only — never a silent success). Project delete is idempotent:
 an unknown or already-deleted project answers `200` with `deletedTasks: 0`.
 
+### Opt-in physical purge (`{"purge": true}`)
+
+Both delete endpoints accept a `{"purge": true}` body to **physically destroy
+the conversation bytes** through the upstream 3.18+ v4 deletion face
+(`storage/sessionData/deletionPreview` → `deletionExecute`, with its own
+busy/in-use guards and revision check). This is destructive and irreversible,
+so it needs BOTH the per-request flag and a machine-level arming switch:
+
+```json
+// ~/.config/zcode-acp/config.json
+{ "delete": { "purge": true } }
+```
+
+(or env `ZCODE_ACP_DELETE_PURGE=1`). A purge request on an unarmed machine
+answers `403` and deletes nothing — a stolen token must not be able to
+destroy bytes.
+
+```text
+POST {hub}/api/instances/{id}/sessions/{sid}/delete
+     body: { "purge": true }   → 200 { "ok": true, "deleted": true, "purged": true }
+
+POST {hub}/api/projects/delete
+     body: { "workspacePath": "...", "purge": true }
+                               → 200 { "ok": true, "deletedTasks": 12,
+                                        "purged": ["sess_a", "sess_c"],
+                                        "skipped": [{ "id": "sess_b", "reason": "running" }] }
+```
+
+Semantics:
+
+- The **tombstone is written first** — any purge failure degrades to the soft
+  delete (200 with `purged: false` and a `reason`), never a half state.
+- Upstream guards map to `409` with the reason (`running`, `in-use`,
+  `changed`); a session the backend answers `not-found` for (already
+  physically deleted, or soft-deleted upstream — resume refuses both) gets its
+  tombstone **retired** (hidden for good, never revived) and answers
+  `200 { purged: false, reason: "not-found" }`.
+- A completed purge also removes the tasks-index row (its bytes are gone).
+- Project purge relays each session through the workspace's serve bridge (≤4
+  concurrent, ≤200 sessions per request — the overflow is reported in
+  `skipped` with a cap reason, never silently dropped; re-issue to continue);
+  with no serve bridge reachable the tombstones still apply and the answer
+  carries a `warning` plus per-id `skipped` entries.
+
+### Tombstone retirement (sessions whose bytes are gone)
+
+A session physically deleted from the desktop App (3.18+ v4 face), or
+soft-deleted upstream (`time_deleted` — upstream resume refuses those with
+`Session not found`), can no longer be resumed through any bridge path. Its
+tombstone therefore **retires** instead of reviving: the row keeps `deleted=1`
+and gains `archived=1`, hidden from every listing forever. Retirement happens
+lazily — the first resume attempt that fails as gone — and proactively, before
+any project-wide mass revival (`session/list`'s batch id query is the liveness
+oracle; on backends without it, per-id `session/lifecycle/getState`). A probe
+failure never retires anything: no verdict means the old blind-revival
+behavior. Bridge-tombstoned sessions (deleted through THIS API, no upstream
+`time_deleted`) keep the full self-heal contract above.
+
 ## Hub self-upgrade
 
 ```text
