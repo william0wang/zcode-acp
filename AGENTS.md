@@ -20,9 +20,11 @@ methods and streams events back as ACP `session/update` notifications.
 
 ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
-to source root 3.18.0 — the CLI still self-reports 0.17.1 across desktop
-versions — commit `b95ebaff`, audited 2026-11-11 — see docs/BACKLOG.md). The
-bridge runs desktop **3.18.0** (installed 2026-11-12; same CLI string).
+to source root 3.18.2 via the 3.18.1 sync — the CLI still self-reports 0.17.1
+across desktop versions — commits `c5904686`/`fec97590`, audited 2026-11-14 —
+see docs/BACKLOG.md). The bridge runs desktop **3.18.2** (auto-updated from
+3.18.0, observed 2026-11-14; same CLI string; `zcode.cjs` sha256 `08726b5e…`,
+matching the catalog-probe pin in `src/config/deferred-probe-capability.ts`).
 Its audit found the protocol surface purely additive EXCEPT that ADR-0031's
 "no physical delete path" premise is gone: upstream added a v4-only
 permanent-deletion face
@@ -33,8 +35,11 @@ the credential-store Gotcha below; fixed in 0.84.0, #374). The Gotchas below wer
 against 0.16.9 and re-verified file-by-file at the 0.17.0 audits
 (2026-10-19/20), the 3.17.1 audit (2026-11-02 — all invariants held; one
 bridge fix: `CronPauseSelf` joined the default tool denylist), the
-3.17.2/3.18.0 audit (2026-11-11 — all invariants held), and the live
-3.18.0 credential-migration incident (2026-11-12); the bundle
+3.17.2/3.18.0 audit (2026-11-11 — all invariants held), the live
+3.18.0 credential-migration incident (2026-11-12), and the 3.18.1/3.18.2
+audit (2026-11-14 — protocol schema byte-identical both hops; 3.18.1 is
+telemetry-only, 3.18.2 adds host-only credential features and a Start-Plan
+identity split, neither touches the bridge's wires); the bundle
 recipe in docs/BACKLOG.md "Verification method" remains the way to re-prove a
 note against the binary. The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
@@ -1083,12 +1088,12 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   ciphertext to the gateway and EVERY bridge turn failed with
   `model_request_failed` — desktop-owned sessions kept working, masking the
   scope). Source of truth: `packages/shared/src/credential-security/
-  systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
+systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
   the key is a random 32-byte base64url secret in the platform vault under
   service `"ZCode Credential Encryption"`, account = hex(sha256(RESOLVED
   credentials.json path)) — resolve the path the same way or you read a
   different entry; on Linux the Entry MUST pin `{linux:{store:
-  "secret-service"}}` (upstream's AsyncEntry does — the default store differs
+"secret-service"}}` (upstream's AsyncEntry does — the default store differs
   and reads a vault the desktop never wrote); `<fp24>` =
   hex(sha256(key)).slice(0,24) is a KEY CHECKSUM, not a free-form source tag.
   The backend also DELEGATES its own cipher ops to its host over
@@ -1102,7 +1107,21 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   `ZCODE_CREDENTIAL_DECRYPT_FAILED`, so an uncorrelated error would
   needlessly destroy working logins — map everything the bridge cannot serve
   to `CREDENTIAL_SECURE_STORAGE_UNAVAILABLE`. Fixed in 0.84.0 (#374, with
-  parity tests against upstream's seal/open).
+  parity tests against upstream's seal/open). **3.18.2 amendment (audited
+  2026-11-14)**: the `enc:v2:os` path is byte-identical in
+  `systemCredentialCipher.ts` (the fingerprint/service/account-keying were only
+  extracted into helpers). Upstream added two HOST-only features:
+  `shareKeyWithCopiedCredentials` (desktop data-root copy repair) and
+  `enablePrivateFileKeyFallback` — Linux Desktop Main only, default off; when
+  Secret Service is unavailable AND the directory is unbound, the host publishes
+  a 0600 `credential-secret` sibling file and future values carry source `env`
+  (`enc:v2:env:…`, key = digest of that file per `resolveManagedSecret`,
+  systemCredentialCipher.ts:141-150). The bridge's reader deliberately declines
+  `enc:v2:env` and does not read the sibling file — on that population
+  (Linux desktop without a keyring) Start-Plan credential reads degrade
+  gracefully; pre-3.18.2 those machines could not save logins at all, so this
+  is a new population, not a regression. Mirroring the sibling-file read is an
+  optional follow-up, not owed today.
 - **3.18.0 changed the `session/messages` wire shape from Core rows
   (`info.id`) to the legacy-protocol mapper (`info.messageId`) — the bridge
   normalizes in `fetchMessages`, and the completion replay additionally
@@ -1131,7 +1150,7 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   (`isContentLiveDelivered` — containment plus trimmed equality; an empty
   accumulator never suppresses, so "replay a turn that ran while no listener
   was attached" stays intact). The suppression emits a `⚠ completion replay
-  suppressed` warn — treat that line as "the id bridge failed again". Do not
+suppressed` warn — treat that line as "the id bridge failed again". Do not
   "simplify" either layer away: the normalization is the fix, the content
   belt is what keeps the NEXT silent id drift from double-rendering every
   reply. Reproduction/discrimination tooling: `.zcode/scratch/probe-duplicate/`

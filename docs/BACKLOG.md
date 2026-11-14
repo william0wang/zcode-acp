@@ -243,6 +243,45 @@ enumerated `AUTOMATION_TOOL_DEFAULTS` therefore gained `CronPauseSelf`
 (src/backend/resolve.ts) — a headless bridge session never carries a run's
 `automationId`, so the tool can never do anything there.
 
+**3.18.1 + 3.18.2 audit (2026-11-14, commits `c5904686`/`fec97590` — protocol
+schema UNCHANGED both hops, no bridge change owed)**: the machine's desktop
+auto-updated 3.18.0 → 3.18.2 (`zcode.cjs` sha256 `08726b5e…` — matches the
+catalog-probe pin); the checkout had an un-audited 3.18.1 sync in between.
+`packages/shared/src/zcode-protocol/index.ts` is byte-identical across BOTH
+hops — zero wire drift; every Gotchas-cited behavior file verified 0-diff
+(`server-operations.ts`, `prompt-turn.ts`, `execution-state.ts`,
+`session-mode-port.ts`, `verification-policy.ts`, `session-mapper.ts`,
+`permanent-deletion.ts`, and the provider env/registry quartet).
+3.18.1 (`c5904686`, 111 files) is telemetry only: memory-diagnostics cadence
+(`zcode-protocol/server.ts` — `collectMemoryDiagnostics({includeEventStats})`,
+the 15s inspector pass skips the event-store scan), a resource-sampler
+inspector hook, and +4 v4-gateway diagnostics counters. 3.18.2 (`fec97590`,
+46 files) has exactly two bridge-relevant surfaces, both host-side:
+(1) credential security (`systemCredentialCipher.ts` +178/−26): the
+`enc:v2:os` path the bridge mirrors since 0.84.0 is byte-identical (seal/open
+layout, fingerprint = hex(sha256(key)).slice(0,24) — now the
+`keyFingerprint()` helper, service name, per-path account keying, the
+`.keyring` file lock); the parity tests stand unchanged. New host-only
+features: `shareKeyWithCopiedCredentials` (desktop data-root copy repair,
+ZCT-2120723935487688704) and `enablePrivateFileKeyFallback` (Linux Desktop
+Main only, default off): Secret Service unavailable + unbound directory →
+the host publishes a 0600 `credential-secret` sibling file and future values
+carry source `env` (`enc:v2:env:…`, key = digest of that file per
+`resolveManagedSecret`, systemCredentialCipher.ts:141-150). The bridge's
+reader declines `enc:v2:env` and does not read the sibling file — that
+population (Linux desktop without a keyring) degrades gracefully on
+Start-Plan credential reads; pre-3.18.2 those machines could not save logins
+at all, so it is a NEW population, not a regression. Mirroring the
+sibling-file read is an optional follow-up.
+(2) Start-Plan identity split (`accountProviderConnectionResolver.ts` +117):
+CN unlinked logins now get Start models without a BigModel link (Start
+identity decoupled from the paid-plan family identity,
+`isStartPlanFamilyCurrent`). `zcodejwttoken` and the runtime-headers
+protocol are untouched — the bridge's `startPlanRequestAuthFor`/entitlement
+ladder is unaffected; at most a model-list divergence on
+CN-unlinked-Start machines (host lists Start models the bridge's snapshot
+does not). The CLI still self-reports `0.17.1` (apps/zcode-cli/package.json).
+
 **3.17.2 + 3.18.0 audit (2026-11-11, commits `a9fe401e`/`b95ebaff` — checkout
 synced, purely additive protocol, ONE follow-up = #371)**: the machine's
 desktop auto-updated 3.17.1 → 3.17.2 (runtime provider sync already ran; its
@@ -280,11 +319,12 @@ stubs), `provider-runtime-env.ts`, `registry-service.ts`,
 reasoning ladder), the toolDenylist projection, and the compact/setModel/
 send-busy semantics in `server-operations.ts` (its 614-line diff is
 refactoring: goal-continuation extraction + unified legacy/V4 model admission
-+ `releaseUnderDirectory` wiring — no hunk touches stop/compact/-32010), the
-lifecycle `getState` schema, and the v4 surfaces the bridge consumes
-(`renameSession`/`resumeWorkflowRun`/`workflowRuns` queries: 0 changes; v4
-rows gained a per-line `unreadable` degradation row + worktree rows —
-display-layer only).
+
+- `releaseUnderDirectory` wiring — no hunk touches stop/compact/-32010), the
+  lifecycle `getState` schema, and the v4 surfaces the bridge consumes
+  (`renameSession`/`resumeWorkflowRun`/`workflowRuns` queries: 0 changes; v4
+  rows gained a per-line `unreadable` degradation row + worktree rows —
+  display-layer only).
 
 The ONE substantive follow-up — ADR-0031's "no physical delete path"
 premise is GONE in 3.18.0: upstream added a real two-phase permanent
