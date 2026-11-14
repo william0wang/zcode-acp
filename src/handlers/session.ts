@@ -334,14 +334,53 @@ function workspaceFromResumeResult(result: unknown): string | null {
 /** Verify workspace against the persisted backend record, not the caller's cwd.
  * sessionIds is intentionally unscoped: a workspace filter can mask a foreign
  * session and some backend versions echo the filter instead of the stored path.
+ *
+ * A backend whose schema predates the `sessionIds` key (strict zod
+ * "Unrecognized key" — verdict pinned per generation, mirroring
+ * probeGoneBackendSessions) cannot answer the pre-check: skip it instead of
+ * failing every serve-mode recovery. The post-resume workspace guard below
+ * remains the backstop, exactly the pre-#381 behavior on those builds.
  */
 async function verifyServeWorkspace(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
+  if (server.sessionIdsQueryRejected === true) return;
   const backend = await server.ensureBackend();
-  const resp = await backend.request(server.nextId(), "session/list", { sessionIds: [zcodeSid] }, 15000);
-  if (resp.error) throw new Error(`cannot verify session workspace: ${resp.error.message ?? "backend error"}`);
-  const sessions = (resp.result as { sessions?: Array<{ sessionId?: unknown; workspace?: { workspacePath?: unknown } }> } | undefined)?.sessions;
-  const entry = Array.isArray(sessions) ? sessions.find((s) => s?.sessionId === zcodeSid) : undefined;
-  if (Array.isArray(sessions) && !entry && await probeLifecycleResidency(server, zcodeSid) === "gone") {
+  // ensureBackend may have respawned (and reset the verdict to null) while we
+  // waited — re-read without the pre-await narrowing.
+  if ((server.sessionIdsQueryRejected as boolean | null) === true) return;
+  const resp = await backend.request(
+    server.nextId(),
+    "session/list",
+    { sessionIds: [zcodeSid] },
+    15000,
+  );
+  if (resp.error) {
+    const message = resp.error.message ?? "";
+    if (/unrecognized key/i.test(message)) {
+      if (server.sessionIdsQueryRejected === null) {
+        server.sessionIdsQueryRejected = true;
+        log(
+          "session/list sessionIds unsupported on this backend build — " +
+            "skipping serve workspace pre-check (post-resume guard remains)",
+        );
+      }
+      return;
+    }
+    throw new Error(`cannot verify session workspace: ${message || "backend error"}`);
+  }
+  server.sessionIdsQueryRejected = false;
+  const sessions = (
+    resp.result as
+      | { sessions?: Array<{ sessionId?: unknown; workspace?: { workspacePath?: unknown } }> }
+      | undefined
+  )?.sessions;
+  const entry = Array.isArray(sessions)
+    ? sessions.find((s) => s?.sessionId === zcodeSid)
+    : undefined;
+  if (
+    Array.isArray(sessions) &&
+    !entry &&
+    (await probeLifecycleResidency(server, zcodeSid)) === "gone"
+  ) {
     throw new Error(`Session not found: ${zcodeSid}`);
   }
   const ws = workspaceFromResumeResult({ session: entry });
@@ -907,7 +946,9 @@ export async function ensureRealSession(
           const turnInFlight = [...server.pendingTurns.values()].some(
             (turn) => turn.zcodeSid === record.zcodeSid,
           );
-          const state = turnInFlight ? "unknown" : await probeLifecycleResidency(server, record.zcodeSid);
+          const state = turnInFlight
+            ? "unknown"
+            : await probeLifecycleResidency(server, record.zcodeSid);
           if (state === "gone") {
             retireGoneSessionTasks(record.zcodeSid);
             throw new Error(messages().sessionEvicted(acpSid));
