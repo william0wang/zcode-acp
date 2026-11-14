@@ -83,6 +83,16 @@ const opened = (ws: WebSocket): Promise<void> =>
 const nextMessage = (ws: WebSocket): Promise<Record<string, unknown>> =>
   new Promise((resolve) => ws.once("message", (data) => resolve(JSON.parse(String(data)))));
 
+/** nextMessage plus the opcode: the relay must forward BOTH verbatim — both
+ * app ends (Rust reader, phone WS client) drop non-text frames, so a relay
+ * that Buffers a text frame into a binary one eats the message silently. */
+const nextFrame = (
+  ws: WebSocket,
+): Promise<{ frame: Record<string, unknown>; isBinary: boolean }> =>
+  new Promise((resolve) =>
+    ws.once("message", (data, isBinary) => resolve({ frame: JSON.parse(String(data)), isBinary })),
+  );
+
 const nextClose = (ws: WebSocket): Promise<{ code: number; reason: string }> =>
   new Promise((resolve) =>
     ws.once("close", (code, reason) => resolve({ code, reason: String(reason) })),
@@ -171,7 +181,7 @@ describe("terminal relay endpoints", () => {
 });
 
 describe("terminal relay pairing", () => {
-  it("relays frames verbatim both ways", async () => {
+  it("relays frames verbatim both ways, opcode included", async () => {
     const hub = await startTestHub();
     const control = controlWs(hub);
     await opened(control);
@@ -179,13 +189,25 @@ describe("terminal relay pairing", () => {
     await opened(client);
     await expectSubs(control, 1);
 
+    // Text in → text out (a Buffer re-send flips the frame to binary and the
+    // workbench's Rust reader drops it).
     const turn = { v: 1, type: "turn", command: "echo hi" };
     client.send(JSON.stringify(turn));
-    expect(await nextMessage(control)).toEqual(turn);
+    const up = await nextFrame(control);
+    expect(up.frame).toEqual(turn);
+    expect(up.isBinary).toBe(false);
 
     const state = { v: 1, type: "state", terminal: { state: "ready" } };
     control.send(JSON.stringify(state));
-    expect(await nextMessage(client)).toEqual(state);
+    const down = await nextFrame(client);
+    expect(down.frame).toEqual(state);
+    expect(down.isBinary).toBe(false);
+
+    // Binary in → binary out (verbatim also means never demoting a frame).
+    client.send(Buffer.from(JSON.stringify(turn), "utf8"));
+    const upBin = await nextFrame(control);
+    expect(upBin.frame).toEqual(turn);
+    expect(upBin.isBinary).toBe(true);
   });
 
   it("consumes push and audit frames at the hub, never relaying them", async () => {

@@ -203,7 +203,7 @@ export function createTerminalRelay(opts: TerminalRelayOptions): TerminalRelay {
         "terminal-relay: remote.exec disabled — control connection stays (presence), relay inert",
       );
     }
-    ws.on("message", (data: RawData) => {
+    ws.on("message", (data: RawData, isBinary: boolean) => {
       // push/audit always land (they report turns that already ran); relaying
       // is the part the switch gates.
       const frame = parseJsonFrame(data);
@@ -219,11 +219,14 @@ export function createTerminalRelay(opts: TerminalRelayOptions): TerminalRelay {
         warn("terminal-relay: non-JSON frame from workbench — dropped");
         return;
       }
-      const buf = toBuffer(data);
+      // Forward with the frame's binary flag intact (same as the ACP proxy):
+      // `ws.send(buffer)` defaults to a BINARY frame, and BOTH app ends drop
+      // non-text frames — the Rust reader ignores binary, the phone waits for
+      // a string. A Buffer re-send here would eat every relayed message.
       for (const c of clients) {
         if (c.readyState === WebSocket.OPEN) {
           try {
-            c.send(buf);
+            c.send(data, { binary: isBinary });
           } catch {
             /* a dead client is reaped by its own close handler */
           }
@@ -258,7 +261,7 @@ export function createTerminalRelay(opts: TerminalRelayOptions): TerminalRelay {
         clients.add(ws);
         supervise(ws);
         notifySubs();
-        ws.on("message", (data: RawData) => {
+        ws.on("message", (data: RawData, isBinary: boolean) => {
           if (!opts.enabled()) {
             errorClose(ws, "disabled", "remote terminal disabled (remote.exec.enabled)");
             return;
@@ -268,7 +271,8 @@ export function createTerminalRelay(opts: TerminalRelayOptions): TerminalRelay {
             return;
           }
           try {
-            control.send(toBuffer(data));
+            // Flag-preserving forward, same rationale as the control→client leg.
+            control.send(data, { binary: isBinary });
           } catch {
             errorClose(ws, "no_carrier", "desktop workbench disconnected");
           }
