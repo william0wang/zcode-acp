@@ -1262,6 +1262,45 @@ describe("serve cold recovery verification regressions", () => {
     await expect(ensureRealSession(server, "alias")).rejects.toThrow(/workspace/i);
     expect(server.resolveSid("alias")).toBeUndefined();
   });
+  it("skips the workspace pre-check when the backend predates the sessionIds key", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "stored", createdAt: 1 });
+    const { backend, calls } = fakeBackend([], [], process.cwd());
+    const request = backend.request.bind(backend);
+    backend.request = async (id, method, params, timeout) => {
+      if (method === "session/list" && (params as { sessionIds?: unknown }).sessionIds) {
+        return { id, error: { code: -32600, message: "Unrecognized key: sessionIds" } };
+      }
+      return request(id, method, params, timeout);
+    };
+    server.backend = backend;
+    const cx = { notify: async () => {} } as unknown as acp.AgentContext;
+    // Recovery of a same-workspace session must not break on old backends —
+    // the pre-check is skipped and the resume proceeds.
+    await resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx);
+    expect(calls.some((c) => c.method === "session/resume")).toBe(true);
+    expect(server.sessionIdsQueryRejected).toBe(true);
+  });
+  it("still refuses a foreign workspace on a sessionIds-less backend (post-resume guard)", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "stored", createdAt: 1 });
+    const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
+    const request = backend.request.bind(backend);
+    backend.request = async (id, method, params, timeout) => {
+      if (method === "session/list" && (params as { sessionIds?: unknown }).sessionIds) {
+        return { id, error: { code: -32600, message: "Unrecognized key: sessionIds" } };
+      }
+      return request(id, method, params, timeout);
+    };
+    server.backend = backend;
+    const cx = { notify: async () => {} } as unknown as acp.AgentContext;
+    // The skipped pre-check must not open a hole: the resume RESULT still
+    // carries the recorded workspace and the post-resume guard refuses it.
+    await expect(
+      resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx),
+    ).rejects.toThrow("session belongs to another workspace");
+    expect(calls.some((c) => c.method === "session/resume")).toBe(true);
+  });
 });
 
 it("pushes real model catalog after lazy first prompt materializes", async () => {

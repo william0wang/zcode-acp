@@ -163,7 +163,10 @@ export async function main(): Promise<void> {
  * the stdio server (`main`) and the headless serve bridge (`runHeadless`) —
  * one build, two transports.
  */
-function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof buildAllCommands>) {
+export function buildAgentApp(
+  server: ZcodeAcpServer,
+  allCommands: ReturnType<typeof buildAllCommands>,
+) {
   // Exposed for the gate-aware menu catch-up (resendMenuAfterGateSettled in
   // handlers/session.ts) — a cold bridge's menu snapshot predates the verdict.
   server.allCommands = allCommands;

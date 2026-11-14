@@ -4,8 +4,14 @@ import path from "node:path";
 import type { ZcodeAcpServer } from "../src/server.js";
 import { ZcodeBackend } from "../src/backend/client.js";
 
+vi.mock("../src/backend/resolve.js", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  resolveZcodeCommand: () => ["mock"],
+}));
+
+const capability = vi.hoisted(() => ({ verified: true }));
 vi.mock("../src/config/deferred-probe-capability.js", () => ({
-  deferredProbeCapabilityVerified: () => true,
+  deferredProbeCapabilityVerified: () => capability.verified,
 }));
 
 vi.mock("../src/config/account-provider.js", async (importOriginal) => ({
@@ -22,7 +28,6 @@ vi.mock("../src/lazy-sessions.js", () => ({
 vi.mock("../src/tasks-index.js", () => ({ reviveTombstonesOnActivity: async () => 0 }));
 
 import { probeInitialModelCatalog } from "../src/config/initial-model-catalog.js";
-import { newSession } from "../src/handlers/session.js";
 import { ZcodeAcpServer as Server } from "../src/server.js";
 import { buildInitialConfigOptions } from "../src/config/options.js";
 
@@ -51,6 +56,33 @@ function fixture(create: () => Promise<unknown>, start?: () => Promise<unknown>)
 }
 
 describe("isolated initial catalog probe", () => {
+  it("fails closed without launching when the backend is unsupported", async () => {
+    const factory = vi.fn(fixture(async () => ({ result: snapshot })).factory);
+    capability.verified = false;
+    try {
+      expect(await probeInitialModelCatalog("/fixture", factory, 100)).toBeNull();
+      expect(factory).not.toHaveBeenCalled();
+    } finally {
+      capability.verified = true;
+    }
+  });
+  it("disposes the temporary server after the backend closes", async () => {
+    const dispose = vi.fn();
+    const backend = {
+      request: async (_id: number, method: string) =>
+        method === "session/create" ? { result: snapshot } : { result: {} },
+      close: async () => {},
+    };
+    const server = { nextId: () => 1, ensureBackend: async () => backend, dispose };
+    expect(
+      await probeInitialModelCatalog(
+        "/fixture",
+        async () => server as unknown as ZcodeAcpServer,
+        1000,
+      ),
+    ).toEqual(snapshot);
+    expect(dispose).toHaveBeenCalledOnce();
+  });
   it("reads the resident selection when create returns availability without current", async () => {
     const noCurrent = {
       session: { sessionId: "probe" },
@@ -190,17 +222,34 @@ describe("isolated initial catalog probe", () => {
     );
     expect(await probeInitialModelCatalog("/first", f.factory, 20)).toBeNull();
     const next = vi.fn(fixture(async () => ({ result: snapshot })).factory);
-    expect(await probeInitialModelCatalog("/second", next, 20)).toBeNull();
+    const queued = probeInitialModelCatalog("/second", next, 100);
     expect(next).not.toHaveBeenCalled();
     releaseStartup(f.backend);
     await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce());
-    expect(await probeInitialModelCatalog("/second", next, 20)).toBeNull();
     expect(next).not.toHaveBeenCalled();
     releaseClose();
-    await vi.waitFor(async () => {
-      await probeInitialModelCatalog("/second", next, 100);
-      expect(next).toHaveBeenCalledOnce();
-    });
+    expect(await queued).toEqual(snapshot);
+    expect(next).toHaveBeenCalledOnce();
+  });
+  it("bounds queued requests while a timed-out startup remains hung", async () => {
+    let releaseStartup!: (v: unknown) => void;
+    const f = fixture(
+      async () => ({ result: snapshot }),
+      () =>
+        new Promise((resolve) => {
+          releaseStartup = resolve;
+        }),
+    );
+    expect(await probeInitialModelCatalog("/hung", f.factory, 10)).toBeNull();
+    const next = vi.fn(fixture(async () => ({ result: snapshot })).factory);
+    const requests = Array.from({ length: 40 }, (_, i) =>
+      probeInitialModelCatalog(`/waiting-${i}`, next, 20),
+    );
+    expect(await Promise.all(requests)).toEqual(Array(40).fill(null));
+    expect(next).not.toHaveBeenCalled();
+    releaseStartup(f.backend);
+    await vi.waitFor(() => expect(f.close).toHaveBeenCalledOnce());
+    expect(await probeInitialModelCatalog("/after", next, 100)).toEqual(snapshot);
   });
   it("falls back if startup crashes or returns a malformed session", async () => {
     const failed = fixture(
@@ -259,7 +308,7 @@ describe("isolated initial catalog probe", () => {
 });
 
 describe("ACP session/new", () => {
-  it("does not advertise a current model missing from the live registry", async () => {
+  it("falls back to local models when the live current is missing from the registry", async () => {
     const options = await buildInitialConfigOptions(new Server(), undefined, {
       session: { sessionId: "probe" },
       settings: {
@@ -269,36 +318,13 @@ describe("ACP session/new", () => {
         },
       },
     });
-    expect(options.some((option) => option.id === "model")).toBe(false);
+    expect(options.some((option) => option.id === "model")).toBe(true);
   });
-  it("does not invent a current model when a live registry has no selection", async () => {
+  it("falls back to local models when a live registry has no selection", async () => {
     const options = await buildInitialConfigOptions(new Server(), undefined, {
       session: { sessionId: "probe" },
       settings: { model: { available: [] } },
     });
-    expect(options.some((option) => option.id === "model")).toBe(false);
-  });
-  it("returns the live catalog for the first lazy session and shares an in-flight probe", async () => {
-    const server = new Server();
-    const cwd = process.env.HOME!;
-    let release!: (result: typeof snapshot) => void;
-    const flight = new Promise<typeof snapshot>((resolve) => {
-      release = resolve;
-    });
-    server.initialCatalogFlights.set(cwd, flight);
-    const first = newSession(server, { cwd, mcpServers: [] });
-    const second = newSession(server, { cwd, mcpServers: [] });
-    release(snapshot);
-    const responses = await Promise.all([first, second]);
-    for (const response of responses) {
-      const model = response.configOptions?.find((option) => option.id === "model");
-      expect(model?.type).toBe("select");
-      if (model?.type !== "select") throw Error("missing model option");
-      expect(model.currentValue).toBe("custom:live\\live");
-      expect(model.options.map((option) => ("value" in option ? option.value : "group"))).toEqual([
-        "custom:live\\live",
-      ]);
-      expect(server.resolveSid(response.sessionId)).toBeUndefined();
-    }
+    expect(options.some((option) => option.id === "model")).toBe(true);
   });
 });

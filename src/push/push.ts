@@ -29,7 +29,8 @@ export type PushKind =
   | "goal"
   | "compact"
   | "workflowStage"
-  | "quota";
+  | "quota"
+  | "terminal";
 
 /** Settled kinds routed through {@link pushSettled} (§5.2 — per-kind switches). */
 export type PushSettledKind = Extract<
@@ -182,6 +183,24 @@ export function pushSettled(
 export function pushQuotaWarning(data: PushEventData & { kind: "quota" }): void {
   const cfg = pushConfig();
   if (!cfg || !cfg.notify.quota) return;
+  const s = pushSender();
+  if (!s) return;
+  dispatchPush(cfg, s, data);
+}
+
+/**
+ * Remote Terminal turn completion (app ADR-0011): dispatched by the hub's
+ * terminal relay on the workbench's behalf when a turn settled with zero
+ * subscribers connected. Same class as quota warnings — no client gate and no
+ * quiet window: the workbench already judged "nobody watching" at settle
+ * time, and the hub holds no user-activity stamp. Gated by `push.notify.
+ * terminal` (default on) and the shared ACTIVE predicate; under
+ * `contentDetail: "minimal"` the body (command output — the most sensitive
+ * business string in the system) is stripped like every other kind.
+ */
+export function pushTerminalNotification(data: PushEventData & { kind: "terminal" }): void {
+  const cfg = pushConfig();
+  if (!cfg || !cfg.notify.terminal) return;
   const s = pushSender();
   if (!s) return;
   dispatchPush(cfg, s, data);

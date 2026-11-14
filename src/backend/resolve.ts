@@ -450,7 +450,11 @@ export function resolveZcodeCommand(opts: { catalogProbe?: boolean } = {}): stri
     return [zcodeBin, ...backendArgs()];
   }
   // JS file → launch with an explicit sqlite-capable Node to bypass the shebang.
-  for (const nodeBin of candidateNodeBinaries()) {
+  const candidates =
+    opts.catalogProbe && process.release.name === "node" && !process.versions.electron
+      ? [process.execPath, ...candidateNodeBinaries()]
+      : candidateNodeBinaries();
+  for (const nodeBin of candidates) {
     if (nodeSupportsSqlite(nodeBin, probeEnv)) {
       let ver = "?";
       try {

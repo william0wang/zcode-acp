@@ -8,9 +8,37 @@ import { deferredProbeCapabilityVerified } from "./deferred-probe-capability.js"
 import { resolveZcodeCommand } from "../backend/resolve.js";
 
 const DEADLINE_MS = 15000;
-// Includes timed-out work until startup, requests and process termination settle.
-// A stuck operation deliberately retains the slot rather than spawning unbounded children.
-let probeActive = false;
+// A timed-out child retains the only slot until teardown actually settles.
+// Waiting requests have their own deadline and the queue has a hard cap.
+const MAX_WAITERS = 16;
+let active = false;
+type Waiter = { grant: () => void; timer: ReturnType<typeof setTimeout> };
+const waiters: Waiter[] = [];
+function acquire(deadlineMs: number): Promise<(() => void) | null> {
+  const release = () => {
+    const next = waiters.shift();
+    if (next) {
+      clearTimeout(next.timer);
+      next.grant();
+    } else active = false;
+  };
+  if (!active) {
+    active = true;
+    return Promise.resolve(release);
+  }
+  if (waiters.length >= MAX_WAITERS) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const waiter: Waiter = {
+      grant: () => resolve(release),
+      timer: setTimeout(() => {
+        const index = waiters.indexOf(waiter);
+        if (index !== -1) waiters.splice(index, 1);
+        resolve(null);
+      }, deadlineMs),
+    };
+    waiters.push(waiter);
+  });
+}
 
 /** Each probe owns its backend: a timed-out create can never leak a resident
  * runtime into the bridge's shared process, even if its reply arrives late. */
@@ -22,11 +50,30 @@ export async function probeInitialModelCatalog(
   },
   deadlineMs = DEADLINE_MS,
 ): Promise<ZcodeCreateResult | null> {
+  const started = Date.now();
+  const release = await acquire(deadlineMs);
+  if (!release) return null;
+  let remaining = deadlineMs - (Date.now() - started);
+  if (remaining <= 0) {
+    release();
+    return null;
+  }
   // Never even start a backend without an authoritative non-mutating proof.
   // Some old servers accept unknown fields and persist the probe immediately.
-  if (!deferredProbeCapabilityVerified(resolveZcodeCommand({ catalogProbe: true }))) return null;
-  if (probeActive) return null;
-  probeActive = true;
+  try {
+    if (!deferredProbeCapabilityVerified(resolveZcodeCommand({ catalogProbe: true }))) {
+      release();
+      return null;
+    }
+  } catch {
+    release();
+    return null;
+  }
+  remaining = deadlineMs - (Date.now() - started);
+  if (remaining <= 0) {
+    release();
+    return null;
+  }
   let expired = false;
   let backend: ZcodeBackend | undefined;
   let server: ZcodeAcpServer | undefined;
@@ -40,9 +87,10 @@ export async function probeInitialModelCatalog(
   const timeout = new Promise<null>((resolve) => {
     timer = setTimeout(() => {
       expired = true;
+      server?.dispose?.();
       void close();
       resolve(null);
-    }, deadlineMs);
+    }, remaining);
   });
   const work = (async (): Promise<ZcodeCreateResult | null> => {
     try {
@@ -114,7 +162,8 @@ export async function probeInitialModelCatalog(
           await new Promise<void>((resolve) => proc.once("exit", () => resolve()));
         }
       } finally {
-        probeActive = false;
+        server?.dispose?.();
+        release();
       }
     }
   })();

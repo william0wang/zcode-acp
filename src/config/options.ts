@@ -798,11 +798,11 @@ export async function buildInitialConfigOptions(
     !Array.isArray(available) ||
     available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId)
   )
-    return options.filter((option) => option.id !== "model");
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
   // ACP requires a currentValue. A registry that has no current selection
   // cannot safely claim the locally configured default is active.
   if (!current?.providerId || !current.modelId)
-    return options.filter((option) => option.id !== "model");
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
   const models = available.map((entry) => ({
     providerId: entry.ref!.providerId!,
     providerName: entry.ref!.providerId!,
@@ -813,7 +813,7 @@ export async function buildInitialConfigOptions(
   if (!choices.some((choice) => choice.value === currentValue)) {
     // A current model absent from the registry snapshot is not a verified
     // selectable option. Do not advertise it as switchable.
-    return options.filter((option) => option.id !== "model");
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
   }
   const index = options.findIndex((option) => option.id === "model");
   const existing = options[index];

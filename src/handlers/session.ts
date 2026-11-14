@@ -89,6 +89,7 @@ import { dispatchEvent } from "./dispatch.js";
 import {
   echoSteeredInputs,
   emitSessionTurnState,
+  enqueueSessionSend,
   sendAvailableCommandsDeferred,
   sendSessionUpdate,
   sendTextChunk,
@@ -123,43 +124,100 @@ function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: stri
   return { workspacePath: p, workspaceKey: p };
 }
 
-async function initialCatalog(
+function initialCatalog(
   server: ZcodeAcpServer,
   cwd: string,
-): Promise<ZcodeCreateResult | null> {
-  const existing = server.initialCatalogFlights.get(cwd);
-  if (existing) return existing;
-  // Bound backend work across workspaces; an unrelated session must not queue.
-  if (server.initialCatalogFlights.size > 0) {
-    warn(
-      "Initial model catalog unavailable while another workspace is probing; model selection is hidden.",
-    );
-    return null;
+): {
+  cached: ZcodeCreateResult | null;
+  flight?: Promise<ZcodeCreateResult | null>;
+} {
+  const cached = server.initialCatalogCache.get(cwd);
+  if (cached) return { cached };
+  let flight = server.initialCatalogFlights.get(cwd);
+  if (!flight) {
+    const generation = server.backendGeneration;
+    flight = new Promise<ZcodeCreateResult | null>((resolve) => {
+      setImmediate(() => {
+        if (server.disposed || server.backendGeneration !== generation) {
+          resolve(null);
+          return;
+        }
+        void probeInitialModelCatalog(cwd).then(resolve, () => resolve(null));
+      });
+    })
+      .then((result) => {
+        const model = result?.settings?.model;
+        if (
+          server.disposed ||
+          generation !== server.backendGeneration ||
+          !model?.current?.providerId ||
+          !model.current.modelId ||
+          !Array.isArray(model.available) ||
+          model.available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId) ||
+          !model.available.some(
+            (entry) =>
+              entry.ref?.providerId === model.current?.providerId &&
+              entry.ref?.modelId === model.current?.modelId,
+          )
+        )
+          return null;
+        server.initialCatalogCache.set(cwd, result!);
+        return result;
+      })
+      .catch(() => null);
+    server.initialCatalogFlights.set(cwd, flight);
+    const ownedFlight = flight;
+    void flight.finally(() => {
+      if (server.initialCatalogFlights.get(cwd) === ownedFlight)
+        server.initialCatalogFlights.delete(cwd);
+    });
   }
-  const flight = probeInitialModelCatalog(cwd);
-  server.initialCatalogFlights.set(cwd, flight);
-  try {
-    const result = await flight;
-    const model = result?.settings?.model;
-    if (
-      !model?.current?.providerId ||
-      !model.current.modelId ||
-      !Array.isArray(model.available) ||
-      model.available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId) ||
-      !model.available.some(
-        (entry) =>
-          entry.ref?.providerId === model.current?.providerId &&
-          entry.ref?.modelId === model.current?.modelId,
-      )
-    ) {
-      warn(
-        "Initial model catalog unavailable or backend version unverified; model selection is hidden until a verified catalog is available.",
-      );
-    }
-    return result;
-  } finally {
-    if (server.initialCatalogFlights.get(cwd) === flight) server.initialCatalogFlights.delete(cwd);
-  }
+  return { cached: null, flight };
+}
+
+/** Send only to the connection that adopted this still-unmodified placeholder. */
+function updateInitialCatalog(
+  server: ZcodeAcpServer,
+  cwd: string,
+  sid: string,
+  client: acp.AgentContext | undefined,
+  flight: Promise<ZcodeCreateResult | null> | undefined,
+): void {
+  if (!flight) return;
+  const pending = server.pendingSessions.get(sid);
+  if (!pending) return;
+  const generation = server.backendGeneration;
+  const root = clientConnectionRoot(client);
+  const tracked =
+    !!client && server.clients.snapshot().some((cx) => clientConnectionRoot(cx) === root);
+  const valid = () =>
+    !server.disposed &&
+    server.backendGeneration === generation &&
+    server.sessionCwds.get(sid) === cwd &&
+    server.pendingSessions.get(sid) === pending &&
+    pending.cwd === cwd &&
+    !pending.creating &&
+    !server.resolveSid(sid) &&
+    (!tracked || server.clients.snapshot().some((cx) => clientConnectionRoot(cx) === root));
+  void flight.then((result) => {
+    if (!result || !valid()) return;
+    // The request handler returns synchronously after newSession. The SDK's
+    // response enters its per-connection write queue before this callback;
+    // that queue orders the update behind the response even under backpressure.
+    setImmediate(() => {
+      void (async () => {
+        if (!valid()) return;
+        const options = await buildInitialConfigOptions(server, root, result);
+        await enqueueSessionSend(sid, async () => {
+          if (!valid()) return;
+          await (client ?? server.clients.broadcast()).notify("session/update", {
+            sessionId: sid,
+            update: { sessionUpdate: "config_option_update", configOptions: options },
+          });
+        });
+      })().catch((err) => log(`initial model catalog update failed: ${String(err)}`));
+    });
+  });
 }
 
 /**
@@ -375,17 +433,40 @@ function workspaceFromResumeResult(result: unknown): string | null {
 /** Verify workspace against the persisted backend record, not the caller's cwd.
  * sessionIds is intentionally unscoped: a workspace filter can mask a foreign
  * session and some backend versions echo the filter instead of the stored path.
+ *
+ * A backend whose schema predates the `sessionIds` key (strict zod
+ * "Unrecognized key" — verdict pinned per generation, mirroring
+ * probeGoneBackendSessions) cannot answer the pre-check: skip it instead of
+ * failing every serve-mode recovery. The post-resume workspace guard below
+ * remains the backstop, exactly the pre-#381 behavior on those builds.
  */
 async function verifyServeWorkspace(server: ZcodeAcpServer, zcodeSid: string): Promise<void> {
+  if (server.sessionIdsQueryRejected === true) return;
   const backend = await server.ensureBackend();
+  // ensureBackend may have respawned (and reset the verdict to null) while we
+  // waited — re-read without the pre-await narrowing.
+  if ((server.sessionIdsQueryRejected as boolean | null) === true) return;
   const resp = await backend.request(
     server.nextId(),
     "session/list",
     { sessionIds: [zcodeSid] },
     15000,
   );
-  if (resp.error)
-    throw new Error(`cannot verify session workspace: ${resp.error.message ?? "backend error"}`);
+  if (resp.error) {
+    const message = resp.error.message ?? "";
+    if (/unrecognized key/i.test(message)) {
+      if (server.sessionIdsQueryRejected === null) {
+        server.sessionIdsQueryRejected = true;
+        log(
+          "session/list sessionIds unsupported on this backend build — " +
+            "skipping serve workspace pre-check (post-resume guard remains)",
+        );
+      }
+      return;
+    }
+    throw new Error(`cannot verify session workspace: ${message || "backend error"}`);
+  }
+  server.sessionIdsQueryRejected = false;
   const sessions = (
     resp.result as
       | { sessions?: Array<{ sessionId?: unknown; workspace?: { workspacePath?: unknown } }> }
@@ -589,15 +670,11 @@ export async function newSession(
     server.lastMode.set(bindSid, modes.currentModeId);
     emitBootUsageUpdate(server, bindSid);
     scheduleQuotaDockBackstop(server);
-    return {
-      sessionId: bindSid,
-      modes,
-      configOptions: await buildInitialConfigOptions(
-        server,
-        bindRoot,
-        await initialCatalog(server, server.sessionCwds.get(bindSid) ?? process.cwd()),
-      ),
-    };
+    const cwd = server.sessionCwds.get(bindSid) ?? process.cwd();
+    const catalog = initialCatalog(server, cwd);
+    const configOptions = await buildInitialConfigOptions(server, bindRoot, catalog.cached);
+    updateInitialCatalog(server, cwd, bindSid, client, catalog.flight);
+    return { sessionId: bindSid, modes, configOptions };
   }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
@@ -715,15 +792,14 @@ export async function newSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
   scheduleQuotaDockBackstop(server);
-  return {
-    sessionId: acpSid,
-    modes,
-    configOptions: await buildInitialConfigOptions(
-      server,
-      clientConnectionRoot(client),
-      await initialCatalog(server, cwd),
-    ),
-  };
+  const catalog = initialCatalog(server, cwd);
+  const configOptions = await buildInitialConfigOptions(
+    server,
+    clientConnectionRoot(client),
+    catalog.cached,
+  );
+  updateInitialCatalog(server, cwd, acpSid, client, catalog.flight);
+  return { sessionId: acpSid, modes, configOptions };
 }
 
 /**

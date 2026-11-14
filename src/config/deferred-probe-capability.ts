@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { warn } from "../utils.js";
 
 // Only these macOS desktop bundle version/hash pairs are audited; the CLI version
 // is unrelated. Unknown versions, other platforms, paths and builds fail closed.
@@ -13,6 +14,20 @@ const AUDITED: Readonly<Record<string, string>> = {
 
 export function auditedBundleMatches(version: string, digest: string): boolean {
   return Object.hasOwn(AUDITED, version) && AUDITED[version] === digest;
+}
+
+/** Read-only bundle pin diagnostics; no backend or user state is opened. */
+export function catalogProbeDiagnostic(): string {
+  try {
+    const plist = readFileSync(path.join(path.dirname(ENTRY), "../../Info.plist"), "utf8");
+    const version =
+      /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/u.exec(plist)?.[1] ??
+      "unknown";
+    const digest = createHash("sha256").update(readFileSync(ENTRY)).digest("hex");
+    return `catalog probe: version=${version} sha256=${digest} pin=${auditedBundleMatches(version, digest) ? "match" : "mismatch"}`;
+  } catch {
+    return "catalog probe: desktop bundle unavailable";
+  }
 }
 
 /** Identity is necessary, but is not an authorization to access a data store. */
@@ -35,9 +50,12 @@ function verifiedDigest(argv?: readonly string[]): string | null {
       plist,
     )?.[1];
     const expected = version ? AUDITED[version] : undefined;
-    if (!expected) return null;
     const actual = createHash("sha256").update(readFileSync(ENTRY)).digest("hex");
-    return auditedBundleMatches(version!, actual) ? expected : null;
+    if (!version || !auditedBundleMatches(version, actual)) {
+      warn(`Deferred catalog probe pin mismatch: version=${version ?? "unknown"} sha256=${actual}`);
+      return null;
+    }
+    return expected ?? null;
   } catch {
     return null;
   }

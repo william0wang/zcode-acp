@@ -37,6 +37,8 @@ export interface PushNotifyConfig {
   workflowStage: boolean;
   /** Quota threshold warnings (5h/weekly windows at 60/80/90/95/98/exhausted). */
   quota: boolean;
+  /** Remote Terminal turn completion (app ADR-0011): fired by the hub relay. */
+  terminal: boolean;
 }
 
 /** Default quiet window for settled pushes (§5.2): user active → no ping. */
@@ -115,6 +117,7 @@ export function resolvePushConfig(env: NodeJS.ProcessEnv): PushConfig | null {
     ask: file.notify?.ask !== false,
     workflowStage: file.notify?.workflowStage !== false,
     quota: file.notify?.quota !== false,
+    terminal: file.notify?.terminal !== false,
   };
   const quietMs =
     file.quietMs !== undefined && file.quietMs >= 0 ? file.quietMs : PUSH_QUIET_WINDOW_MS;

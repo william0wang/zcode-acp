@@ -131,6 +131,7 @@ export class ZcodeAcpServer {
     string,
     Promise<import("./backend/types.js").ZcodeCreateResult | null>
   >();
+  readonly initialCatalogCache = new Map<string, import("./backend/types.js").ZcodeCreateResult>();
   /** acp_sid → zcode session id (usually identical, but kept for clarity). */
   readonly sessionMap = new Map<string, string>();
   /**
@@ -674,6 +675,13 @@ export class ZcodeAcpServer {
   readonly serveMode: boolean;
 
   private readonly catalogProbe: boolean;
+  private readonly sweep: ReturnType<typeof setInterval>;
+  disposed = false;
+
+  dispose(): void {
+    this.disposed = true;
+    clearInterval(this.sweep);
+  }
 
   constructor(opts: { serveMode?: boolean; catalogProbe?: boolean } = {}) {
     this.serveMode = opts.serveMode === true;
@@ -687,10 +695,10 @@ export class ZcodeAcpServer {
     // turn loop will ever poll — above all a background workflow run's — are
     // forwarded, pushed or settled instead of silently timing out. Unref'd,
     // never keeps the process alive; a no-op while the queue is empty.
-    const sweep = setInterval(() => {
+    this.sweep = setInterval(() => {
       void sweepOrphanedServerRequests(this).catch(() => undefined);
     }, 2_000);
-    sweep.unref();
+    this.sweep.unref();
   }
 
   /** Next JSON-RPC id for messages we send to zcode. */
@@ -935,6 +943,8 @@ export class ZcodeAcpServer {
     // Fresh backend process: every session rehydrates from scratch, so the
     // settle bookkeeping from the previous instance is void.
     this.backendGeneration++;
+    this.initialCatalogCache.clear();
+    this.initialCatalogFlights.clear();
     this.modelAvailability.clear();
     this.currentModelIdentity.clear();
     this.hydrationUnsettled.clear();

@@ -1,7 +1,10 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { probeInitialModelCatalog } from "../src/config/initial-model-catalog.js";
 import { newSession } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
+import { ZCODE_CREDS_PATH } from "../src/utils.js";
 
 it("never starts an unverified backend that would silently persist a deferred create", async () => {
   vi.stubEnv("ZCODE_BIN", "/nonexistent/unverified-zcode");
@@ -22,19 +25,43 @@ it("never starts an unverified backend that would silently persist a deferred cr
   vi.unstubAllEnvs();
 });
 
-it("returns a lazy ACP session without spawning an unverified backend", async () => {
+it("retains local model fallback without spawning an unverified backend after the flight settles", async () => {
   vi.stubEnv("ZCODE_BIN", "/nonexistent/unverified-zcode");
+  expect(ZCODE_CREDS_PATH.startsWith(`${process.env.HOME}/`)).toBe(true);
+  mkdirSync(path.dirname(ZCODE_CREDS_PATH), { recursive: true });
+  writeFileSync(
+    ZCODE_CREDS_PATH,
+    JSON.stringify({
+      provider: {
+        "local-fixture": {
+          enabled: true,
+          options: { apiKeyRequired: false },
+          models: { "local-model": {} },
+        },
+      },
+    }),
+  );
   const server = new ZcodeAcpServer();
-  const spawn = vi.spyOn(server, "ensureBackend");
-  const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-  const response = await newSession(server, { cwd: process.env.HOME!, mcpServers: [] });
-  expect(response.sessionId).toBeTruthy();
-  expect(server.backend).toBeNull();
-  expect(spawn).not.toHaveBeenCalled();
-  expect(response.configOptions?.some((option) => option.id === "model")).toBe(false);
-  expect(
-    stderr.mock.calls.some(([line]) => String(line).includes("backend version unverified")),
-  ).toBe(true);
-  stderr.mockRestore();
-  vi.unstubAllEnvs();
+  const spawn = vi.spyOn(ZcodeAcpServer.prototype, "ensureBackend");
+  try {
+    const cwd = process.env.HOME!;
+    const response = await newSession(server, { cwd, mcpServers: [] });
+    const flight = server.initialCatalogFlights.get(cwd);
+    expect(flight).toBeDefined();
+    expect(await flight).toBeNull();
+    await vi.waitFor(() => expect(server.initialCatalogFlights.has(cwd)).toBe(false));
+    expect(response.sessionId).toBeTruthy();
+    expect(response.configOptions?.find((option) => option.id === "model")).toMatchObject({
+      id: "model",
+      type: "select",
+      currentValue: "local-fixture\\local-model",
+    });
+    expect(server.backend).toBeNull();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(server.initialCatalogCache.size).toBe(0);
+  } finally {
+    server.dispose();
+    spawn.mockRestore();
+    vi.unstubAllEnvs();
+  }
 });

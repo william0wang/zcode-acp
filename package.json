@@ -1,6 +1,6 @@
 {
   "name": "zcode-acp-server",
-  "version": "0.84.3",
+  "version": "0.85.0",
   "description": "Agent Client Protocol (ACP) server bridging headless ZCode to editors like Zed and JetBrains.",
   "type": "module",
   "license": "Apache-2.0",
@@ -43,7 +43,7 @@
     "test:watch": "vitest",
     "format": "prettier --write src",
     "lint": "eslint .",
-    "smoke": "node dist/index.js < /dev/null",
+    "smoke": "node dist/cli.js doctor && node dist/index.js < /dev/null",
     "smoke:tui": "node dist/cli.js tui --check",
     "prepublishOnly": "pnpm run build && pnpm run test",
     "postinstall": "node dist/remote/hub-upgrade-notify.js 2>/dev/null || true"

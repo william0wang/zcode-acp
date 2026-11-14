@@ -64,7 +64,17 @@ import { recordClosedSessionIds } from "../closed-sessions.js";
 import { expandHomePath, hardDeleteArmed, type TerminalPrefs } from "../config/user-config.js";
 import { tuiStatsSegments } from "../config/settings.js";
 import { readCodeFingerprint } from "./code-fingerprint.js";
-import { remoteEnabledLive, remoteProjectRoots, remoteTerminalPrefs } from "./config.js";
+import {
+  remoteEnabledLive,
+  remoteExecEnabledLive,
+  remoteProjectRoots,
+  remoteTerminalPrefs,
+} from "./config.js";
+import {
+  createTerminalRelay,
+  PING_INTERVAL_MS as TERMINAL_PING_INTERVAL_MS,
+  type TerminalRelay,
+} from "./terminal-relay.js";
 import { envWithLoginShell } from "./login-shell-env.js";
 import { accountUsageStats, type UsageStatsResult } from "../handlers/account.js";
 import { BOOT_RESUME_TRIGGER } from "../handlers/session.js";
@@ -156,6 +166,19 @@ export interface HubOptions {
    * only an explicit disable retires the daemon.
    */
   stayAliveCheck?: () => boolean;
+  /**
+   * Override the Remote Terminal exec gate (app ADR-0011; tests pin it).
+   * Default: live re-read of `remote.exec.enabled` (remoteExecEnabledLive,
+   * default false). The relay re-checks per frame and per keepalive sweep,
+   * so flipping the config tears down live pairings without a hub restart.
+   */
+  execEnabled?: () => boolean;
+  /**
+   * Keepalive sweep cadence for the terminal relay legs (pong-supervised
+   * pings + the exec-gate sweep for idle pairs; tests shrink it). Default
+   * PING_INTERVAL_MS.
+   */
+  terminalPingIntervalMs?: number;
   /**
    * Override how the remote session-create / session-resume endpoints spawn
    * a bridge (tests inject a fake). Default: this node + this package's
@@ -1380,10 +1403,24 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
     codePaths = defaultCodePaths(),
     projectsDbPath,
     stayAliveCheck = () => remoteEnabledLive(),
+    execEnabled,
+    terminalPingIntervalMs = TERMINAL_PING_INTERVAL_MS,
     spawnServe = defaultSpawnServe,
     terminalLaunches,
     staleVoteCooldownMs = STALE_VOTE_COOLDOWN_MS,
   } = options;
+
+  /**
+   * Remote Terminal relay (app ADR-0011): a dumb authenticated pipe between
+   * remote clients and the desktop workbench's control connection. Created
+   * early — the stay-alive wrapper below and the upgrade routes both need it.
+   */
+  const terminalRelay: TerminalRelay = createTerminalRelay({
+    enabled: execEnabled ?? (() => remoteExecEnabledLive()),
+    pingIntervalMs: terminalPingIntervalMs,
+  });
+  /** Idle-exit stay-alive: the user config OR a live workbench wiring. */
+  const stayAlive = (): boolean => stayAliveCheck() || terminalRelay.controlAlive();
 
   /** Frozen at hub start — the anchor the /api/upgrade signals compare to. */
   const startedAt = Date.now();
@@ -1475,7 +1512,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
    * never opens a window retroactively.
    */
   const desktopPresence = (req: IncomingMessage): DesktopPresence | null => {
-    if (desktopPairs.size > 0) return "connection";
+    if (desktopPairs.size > 0 || terminalRelay.controlAlive()) return "connection";
     if (requestIsDesktopClient(req)) return "request";
     if (desktopSeenAt > 0 && Date.now() - desktopSeenAt < desktopPresenceTtlMs) return "recent";
     return null;
@@ -2042,6 +2079,28 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
 
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    // Remote Terminal relay (app ADR-0011): both endpoints authenticate like
+    // every WS route (Bearer header or ?token= — browser WS can only do query).
+    if (url.pathname === "/api/desktop-control" || url.pathname === "/api/terminals/ws") {
+      if (!authorized(req, url, token)) {
+        rejectUpgrade(socket, 401, "Unauthorized");
+        return;
+      }
+      if (url.pathname === "/api/desktop-control" && !requestIsDesktopClient(req)) {
+        // Browser WS cannot set custom headers, so only the native workbench
+        // client can present the desktop identity — a phone cannot park in
+        // the carrier seat (the token remains the actual gate either way).
+        rejectUpgrade(socket, 403, "Forbidden");
+        return;
+      }
+      terminalRelay.handleUpgrade(
+        req,
+        socket,
+        head,
+        url.pathname === "/api/desktop-control" ? "control" : "client",
+      );
+      return;
+    }
     if (url.pathname !== "/acp") {
       rejectUpgrade(socket, 404, "Not Found");
       return;
@@ -2438,12 +2497,10 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       const PURGE_REQUEST_CAP = 200;
       const allIds = purge ? await workspaceTaskIds(workspacePath, projectsDbPath) : [];
       const ids = allIds.slice(0, PURGE_REQUEST_CAP);
-      const overflowSkipped = allIds
-        .slice(PURGE_REQUEST_CAP)
-        .map((id) => ({
-          id,
-          reason: `purge request cap (${PURGE_REQUEST_CAP}) — re-issue to continue`,
-        }));
+      const overflowSkipped = allIds.slice(PURGE_REQUEST_CAP).map((id) => ({
+        id,
+        reason: `purge request cap (${PURGE_REQUEST_CAP}) — re-issue to continue`,
+      }));
       if (!purge || ids.length === 0) {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(
@@ -3409,7 +3466,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       }
       if (idleSince === null) idleSince = Date.now();
       if (Date.now() - idleSince >= idleExitMs) {
-        if (stayAliveCheck()) {
+        if (stayAlive()) {
           log("hub: idle with no instances, but remote is still enabled — staying resident");
           idleSince = Date.now();
           return;
@@ -3431,6 +3488,7 @@ export function startHub(options: HubOptions & { onIdleExit?: () => void }): Pro
       bridge.terminate();
     }
     proxyPairs.clear();
+    terminalRelay.close();
     wss.close();
     server.closeAllConnections?.();
     await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   auditedBundleMatches,
   boundDeferredProbeCommand,
+  catalogProbeDiagnostic,
   deferredProbeCapabilityVerified,
 } from "../src/config/deferred-probe-capability.js";
 
@@ -18,6 +19,11 @@ const installedDigest = existsSync(entry)
 const installed = installedDigest === oldDigest || installedDigest === newDigest;
 
 describe("deferred capability identity", () => {
+  it("reports bundle diagnostics without starting a backend", () => {
+    expect(catalogProbeDiagnostic()).toMatch(
+      /^catalog probe: (desktop bundle unavailable|version=.* sha256=[a-f0-9]{64} pin=(match|mismatch))$/,
+    );
+  });
   it("only trusts audited version and digest pairs", () => {
     expect(auditedBundleMatches("3.18.0", oldDigest)).toBe(true);
     expect(auditedBundleMatches("3.18.2", newDigest)).toBe(true);
