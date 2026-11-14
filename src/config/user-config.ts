@@ -88,6 +88,18 @@ export interface RemoteUserConfig {
    */
   projectRoots?: string[];
   terminal?: TerminalPrefs;
+  /**
+   * Remote Terminal execution (app ADR-0011): manual command wiring from
+   * remote clients into the desktop workbench's session terminal. Default
+   * false — an explicit opt-in, because while it is on a token holder can
+   * execute arbitrary commands on the machine (outside the agent sandbox).
+   */
+  exec?: RemoteExecUserConfig;
+}
+
+/** The `remote.exec` sub-section of the user config file. */
+export interface RemoteExecUserConfig {
+  enabled?: boolean;
 }
 
 /** The `quota` section of the user config file. */
@@ -198,6 +210,8 @@ export interface PushNotifyUserConfig {
   workflowStage?: boolean;
   /** Quota threshold warnings (5h/weekly windows at 60/80/90/95/98/exhausted). */
   quota?: boolean;
+  /** Remote Terminal turn completion (app ADR-0011): fired by the hub relay. */
+  terminal?: boolean;
 }
 
 /** The `push` section: offline WeCom notifications (push-backend-requirements §8). */
@@ -533,6 +547,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
           "ask",
           "workflowStage",
           "quota",
+          "terminal",
         ] as const) {
           const v = notify[key];
           if (v === undefined) continue;
@@ -633,6 +648,14 @@ function parseRemoteSection(remote: Record<string, unknown>, file: string): Remo
     if (roots.length > 0) out.projectRoots = roots;
   } else if (remote["projectRoots"] !== undefined) {
     warn(`config: remote.projectRoots in ${file} is not an array of paths — ignoring`);
+  }
+  const exec = remote["exec"];
+  if (isPlainObject(exec)) {
+    const e: RemoteExecUserConfig = {};
+    if (typeof exec["enabled"] === "boolean") e.enabled = exec["enabled"];
+    if (Object.keys(e).length > 0) out.exec = e;
+  } else if (exec !== undefined) {
+    warn(`config: remote.exec in ${file} is not an object — ignoring`);
   }
   const terminal = remote["terminal"];
   if (isPlainObject(terminal)) {

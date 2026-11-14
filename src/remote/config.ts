@@ -144,6 +144,22 @@ export function remoteEnabledLive(env: NodeJS.ProcessEnv = process.env): boolean
     : ["1", "true", "yes", "on"].includes((env.ZCODE_ACP_REMOTE ?? "").trim().toLowerCase());
 }
 
+/**
+ * Remote Terminal execution gate (app ADR-0011): file `remote.exec.enabled` >
+ * env ZCODE_ACP_REMOTE_EXEC, default FALSE. Read live per use (same
+ * convention as remoteEnabledLive) — the terminal relay re-checks on every
+ * frame, so flipping the config tears down live pairings without a hub
+ * restart. Default-off is deliberate: while on, a token holder can execute
+ * arbitrary commands on the machine, outside the agent sandbox.
+ */
+export function remoteExecEnabledLive(env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = loadUserConfig(env).remote?.exec?.enabled;
+  if (file !== undefined) return file;
+  return ["1", "true", "yes", "on"].includes(
+    (env.ZCODE_ACP_REMOTE_EXEC ?? "").trim().toLowerCase(),
+  );
+}
+
 /** Parse hub-side config for the standalone hub entry (`zcode-acp hub`). */
 export function parseHubConfig(env: NodeJS.ProcessEnv = process.env): RemoteConfig | null {
   const { token, hubPort, hubHost, bridgePort, webDir } = mergeCommon(env);
