@@ -42,6 +42,10 @@ function makeBackend(overrides: Record<string, () => ZcodeResponse> = {}): {
       switch (method) {
         case "workspace/updateProviderRegistry":
         case "session/resume":
+          return { id, result: { settings: { model: { available: [
+            { ref: { providerId: "fixture", modelId: "GLM-5.2" } },
+            { ref: { providerId: "fixture", modelId: "GLM-5.3" } },
+          ] } } } } as ZcodeResponse;
         case "session/setModel":
         case "session/setThoughtLevel":
           return { id, result: {} } as ZcodeResponse;

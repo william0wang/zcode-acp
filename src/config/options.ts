@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { backendCapabilities } from "../backend/adapter.js";
-import type { ZcodeReadResult } from "../backend/types.js";
+import type { ZcodeCreateResult, ZcodeReadResult } from "../backend/types.js";
 import { recordModelChoice } from "../lazy-sessions.js";
 import {
   clientConnectionRoot,
@@ -510,7 +510,9 @@ export async function buildModes(
   let currentMode = initialSessionMode();
   if (zcodeSid !== null) {
     try {
+      const generation = server.backendGeneration;
       const read = await sessionRead(server, zcodeSid);
+      if (generation !== server.backendGeneration) throw new Error("backend generation changed");
       const settings = (read.settings ?? {}) as Record<string, unknown>;
       const modeSet = (settings.mode as Record<string, unknown>) ?? {};
       currentMode = (modeSet.current as string) ?? currentMode;
@@ -627,19 +629,33 @@ export async function buildConfigOptions(
 
   if (zcodeSid !== null) {
     try {
+      const generation = server.backendGeneration;
+      const identityBeforeRead = server.currentModelIdentity.get(zcodeSid);
       const read = await sessionRead(server, zcodeSid);
+      if (generation !== server.backendGeneration) throw new Error("backend generation changed");
       const settings = (read.settings ?? {}) as Record<string, unknown>;
       const modeSet = (settings.mode as Record<string, unknown>) ?? {};
       currentMode = (modeSet.current as string) ?? currentMode;
       const modelSet = (settings.model as Record<string, unknown>) ?? {};
       // settings.model.current is { providerId, modelId, variant? } — read BOTH so
-      // we can disambiguate same-named models across providers. Normalize the
-      // provider spelling (3.12+ registries answer `account:<family>-<plan>`;
-      // config.json and the dropdown use `builtin:<family>-<plan>`) so the
-      // current value matches a dropdown entry instead of duplicating it.
+      // we can disambiguate same-named models across providers. Preserve the
+      // registry identity: legacy config aliases can collapse distinct plans.
       const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
-      if (cur.providerId) currentProviderId = configProviderIdFor(cur.providerId);
-      if (cur.modelId) currentModelId = cur.modelId;
+      if (
+        cur.providerId &&
+        cur.modelId &&
+        server.currentModelIdentity.get(zcodeSid) === identityBeforeRead
+      ) {
+        server.currentModelIdentity.set(zcodeSid, {
+          providerId: cur.providerId,
+          modelId: cur.modelId,
+        });
+      }
+      const identity = server.currentModelIdentity.get(zcodeSid);
+      if (identity) {
+        currentProviderId = identity.providerId;
+        currentModelId = identity.modelId;
+      }
       const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
       // `current` is absent right after session/create — fall back to the
       // backend's defaultLevel (the level the session actually runs at).
@@ -674,11 +690,31 @@ export async function buildConfigOptions(
   // currentValue encodes provider+model so the switch handler can locate the
   // right provider (and its apiKey). Fall back to the first enabled provider
   // when settings omits providerId (legacy sessions).
-  const allModels = loadAllModels();
+  if (zcodeSid !== null && !currentProviderId) {
+    const identity = server.currentModelIdentity.get(zcodeSid);
+    if (identity) {
+      currentProviderId = identity.providerId;
+      currentModelId = identity.modelId;
+    }
+  }
+  const snapshot = zcodeSid === null ? undefined : server.modelAvailability.get(zcodeSid);
+  const allModels =
+    snapshot === undefined
+      ? loadAllModels()
+      : snapshot
+          .filter((m): m is typeof m & { providerId: string; modelId: string } =>
+            Boolean(m.providerId && m.modelId),
+          )
+          .map((m) => ({
+            providerId: m.providerId,
+            providerName: m.providerId,
+            modelId: m.modelId,
+          }));
   const currentProvider = currentProviderId || allModels[0]?.providerId || DEFAULT_PROVIDER_ID;
   const currentModel = formatModelValue(currentProvider, currentModelId);
 
-  // Model options: config.json enabled providers are authoritative. Values
+  // Materialized snapshots are authoritative for display; before one exists,
+  // fall back to config.json. Values
   // are always providerId\modelId. Builtin labels stay the bare modelId
   // unless two providers ship the same id; third-party labels always qualify.
   let modelOptions = buildModelSelectOptions(allModels);
@@ -722,6 +758,9 @@ export async function buildConfigOptions(
     },
   ];
 
+  // Do not invent a provider/model pair when a materialized read lacks identity.
+  if (zcodeSid !== null && !currentProviderId) options.shift();
+
   // Read-only quota pseudo-option (ADR-0021): martty-only, no category (never
   // lands in a settings menu), string type per the probe-verified shape — the
   // SDK's union stops at select/boolean, so the cast carries the agent-owned
@@ -742,6 +781,44 @@ export async function buildConfigOptions(
       currentValue: server.quotaDock,
     } as unknown as acp.SessionConfigOption);
   }
+  return options;
+}
+
+/** Apply a validated, ephemeral create snapshot to a lazy session's initial menu. */
+export async function buildInitialConfigOptions(
+  server: ZcodeAcpServer,
+  receiverRoot: unknown,
+  result: ZcodeCreateResult | null,
+): Promise<acp.SessionConfigOption[]> {
+  const options = await buildConfigOptions(server, null, receiverRoot);
+  const model = result?.settings?.model;
+  const current = model?.current;
+  const available = model?.available;
+  if (
+    !Array.isArray(available) ||
+    available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId)
+  )
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+  // ACP requires a currentValue. A registry that has no current selection
+  // cannot safely claim the locally configured default is active.
+  if (!current?.providerId || !current.modelId)
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+  const models = available.map((entry) => ({
+    providerId: entry.ref!.providerId!,
+    providerName: entry.ref!.providerId!,
+    modelId: entry.ref!.modelId!,
+  }));
+  const currentValue = formatModelValue(current.providerId, current.modelId);
+  const choices = buildModelSelectOptions(models);
+  if (!choices.some((choice) => choice.value === currentValue)) {
+    // A current model absent from the registry snapshot is not a verified
+    // selectable option. Do not advertise it as switchable.
+    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+  }
+  const index = options.findIndex((option) => option.id === "model");
+  const existing = options[index];
+  if (index >= 0 && existing?.type === "select")
+    options[index] = { ...existing, currentValue, options: choices };
   return options;
 }
 

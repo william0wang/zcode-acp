@@ -205,3 +205,14 @@ describe("quota config option no-op", () => {
     expect(resp.configOptions.some((o) => o.id === "model")).toBe(true);
   });
 });
+vi.mock("../src/config/initial-model-catalog.js", () => ({
+  probeInitialModelCatalog: async () => ({
+    session: { sessionId: "probe" },
+    settings: {
+      model: {
+        current: { providerId: "fixture", modelId: "model" },
+        available: [{ ref: { providerId: "fixture", modelId: "model" } }],
+      },
+    },
+  }),
+}));

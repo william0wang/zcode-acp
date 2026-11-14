@@ -24,6 +24,10 @@ import {
 } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
+vi.mock("../src/config/initial-model-catalog.js", () => ({
+  probeInitialModelCatalog: async () => null,
+}));
+
 // Record tasks-index upserts so tests can assert the App sync happens at
 // materialization (never at session/new). The real module writes the App's
 // ~/.zcode/v2/tasks-index.sqlite and must not be touched by tests.
@@ -1099,8 +1103,12 @@ describe("store-recovered sessions (bridge restart)", () => {
     const setModelIdx = calls.findIndex((c) => c.method === "session/setModel");
     expect(resumeIdx).toBeGreaterThanOrEqual(0);
     expect(setModelIdx).toBeGreaterThan(resumeIdx);
+    const selected = (
+      calls[setModelIdx]!.params as { model: { providerId: string; modelId: string } }
+    ).model;
+    expect(selected.modelId).toBe("GLM-5.3");
     const model = resp.configOptions.find((o) => o.id === "model");
-    expect(model?.currentValue).toBe("builtin:bigmodel-coding-plan\\GLM-5.3");
+    expect(model?.currentValue).toBe(`${selected.providerId}\\${selected.modelId}`);
   });
 
   it("session/load on a store-recovered record resumes exactly once and carries fresh mcpServers", async () => {
@@ -1293,4 +1301,86 @@ describe("serve cold recovery verification regressions", () => {
     ).rejects.toThrow("session belongs to another workspace");
     expect(calls.some((c) => c.method === "session/resume")).toBe(true);
   });
+});
+
+it("pushes real model catalog after lazy first prompt materializes", async () => {
+  const { prompt } = await import("../src/handlers/session.js");
+  const server = new ZcodeAcpServer();
+  const created = await newSession(server, newSessionParams("/tmp/ws"));
+  const { backend } = fakeBackend();
+  const old = backend.request.bind(backend);
+  backend.request = (async (id: number, method: string, params: unknown, timeout?: number) => {
+    if (method === "session/create")
+      return {
+        id,
+        result: {
+          session: { sessionId: "lazy-model" },
+          settings: {
+            model: { available: [{ ref: { providerId: "custom:live", modelId: "actual" } }] },
+          },
+        },
+      };
+    if (method === "session/read")
+      return {
+        id,
+        result: {
+          settings: { model: { current: { providerId: "custom:live", modelId: "actual" } } },
+        },
+      };
+    return old(id, method, params, timeout);
+  }) as typeof backend.request;
+  server.backend = backend;
+  const notifications: any[] = [];
+  const cx = {
+    notify: async (_method: unknown, payload: unknown) => {
+      notifications.push(payload);
+    },
+    request: async () => ({}),
+  } as unknown as acp.AgentContext;
+  await prompt(
+    server,
+    { sessionId: created.sessionId, prompt: [{ type: "text", text: "hello" }] },
+    cx,
+    1,
+  ).catch(() => undefined);
+  const update = notifications.find((n) => n?.update?.sessionUpdate === "config_option_update");
+  expect(
+    update?.update?.configOptions
+      .find((o: any) => o.id === "model")
+      ?.options.map((o: any) => o.value),
+  ).toEqual(["custom:live\\actual"]);
+});
+
+it("rejects an old generation create response without publishing its session or catalog", async () => {
+  const server = new ZcodeAcpServer();
+  const created = await newSession(server, newSessionParams("/tmp/ws"));
+  const { backend } = fakeBackend();
+  const old = backend.request.bind(backend);
+  let release!: (v: any) => void;
+  let started!: () => void;
+  const ready = new Promise<void>((r) => {
+    started = r;
+  });
+  backend.request = (async (id: number, method: string, params: unknown, timeout?: number) => {
+    if (method === "session/create") {
+      started();
+      return await new Promise((r) => {
+        release = r;
+      });
+    }
+    return old(id, method, params, timeout);
+  }) as typeof backend.request;
+  server.backend = backend;
+  const creating = ensureRealSession(server, created.sessionId);
+  await ready;
+  server.resetBackendGeneration();
+  release({
+    result: {
+      session: { sessionId: "old" },
+      settings: { model: { available: [{ ref: { providerId: "old", modelId: "old" } }] } },
+    },
+  });
+  await expect(creating).rejects.toThrow(/generation/i);
+  expect(server.resolveSid(created.sessionId)).toBeUndefined();
+  expect(server.modelAvailability.has("old")).toBe(false);
 });

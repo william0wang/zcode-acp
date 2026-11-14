@@ -15,8 +15,9 @@
  */
 
 import path from "node:path";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { disallowedToolList, resolveZcodeCommand } from "../src/backend/resolve.js";
 
@@ -49,6 +50,21 @@ function nativeLaunchArgs(): string[] {
 }
 
 describe("resolveZcodeCommand Happy Eyeballs args", () => {
+  it("does not run Node preloads during catalog probe executable discovery", () => {
+    const dir = mkdtempSync(path.join(process.env.HOME!, "resolve-probe-"));
+    const marker = path.join(dir, "ran");
+    const preload = path.join(dir, "preload.cjs");
+    writeFileSync(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`);
+    vi.stubEnv("NODE_OPTIONS", `--require=${preload}`);
+    vi.stubEnv("ZCODE_BIN", "/nonexistent/zcode.cjs");
+    vi.stubEnv("ZCODE_NODE", process.execPath);
+    try {
+      expect(resolveZcodeCommand({ catalogProbe: true })[0]).toBe(process.execPath);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
   it("disables autoSelectFamily AND pins dns order to ipv4first by default", () => {
     delete process.env.ZCODE_KEEP_HAPPY_EYEBALLS;
     const argv = jsLaunchArgs();

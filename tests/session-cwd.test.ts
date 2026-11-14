@@ -183,3 +183,4 @@ describe("projectCwd()", () => {
     expect(server.projectCwd()).toBe(process.cwd());
   });
 });
+vi.mock("../src/config/initial-model-catalog.js", () => ({ probeInitialModelCatalog: async () => null }));

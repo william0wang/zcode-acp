@@ -532,3 +532,32 @@ describe("metadata-only attach skips the settle (cold-reattach fast path)", () =
     expect(server.hydrationWatermark.get("sess_race")).toBe(8);
   }, 10_000);
 });
+
+it("does not cache an old-generation resume snapshot after restart", async () => {
+ let release!: (v:unknown)=>void; const gate=new Promise<unknown>(r=>{release=r});
+ const {backend,counts}=makeBackend({messagesQueue:[[]],resumeGate:gate});
+ const server=new ZcodeAcpServer(); server.backend=backend;
+ const pending=loadSession(server,loadParams(),collectCx().cx); await park();
+ expect(counts.get("session/resume")).toBe(1);
+ server.resetBackendGeneration();
+ release({result:{settings:{model:{available:[{ref:{providerId:"old",modelId:"old"}}]}}}});
+ await pending.catch(()=>undefined);
+ expect(server.modelAvailability.has("sess_race")).toBe(false);
+});
+
+it("new generation must not join an old resume flight", async () => {
+ let release!: (v:unknown)=>void; const gate=new Promise<unknown>(r=>{release=r});
+ const old=makeBackend({messagesQueue:[[]],resumeGate:gate});
+ const fresh=makeBackend({messagesQueue:[[]]});
+ const server=new ZcodeAcpServer(); server.backend=old.backend;
+ const p1=loadSession(server,loadParams(),collectCx().cx); p1.catch(()=>{}); await park();
+ expect(old.counts.get("session/resume")).toBe(1);
+ server.resetBackendGeneration(); server.backend=fresh.backend;
+ const p2=loadSession(server,loadParams(),collectCx().cx); p2.catch(()=>{}); await park();
+ const newCalls=fresh.counts.get("session/resume") ?? 0;
+ release({result:{}}); const [oldResult, newResult] = await Promise.allSettled([p1,p2]);
+ expect(newCalls).toBe(1);
+ expect(oldResult.status).toBe("rejected");
+ expect(newResult.status).toBe("fulfilled");
+ expect(server.resumeInFlight.size).toBe(0);
+});

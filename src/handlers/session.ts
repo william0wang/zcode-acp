@@ -36,6 +36,7 @@ import type {
 import {
   buildModes,
   buildConfigOptions,
+  buildInitialConfigOptions,
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_ID,
   formatModelValue,
@@ -53,6 +54,7 @@ import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js"
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode } from "../config/settings.js";
+import { probeInitialModelCatalog } from "../config/initial-model-catalog.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
   effectiveWorkflowGate,
@@ -87,6 +89,7 @@ import { dispatchEvent } from "./dispatch.js";
 import {
   echoSteeredInputs,
   emitSessionTurnState,
+  enqueueSessionSend,
   sendAvailableCommandsDeferred,
   sendSessionUpdate,
   sendTextChunk,
@@ -119,6 +122,102 @@ import { handleServerRequests } from "./server-requests.js";
 function workspaceFor(cwd?: string): { workspacePath: string; workspaceKey: string } {
   const p = cwd || process.cwd();
   return { workspacePath: p, workspaceKey: p };
+}
+
+function initialCatalog(
+  server: ZcodeAcpServer,
+  cwd: string,
+): {
+  cached: ZcodeCreateResult | null;
+  flight?: Promise<ZcodeCreateResult | null>;
+} {
+  const cached = server.initialCatalogCache.get(cwd);
+  if (cached) return { cached };
+  let flight = server.initialCatalogFlights.get(cwd);
+  if (!flight) {
+    const generation = server.backendGeneration;
+    flight = new Promise<ZcodeCreateResult | null>((resolve) => {
+      setImmediate(() => {
+        if (server.disposed || server.backendGeneration !== generation) {
+          resolve(null);
+          return;
+        }
+        void probeInitialModelCatalog(cwd).then(resolve, () => resolve(null));
+      });
+    })
+      .then((result) => {
+        const model = result?.settings?.model;
+        if (
+          server.disposed ||
+          generation !== server.backendGeneration ||
+          !model?.current?.providerId ||
+          !model.current.modelId ||
+          !Array.isArray(model.available) ||
+          model.available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId) ||
+          !model.available.some(
+            (entry) =>
+              entry.ref?.providerId === model.current?.providerId &&
+              entry.ref?.modelId === model.current?.modelId,
+          )
+        )
+          return null;
+        server.initialCatalogCache.set(cwd, result!);
+        return result;
+      })
+      .catch(() => null);
+    server.initialCatalogFlights.set(cwd, flight);
+    const ownedFlight = flight;
+    void flight.finally(() => {
+      if (server.initialCatalogFlights.get(cwd) === ownedFlight)
+        server.initialCatalogFlights.delete(cwd);
+    });
+  }
+  return { cached: null, flight };
+}
+
+/** Send only to the connection that adopted this still-unmodified placeholder. */
+function updateInitialCatalog(
+  server: ZcodeAcpServer,
+  cwd: string,
+  sid: string,
+  client: acp.AgentContext | undefined,
+  flight: Promise<ZcodeCreateResult | null> | undefined,
+): void {
+  if (!flight) return;
+  const pending = server.pendingSessions.get(sid);
+  if (!pending) return;
+  const generation = server.backendGeneration;
+  const root = clientConnectionRoot(client);
+  const tracked =
+    !!client && server.clients.snapshot().some((cx) => clientConnectionRoot(cx) === root);
+  const valid = () =>
+    !server.disposed &&
+    server.backendGeneration === generation &&
+    server.sessionCwds.get(sid) === cwd &&
+    server.pendingSessions.get(sid) === pending &&
+    pending.cwd === cwd &&
+    !pending.creating &&
+    !server.resolveSid(sid) &&
+    (!tracked || server.clients.snapshot().some((cx) => clientConnectionRoot(cx) === root));
+  void flight.then((result) => {
+    if (!result || !valid()) return;
+    // The request handler returns synchronously after newSession. The SDK's
+    // response enters its per-connection write queue before this callback;
+    // that queue orders the update behind the response even under backpressure.
+    setImmediate(() => {
+      void (async () => {
+        if (!valid()) return;
+        const options = await buildInitialConfigOptions(server, root, result);
+        await enqueueSessionSend(sid, async () => {
+          if (!valid()) return;
+          await (client ?? server.clients.broadcast()).notify("session/update", {
+            sessionId: sid,
+            update: { sessionUpdate: "config_option_update", configOptions: options },
+          });
+        });
+      })().catch((err) => log(`initial model catalog update failed: ${String(err)}`));
+    });
+  });
 }
 
 /**
@@ -571,11 +670,11 @@ export async function newSession(
     server.lastMode.set(bindSid, modes.currentModeId);
     emitBootUsageUpdate(server, bindSid);
     scheduleQuotaDockBackstop(server);
-    return {
-      sessionId: bindSid,
-      modes,
-      configOptions: await buildConfigOptions(server, null, bindRoot),
-    };
+    const cwd = server.sessionCwds.get(bindSid) ?? process.cwd();
+    const catalog = initialCatalog(server, cwd);
+    const configOptions = await buildInitialConfigOptions(server, bindRoot, catalog.cached);
+    updateInitialCatalog(server, cwd, bindSid, client, catalog.flight);
+    return { sessionId: bindSid, modes, configOptions };
   }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
@@ -693,11 +792,14 @@ export async function newSession(
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
   scheduleQuotaDockBackstop(server);
-  return {
-    sessionId: acpSid,
-    modes,
-    configOptions: await buildConfigOptions(server, null, clientConnectionRoot(client)),
-  };
+  const catalog = initialCatalog(server, cwd);
+  const configOptions = await buildInitialConfigOptions(
+    server,
+    clientConnectionRoot(client),
+    catalog.cached,
+  );
+  updateInitialCatalog(server, cwd, acpSid, client, catalog.flight);
+  return { sessionId: acpSid, modes, configOptions };
 }
 
 /**
@@ -983,6 +1085,7 @@ export async function ensureRealSession(
   // promise is stored before any concurrent caller can observe the entry.
   const creating = (async () => {
     const backend = await server.ensureBackend();
+    const generation = server.backendGeneration;
     // Push the provider registry BEFORE session/create: the backend resolves
     // the session's default model against the registry, and without the
     // provider's reasoning/model definitions it falls back to the bare
@@ -1022,6 +1125,8 @@ export async function ensureRealSession(
     // Compat retries build on the params ACTUALLY sent last, so a second
     // rejection does not resurrect a key the first retry already dropped.
     let sent = createParams;
+    if (generation !== server.backendGeneration)
+      throw new Error("backend generation changed during create");
     let resp = await backend.request(server.nextId(), "session/create", sent, 15000);
     if (resp.error && sent.mode === "guarded" && rejectsModeGuarded(resp.error.message)) {
       // 3.15.1's `guarded` on a pre-3.15 backend: the strict mode enum rejects
@@ -1042,6 +1147,8 @@ export async function ensureRealSession(
     if (resp.error) {
       throw new Error(`zcode create failed: ${resp.error.message ?? ""}`);
     }
+    if (generation !== server.backendGeneration)
+      throw new Error("backend generation changed during create");
     const result = (resp.result ?? {}) as ZcodeCreateResult;
     const session = result.session ?? {};
     const sid = session.sessionId;
@@ -2670,8 +2777,15 @@ async function runPrompt(
   // A failure here (evicted session, dead backend) abandons the prompt before
   // the send — staged files must go with it.
   let zcodeSid: string;
+  const wasPending = !server.resolveSid(params.sessionId);
   try {
     zcodeSid = await ensureRealSession(server, params.sessionId);
+    if (wasPending) {
+      const { emitConfigOptionUpdate } = await import("../config/options.js");
+      await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, "model").catch(
+        () => undefined,
+      );
+    }
     // Re-arm the session's out-of-band listeners (background tasks, backend
     // titles): a mid-session backend respawn (sandbox flip, dynamic allow
     // batches, dead-reader recovery) replaces the instance the listeners were
@@ -3542,7 +3656,7 @@ async function reassertModelChoice(server: ZcodeAcpServer, zcodeSid: string): Pr
  * cache, and the object form of `session/setModel` hard-fails a level-bearing
  * model without one ("Reasoning level is required").
  *
- * Best-effort: an empty or missing list leaves any previous cache intact.
+ * Empty or malformed lists invalidate the cache; the backend validates switches.
  */
 export function cacheModelAvailability(
   server: ZcodeAcpServer,
@@ -3558,16 +3672,30 @@ export function cacheModelAvailability(
         }>;
       }
     | undefined;
-  const avail = model?.available ?? [];
-  if (avail.length === 0) return;
+  const avail = model?.available;
+  if (
+    !Array.isArray(avail) ||
+    avail.length === 0 ||
+    avail.some(
+      (a) =>
+        !a ||
+        typeof a.ref?.providerId !== "string" ||
+        !a.ref.providerId ||
+        typeof a.ref?.modelId !== "string" ||
+        !a.ref.modelId,
+    )
+  ) {
+    server.modelAvailability.delete(zcodeSid);
+    return;
+  }
   server.modelAvailability.set(
     zcodeSid,
     avail.map((a) => ({
       providerId: a.ref?.providerId,
       modelId: a.ref?.modelId,
       defaultLevel: a.reasoning?.defaultLevel ?? a.reasoning?.levels?.[0]?.value,
-      levels: (a.reasoning?.levels ?? [])
-        .map((l) => l.value)
+      levels: (Array.isArray(a.reasoning?.levels) ? a.reasoning.levels : [])
+        .map((l) => l?.value)
         .filter((v): v is string => typeof v === "string"),
     })),
   );
@@ -3599,18 +3727,26 @@ async function resumePreservingModel(
   opts: { skipSettle?: boolean } = {},
 ): Promise<ResumeOutcome> {
   const zcodeSid = String(zcParams["sessionId"] ?? "");
-  const inFlight = server.resumeInFlight.get(zcodeSid) as Promise<ResumeOutcome> | undefined;
-  if (inFlight) {
+  const inFlight = server.resumeInFlight.get(zcodeSid);
+  if (inFlight && inFlight.generation === server.backendGeneration) {
     // Known limitation (#193): the joiner rides the performer's params as
     // frozen at flight start, so mcpServers the joiner just remembered are
     // NOT delivered by this resume. Window: only right after a bridge
     // restart (map empty) with two clients loading the same session; the
     // next eviction reload re-sends the set. Re-issuing a second resume
     // here would break the single-flight dehydration guarantee.
-    const shared = await inFlight; // rethrows the first flight's failure
+    const shared = (await inFlight.promise) as ResumeOutcome; // rethrows the first flight's failure
     return { ...shared, performed: false };
   }
+  const entry: { generation: number; promise: Promise<unknown> } = {
+    generation: server.backendGeneration,
+    promise: Promise.resolve(),
+  };
   const flight = (async (): Promise<ResumeOutcome> => {
+    await server.ensureBackend();
+    const generation = server.backendGeneration;
+    // A cold spawn can advance the generation while this flight starts.
+    if (server.resumeInFlight.get(zcodeSid) === entry) entry.generation = generation;
     // The backend can echo the supplied workspace in its resume snapshot.
     // Verify the stored record before resume itself can load foreign history.
     if (server.serveMode) await verifyServeWorkspace(server, zcodeSid);
@@ -3618,6 +3754,8 @@ async function resumePreservingModel(
     try {
       result = await resumeBackendSession(server, zcParams);
     } catch (err) {
+      if (generation !== server.backendGeneration)
+        throw new Error("backend generation changed during resume");
       // A session the backend no longer stores cannot be repaired by ANY
       // overlay — rethrow the honest cause instead of retrying (3.12+
       // backends reject the runtimeModel key outright, so the retry would
@@ -3640,6 +3778,8 @@ async function resumePreservingModel(
         throw overlayErr;
       }
     }
+    if (generation !== server.backendGeneration)
+      throw new Error("backend generation changed during resume");
     // Validate in the shared flight before reading history or marking live.
     const backendWs = workspaceFromResumeResult(result);
     if (server.serveMode) {
@@ -3660,23 +3800,28 @@ async function resumePreservingModel(
     // session/read is hardcoded "current") — refresh the switch-time level
     // lookup for models added after create BEFORE the remembered choice
     // re-asserts (it resolves its level from this cache).
+    if (generation !== server.backendGeneration)
+      throw new Error("backend generation changed during resume");
     cacheModelAvailability(server, zcodeSid, result);
     // Re-apply the bridge-remembered model choice (best-effort — never fails
     // the resume): the resumed session may have silently reverted to the
     // workspace default when the backend's own selection entry was lost.
     await reassertModelChoice(server, zcodeSid);
+    if (generation !== server.backendGeneration)
+      throw new Error("backend generation changed during resume");
     return {
       performed: true,
       result,
       history,
     };
   })();
-  server.resumeInFlight.set(zcodeSid, flight);
+  entry.promise = flight;
+  server.resumeInFlight.set(zcodeSid, entry);
   try {
     return await flight;
   } finally {
     // Guarded delete: only the owner removes its own entry.
-    if (server.resumeInFlight.get(zcodeSid) === flight) server.resumeInFlight.delete(zcodeSid);
+    if (server.resumeInFlight.get(zcodeSid) === entry) server.resumeInFlight.delete(zcodeSid);
   }
 }
 

@@ -43,7 +43,7 @@
     "test:watch": "vitest",
     "format": "prettier --write src",
     "lint": "eslint .",
-    "smoke": "node dist/index.js < /dev/null",
+    "smoke": "node dist/cli.js doctor && node dist/index.js < /dev/null",
     "smoke:tui": "node dist/cli.js tui --check",
     "prepublishOnly": "pnpm run build && pnpm run test",
     "postinstall": "node dist/remote/hub-upgrade-notify.js 2>/dev/null || true"

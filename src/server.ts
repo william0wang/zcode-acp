@@ -126,6 +126,12 @@ export class ZcodeAcpServer {
    * enforcement point — so flipping the kind flips every gated surface.
    */
   readonly backendKind: BackendKind = "zcode";
+  /** Concurrent initial catalog probes for the same workspace share one child. */
+  readonly initialCatalogFlights = new Map<
+    string,
+    Promise<import("./backend/types.js").ZcodeCreateResult | null>
+  >();
+  readonly initialCatalogCache = new Map<string, import("./backend/types.js").ZcodeCreateResult>();
   /** acp_sid → zcode session id (usually identical, but kept for clarity). */
   readonly sessionMap = new Map<string, string>();
   /**
@@ -187,7 +193,7 @@ export class ZcodeAcpServer {
    * (a mid-restore query returns a prefix and the first-entry replay "ends
    * in the middle").
    */
-  readonly resumeInFlight = new Map<string, Promise<unknown>>();
+  readonly resumeInFlight = new Map<string, { generation: number; promise: Promise<unknown> }>();
   /**
    * Backend session ids whose last settle poll hit RESUME_SETTLE_CAP_MS while
    * hydration was still growing (see fetchMessagesSettled): a later plain
@@ -558,6 +564,8 @@ export class ZcodeAcpServer {
    * resolve the target's reasoning level from this cache first; an entry that
    * declares no levels simply has none (the backend's own "level-less" verdict).
    */
+  backendGeneration = 0;
+  readonly currentModelIdentity = new Map<string, { providerId: string; modelId: string }>();
   readonly modelAvailability = new Map<
     string,
     Array<{ providerId?: string; modelId?: string; defaultLevel?: string; levels?: string[] }>
@@ -666,8 +674,18 @@ export class ZcodeAcpServer {
    */
   readonly serveMode: boolean;
 
-  constructor(opts: { serveMode?: boolean } = {}) {
+  private readonly catalogProbe: boolean;
+  private readonly sweep: ReturnType<typeof setInterval>;
+  disposed = false;
+
+  dispose(): void {
+    this.disposed = true;
+    clearInterval(this.sweep);
+  }
+
+  constructor(opts: { serveMode?: boolean; catalogProbe?: boolean } = {}) {
     this.serveMode = opts.serveMode === true;
+    this.catalogProbe = opts.catalogProbe === true;
     // Offline-push hook (§5.1): fires inside requestAny's zero-clients branch.
     // The gate (clients.size / ACTIVE) lives in the push module; this wiring is
     // the only connection between the remote layer and the push module.
@@ -677,10 +695,10 @@ export class ZcodeAcpServer {
     // turn loop will ever poll — above all a background workflow run's — are
     // forwarded, pushed or settled instead of silently timing out. Unref'd,
     // never keeps the process alive; a no-op while the queue is empty.
-    const sweep = setInterval(() => {
+    this.sweep = setInterval(() => {
       void sweepOrphanedServerRequests(this).catch(() => undefined);
     }, 2_000);
-    sweep.unref();
+    this.sweep.unref();
   }
 
   /** Next JSON-RPC id for messages we send to zcode. */
@@ -761,7 +779,16 @@ export class ZcodeAcpServer {
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
     };
-    let argv = resolveZcodeCommand();
+    let argv = resolveZcodeCommand({ catalogProbe: this.catalogProbe });
+    if (this.catalogProbe) {
+      const { boundDeferredProbeCommand } = await import("./config/deferred-probe-capability.js");
+      const bound = boundDeferredProbeCommand(argv);
+      if (!bound) throw new Error("catalog probe backend identity not verified");
+      argv = bound;
+      // A preload can run before the loader and bypass its identity check.
+      delete env.NODE_OPTIONS;
+      delete env.NODE_PATH;
+    }
     this.backendSandboxed = sandboxActive(this.sandboxRoots());
     if (this.backendSandboxed) {
       const { workspaces, extraAllow } = collectSandboxWorkspaces(this.sandboxRoots());
@@ -784,7 +811,7 @@ export class ZcodeAcpServer {
     // serve spawn passes `cwd` (defaultSpawnServe). Forcing a single `cwd` here
     // would be both redundant and wrong — the backend is one process shared by
     // every session, while the directory belongs to each window/session.
-    const backend = new ZcodeBackend(argv, env);
+    const backend = new ZcodeBackend(argv, env, this.catalogProbe);
     this.backend = backend;
     this.resetBackendGeneration();
     // Verdict observability (one line per spawn — a dark gate was previously
@@ -915,6 +942,11 @@ export class ZcodeAcpServer {
   resetBackendGeneration(): void {
     // Fresh backend process: every session rehydrates from scratch, so the
     // settle bookkeeping from the previous instance is void.
+    this.backendGeneration++;
+    this.initialCatalogCache.clear();
+    this.initialCatalogFlights.clear();
+    this.modelAvailability.clear();
+    this.currentModelIdentity.clear();
     this.hydrationUnsettled.clear();
     this.hydrationWatermark.clear();
     this.compactOutcomes.clear();

@@ -322,12 +322,12 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 
 ## Version Compatibility
 
-| ZCode CLI version |   Support    | Notes                                                                                                                                                                                                 |
-| :---------------: | :----------: | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| ZCode CLI version |   Support    | Notes                                                                                                                                                                                                                                                                                                                                                  |
+| :---------------: | :----------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 |   **>= 0.16.0**   |     Full     | Steer/rewind removed upstream (moved to the v4 conversation API); bridge dropped the `session/steer`, `session/rewind`, `session/rewindCascade` extensions and the `/steer`, `/rewind` slash commands. Mid-turn steering is back via the cross-adapter `_session/steering` extension (`v4/command` sendText; see [docs/PROTOCOL.md](docs/PROTOCOL.md)) |
-|   **>= 0.15.0**   |     Full     | All extension methods available                                                                                                                                                                       |
-|   **>= 0.14.8**   |     Full     | Event-stream push, all extension methods                                                                                                                                                              |
-|   **< 0.14.8**    | Incompatible | Event-stream subscription unavailable                                                                                                                                                                 |
+|   **>= 0.15.0**   |     Full     | All extension methods available                                                                                                                                                                                                                                                                                                                        |
+|   **>= 0.14.8**   |     Full     | Event-stream push, all extension methods                                                                                                                                                                                                                                                                                                               |
+|   **< 0.14.8**    | Incompatible | Event-stream subscription unavailable                                                                                                                                                                                                                                                                                                                  |
 
 ## Documentation
 
@@ -393,3 +393,7 @@ Apache-2.0. This project follows the same license as the upstream ACP specificat
 
 This is an independent community project and is not affiliated with, endorsed
 by, or sponsored by Zhipu Z.AI. ZCode is a product of Zhipu Z.AI.
+
+### Model selection ambiguity
+
+When multiple providers expose the same model ID, `/model <id>` is ambiguous and is rejected. Use the provider-qualified value shown in the model selector. The initial selector can use local configuration until a verified backend catalog is available.
