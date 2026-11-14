@@ -127,3 +127,23 @@ describe("repairUnavailableModel (#270)", () => {
     expect(model.modelId).toBe("GLM-5.3"); // config.json's first enabled model
   });
 });
+
+it("repair can select configured fallback even if resume snapshot is stale", async () => {
+  vi.stubEnv("ZCODE_PROVIDER", "builtin:zai-coding-plan");
+  vi.stubEnv("ZCODE_MODEL", "GLM-5.3-Flash");
+  const {server,setModelParams}=makeHarness({providerId:"account:zai-individual-coding-plan",modelId:"gone"});
+  server.modelAvailability.set(SID_Z,[{providerId:"custom:old",modelId:"stale"}]);
+  await repairUnavailableModel(server,SID_Z);
+  expect(setModelParams[0]?.model).toMatchObject({modelId:"GLM-5.3-Flash"});
+});
+
+it("cold reload tries faithful resume before fallback, and preserves original error on unsupported overlay", async () => {
+  const {reloadBackendSession} = await import("../src/handlers/session.js");
+  const server=new ZcodeAcpServer(); const resumes: any[]=[];
+  server.backend={isDead:false,request:async (_id:unknown,method:string,params:any)=>{
+    if(method === "session/resume") {resumes.push(params); return {error:{message:params.runtimeModel ? "Unrecognized key: runtimeModel" : "backend model unavailable"}};}
+    return {result:{}};
+  }} as never;
+  await expect(reloadBackendSession(server,"alias","session")).rejects.toThrow("backend model unavailable");
+  expect(resumes).toHaveLength(2); expect(resumes[0].runtimeModel).toBeUndefined(); expect(resumes[1].runtimeModel).toBeDefined();
+});

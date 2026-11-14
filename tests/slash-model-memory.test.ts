@@ -76,6 +76,7 @@ describe("slash switches remember the model choice", () => {
     const { backend, calls } = fakeBackend();
     server.backend = backend;
     const acpSid = seedSession(server, "zc-mem-1");
+    server.modelAvailability.set("zc-mem-1", [{ providerId: "fixture", modelId: "GLM-5.2", levels: [] }]);
     const { cx, updates } = recordingCx();
 
     const resp = await handleSlashCommand(server, cx, acpSid, "zc-mem-1", "/model GLM-5.2");
@@ -112,6 +113,7 @@ describe("slash switches remember the model choice", () => {
     });
     server.backend = backend;
     const acpSid = seedSession(server, "zc-mem-3");
+    server.modelAvailability.set("zc-mem-3", [{ providerId: "fixture", modelId: "GLM-5.2", levels: [] }]);
     const { cx } = recordingCx();
 
     await expect(

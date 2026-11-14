@@ -127,3 +127,4 @@ describe("tombstone revival wiring", () => {
     expect(reviveCalls).toHaveLength(1);
   });
 });
+vi.mock("../src/config/initial-model-catalog.js", () => ({ probeInitialModelCatalog: async () => null }));

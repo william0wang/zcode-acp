@@ -40,6 +40,8 @@ interface PendingRequest {
 export interface JsonRpcChildOptions {
   argv: string[];
   env: NodeJS.ProcessEnv;
+  /** Prevent preloads from running in a probe's watchdog. */
+  sanitizeWatchdog?: boolean;
   /** Backend name used in error strings (e.g. "zcode" → "zcode backend pipe broken"). */
   name: string;
   /** Human-readable label for the start log line. */
@@ -96,7 +98,7 @@ export abstract class JsonRpcChild implements BackendAdapter {
       warn(`backend: stdin error: ${err.message}`);
     });
     this.startReader();
-    this.startWatchdog();
+    this.startWatchdog(opts.sanitizeWatchdog === true);
     log(`backend: started ${opts.logLabel} (pid=${this.proc.pid})`);
   }
 
@@ -116,7 +118,7 @@ export abstract class JsonRpcChild implements BackendAdapter {
    * kills. It self-terminates as soon as the backend process exits, so a
    * normal shutdown leaves no lingering watchdog.
    */
-  private startWatchdog(): void {
+  private startWatchdog(sanitize: boolean): void {
     const bridgePid = process.pid;
     const backendPid = this.proc.pid;
     if (!bridgePid || !backendPid) return;
@@ -137,9 +139,15 @@ export abstract class JsonRpcChild implements BackendAdapter {
       setInterval(tick, 2000);
       tick();
     `;
+    const env = sanitize ? { ...process.env } : undefined;
+    if (env) {
+      delete env.NODE_OPTIONS;
+      delete env.NODE_PATH;
+    }
     this.watchdog = spawn(process.execPath, ["-e", script], {
       stdio: "ignore",
       detached: true, // own process group, not part of the backend group
+      env,
     });
     this.watchdog.unref();
   }
@@ -397,7 +405,10 @@ export abstract class JsonRpcChild implements BackendAdapter {
       killTree(proc.pid);
       await new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => resolve(false), 3000);
-        proc.once("exit", () => { clearTimeout(timer); resolve(true); });
+        proc.once("exit", () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
       });
       return;
     }

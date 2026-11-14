@@ -1163,6 +1163,9 @@ describe("settings API — app update", () => {
   });
 
   it("is gated by the hub token like every other settings route", async () => {
+    const app = await fakeApp("3.14.1");
+    vi.stubEnv("ZCODE_APP_PATH", app);
+    stubManifest("3.14.3");
     const res = await hubGet("app-update", "wrong-token");
     expect(res.status).toBe(401);
     const ok = await hubGet("app-update");

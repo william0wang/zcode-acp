@@ -449,3 +449,4 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
     ).rejects.toThrow();
   });
 });
+vi.mock("../src/config/initial-model-catalog.js", () => ({ probeInitialModelCatalog: async () => null }));

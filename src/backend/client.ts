@@ -55,10 +55,11 @@ export class ZcodeBackend extends JsonRpcChild {
    */
   onLifecycleChanged?: (snapshot: ZcodeLifecycleSnapshot) => void;
 
-  constructor(argv: string[], env: NodeJS.ProcessEnv) {
+  constructor(argv: string[], env: NodeJS.ProcessEnv, sanitizeWatchdog = false) {
     super({
       argv,
       env,
+      sanitizeWatchdog,
       name: "zcode",
       logLabel: "zcode app-server",
       cliLabel: "zcode CLI",

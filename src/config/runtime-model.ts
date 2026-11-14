@@ -145,8 +145,20 @@ export async function applyModelSwitch(
   zcodeSid: string,
   value: string,
 ): Promise<boolean> {
-  const { providerId, modelId } = parseModelValue(value);
   const backend = await server.ensureBackend();
+  const generation = server.backendGeneration;
+  let { providerId, modelId } = parseModelValue(value);
+  // A legacy bare ID is safe only if it identifies exactly one registry pair.
+  // A live snapshot supersedes local files, including when it has no match.
+  if (!value.includes("\\") && !/^custom:[^:]+:.+$/.test(value)) {
+    const models = server.modelAvailability.get(zcodeSid) ?? loadAllModels();
+    const providers = new Set(models.filter((m) => m.modelId === value && m.providerId)
+      .map((m) => accountProviderIdFor(m.providerId!)));
+    if (providers.size !== 1) return false;
+    providerId = [...providers][0]!;
+    modelId = value;
+  }
+  if (!providerId || !modelId) return false;
   const registryProviderId = accountProviderIdFor(providerId);
   const candidates = candidateReasoningLevels(server, zcodeSid, registryProviderId, modelId);
   // [best, omit, rest]: omission second so a level-less registry def succeeds
@@ -171,7 +183,9 @@ export async function applyModelSwitch(
       { sessionId: zcodeSid, model, persistAsWorkspaceLastUsed: false },
       15000,
     );
+    if (generation !== server.backendGeneration) return false;
     if (!resp.error) {
+      server.currentModelIdentity.set(zcodeSid, { providerId: registryProviderId, modelId });
       invalidateModelCache(server, zcodeSid);
       return true;
     }

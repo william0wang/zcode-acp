@@ -111,12 +111,13 @@ export function candidateNodeBinaries(): string[] {
  * lacks the module and would crash). Uses `new DatabaseSync(...)` because a
  * bare reference would mis-detect support.
  */
-function nodeSupportsSqlite(nodeBin: string): boolean {
+function nodeSupportsSqlite(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
   if (!nodeBin || !existsSync(nodeBin)) return false;
   try {
     execFileSync(nodeBin, ["-e", "new (require('node:sqlite').DatabaseSync)(':memory:')"], {
       stdio: ["ignore", "ignore", "ignore"],
       timeout: 5000,
+      env,
     });
     return true;
   } catch {
@@ -437,7 +438,12 @@ export function backendArgs(): string[] {
 }
 
 /** Resolve the full argv to launch `zcode app-server --stdio`. */
-export function resolveZcodeCommand(): string[] {
+export function resolveZcodeCommand(opts: { catalogProbe?: boolean } = {}): string[] {
+  const probeEnv = opts.catalogProbe ? { ...process.env } : undefined;
+  if (probeEnv) {
+    delete probeEnv.NODE_OPTIONS;
+    delete probeEnv.NODE_PATH;
+  }
   const zcodeBin = process.env.ZCODE_BIN ?? discoverZcodeBin() ?? "zcode";
   // Non-JS bin (e.g. a `zcode` command or wrapper) → use as-is, rely on its own shebang.
   if (!/\.(cjs|mjs|js)$/.test(zcodeBin)) {
@@ -445,13 +451,14 @@ export function resolveZcodeCommand(): string[] {
   }
   // JS file → launch with an explicit sqlite-capable Node to bypass the shebang.
   for (const nodeBin of candidateNodeBinaries()) {
-    if (nodeSupportsSqlite(nodeBin)) {
+    if (nodeSupportsSqlite(nodeBin, probeEnv)) {
       let ver = "?";
       try {
         // argv form (no shell, space-safe); capture stderr so it doesn't leak.
         ver = execFileSync(nodeBin, ["--version"], {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
+          env: probeEnv,
         }).trim();
       } catch {
         // keep "?"
