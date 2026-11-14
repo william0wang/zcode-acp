@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.0](https://github.com/william0wang/zcode-acp/compare/v0.84.3...v0.85.0) (2026-11-14)
+
+
+### Features
+
+* **remote:** terminal relay for remote terminal execution over the hub (app ADR-0011) ([#383](https://github.com/william0wang/zcode-acp/issues/383)) ([1481bd1](https://github.com/william0wang/zcode-acp/commit/1481bd1ea9cd20c7226d6176b9ca48ad8c779f93))
+
+
+### Bug Fixes
+
+* preserve workspace when recovering cold sessions ([#381](https://github.com/william0wang/zcode-acp/issues/381)) ([32e9921](https://github.com/william0wang/zcode-acp/commit/32e9921634bb7dd6938a14a471df143b0a07020f))
+* **remote:** skip serve workspace pre-check on backends without sessionIds support ([#385](https://github.com/william0wang/zcode-acp/issues/385)) ([6a98771](https://github.com/william0wang/zcode-acp/commit/6a9877147ff58b057f16c3476bfd82783789fda0))
+
 ## [0.84.3](https://github.com/william0wang/zcode-acp/compare/v0.84.2...v0.84.3) (2026-11-13)
 
 
