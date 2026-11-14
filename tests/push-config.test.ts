@@ -53,6 +53,7 @@ describe("resolvePushConfig", () => {
         ask: true,
         workflowStage: true,
         quota: true,
+        terminal: true,
       },
       quietMs: 30_000,
       askDelayMs: 120_000,
@@ -119,6 +120,7 @@ describe("resolvePushConfig", () => {
         ask: true,
         workflowStage: true,
         quota: true,
+        terminal: true,
       },
       quietMs: 30_000,
       askDelayMs: 120_000,
@@ -186,6 +188,7 @@ describe("resolvePushConfig", () => {
       ask: false,
       workflowStage: true,
       quota: true,
+      terminal: true,
     });
   });
 
