@@ -86,9 +86,7 @@ const nextMessage = (ws: WebSocket): Promise<Record<string, unknown>> =>
 /** nextMessage plus the opcode: the relay must forward BOTH verbatim — both
  * app ends (Rust reader, phone WS client) drop non-text frames, so a relay
  * that Buffers a text frame into a binary one eats the message silently. */
-const nextFrame = (
-  ws: WebSocket,
-): Promise<{ frame: Record<string, unknown>; isBinary: boolean }> =>
+const nextFrame = (ws: WebSocket): Promise<{ frame: Record<string, unknown>; isBinary: boolean }> =>
   new Promise((resolve) =>
     ws.once("message", (data, isBinary) => resolve({ frame: JSON.parse(String(data)), isBinary })),
   );
@@ -254,12 +252,16 @@ describe("terminal relay pairing", () => {
 
     const client = clientWs(hub);
     await opened(client); // pairs with the SECOND control
+    // Attach the subs listener BEFORE awaiting the close: the two events ride
+    // different sockets with no cross-socket ordering, and a subs frame that
+    // fires while nothing listens is lost — expectSubs would hang forever.
+    const subs = nextMessage(second);
     const { code, reason } = await gone;
     expect(code).toBe(4000);
     expect(reason).toBe("superseded");
 
     // The surviving control still relays (after its own subs notice).
-    await expectSubs(second, 1);
+    expect(await subs).toEqual({ v: 1, type: "subs", count: 1 });
     client.send(JSON.stringify({ v: 1, type: "replay", afterSeq: 0 }));
     expect(await nextMessage(second)).toEqual({ v: 1, type: "replay", afterSeq: 0 });
   });

@@ -64,6 +64,9 @@ function makeFixtures(turn: PendingTurn, escalateAfterMs = 0): DrainFixtures {
     // stub servers must mirror the real shape or the reload throws.
     sessionMcpServers: new Map(),
     modelAvailability: new Map(),
+    // cacheModelAvailability drops this with an invalidated snapshot — stub
+    // servers must mirror the real shape or the reload throws.
+    currentModelIdentity: new Map(),
     markBackendLoaded: () => {},
     // resumePreservingModel single-flights through this map (ADR-0017 race
     // fix) — stub servers must mirror the real shape or the reload throws.

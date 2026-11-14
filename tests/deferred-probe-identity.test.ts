@@ -2,12 +2,27 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+/** Counts real readFileSync calls so the bundle-state memo is observable. */
+const reads = vi.hoisted(() => ({ count: 0 }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    readFileSync: (...args: unknown[]) => {
+      reads.count++;
+      return (actual.readFileSync as (...a: unknown[]) => unknown)(...args);
+    },
+  };
+});
+
 import {
   auditedBundleMatches,
   boundDeferredProbeCommand,
   catalogProbeDiagnostic,
   deferredProbeCapabilityVerified,
+  resetDeferredProbeMemosForTests,
 } from "../src/config/deferred-probe-capability.js";
 
 const entry = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
@@ -40,6 +55,18 @@ describe("deferred capability identity", () => {
       ).toBe(true);
     },
   );
+  it.runIf(installed)("reads the bundle state once per process across capability checks", () => {
+    resetDeferredProbeMemosForTests();
+    reads.count = 0;
+    const argv = [process.execPath, entry, "app-server", "--stdio"];
+    expect(deferredProbeCapabilityVerified(argv)).toBe(true);
+    // Info.plist + the bundle itself — nothing more on repeat checks.
+    expect(reads.count).toBe(2);
+    expect(deferredProbeCapabilityVerified(argv)).toBe(true);
+    expect(boundDeferredProbeCommand(argv)).not.toBeNull();
+    expect(reads.count).toBe(2);
+    resetDeferredProbeMemosForTests();
+  });
   it("rejects wrappers, unknown executables, and misleading command arguments", () => {
     for (const argv of [
       ["zcode", "app-server", "--stdio"],

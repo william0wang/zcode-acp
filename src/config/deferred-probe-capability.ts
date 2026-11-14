@@ -16,15 +16,35 @@ export function auditedBundleMatches(version: string, digest: string): boolean {
   return Object.hasOwn(AUDITED, version) && AUDITED[version] === digest;
 }
 
+/** Per-process bundle-state memo: the Info.plist read + bundle sha256 dominate
+ * the capability check, which every session/new flight pays even on machines
+ * the probe refuses to cover. A desktop update mid-process is served by the
+ * next bridge restart (the same trade as the per-generation backend verdicts)
+ * — and the mismatch warn below then fires once per process, not per session. */
+let bundleStateMemo: { version?: string; digest: string } | null = null;
+
+/** Test hook — drop the per-process bundle-state memo. */
+export function resetDeferredProbeMemosForTests(): void {
+  bundleStateMemo = null;
+}
+
+function bundleState(): { version?: string; digest: string } {
+  if (!bundleStateMemo) {
+    const plist = readFileSync(path.join(path.dirname(ENTRY), "../../Info.plist"), "utf8");
+    const version = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/u.exec(
+      plist,
+    )?.[1];
+    const digest = createHash("sha256").update(readFileSync(ENTRY)).digest("hex");
+    bundleStateMemo = { version, digest };
+  }
+  return bundleStateMemo;
+}
+
 /** Read-only bundle pin diagnostics; no backend or user state is opened. */
 export function catalogProbeDiagnostic(): string {
   try {
-    const plist = readFileSync(path.join(path.dirname(ENTRY), "../../Info.plist"), "utf8");
-    const version =
-      /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/u.exec(plist)?.[1] ??
-      "unknown";
-    const digest = createHash("sha256").update(readFileSync(ENTRY)).digest("hex");
-    return `catalog probe: version=${version} sha256=${digest} pin=${auditedBundleMatches(version, digest) ? "match" : "mismatch"}`;
+    const { version, digest } = bundleState();
+    return `catalog probe: version=${version ?? "unknown"} sha256=${digest} pin=${auditedBundleMatches(version ?? "", digest) ? "match" : "mismatch"}`;
   } catch {
     return "catalog probe: desktop bundle unavailable";
   }
@@ -45,12 +65,8 @@ function verifiedDigest(argv?: readonly string[]): string | null {
     if (tail.length !== 0 && !(tail.length === 2 && tail[0] === "--disallowed-tools" && tail[1]))
       return null;
     if (realpathSync(ENTRY) !== ENTRY) return null;
-    const plist = readFileSync(path.join(path.dirname(ENTRY), "../../Info.plist"), "utf8");
-    const version = /<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/u.exec(
-      plist,
-    )?.[1];
+    const { version, digest: actual } = bundleState();
     const expected = version ? AUDITED[version] : undefined;
-    const actual = createHash("sha256").update(readFileSync(ENTRY)).digest("hex");
     if (!version || !auditedBundleMatches(version, actual)) {
       warn(`Deferred catalog probe pin mismatch: version=${version ?? "unknown"} sha256=${actual}`);
       return null;

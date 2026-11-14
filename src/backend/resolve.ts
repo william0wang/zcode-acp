@@ -109,18 +109,34 @@ export function candidateNodeBinaries(): string[] {
 /**
  * Verify a Node binary can load `node:sqlite` (ZCode depends on it; Node < 22
  * lacks the module and would crash). Uses `new DatabaseSync(...)` because a
- * bare reference would mis-detect support.
+ * bare reference would mis-detect support. Memoized per binary: a binary's
+ * sqlite support cannot change within one bridge process, and the catalog
+ * probe re-resolves its command on every session/new flight.
  */
+const sqliteSupportMemo = new Map<string, boolean>();
+let probeResolutionMemo: { key: string; argv: string[] } | null = null;
+
+/** Test hook — clear the per-process resolve memos between cases. */
+export function resetResolveMemosForTests(): void {
+  sqliteSupportMemo.clear();
+  probeResolutionMemo = null;
+}
+
 function nodeSupportsSqlite(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
   if (!nodeBin || !existsSync(nodeBin)) return false;
+  const memoKey = `${nodeBin}\0${env ? "sanitized" : "inherit"}`;
+  const memo = sqliteSupportMemo.get(memoKey);
+  if (memo !== undefined) return memo;
   try {
     execFileSync(nodeBin, ["-e", "new (require('node:sqlite').DatabaseSync)(':memory:')"], {
       stdio: ["ignore", "ignore", "ignore"],
       timeout: 5000,
       env,
     });
+    sqliteSupportMemo.set(memoKey, true);
     return true;
   } catch {
+    sqliteSupportMemo.set(memoKey, false);
     return false;
   }
 }
@@ -437,13 +453,28 @@ export function backendArgs(): string[] {
   return ["app-server", "--stdio", ...(disallowed ? ["--disallowed-tools", disallowed] : [])];
 }
 
-/** Resolve the full argv to launch `zcode app-server --stdio`. */
+/** Resolve the full argv to launch `zcode app-server --stdio`. The catalog
+ * probe path re-runs per session/new flight, so its resolution is memoized
+ * per process (ZCODE_BIN and the candidate set cannot change mid-process). */
 export function resolveZcodeCommand(opts: { catalogProbe?: boolean } = {}): string[] {
   const probeEnv = opts.catalogProbe ? { ...process.env } : undefined;
   if (probeEnv) {
     delete probeEnv.NODE_OPTIONS;
     delete probeEnv.NODE_PATH;
   }
+  const memoKey = opts.catalogProbe ? (process.env.ZCODE_BIN ?? "") : null;
+  if (memoKey !== null && probeResolutionMemo?.key === memoKey) {
+    return [...probeResolutionMemo.argv];
+  }
+  const argv = resolveZcodeCommandOnce(probeEnv, opts.catalogProbe === true);
+  if (memoKey !== null) probeResolutionMemo = { key: memoKey, argv };
+  return [...argv];
+}
+
+function resolveZcodeCommandOnce(
+  probeEnv: NodeJS.ProcessEnv | undefined,
+  catalogProbe: boolean,
+): string[] {
   const zcodeBin = process.env.ZCODE_BIN ?? discoverZcodeBin() ?? "zcode";
   // Non-JS bin (e.g. a `zcode` command or wrapper) → use as-is, rely on its own shebang.
   if (!/\.(cjs|mjs|js)$/.test(zcodeBin)) {
@@ -451,7 +482,7 @@ export function resolveZcodeCommand(opts: { catalogProbe?: boolean } = {}): stri
   }
   // JS file → launch with an explicit sqlite-capable Node to bypass the shebang.
   const candidates =
-    opts.catalogProbe && process.release.name === "node" && !process.versions.electron
+    catalogProbe && process.release.name === "node" && !process.versions.electron
       ? [process.execPath, ...candidateNodeBinaries()]
       : candidateNodeBinaries();
   for (const nodeBin of candidates) {

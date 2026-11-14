@@ -3686,6 +3686,10 @@ export function cacheModelAvailability(
     )
   ) {
     server.modelAvailability.delete(zcodeSid);
+    // The identity and the snapshot are read as a pair by buildConfigOptions:
+    // a surviving registry-spelling identity over a deleted snapshot appends a
+    // duplicate same-named current into the local-config dropdown.
+    server.currentModelIdentity.delete(zcodeSid);
     return;
   }
   server.modelAvailability.set(
