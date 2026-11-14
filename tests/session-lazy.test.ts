@@ -151,9 +151,18 @@ function fakeBackend(
           };
         case "session/list": {
           const ids = (params as { sessionIds?: string[] }).sessionIds;
-          return { id, result: { sessions: ids
-            ? ids.map(sessionId => ({ ...listed.find(s => s.sessionId === sessionId), sessionId, workspace: { workspacePath: resumeWorkspace ?? process.cwd() } }))
-            : listed } };
+          return {
+            id,
+            result: {
+              sessions: ids
+                ? ids.map((sessionId) => ({
+                    ...listed.find((s) => s.sessionId === sessionId),
+                    sessionId,
+                    workspace: { workspacePath: resumeWorkspace ?? process.cwd() },
+                  }))
+                : listed,
+            },
+          };
         }
         case "session/read":
           return { id, result: { projection: { contextUsed: 0 }, settings: {} } };
@@ -962,9 +971,10 @@ describe("serve foreign durable target rejection", () => {
         mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "foreign", createdAt: 1 });
         const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
         server.backend = backend;
-        const invoke = (method: "resume" | "load") => method === "resume"
-          ? resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx)
-          : loadSession(server, { sessionId: "alias" } as acp.LoadSessionRequest, cx);
+        const invoke = (method: "resume" | "load") =>
+          method === "resume"
+            ? resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx)
+            : loadSession(server, { sessionId: "alias" } as acp.LoadSessionRequest, cx);
         await expect(invoke(first)).rejects.toThrow("session belongs to another workspace");
         await expect(invoke(second)).rejects.toThrow("session belongs to another workspace");
         expect(server.isBackendSessionLive("alias")).toBe(false);
@@ -985,7 +995,8 @@ describe("serve foreign durable target rejection", () => {
     ]);
     for (const result of results) {
       expect(result.status).toBe("rejected");
-      if (result.status === "rejected") expect(result.reason.message).toContain("session belongs to another workspace");
+      if (result.status === "rejected")
+        expect(result.reason.message).toContain("session belongs to another workspace");
     }
     expect(server.isBackendSessionLive("alias")).toBe(false);
     expect(server.resolveSid("alias")).toBeUndefined();
@@ -997,7 +1008,9 @@ describe("serve foreign durable target rejection", () => {
     mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "foreign", createdAt: 1 });
     const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
     server.backend = backend;
-    await expect(ensureRealSession(server, "alias")).rejects.toThrow("session belongs to another workspace");
+    await expect(ensureRealSession(server, "alias")).rejects.toThrow(
+      "session belongs to another workspace",
+    );
     expect(server.resolveSid("alias")).toBeUndefined();
     expect(server.isBackendSessionLive("alias")).toBe(false);
     expect(calls.filter((c) => c.method === "session/messages")).toHaveLength(0);
@@ -1139,7 +1152,6 @@ describe("store-recovered sessions (bridge restart)", () => {
   });
 });
 
-
 describe("serve cold recovery verification regressions", () => {
   function setup(workspace: unknown, state = "ready") {
     const server = new ZcodeAcpServer({ serveMode: true });
@@ -1163,35 +1175,37 @@ describe("serve cold recovery verification regressions", () => {
   it("uses lifecycle ready after verifying the stored workspace", async () => {
     const { server, calls } = setup({ workspacePath: process.cwd() });
     await expect(ensureRealSession(server, "alias")).resolves.toBe("stored");
-    expect(calls.some(c => c.method === "session/resume")).toBe(false);
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
     expect(server.resolveSid("alias")).toBe("stored");
   });
   it("rejects a foreign persisted workspace even when resume would echo the requested workspace", async () => {
     const { server, calls } = setup({ workspacePath: "/tmp/foreign-project" }, "unloaded");
     const cx = { notify: async () => {} } as unknown as acp.AgentContext;
-    await expect(resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx))
-      .rejects.toThrow("session belongs to another workspace");
-    expect(calls.some(c => c.method === "session/resume")).toBe(false);
+    await expect(
+      resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx),
+    ).rejects.toThrow("session belongs to another workspace");
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
     expect(server.resolveSid("alias")).toBeUndefined();
   });
   it("does not reload a turn in flight after verifying workspace", async () => {
     const { server, calls } = setup({ workspacePath: process.cwd() });
     server.pendingTurns.set("turn", { zcodeSid: "stored" } as never);
     await expect(ensureRealSession(server, "alias")).resolves.toBe("stored");
-    expect(calls.some(c => c.method === "session/resume")).toBe(false);
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
   });
   it("does not probe lifecycle for a verified session with a running turn", async () => {
     const { server, calls } = setup({ workspacePath: process.cwd() });
     server.pendingTurns.set("turn", { zcodeSid: "stored" } as never);
     await expect(ensureRealSession(server, "alias")).resolves.toBe("stored");
-    expect(calls.some(c => c.method === "session/lifecycle/getState")).toBe(false);
-    expect(calls.some(c => c.method === "session/resume")).toBe(false);
+    expect(calls.some((c) => c.method === "session/lifecycle/getState")).toBe(false);
+    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
   });
   it("concurrent direct recoveries share one resume flight", async () => {
     const { server, calls } = setup({ workspacePath: process.cwd() }, "unloaded");
-    await expect(Promise.all([ensureRealSession(server, "alias"), ensureRealSession(server, "alias")]))
-      .resolves.toEqual(["stored", "stored"]);
-    expect(calls.filter(c => c.method === "session/resume")).toHaveLength(1);
+    await expect(
+      Promise.all([ensureRealSession(server, "alias"), ensureRealSession(server, "alias")]),
+    ).resolves.toEqual(["stored", "stored"]);
+    expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(1);
     expect(server.resolveSid("alias")).toBe("stored");
   });
   it("does not publish the alias when an unloaded session fails to reload", async () => {
@@ -1199,7 +1213,8 @@ describe("serve cold recovery verification regressions", () => {
     const backend = server.backend!;
     const request = backend.request.bind(backend);
     backend.request = async (id, method, params, timeout) => {
-      if (method === "session/resume") return { id, error: { code: -32000, message: "transient failure" } };
+      if (method === "session/resume")
+        return { id, error: { code: -32000, message: "transient failure" } };
       return request(id, method, params, timeout);
     };
     await expect(ensureRealSession(server, "alias")).rejects.toThrow("transient failure");
@@ -1224,17 +1239,58 @@ describe("serve cold recovery verification regressions", () => {
     const request = backend.request.bind(backend);
     backend.request = async (id, method, params, timeout) => {
       if (method === "session/list") return { id, result: { sessions: [] } };
-      if (method === "session/lifecycle/getState") return { id, error: { code: -32004, message: "Session not found: stored" } };
+      if (method === "session/lifecycle/getState")
+        return { id, error: { code: -32004, message: "Session not found: stored" } };
       return request(id, method, params, timeout);
     };
     const cx = { notify: async () => {} } as unknown as acp.AgentContext;
-    await expect(resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx))
-      .rejects.not.toThrow("cannot verify session workspace");
+    await expect(
+      resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx),
+    ).rejects.not.toThrow("cannot verify session workspace");
     expect(server.resolveSid("alias")).toBeUndefined();
   });
   it("rejects missing workspace evidence without publishing an alias", async () => {
     const { server } = setup(undefined);
     await expect(ensureRealSession(server, "alias")).rejects.toThrow(/workspace/i);
     expect(server.resolveSid("alias")).toBeUndefined();
+  });
+  it("skips the workspace pre-check when the backend predates the sessionIds key", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "stored", createdAt: 1 });
+    const { backend, calls } = fakeBackend([], [], process.cwd());
+    const request = backend.request.bind(backend);
+    backend.request = async (id, method, params, timeout) => {
+      if (method === "session/list" && (params as { sessionIds?: unknown }).sessionIds) {
+        return { id, error: { code: -32600, message: "Unrecognized key: sessionIds" } };
+      }
+      return request(id, method, params, timeout);
+    };
+    server.backend = backend;
+    const cx = { notify: async () => {} } as unknown as acp.AgentContext;
+    // Recovery of a same-workspace session must not break on old backends —
+    // the pre-check is skipped and the resume proceeds.
+    await resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx);
+    expect(calls.some((c) => c.method === "session/resume")).toBe(true);
+    expect(server.sessionIdsQueryRejected).toBe(true);
+  });
+  it("still refuses a foreign workspace on a sessionIds-less backend (post-resume guard)", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "stored", createdAt: 1 });
+    const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
+    const request = backend.request.bind(backend);
+    backend.request = async (id, method, params, timeout) => {
+      if (method === "session/list" && (params as { sessionIds?: unknown }).sessionIds) {
+        return { id, error: { code: -32600, message: "Unrecognized key: sessionIds" } };
+      }
+      return request(id, method, params, timeout);
+    };
+    server.backend = backend;
+    const cx = { notify: async () => {} } as unknown as acp.AgentContext;
+    // The skipped pre-check must not open a hole: the resume RESULT still
+    // carries the recorded workspace and the post-resume guard refuses it.
+    await expect(
+      resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx),
+    ).rejects.toThrow("session belongs to another workspace");
+    expect(calls.some((c) => c.method === "session/resume")).toBe(true);
   });
 });
