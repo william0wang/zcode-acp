@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.1](https://github.com/william0wang/zcode-acp/compare/v0.85.0...v0.85.1) (2026-11-14)
+
+
+### Bug Fixes
+
+* initialize model catalog from verified backend ([#382](https://github.com/william0wang/zcode-acp/issues/382)) ([2aa6cd6](https://github.com/william0wang/zcode-acp/commit/2aa6cd6076a69780d333d82f453ad0647d5e72d5))
+* memoize catalog probe capability and sync model identity invalidation ([4cfc5fd](https://github.com/william0wang/zcode-acp/commit/4cfc5fd30f7c94bd21283af28995138de3067f87))
+* **remote:** preserve terminal relay frame opcode when forwarding ([87ffa2e](https://github.com/william0wang/zcode-acp/commit/87ffa2e8ef2d2c68205c01a2aa42827ce8bf5d01))
+
 ## [0.85.0](https://github.com/william0wang/zcode-acp/compare/v0.84.3...v0.85.0) (2026-11-14)
 
 
