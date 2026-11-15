@@ -195,7 +195,7 @@ describe("session/new lazy creation", () => {
 
     expect(server.backend).toBeNull();
     expect(resp.sessionId).toBeTruthy();
-    expect(server.pendingSessions.get(resp.sessionId)).toEqual({ cwd: "/tmp/ws" });
+    expect(server.pendingSessions.get(resp.sessionId)).toMatchObject({ cwd: "/tmp/ws" });
     expect(server.resolveSid(resp.sessionId)).toBeUndefined();
     expect(mockUpsertCalls).toHaveLength(0);
     // But the PROJECT-OPEN revival fires at session/new (ADR-0031 amendment):
@@ -864,7 +864,7 @@ describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
     const server = new ZcodeAcpServer({ serveMode: true });
     const resp = await newSession(server, newSessionParams("/etc"));
 
-    expect(server.pendingSessions.get(resp.sessionId)).toEqual({ cwd: process.cwd() });
+    expect(server.pendingSessions.get(resp.sessionId)).toMatchObject({ cwd: process.cwd() });
     expect(mockStore.get(resp.sessionId)?.cwd).toBe(process.cwd());
   });
 

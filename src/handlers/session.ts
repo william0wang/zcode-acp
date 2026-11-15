@@ -39,10 +39,12 @@ import {
   buildInitialConfigOptions,
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_ID,
+  findProviderConfig,
   formatModelValue,
   loadAllModels,
   modelContextWindow,
   parseModelValue,
+  rememberModelChoice,
 } from "../config/options.js";
 import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
 import {
@@ -53,7 +55,7 @@ import {
 import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
-import { initialSessionMode } from "../config/settings.js";
+import { initialSessionMode, pinAdvertisedModel } from "../config/settings.js";
 import { probeInitialModelCatalog } from "../config/initial-model-catalog.js";
 import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
 import {
@@ -175,6 +177,20 @@ function initialCatalog(
   return { cached: null, flight };
 }
 
+/**
+ * The model configOption's advertised current value, if the menu carries one.
+ *
+ * `session/new` has no backend session yet, so the current model there is a
+ * projection (`buildConfigOptions` leader / catalog-probe snapshot), not a
+ * measurement. Whoever receives it may skip its model switch on equality —
+ * the pin at materialization below uses this exact value to keep that
+ * projection true.
+ */
+function advertisedModelFrom(options: acp.SessionConfigOption[]): string | undefined {
+  const model = options.find((option) => option.id === "model");
+  return model?.type === "select" ? model.currentValue : undefined;
+}
+
 /** Send only to the connection that adopted this still-unmodified placeholder. */
 function updateInitialCatalog(
   server: ZcodeAcpServer,
@@ -210,6 +226,11 @@ function updateInitialCatalog(
         const options = await buildInitialConfigOptions(server, root, result);
         await enqueueSessionSend(sid, async () => {
           if (!valid()) return;
+          // The probe snapshot is the truthful current model. A client may
+          // only ever see this later menu before it prompts, so the pin at
+          // materialization must follow the LATEST advertised value.
+          const advertised = advertisedModelFrom(options);
+          if (advertised) pending.advertisedModel = advertised;
           await (client ?? server.clients.broadcast()).notify("session/update", {
             sessionId: sid,
             update: { sessionUpdate: "config_option_update", configOptions: options },
@@ -673,6 +694,9 @@ export async function newSession(
     const cwd = server.sessionCwds.get(bindSid) ?? process.cwd();
     const catalog = initialCatalog(server, cwd);
     const configOptions = await buildInitialConfigOptions(server, bindRoot, catalog.cached);
+    const boundPending = server.pendingSessions.get(bindSid);
+    const boundModel = advertisedModelFrom(configOptions);
+    if (boundPending && boundModel) boundPending.advertisedModel = boundModel;
     updateInitialCatalog(server, cwd, bindSid, client, catalog.flight);
     return { sessionId: bindSid, modes, configOptions };
   }
@@ -798,6 +822,9 @@ export async function newSession(
     clientConnectionRoot(client),
     catalog.cached,
   );
+  const pendingAtNew = server.pendingSessions.get(acpSid);
+  const advertisedModel = advertisedModelFrom(configOptions);
+  if (pendingAtNew && advertisedModel) pendingAtNew.advertisedModel = advertisedModel;
   updateInitialCatalog(server, cwd, acpSid, client, catalog.flight);
   return { sessionId: acpSid, modes, configOptions };
 }
@@ -1171,6 +1198,43 @@ export async function ensureRealSession(
       const selected = formatModelValue(pinnedProvider, pinnedModel);
       if (!(await applyModelSwitch(server, sid, selected))) {
         throw new Error(`zcode refused configured model ${selected}`);
+      }
+    }
+    // The pending menu advertised a model before any backend session existed
+    // (buildConfigOptions projects the dropdown leader, or the catalog probe's
+    // snapshot). session/create is the first moment a model really exists —
+    // and the backend's own default can disagree with that projection (e.g.
+    // the desktop's active account family from setting.json wins over the
+    // bridge's dropdown leader). ACP clients may skip a requested switch when
+    // it equals the advertised current value, so the mismatch silently ran
+    // turns on a model nobody selected (observed with T3Code: the thread
+    // stored a custom-provider model, the turn billed the desktop's coding
+    // plan instead and failed 1113). Make the advertisement true: pin the
+    // advertised model unless the env pair above or a client-recorded choice
+    // already owns the selection. ZCODE_ACP_PIN_DEFAULT_MODEL=0 opts out.
+    const advertised = pending.advertisedModel;
+    if (
+      !(pinnedProvider && pinnedModel) &&
+      advertised &&
+      pinAdvertisedModel() &&
+      !server.sessionModelChoices.get(sid) &&
+      // applyModelSwitch resolves providers from config.json; a provider that
+      // exists only in provider_config.json cannot be pinned (same limitation
+      // as any other switch) — leave the backend default instead of a failed
+      // switch on every new session.
+      findProviderConfig(parseModelValue(advertised).providerId)
+    ) {
+      if (await applyModelSwitch(server, sid, advertised)) {
+        // Remember it: a setModel before the session's first input applies
+        // in-memory only, and a later resume reverts to the workspace default
+        // — the re-assert path needs this to restore the same model.
+        rememberModelChoice(server, acpSid, sid, { model: advertised });
+        log(`session/new ${acpSid}: pinned the advertised model ${advertised}`);
+      } else {
+        warn(
+          `session/new ${acpSid}: could not pin the advertised model ${advertised}` +
+            " — keeping the backend default",
+        );
       }
     }
     // session/create loads the session into this backend process.

@@ -69,6 +69,20 @@ export function showCompletionStatus(env: NodeJS.ProcessEnv = process.env): bool
 }
 
 /**
+ * Pin a new session to the model its pending `session/new` menu advertised
+ * (default ON). Prevents the backend's own default (e.g. a desktop-selected
+ * account family) from silently diverging from the `currentValue` clients
+ * used to decide whether a model switch is needed.
+ */
+export function pinAdvertisedModel(env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = loadUserConfig(env).session?.pinDefaultModel;
+  if (file !== undefined) return file;
+  const raw = env.ZCODE_ACP_PIN_DEFAULT_MODEL;
+  if (raw === undefined || raw.trim() === "") return true;
+  return !/^(0|false|off|no)$/i.test(raw.trim());
+}
+
+/**
  * Wait cap (ms) for permission/elicitation requests; 0 = wait forever.
  * Resolved once at bridge start (module-load const in server-requests.ts) —
  * same lifetime as the env var it generalizes.
