@@ -457,7 +457,15 @@ function buildModelSelectOptions(models: ModelRef[]): Array<{ value: string; nam
     const value = formatModelValue(model.providerId, model.modelId);
     if (seen.has(value)) continue;
     seen.add(value);
-    const qualify = collidingIds.has(model.modelId) || !isBuiltinProvider(model.providerId);
+    // An `account:`-spelled coding plan is a builtin in disguise (the
+    // registry dialect of the same config provider) — it must not qualify
+    // just for its spelling, or every snapshot-sourced builtin reads as a
+    // `providerId › model` pair. Collisions still qualify (same model id on
+    // two providers needs the provider in the label).
+    const builtin =
+      isBuiltinProvider(model.providerId) ||
+      isBuiltinProvider(configProviderIdFor(model.providerId));
+    const qualify = collidingIds.has(model.modelId) || !builtin;
     options.push({
       value,
       name: qualify ? `${model.providerName} › ${model.modelId}` : model.modelId,
@@ -698,6 +706,18 @@ export async function buildConfigOptions(
     }
   }
   const snapshot = zcodeSid === null ? undefined : server.modelAvailability.get(zcodeSid);
+  // The materialized snapshot speaks the REGISTRY dialect (`account:…`
+  // provider ids) and carries no display names. The VALUES must stay in that
+  // dialect — it is the only key that keeps same-named models of colliding
+  // legacy plans distinct, and the switch round-trip depends on it — but the
+  // provider NAME a choice shows must not be the raw registry id: a
+  // coding-plan choice would read as the full
+  // `account:<family>-individual-coding-plan › <model>` pair, an unreadable
+  // id string where every client (phone AND desktop panel) wants the display
+  // name. Resolve the name through the config dialect (configProviderIdFor
+  // folds the alias); ids the config cannot name keep the raw id as the
+  // label — distinct, if ugly.
+  const providerNames = new Map(loadAllModels().map((m) => [m.providerId, m.providerName]));
   const allModels =
     snapshot === undefined
       ? loadAllModels()
@@ -707,7 +727,8 @@ export async function buildConfigOptions(
           )
           .map((m) => ({
             providerId: m.providerId,
-            providerName: m.providerId,
+            providerName:
+              providerNames.get(configProviderIdFor(m.providerId)) ?? m.providerId,
             modelId: m.modelId,
           }));
   const currentProvider = currentProviderId || allModels[0]?.providerId || DEFAULT_PROVIDER_ID;
@@ -803,11 +824,18 @@ export async function buildInitialConfigOptions(
   // cannot safely claim the locally configured default is active.
   if (!current?.providerId || !current.modelId)
     return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
-  const models = available.map((entry) => ({
-    providerId: entry.ref!.providerId!,
-    providerName: entry.ref!.providerId!,
-    modelId: entry.ref!.modelId!,
-  }));
+  // Same naming rule as buildConfigOptions' snapshot path: values stay in the
+  // create result's registry dialect (identity-preserving), names resolve
+  // through the config dialect so the raw provider id never reads as a label.
+  const names = new Map(loadAllModels().map((m) => [m.providerId, m.providerName]));
+  const models = available.map((entry) => {
+    const pid = entry.ref!.providerId!;
+    return {
+      providerId: pid,
+      providerName: names.get(configProviderIdFor(pid)) ?? pid,
+      modelId: entry.ref!.modelId!,
+    };
+  });
   const currentValue = formatModelValue(current.providerId, current.modelId);
   const choices = buildModelSelectOptions(models);
   if (!choices.some((choice) => choice.value === currentValue)) {

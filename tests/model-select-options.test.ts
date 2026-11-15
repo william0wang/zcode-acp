@@ -119,6 +119,57 @@ describe("model configOptions uniqueness", () => {
   });
 });
 
+describe("registry snapshot dialect (account: refs)", () => {
+  it("normalizes snapshot refs and the current onto the config dialect with display names", async () => {
+    // A materialized session's modelAvailability carries the registry's
+    // `account:` provider spellings with no display names; the dropdown must
+    // not leak them (a coding-plan choice read as the raw
+    // `account:…-individual-coding-plan › GLM-5.3` pair — an unreadable id
+    // string on clients). Values and the current land on the config dialect.
+    fakeConfig = {
+      provider: {
+        "builtin:zai-coding-plan": codingPlan(
+          "Z.ai - Coding Plan",
+          "https://api.z.ai/api/anthropic",
+        ),
+      },
+    };
+    const server = new ZcodeAcpServer();
+    server.modelAvailability.set("zc-acct-1", [
+      { providerId: "account:zai-individual-coding-plan", modelId: "GLM-5.3" },
+    ]);
+    server.currentModelIdentity.set("zc-acct-1", {
+      providerId: "account:zai-individual-coding-plan",
+      modelId: "GLM-5.3",
+    });
+    server.backend = {
+      isDead: false,
+      request: async () => ({
+        result: {
+          settings: {
+            mode: { current: "build" },
+            model: {
+              current: { providerId: "account:zai-individual-coding-plan", modelId: "GLM-5.3" },
+            },
+            thoughtLevel: { current: "max", available: [] },
+          },
+        },
+      }),
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+
+    const options = await buildConfigOptions(server, "zc-acct-1");
+    const model = options.find((option) => option.id === "model");
+    // The display name is the bare model id — never the raw registry pair.
+    // Values and the current KEEP the registry dialect (identity-preserving:
+    // colliding legacy plans stay distinct, the switch round-trip works).
+    expect(model?.options.map((option) => option.name)).toEqual(["GLM-5.3"]);
+    expect(model?.currentValue).toBe("account:zai-individual-coding-plan\\GLM-5.3");
+    expect(model?.options.map((option) => option.value)).toEqual([
+      "account:zai-individual-coding-plan\\GLM-5.3",
+    ]);
+  });
+});
+
 describe("thought option display clamp", () => {
   it("never advertises a current outside the model's available levels (stale after setModel)", async () => {
     // The runtime can briefly keep the PREVIOUS model's thoughtLevel after a
