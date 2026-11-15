@@ -55,6 +55,15 @@ describe("loadUserConfig", () => {
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ session: { mode: "build" } });
   });
 
+  it("validates the session pin preference (boolean only)", () => {
+    writeConfig(JSON.stringify({ session: { pinDefaultModel: false } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      session: { pinDefaultModel: false },
+    });
+    writeConfig(JSON.stringify({ session: { pinDefaultModel: "false" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
+
   it("missing file reads as empty (the no-file env-only path)", () => {
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });

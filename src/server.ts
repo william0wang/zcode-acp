@@ -165,6 +165,17 @@ export class ZcodeAcpServer {
        * carry command/args/env; remote entries carry type/url), so entries are
        * passed through unchanged. */
       mcpServers?: acp.McpServer[];
+      /**
+       * The model configOption `currentValue` last advertised to the client for
+       * this placeholder (`session/new` response, or the catalog-probe update
+       * that follows it). `session/create` is the first moment a model really
+       * exists, and the backend's own default can disagree with this
+       * projection; a client that skipped its switch because the two matched
+       * would otherwise run turns on a model it never picked. The create path
+       * pins the session to this value so the advertisement stays true
+       * (see ensureRealSession).
+       */
+      advertisedModel?: string;
     }
   >();
   /**

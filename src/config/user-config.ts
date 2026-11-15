@@ -140,6 +140,15 @@ export interface SessionUserConfig {
   mode?: string;
   /** Show successful turn-end status as assistant text (default true). */
   showCompletionStatus?: boolean;
+  /**
+   * Pin a new session to the model its `session/new` menu advertised before
+   * the backend session existed (default true). Without the pin, the backend
+   * starts the session on its own default (e.g. the desktop's active account
+   * family), which can differ from the advertised `currentValue` — and an ACP
+   * client that skipped its model switch on equality then runs the wrong
+   * model. Set false to restore the inherit-the-backend-default behavior.
+   */
+  pinDefaultModel?: boolean;
 }
 
 /** The `autoCompact` section: threshold-based context compaction. */
@@ -404,6 +413,11 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     if (showCompletionStatus !== undefined) {
       if (typeof showCompletionStatus === "boolean") s.showCompletionStatus = showCompletionStatus;
       else warn(`config: ${label}.showCompletionStatus is not a boolean — ignoring`);
+    }
+    const pinDefaultModel = body["pinDefaultModel"];
+    if (pinDefaultModel !== undefined) {
+      if (typeof pinDefaultModel === "boolean") s.pinDefaultModel = pinDefaultModel;
+      else warn(`config: ${label}.pinDefaultModel is not a boolean — ignoring`);
     }
     return s;
   });
