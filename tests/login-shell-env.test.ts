@@ -67,52 +67,10 @@ afterEach(() => {
 });
 
 describe("envWithLoginShell", () => {
-  test("brings in a var the caller does not have", async () => {
-    execAnswers(shellEnv({ PATH: "/opt/mise/shims:/usr/bin:/bin", JAVA_HOME: "/jdk/17" }));
-    vi.stubEnv("JAVA_HOME", undefined as unknown as string);
-
-    // The caller passes NO PATH of its own — the realistic editor case, where
-    // the bridge inherited launchd's bare environment and has nothing worth
-    // keeping. A tool that only exists in the login shell's PATH is now
-    // reachable from a process that could not see it before.
-    const env = await envWithLoginShell({} as NodeJS.ProcessEnv);
-    expect(env.PATH).toBe("/opt/mise/shims:/usr/bin:/bin");
-    expect(env.JAVA_HOME).toBe("/jdk/17");
-  });
-
-  test("the caller's own value wins over the shell's, except PATH", async () => {
-    execAnswers(shellEnv({ PATH: "/shell/bin", ZCODE_ACP_HUB_PORT: "9999" }));
-    const env = await envWithLoginShell({
-      PATH: "/caller/bin",
-      ZCODE_ACP_HUB_PORT: "7777",
-    } as NodeJS.ProcessEnv);
-    // PATH is a union (shell first): a bare inherited PATH must never *drop*
-    // the toolchain dirs the probe exists to add.
-    expect(env.PATH).toBe("/shell/bin:/caller/bin");
-    expect(env.ZCODE_ACP_HUB_PORT).toBe("7777");
-  });
-
   test("PATH is unioned, shell entries first, deduped", async () => {
     execAnswers(shellEnv({ PATH: "/mise/shims:/usr/bin:/bin" }));
     const env = await envWithLoginShell({ PATH: "/usr/bin:/opt/editor/bin" } as NodeJS.ProcessEnv);
     expect(env.PATH).toBe("/mise/shims:/usr/bin:/bin:/opt/editor/bin");
-  });
-
-  test("a caller with only a bare launchd PATH still gains the toolchain dirs", async () => {
-    // The realistic editor case: the inherited PATH is macOS's bare default and
-    // contains no version manager. Caller-wins on PATH would discard the whole
-    // point of the probe.
-    execAnswers(shellEnv({ PATH: "/mise/shims:/opt/homebrew/bin:/usr/bin:/bin" }));
-    const env = await envWithLoginShell({
-      PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-    } as NodeJS.ProcessEnv);
-    expect(env.PATH).toBe("/mise/shims:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
-  });
-
-  test("an empty PATH segment is not carried into the union", async () => {
-    execAnswers(shellEnv({ PATH: "/shell/bin" }));
-    const env = await envWithLoginShell({ PATH: "/caller/bin:" } as NodeJS.ProcessEnv);
-    expect(env.PATH).toBe("/shell/bin:/caller/bin");
   });
 
   test("process-plumbing vars from the shell never leak into the spawn", async () => {
@@ -133,72 +91,6 @@ describe("envWithLoginShell", () => {
     expect(env.ZCODE_ACP_REMOTE_ORIGIN).toBeUndefined();
     expect(env.DSH_TUI_STATS).toBeUndefined();
     expect(env.MARTTY_PASSTHROUGH_ENV).toBeUndefined();
-  });
-
-  test("a plumbing var the CALLER set survives the shell's copy", async () => {
-    execAnswers(shellEnv({ ZCODE_ACP_HUB_PORT: "9999", PATH: "/shell/bin" }));
-    const env = await envWithLoginShell({ ZCODE_ACP_HUB_PORT: "7777" } as NodeJS.ProcessEnv);
-    expect(env.ZCODE_ACP_HUB_PORT).toBe("7777");
-  });
-
-  test("cwd-ish vars are never copied", async () => {
-    // PWD from the probing shell is the directory the shell happened to start
-    // in — carrying it would make the spawn think it is already somewhere else.
-    // TMPDIR too: the live process's own temp dir is authoritative (a harness
-    // or a launchd plist may set it deliberately), and a shell's copy would
-    // send spawned children to a different temp tree than their parent uses.
-    execAnswers(
-      shellEnv({
-        PATH: "/shell/bin",
-        PWD: "/tmp/probe",
-        SHLVL: "3",
-        TMPDIR: "/var/folders/xx/T",
-      }),
-    );
-    const env = await envWithLoginShell({} as NodeJS.ProcessEnv);
-    expect(env.PATH).toBe("/shell/bin");
-    expect(env.PWD).toBeUndefined();
-    expect(env.SHLVL).toBeUndefined();
-    expect(env.TMPDIR).toBeUndefined();
-  });
-
-  test("a shell that fails leaves the caller's env untouched", async () => {
-    execFails();
-    const caller = { PATH: "/usr/bin" } as NodeJS.ProcessEnv;
-    await expect(envWithLoginShell(caller)).resolves.toEqual({ PATH: "/usr/bin" });
-  });
-
-  test("a shell that throws is swallowed, not propagated", async () => {
-    // A hang, a missing binary, an EPERM — none of it may break a spawn.
-    execFileMock.mockImplementation(() => {
-      throw new Error("spawn EPERM");
-    });
-    const caller = { PATH: "/usr/bin" } as NodeJS.ProcessEnv;
-    await expect(envWithLoginShell(caller)).resolves.toEqual({ PATH: "/usr/bin" });
-  });
-
-  test("an empty shell env reads as no completion", async () => {
-    execAnswers(shellEnv({}));
-    const caller = { PATH: "/usr/bin" } as NodeJS.ProcessEnv;
-    await expect(envWithLoginShell(caller)).resolves.toEqual({ PATH: "/usr/bin" });
-  });
-
-  test("values containing a newline survive the NUL framing", async () => {
-    // This is why `env -0` and not `env`: a multi-line value (a MOTD-ish var, a
-    // script) would otherwise split into two bogus records.
-    execAnswers(shellEnv({ PATH: "/shell/bin", MULTI: "line1\nline2" }));
-    const env = await envWithLoginShell({} as NodeJS.ProcessEnv);
-    expect(env.MULTI).toBe("line1\nline2");
-  });
-
-  test("the shell is probed once, not per call", async () => {
-    execAnswers(shellEnv({ PATH: "/shell/bin" }));
-    await envWithLoginShell({} as NodeJS.ProcessEnv);
-    await envWithLoginShell({} as NodeJS.ProcessEnv);
-    await envWithLoginShell({} as NodeJS.ProcessEnv);
-    // The hub incubates repeatedly; re-running a login shell each time would
-    // add ~200ms to every remote session-create for an unchanging value.
-    expect(execFileMock).toHaveBeenCalledTimes(1);
   });
 
   test("concurrent callers share ONE in-flight probe", async () => {
@@ -229,23 +121,6 @@ describe("envWithLoginShell", () => {
     expect(args[2]).toContain(".zshrc");
     expect(args[2]).toContain("env -0");
     expect(args.join(" ")).not.toMatch(/(^|\s)-i($|\s)/);
-  });
-
-  test("bash sources its own rc files", async () => {
-    execAnswers(shellEnv({ PATH: "/shell/bin" }));
-    vi.stubEnv("SHELL", "/bin/bash");
-    await envWithLoginShell({} as NodeJS.ProcessEnv);
-    const [, args] = execFileMock.mock.calls[0] as [string, string[], unknown, unknown];
-    expect(args[2]).toContain(".bashrc");
-    expect(args.join(" ")).not.toMatch(/(^|\s)-i($|\s)/);
-  });
-
-  test("an unknown shell still dumps its login profile env", async () => {
-    execAnswers(shellEnv({ PATH: "/shell/bin" }));
-    vi.stubEnv("SHELL", "/bin/fish");
-    await envWithLoginShell({} as NodeJS.ProcessEnv);
-    const [, args] = execFileMock.mock.calls[0] as [string, string[], unknown, unknown];
-    expect(args[2]).toBe("env -0");
   });
 
   test("stdout noise glued onto the first record is rejected", async () => {

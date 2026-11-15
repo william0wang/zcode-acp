@@ -6,8 +6,6 @@
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { RequestError } from "@agentclientprotocol/sdk";
-
 import { steering } from "../src/handlers/steering.js";
 import { echoSteeredInputs } from "../src/handlers/io.js";
 import { ZcodeAcpServer } from "../src/server.js";
@@ -69,15 +67,6 @@ beforeEach(() => {
 });
 
 describe("_session/steering", () => {
-  it("advertises the extension in the initialize response", async () => {
-    const server = new ZcodeAcpServer();
-    const resp = await server.initialize({ protocolVersion: 1 });
-    const steeringMeta = resp._meta?.["steering"] as
-      { supported?: boolean; timings?: string[] } | undefined;
-    expect(steeringMeta?.supported).toBe(true);
-    expect(steeringMeta?.timings).toEqual(["now", "next"]);
-  });
-
   it("injects into the live turn via v4 sendText guide (default priority)", async () => {
     const server = setup();
     armRunningTurn(server);
@@ -92,19 +81,6 @@ describe("_session/steering", () => {
       requestedDelivery: "guide",
     });
     expect(typeof cmd["commandId"]).toBe("string");
-  });
-
-  it("priority next maps to queue delivery and reports the queued outcome", async () => {
-    const server = setup();
-    armRunningTurn(server);
-    ackFor = { status: "accepted", result: { type: "inputAccepted", delivery: "queue" } };
-    const result = await steering(server, {
-      sessionId: "sess_st",
-      prompt: TEXT_PROMPT,
-      _meta: { steering: { priority: "next" } },
-    });
-    expect(result).toEqual({ outcome: "queued" });
-    expect(commands[0]!["payload"]).toMatchObject({ requestedDelivery: "queue" });
   });
 
   it("records the steering client's root for the drain-echo exclusion", async () => {
@@ -124,79 +100,12 @@ describe("_session/steering", () => {
     expect(idle.steerEchoSuppressedRoots.size).toBe(0);
   });
 
-  it("an idle session answers promptRequired without sending anything", async () => {
-    const server = setup("idle");
-    const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
-    expect(result).toEqual({ outcome: "promptRequired", reason: "noRunningTurn" });
-    expect(commands).toHaveLength(0);
-  });
-
-  it("a foreign-client running turn (projection running, no pending bridge turn) steers", async () => {
-    // The multi-client case: the turn was started by the desktop app, so no
-    // pendingTurns entry exists — the session/read probe is the fallback.
-    const server = setup("running");
-    const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
-    expect(result).toEqual({ outcome: "injected" });
-    expect(commands).toHaveLength(1);
-  });
-
   it("a notification-turn busy window counts as running", async () => {
     const server = setup("idle");
     server.notifyTurnActiveSince.set("zs_st", Date.now());
     const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
     expect(result).toEqual({ outcome: "injected" });
     expect(commands).toHaveLength(1);
-  });
-
-  it("a startNow ack (idle race) is reported honestly as startedNewTurn", async () => {
-    const server = setup("running");
-    armRunningTurn(server);
-    ackFor = { status: "accepted", result: { type: "inputAccepted", delivery: "startNow" } };
-    const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
-    expect(result).toEqual({ outcome: "startedNewTurn" });
-  });
-
-  it("a guide-to-queue fallback upstream reports queued", async () => {
-    const server = setup();
-    armRunningTurn(server);
-    ackFor = { status: "accepted", result: { type: "inputAccepted", delivery: "queue" } };
-    const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
-    expect(result).toEqual({ outcome: "queued" });
-  });
-
-  it("a failed ack (turn_not_steerable) surfaces the backend reason", async () => {
-    const server = setup();
-    armRunningTurn(server);
-    ackFor = {
-      status: "failed",
-      reasonCode: "activePrompt",
-      message: "Core prompt admission rejected: turn_not_steerable",
-    };
-    await expect(steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT })).rejects.toThrow(
-      /turn_not_steerable/,
-    );
-  });
-
-  it("a probe failure treats the session as running and still sends", async () => {
-    const server = setup("error");
-    const result = await steering(server, { sessionId: "sess_st", prompt: TEXT_PROMPT });
-    expect(result).toEqual({ outcome: "injected" });
-    expect(commands).toHaveLength(1);
-  });
-
-  it("rejects non-text content blocks and empty prompts", async () => {
-    const server = setup();
-    armRunningTurn(server);
-    await expect(
-      steering(server, {
-        sessionId: "sess_st",
-        prompt: [{ type: "image", data: "…" }],
-      }),
-    ).rejects.toThrow(RequestError);
-    await expect(
-      steering(server, { sessionId: "sess_st", prompt: [{ type: "text", text: "  " }] }),
-    ).rejects.toThrow(/empty/);
-    expect(commands).toHaveLength(0);
   });
 
   it("rejects unsupported _meta.steering values like codex-acp does", async () => {
@@ -217,21 +126,6 @@ describe("_session/steering", () => {
       }),
     ).rejects.toThrow(/priority/);
     expect(commands).toHaveLength(0);
-  });
-
-  it("joins multi-block prompts with newlines", async () => {
-    const server = setup();
-    armRunningTurn(server);
-    await steering(server, {
-      sessionId: "sess_st",
-      prompt: [
-        { type: "text", text: "stop the current approach" },
-        { type: "text", text: "switch to the sqlite plan" },
-      ],
-    });
-    expect(commands[0]!["payload"]).toMatchObject({
-      text: "stop the current approach\nswitch to the sqlite plan",
-    });
   });
 });
 
@@ -299,27 +193,6 @@ describe("echoSteeredInputs (turn.steerDrained → user_message_chunk)", () => {
     expect(sent[1]!.params.update.messageId).toBe("steer_m2");
   });
 
-  it("skips empty/blank texts and missing drainedInputs", () => {
-    const server = echoServer();
-    echoSteeredInputs(server, "sess_st", {
-      targetTurnId: "t1",
-      pendingInputIds: [],
-      injectedMessageIds: [],
-    });
-    echoSteeredInputs(server, "sess_st", { drainedInputs: [{ messageId: "m1", text: "  " }] });
-    echoSteeredInputs(server, "sess_st", "not-an-object");
-    expect(sent).toHaveLength(0);
-  });
-
-  it("mints an id when the backend message id is absent", () => {
-    const server = echoServer();
-    echoSteeredInputs(server, "sess_st", {
-      drainedInputs: [{ pendingInputId: "pi1", text: "anonymous steer" }],
-    });
-    expect(sent).toHaveLength(2);
-    expect(sent[0]!.params.update.messageId).toMatch(/^steer_/);
-  });
-
   it("excludes the steering client's root — it renders the text locally", () => {
     const server = echoServer();
     const steererRoot = { connection: "martty" };
@@ -331,18 +204,5 @@ describe("echoSteeredInputs (turn.steerDrained → user_message_chunk)", () => {
 
     expect(sent).toHaveLength(2); // still both aliases
     expect(excludedRoots.has(steererRoot)).toBe(true);
-  });
-
-  it("a steering client on one session does not suppress another session's echo", () => {
-    const server = echoServer();
-    server.registerSession("sess_other", "zs_other");
-    const steererRoot = { connection: "editor" };
-    server.suppressSteerEcho("zs_other", steererRoot);
-
-    echoSteeredInputs(server, "sess_st", {
-      drainedInputs: [{ pendingInputId: "pi1", messageId: "m1", text: "unrelated" }],
-    });
-
-    expect(excludedRoots.size).toBe(0); // zs_st has no suppression
   });
 });

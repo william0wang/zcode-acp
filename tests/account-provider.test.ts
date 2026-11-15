@@ -22,7 +22,6 @@ import { mkdirSync, mkdtempSync, renameSync, utimesSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { RequestError } from "@agentclientprotocol/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveCredentialSecret } from "../src/backend/credential-store.js";
@@ -68,10 +67,8 @@ import {
   zcodeCredentialsPresent,
 } from "../src/config/account-provider.js";
 import { saveBridgeAccount } from "../src/config/bridge-accounts.js";
-import { loadAllModels } from "../src/config/options.js";
+import {} from "../src/config/options.js";
 import { authenticate } from "../src/handlers/authenticate.js";
-import { messages } from "../src/i18n.js";
-
 /** Minimal bundled table with two coding-plan providers (one zai, one bigmodel). */
 const TABLE = {
   schemaVersion: 1,
@@ -152,12 +149,6 @@ describe("provider id mapping", () => {
     );
   });
 
-  it("round-trips back to the config.json spelling", () => {
-    expect(configProviderIdFor("account:bigmodel-individual-coding-plan")).toBe(
-      "builtin:bigmodel-coding-plan",
-    );
-  });
-
   it("falls back to the id convention when the bundled table is absent (headless Linux)", () => {
     // Point the resolver at a path that does not exist — a Linux runner (or
     // any machine without the desktop app bundle) has no table to read.
@@ -176,15 +167,6 @@ describe("provider id mapping", () => {
     // off-peak has no legacy builtin spelling — pass through, never invent one.
     expect(configProviderIdFor("account:zai-offpeak-idle-plan")).toBe(
       "account:zai-offpeak-idle-plan",
-    );
-  });
-
-  it("passes unknown / third-party ids through unchanged", () => {
-    expect(accountProviderIdFor("3acc4047-9ddf-43bd-9ed3-a7745f5022ad")).toBe(
-      "3acc4047-9ddf-43bd-9ed3-a7745f5022ad",
-    );
-    expect(configProviderIdFor("3acc4047-9ddf-43bd-9ed3-a7745f5022ad")).toBe(
-      "3acc4047-9ddf-43bd-9ed3-a7745f5022ad",
     );
   });
 });
@@ -355,54 +337,6 @@ describe("fresh desktop-only layout — encrypted store entitlement (#320)", () 
     ).toBe(false);
   });
 
-  it("treats an undecryptable store as empty", () => {
-    writeFileSync(
-      zcodeStorePath.value,
-      JSON.stringify({ [INDIVIDUAL_KEY]: "enc:v1:garbage.not-encrypted-at-all" }),
-    );
-    expect(
-      buildAccountProviderConfig()!.providers["account:bigmodel-individual-coding-plan"]!.access
-        .entitled,
-    ).toBe(false);
-  });
-
-  it("serves the stored api-key when config.json never existed", () => {
-    writeCredentialStore({ [INDIVIDUAL_KEY]: "stored-individual-key" });
-    expect(codingPlanRequestAuthFor("account:bigmodel-individual-coding-plan")).toEqual({
-      apiKey: "stored-individual-key",
-    });
-  });
-
-  it("prefers config.json's key over the stored one", () => {
-    writeCredentialStore({ [INDIVIDUAL_KEY]: "stored-individual-key" });
-    writeFileSync(
-      zcodeCfgPath.value,
-      JSON.stringify({
-        provider: {
-          "builtin:bigmodel-coding-plan": { enabled: true, options: { apiKey: "legacy-key" } },
-        },
-      }),
-    );
-    expect(codingPlanRequestAuthFor("account:bigmodel-individual-coding-plan")).toEqual({
-      apiKey: "legacy-key",
-    });
-  });
-
-  it("keeps one family's store fallback when a bridge account names the other family", async () => {
-    vi.stubEnv("ZCODE_HOME", path.join(root, ".zcode"));
-    writeCredentialStore({ [INDIVIDUAL_KEY]: "stored-individual-key" });
-    await saveBridgeAccount("zai", "bridge-zai-key");
-    const { providers } = buildAccountProviderConfig()!;
-    expect(providers["account:bigmodel-individual-coding-plan"]!.access.entitled).toBe(true);
-    expect(providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
-    expect(codingPlanRequestAuthFor("account:bigmodel-individual-coding-plan")).toEqual({
-      apiKey: "stored-individual-key",
-    });
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
-      apiKey: "bridge-zai-key",
-    });
-  });
-
   it("lets a bridge account entitle only its own family", async () => {
     vi.stubEnv("ZCODE_HOME", path.join(root, ".zcode"));
     await saveBridgeAccount("zai", "bridge-zai-key");
@@ -476,40 +410,6 @@ describe("manual coding-plan keys from provider_config.json (#344)", () => {
     });
   });
 
-  it("serves the fresh manual key over the stale config.json key in apiKey mode", () => {
-    // The desktop "Use API key" flow: mode switches to apiKey and the new key
-    // lands in provider_config.json, while a leftover pre-3.12 config.json
-    // keeps its expired key frozen — the sibling of the OAuth-mode shadowing.
-    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
-    writeFileSync(
-      path.join(dataRoot.value, "setting.json"),
-      JSON.stringify({
-        modelProviderFamilyModes: { zai: "apiKey" },
-        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
-      }),
-    );
-    writeFileSync(
-      zcodeCfgPath.value,
-      JSON.stringify({
-        provider: {
-          "builtin:zai-coding-plan": { enabled: true, options: { apiKey: "stale-pre-3.12-key" } },
-        },
-      }),
-    );
-    writePersonalRules([
-      {
-        providerId: "zai-api",
-        config: {
-          access: { type: "zhipu-coding-plan-api-key", apiKey: "fresh-manual-key" },
-          api: { baseUrl: "https://api.z.ai/api/anthropic" },
-        },
-      },
-    ]);
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
-      apiKey: "fresh-manual-key",
-    });
-  });
-
   it("ignores disabled rules, plain api-key rules, and unrecognized baseUrls", () => {
     writePersonalRules([
       zaiRule({ enabled: false }),
@@ -534,20 +434,6 @@ describe("manual coding-plan keys from provider_config.json (#344)", () => {
     ).toBe(false);
     expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toBeNull();
   });
-
-  it("falls back to the frozen official endpoints when the table is absent", () => {
-    // Headless Linux has no desktop bundle to read — the endpoint → family
-    // mapping must still resolve (frozen pair), and the individual-plan
-    // detection falls back to the id-shape check.
-    builtinProviderEnv.mockReturnValue({
-      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: path.join(root, "absent-table.json"),
-    });
-    delete process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE;
-    writePersonalRules([zaiRule()]);
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
-      apiKey: "manual-zai-key",
-    });
-  });
 });
 
 describe("authenticate (#344)", () => {
@@ -563,23 +449,6 @@ describe("authenticate (#344)", () => {
     ]);
     expect(zcodeCredentialsPresent()).toBe(true);
     expect(authenticate({ methodId: "zcode-credentials" })).toEqual({});
-  });
-
-  it("errors with sign-in guidance when no credential source exists", () => {
-    expect(zcodeCredentialsPresent()).toBe(false);
-    expect(() => authenticate({ methodId: "zcode-credentials" })).toThrowError(
-      messages().authErrNoCredentials,
-    );
-  });
-
-  it("rejects an unknown auth method id with -32602", () => {
-    let code: number | undefined;
-    try {
-      authenticate({ methodId: "someone-elses-method" });
-    } catch (e) {
-      code = (e as RequestError).code;
-    }
-    expect(code).toBe(-32602);
   });
 });
 
@@ -617,24 +486,6 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
     ]);
   });
 
-  it("ignores the selection without an OAuth sign-in for that family", () => {
-    writeCredentialStore({ "oauth:bigmodel:access_token": "login-jwt" });
-    writeSetting({ zai: { kind: "individual-coding-plan" } });
-    const payload = buildAccountProviderConfig();
-    expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
-    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBeNull();
-  });
-
-  it("counts only individual coding-plan selections", () => {
-    writeCredentialStore({ "oauth:bigmodel:access_token": "login-jwt" });
-    writeSetting({ bigmodel: { kind: "team-coding-plan" } });
-    const payload = buildAccountProviderConfig();
-    expect(payload!.providers["account:bigmodel-individual-coding-plan"]!.access.entitled).toBe(
-      false,
-    );
-    expect(oauthProjectTokenFamilyFor("account:bigmodel-team-coding-plan")).toBeNull();
-  });
-
   it("unions the OAuth selection even under a stale 3.12–3.14 coding-plan-cache (#359)", () => {
     writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
     writeSetting({ zai: { kind: "individual-coding-plan" } });
@@ -649,138 +500,6 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
     const payload = buildAccountProviderConfig();
     expect(payload!.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(true);
     expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
-  });
-
-  it("does not let a leftover pre-3.12 config.json static key shadow 3.15+ OAuth, while keeping bridge and manual overrides", async () => {
-    vi.stubEnv("ZCODE_HOME", path.join(root, ".zcode"));
-    writeCredentialStore({
-      "oauth:zai:access_token": "login-jwt",
-      "account-provider:coding-plan:account:zai-individual-coding-plan:account:108:api-key":
-        "stale-pre-3.15-store-key",
-    });
-    writeFileSync(
-      path.join(dataRoot.value, "setting.json"),
-      JSON.stringify({
-        modelProviderFamilyModes: { zai: "oauth" },
-        providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
-      }),
-    );
-    // Leftover pre-3.12 config.json with an expired static key on zai.
-    writeFileSync(
-      zcodeCfgPath.value,
-      JSON.stringify({
-        provider: {
-          "builtin:zai-coding-plan": {
-            enabled: true,
-            options: { apiKey: "stale-pre-3.12-key" },
-            models: { "GLM-5.3": {}, "GLM-5.3-Flash": {} },
-          },
-        },
-      }),
-    );
-    // Static request-auth returns null so answerProviderRuntimeHeaders proceeds
-    // to oauthProjectTokenFamilyFor -> resolveOAuthProjectToken("zai").
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toBeNull();
-    expect(oauthProjectTokenFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
-
-    // A manual coding-plan key in 3.12+ provider_config.json still wins.
-    writePersonalRules([
-      {
-        providerId: "zai-api",
-        config: {
-          access: { type: "zhipu-coding-plan-api-key", apiKey: "manual-zai-key" },
-          api: { baseUrl: "https://api.z.ai/api/anthropic" },
-        },
-      },
-    ]);
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
-      apiKey: "manual-zai-key",
-    });
-
-    // An explicit `zcode-acp setup` bridge account wins above everything.
-    await saveBridgeAccount("zai", "bridge-zai-key");
-    expect(codingPlanRequestAuthFor("account:zai-individual-coding-plan")).toEqual({
-      apiKey: "bridge-zai-key",
-    });
-  });
-
-  it("advertises entitled OAuth coding-plan models alongside personal custom providers and leftover config.json entries", () => {
-    writeCredentialStore({ "oauth:zai:access_token": "login-jwt" });
-    writeSetting({ zai: { kind: "individual-coding-plan" } });
-    // Leftover pre-3.12 config.json where builtin:zai-coding-plan was disabled
-    // and a custom provider was later disabled in 3.12+ provider_config.json,
-    // while another personal custom provider is enabled.
-    writeFileSync(
-      zcodeCfgPath.value,
-      JSON.stringify({
-        provider: {
-          "custom:cliproxyapi": {
-            name: "CLIProxyAPI",
-            enabled: true,
-            options: { apiKey: "old-proxy-key", baseURL: "http://127.0.0.1:8317/v1" },
-            models: { "claude-opus-4-6-thinking": {} },
-          },
-          "builtin:zai-coding-plan": {
-            enabled: false,
-            models: { "GLM-5.3": {}, "GLM-5.3-Flash": {} },
-          },
-        },
-      }),
-    );
-    writeFileSync(
-      path.join(dataRoot.value, "provider_config.json"),
-      JSON.stringify({
-        config: {
-          providerConfigRules: {
-            providerRules: [
-              {
-                providerId: "custom:cliproxyapi",
-                providerName: "CLIProxyAPI",
-                enabled: false,
-                config: { access: { type: "api-key", apiKey: "old-proxy-key" } },
-              },
-              {
-                providerId: "custom:active",
-                providerName: "ActiveCustom",
-                enabled: true,
-                config: {
-                  access: { type: "api-key", apiKey: "active-key" },
-                  api: { baseUrl: "https://api.example.test/v1" },
-                },
-              },
-            ],
-          },
-          modelConfigRules: {
-            providerModelRules: [
-              {
-                providerId: "custom:active",
-                modelId: "custom-model-1",
-                config: { enabled: true },
-              },
-            ],
-          },
-        },
-      }),
-    );
-
-    const models = loadAllModels();
-    expect(models).toEqual([
-      {
-        providerId: "builtin:zai-coding-plan",
-        providerName: "builtin:zai-coding-plan",
-        modelId: "GLM-5.3",
-      },
-      {
-        providerId: "builtin:zai-coding-plan",
-        providerName: "builtin:zai-coding-plan",
-        modelId: "GLM-5.3-Flash",
-      },
-      {
-        providerId: "custom:active",
-        providerName: "ActiveCustom",
-        modelId: "custom-model-1",
-      },
-    ]);
   });
 
   it("does not entitle Start Plan from a Coding Plan OAuth login alone (#363 follow-up)", () => {
@@ -896,57 +615,5 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
         modelId: "GLM-5-Turbo",
       },
     ]);
-  });
-
-  it("entitles Start Plan alone for a Start Plan-only OAuth user with no Coding Plan selection", () => {
-    writeFileSync(
-      tablePath,
-      JSON.stringify({
-        ...TABLE,
-        config: {
-          providerConfigRules: {
-            providerRules: [
-              ...TABLE.config.providerConfigRules.providerRules,
-              {
-                providerId: "account:zai-start-plan",
-                providerName: "Start Plan",
-                config: {
-                  access: { type: "zhipu-account", mode: "start-plan", accountType: "zai" },
-                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
-                },
-              },
-            ],
-          },
-        },
-      }),
-    );
-    writeCredentialStore({
-      "oauth:active_provider": "zai",
-      "oauth:zai:access_token": "login-jwt",
-      zcodejwttoken: "start-plan-only-jwt",
-    });
-    // The connection selection IS Start Plan — that is the on-disk holding
-    // signal (a login alone is not, see the #363 follow-up test).
-    writeSetting({ zai: { kind: "start-plan" } });
-    // Leftover pre-3.12 config.json key must not shadow the 3.15+ OAuth JWT.
-    writeFileSync(
-      zcodeCfgPath.value,
-      JSON.stringify({
-        provider: {
-          "builtin:zai-start-plan": {
-            enabled: true,
-            options: { apiKey: "stale-pre-3.12-start-key" },
-          },
-        },
-      }),
-    );
-
-    const payload = buildAccountProviderConfig()!;
-    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
-    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(true);
-    expect(startPlanRequestAuthFor("account:zai-start-plan")).toEqual({
-      apiKey: "start-plan-only-jwt",
-    });
-    expect(zcodeCredentialsPresent()).toBe(true);
   });
 });

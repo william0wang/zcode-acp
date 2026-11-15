@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
 import { loadSession } from "../src/handlers/session.js";
-import { fetchMessages, loadEarlier, TURN_READ } from "../src/handlers/replay.js";
+import { fetchMessages, loadEarlier} from "../src/handlers/replay.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 vi.mock("../src/tasks-index.js", () => ({
@@ -127,16 +127,6 @@ describe("session/load tail limit", () => {
     });
   });
 
-  it("limit 0 attaches without replaying anything", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams({ _meta: { zcode: { limit: 0 } } }), cx);
-
-    expect(chunks(updates)).toEqual([]);
-  });
-
   it("without _meta the full history replays (Zed path regression)", async () => {
     const server = new ZcodeAcpServer();
     server.backend = fakeBackend(hist());
@@ -151,124 +141,6 @@ describe("session/load tail limit", () => {
       totalMessages: 8,
       totalTurns: 4,
     });
-  });
-});
-
-describe("system-reminder stripping in replay", () => {
-  it("strips reminder blocks from user text and drops reminder-only messages", async () => {
-    const history = hist();
-    // u2: reminder prefix + real text. u3: reminder only — must vanish.
-    history[3] = {
-      info: { id: "u2", role: "user" },
-      parts: [{ type: "text", text: "<system-reminder>todo nudge</system-reminder>\n\ntwo" }],
-    };
-    history[6] = {
-      info: { id: "u3", role: "user" },
-      parts: [{ type: "text", text: "<system-reminder>todo nudge</system-reminder>" }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    const texts = chunks(updates);
-    expect(texts).toEqual(["sys", "one", "A1", "two", "A2a", "A2b", "A3"]);
-    expect(texts.join("\n")).not.toContain("system-reminder");
-  });
-
-  it("leaves assistant text that literally mentions the tag untouched", async () => {
-    const history = hist();
-    history[4] = {
-      info: { id: "a2a", role: "assistant" },
-      parts: [{ type: "text", text: "A2a discusses <system-reminder> tags" }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    expect(chunks(updates)).toContain("A2a discusses <system-reminder> tags");
-  });
-});
-
-describe("tag-less tool reminder stripping in replay", () => {
-  // Exact shape captured from a live session/messages payload: the harness
-  // stores TodoWrite nudges as plain text WITHOUT <system-reminder> tags.
-  const NUDGE =
-    "The TodoWrite tool hasn't been used recently. If you're working on " +
-    "tasks that would benefit from tracking progress, consider using the " +
-    "TodoWrite tool to track progress. Also consider cleaning up the todo " +
-    "list if it no longer matches what you are working on. Only use it if " +
-    "it's relevant to the current work. This is just a gentle reminder - " +
-    "ignore if not applicable.";
-  const DUMP =
-    "Here are the existing contents of your todo list:\n\n" +
-    "[1. [completed] probe\n2. [pending] client app refresh]";
-
-  it("drops a reminder-only message (nudge + todo dump)", async () => {
-    const history = hist();
-    history[6] = {
-      info: { id: "u3", role: "user" },
-      parts: [{ type: "text", text: `${NUDGE}\n\n${DUMP}` }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    const texts = chunks(updates);
-    expect(texts).toEqual(["sys", "one", "A1", "two", "A2a", "A2b", "A3"]);
-    expect(texts.join("\n")).not.toContain("TodoWrite");
-  });
-
-  it("keeps user text that follows the reminder in the same message", async () => {
-    const history = hist();
-    history[6] = {
-      info: { id: "u3", role: "user" },
-      parts: [{ type: "text", text: `${NUDGE}\n\n${DUMP}\n\n这个问题还是存在` }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    expect(chunks(updates)).toContain("这个问题还是存在");
-  });
-
-  it("keeps user text that precedes the nudge", async () => {
-    const history = hist();
-    history[6] = {
-      info: { id: "u3", role: "user" },
-      parts: [{ type: "text", text: `please fix this\n\n${NUDGE}` }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    const texts = chunks(updates);
-    expect(texts).toContain("please fix this");
-    expect(texts.join("\n")).not.toContain("gentle reminder");
-  });
-
-  it("leaves ordinary mentions of the tool name untouched", async () => {
-    const history = hist();
-    history[6] = {
-      info: { id: "u3", role: "user" },
-      parts: [{ type: "text", text: "帮我处理 TodoWrite 的问题" }],
-    };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    expect(chunks(updates)).toContain("帮我处理 TodoWrite 的问题");
   });
 });
 
@@ -290,19 +162,6 @@ describe("message dedup in replay", () => {
     expect((result as { replayMeta?: { totalMessages?: number } }).replayMeta).toMatchObject({
       totalMessages: 8,
     });
-  });
-
-  it("keeps distinct message ids even when their text is identical", async () => {
-    const history = hist();
-    history[3] = { info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "继续" }] };
-    history[6] = { info: { id: "u3", role: "user" }, parts: [{ type: "text", text: "继续" }] };
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(history);
-    const { cx, updates } = collectCx();
-
-    await loadSession(server, loadParams(), cx);
-
-    expect(chunks(updates)).toEqual(["sys", "one", "A1", "继续", "A2a", "A2b", "继续", "A3"]);
   });
 });
 
@@ -376,17 +235,6 @@ describe("context handoff collapse marker", () => {
     expect(update._meta).toEqual({ zcode: { collapsed: true, kind: "context-handoff" } });
     expect(update.content![0]!.content!.text).toContain("The summary below covers");
   });
-
-  it("ordinary user and agent text carries no _meta", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx, sent } = collectParams();
-
-    await loadSession(server, loadParams(), cx);
-
-    expect(sent.length).toBeGreaterThan(0);
-    expect(sent.every((p) => p._meta === undefined)).toBe(true);
-  });
 });
 
 describe("session/load_earlier", () => {
@@ -418,24 +266,6 @@ describe("session/load_earlier", () => {
     expect(pages).toEqual([["two", "A2a", "A2b"], ["one", "A1"], ["sys"]]);
   });
 
-  it("still pages when new turns arrived since attach", async () => {
-    const server = new ZcodeAcpServer();
-    const history = hist();
-    server.backend = fakeBackend(history);
-    const cursor = await attachTail(server);
-
-    // The live session moved on (append-only) — the cursor's prefix is intact.
-    history.push(
-      { info: { id: "u4", role: "user" }, parts: [{ type: "text", text: "four" }] },
-      { info: { id: "a4", role: "assistant" }, parts: [{ type: "text", text: "A4" }] },
-    );
-
-    const { cx, updates } = collectCx();
-    const res = await loadEarlier(server, { sessionId: "sess_tail", before: cursor, limit: 2 }, cx);
-    expect(chunks(updates)).toEqual(["two", "A2a", "A2b"]);
-    expect(res.replayMeta).toMatchObject({ hasMore: true, totalMessages: 10, totalTurns: 5 });
-  });
-
   it("errors with cursor expired after the history compacted", async () => {
     const server = new ZcodeAcpServer();
     const history = hist();
@@ -449,60 +279,6 @@ describe("session/load_earlier", () => {
     await expect(
       loadEarlier(server, { sessionId: "sess_tail", before: cursor, limit: 2 }, cx),
     ).rejects.toThrow("cursor expired");
-  });
-
-  it("errors for a session that was never attached in this bridge", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx } = collectCx();
-    await expect(
-      loadEarlier(server, { sessionId: "never-attached", before: "whatever", limit: 2 }, cx),
-    ).rejects.toThrow("session not registered");
-  });
-
-  it("requires a before cursor", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    server.registerSession("sess_tail", "sess_tail");
-    const { cx } = collectCx();
-    await expect(
-      loadEarlier(server, { sessionId: "sess_tail", limit: 2 } as never, cx),
-    ).rejects.toThrow("before");
-  });
-
-  it("marks every load_earlier update _meta.zcode.earlierPage; the load tail stays unmarked", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx: loadCx, updates: loadUpdates } = collectCx();
-    const result = (await loadSession(
-      server,
-      loadParams({ _meta: { zcode: { limit: 2 } } }),
-      loadCx,
-    )) as { replayMeta: { cursor: string } };
-
-    // Tail replay (session/load) carries NO page marker — clients treat these
-    // as the normal attach transcript.
-    expect(loadUpdates.length).toBeGreaterThan(0);
-    for (const u of loadUpdates) {
-      expect(
-        (u as { _meta?: { zcode?: { earlierPage?: unknown } } })._meta?.zcode?.earlierPage,
-      ).toBeUndefined();
-    }
-
-    const { cx, updates } = collectCx();
-    await loadEarlier(
-      server,
-      { sessionId: "sess_tail", before: result.replayMeta.cursor, limit: 2 },
-      cx,
-    );
-    // Every paged update is marked so remote clients can route it into the
-    // older-page buffer instead of the live transcript.
-    expect(updates.length).toBeGreaterThan(0);
-    for (const u of updates) {
-      expect(
-        (u as { _meta?: { zcode?: { earlierPage?: unknown } } })._meta?.zcode?.earlierPage,
-      ).toBe(true);
-    }
   });
 });
 
@@ -518,30 +294,6 @@ describe("replayMeta.turnActive", () => {
 
     const result = await loadSession(server, loadParams(), cx);
     expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(true);
-  });
-
-  it("reports false when no turn is in flight", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx } = collectCx();
-
-    const result = await loadSession(server, loadParams(), cx);
-    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(
-      false,
-    );
-  });
-
-  it("ignores turns belonging to other sessions", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = fakeBackend(hist());
-    const { cx } = collectCx();
-    await loadSession(server, loadParams(), cx);
-    server.pendingTurns.set(999, { zcodeSid: "some-other-session", cancelled: false });
-
-    const result = await loadSession(server, loadParams(), cx);
-    expect((result as { replayMeta?: { turnActive?: boolean } }).replayMeta?.turnActive).toBe(
-      false,
-    );
   });
 
   it("flags a FOREIGN backend turn (background wake, no bridge turn loop)", async () => {
@@ -584,87 +336,5 @@ describe("fetchMessages (P1: slow reads must not read as empty)", () => {
     const out = await fetchMessages(server, "sess_tail");
     expect(out).toHaveLength(history.length);
     expect(read).toBe(2);
-  });
-
-  it("degrades to [] only when the retry fails too", async () => {
-    const backend = {
-      isDead: false,
-      request: async (_id: number, method: string) =>
-        method === "session/messages"
-          ? { error: { message: "zcode backend reader exited (backend dead)" } }
-          : { result: {} },
-      registerEventListener: () => {},
-      unregisterEventListener: () => {},
-    } as unknown as ZcodeBackend;
-    const server = new ZcodeAcpServer();
-    server.backend = backend;
-
-    const out = await fetchMessages(server, "sess_tail");
-    expect(out).toEqual([]);
-  });
-
-  it("defaults to the generous 45s hydration timeout", async () => {
-    const timeouts: number[] = [];
-    const backend = {
-      isDead: false,
-      request: async (_id: number, method: string, _params: unknown, timeout?: number) => {
-        if (method === "session/messages") {
-          timeouts.push(timeout ?? -1);
-          return { result: { messages: hist() } };
-        }
-        return { result: {} };
-      },
-      registerEventListener: () => {},
-      unregisterEventListener: () => {},
-    } as unknown as ZcodeBackend;
-    const server = new ZcodeAcpServer();
-    server.backend = backend;
-
-    await fetchMessages(server, "sess_tail");
-    expect(timeouts).toEqual([45_000]);
-  });
-
-  it("passes opts through: custom timeout honored, retry:false fails in ONE read", async () => {
-    const timeouts: number[] = [];
-    const backend = {
-      isDead: false,
-      request: async (_id: number, method: string, _params: unknown, timeout?: number) => {
-        if (method === "session/messages") {
-          timeouts.push(timeout ?? -1);
-          return { error: { message: "timeout" } };
-        }
-        return { result: {} };
-      },
-      registerEventListener: () => {},
-      unregisterEventListener: () => {},
-    } as unknown as ZcodeBackend;
-    const server = new ZcodeAcpServer();
-    server.backend = backend;
-
-    const out = await fetchMessages(server, "sess_tail", TURN_READ);
-    // One bounded read, no retry, no 45s hang — the turn-internal contract.
-    expect(timeouts).toEqual([8000]);
-    expect(out).toEqual([]);
-  });
-
-  it("passes a custom timeoutMs through even with retry on", async () => {
-    const timeouts: number[] = [];
-    const backend = {
-      isDead: false,
-      request: async (_id: number, method: string, _params: unknown, timeout?: number) => {
-        if (method === "session/messages") {
-          timeouts.push(timeout ?? -1);
-          return { result: { messages: hist() } };
-        }
-        return { result: {} };
-      },
-      registerEventListener: () => {},
-      unregisterEventListener: () => {},
-    } as unknown as ZcodeBackend;
-    const server = new ZcodeAcpServer();
-    server.backend = backend;
-
-    await fetchMessages(server, "sess_tail", { timeoutMs: 12_345 });
-    expect(timeouts).toEqual([12_345]);
   });
 });

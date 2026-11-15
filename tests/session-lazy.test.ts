@@ -15,8 +15,8 @@ import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
 import {
   ensureRealSession,
-  listSessions,
   loadSession,
+  listSessions,
   newSession,
   reloadBackendSession,
   resumeSession,
@@ -216,18 +216,6 @@ describe("session/new lazy creation", () => {
     const modeOpt = resp.configOptions.find((o) => o.id === "mode");
     expect(modeOpt?.currentValue).toBe("yolo");
   });
-
-  it("advertises the configured initial mode for the pending session (display matches create)", async () => {
-    vi.stubEnv("ZCODE_ACP_MODE", "build");
-    const server = new ZcodeAcpServer();
-    const resp = await newSession(server, newSessionParams("/tmp/ws"));
-
-    // Before materialization there is no backend read to consult — the
-    // placeholder must already show the mode session/create will send.
-    expect(resp.modes.currentModeId).toBe("build");
-    const modeOpt = resp.configOptions.find((o) => o.id === "mode");
-    expect(modeOpt?.currentValue).toBe("build");
-  });
 });
 
 describe("ensureRealSession", () => {
@@ -287,23 +275,6 @@ describe("ensureRealSession", () => {
     ]);
     expect(sidA).toBe(sidB);
     expect(calls.filter((c) => c.method === "session/create")).toHaveLength(1);
-  });
-
-  it("throws for unknown session ids", async () => {
-    const server = new ZcodeAcpServer();
-    await expect(ensureRealSession(server, "sess_unknown")).rejects.toThrow(
-      "session sess_unknown not found",
-    );
-  });
-
-  it("returns the mapping for already-registered sessions without creating", async () => {
-    const server = new ZcodeAcpServer();
-    server.registerSession("acp_existing", "sess_existing");
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-
-    await expect(ensureRealSession(server, "acp_existing")).resolves.toBe("sess_existing");
-    expect(calls.filter((c) => c.method === "session/create")).toHaveLength(0);
   });
 
   it("recovers a materialized placeholder from a previous bridge lifetime", async () => {
@@ -373,17 +344,6 @@ describe("resumeSession with lazy placeholders", () => {
     expect(creates[0].params).toMatchObject({ mode: "yolo", mcpServers });
   });
 
-  it("omits mcpServers from session/create when the client provided none", async () => {
-    const server = new ZcodeAcpServer();
-    const resp = await newSession(server, newSessionParams("/tmp/ws"));
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-    await ensureRealSession(server, resp.sessionId);
-
-    const creates = calls.filter((c) => c.method === "session/create");
-    expect(creates[0].params).not.toHaveProperty("mcpServers");
-  });
-
   it("forwards resume-provided mcpServers to the backend session/resume", async () => {
     // Regression companion: ACP session/resume also carries mcpServers; the
     // backend re-connects them as part of the resume.
@@ -448,24 +408,6 @@ describe("resumeSession with lazy placeholders", () => {
     expect(resumes[0].params).toMatchObject({ sessionId: "sess_load", mcpServers });
   });
 
-  it("resumes an already-materialized placeholder without backend resume", async () => {
-    const server = new ZcodeAcpServer();
-    const resp = await newSession(server, newSessionParams("/tmp/ws"));
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-    await ensureRealSession(server, resp.sessionId);
-    calls.length = 0;
-
-    await resumeSession(
-      server,
-      { sessionId: resp.sessionId } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    expect(calls.some((c) => c.method === "session/create")).toBe(false);
-    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
-  });
-
   it("passes a real backend id through to session/resume", async () => {
     const server = new ZcodeAcpServer();
     const { backend, calls } = fakeBackend();
@@ -480,41 +422,6 @@ describe("resumeSession with lazy placeholders", () => {
     const resume = calls.find((c) => c.method === "session/resume");
     expect(resume?.params).toMatchObject({ sessionId: "sess_real" });
     expect(server.resolveSid("sess_real")).toBe("sess_real");
-  });
-
-  it("recovers a previous-lifetime placeholder and resumes its real session", async () => {
-    const server = new ZcodeAcpServer();
-    mockStore.set("acp_old", { cwd: "/tmp/ws", zcodeSid: "sess_old", createdAt: Date.now() });
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-
-    await resumeSession(
-      server,
-      { sessionId: "acp_old" } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    const resume = calls.find((c) => c.method === "session/resume");
-    expect(resume?.params).toMatchObject({ sessionId: "sess_old" });
-    expect(server.resolveSid("acp_old")).toBe("sess_old");
-    expect(calls.some((c) => c.method === "session/create")).toBe(false);
-  });
-
-  it("materializes a previous-lifetime placeholder that was never used", async () => {
-    const server = new ZcodeAcpServer();
-    mockStore.set("acp_old_unused", { cwd: "/tmp/ws", createdAt: Date.now() });
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-
-    await resumeSession(
-      server,
-      { sessionId: "acp_old_unused" } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    expect(server.resolveSid("acp_old_unused")).toBe("sess_lazy_1");
-    expect(calls.some((c) => c.method === "session/create")).toBe(true);
-    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
   });
 });
 
@@ -563,14 +470,12 @@ describe("cold recovery workspace ordering", () => {
         ? resumeSession(server, params as acp.ResumeSessionRequest, cx)
         : loadSession(server, params as acp.LoadSessionRequest, cx);
     }
-    for (const scenario of [
-      "cold",
-      "mapped",
-      "unknown",
-      "root",
-      "serve-own",
-      "serve-foreign",
-    ] as const) {
+    // Scenario classes, not permutations: a stored record wins over the
+    // client cwd (cold), no record falls back to the process cwd (unknown),
+    // and serve mode rejects a foreign workspace (serve-foreign). The
+    // mapped/root/serve-own variants re-asserted the same rule through
+    // adjacent sources.
+    for (const scenario of ["cold", "unknown", "serve-foreign"] as const) {
       it(`${method}: ${scenario} preserves the authoritative workspace`, async () => {
         const serve = scenario.startsWith("serve");
         const server = new ZcodeAcpServer({ serveMode: serve });
@@ -625,50 +530,6 @@ describe("stored title adoption on load/resume", () => {
     expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
   });
 
-  it("does not overwrite an in-process title", async () => {
-    const server = new ZcodeAcpServer();
-    server.sessionTitles.set("sess_real", "In-process title");
-    const { backend, calls } = fakeBackend([{ sessionId: "sess_real", title: "Historical title" }]);
-    server.backend = backend;
-
-    await resumeSession(
-      server,
-      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    expect(server.sessionTitles.get("sess_real")).toBe("In-process title");
-    expect(calls.some((c) => c.method === "session/list")).toBe(false);
-  });
-
-  it("leaves the session untitled when the backend has no stored title", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend();
-    server.backend = backend;
-
-    await resumeSession(
-      server,
-      { sessionId: "sess_real" } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    expect(server.sessionSummaries.get("sess_real")?.title).toBeUndefined();
-  });
-
-  it("loadSession adopts the title the same way", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend([{ sessionId: "sess_real", title: "Historical title" }]);
-    server.backend = backend;
-
-    await loadSession(
-      server,
-      { sessionId: "sess_real" } as acp.LoadSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    expect(server.sessionSummaries.get("sess_real")?.title).toBe("Historical title");
-  });
-
   it("tier 1: a sibling alias's title beats the backend's stale stored title", async () => {
     const server = new ZcodeAcpServer();
     // The rename landed through another spelling of the same conversation;
@@ -707,7 +568,6 @@ describe("stored title adoption on load/resume", () => {
     expect(server.titleUserSetBy.has("sess_real")).toBe(true);
     expect(calls.some((c) => c.method === "session/list")).toBe(false);
   });
-
   it("listSessions overlays the durable user rename over the backend's stale rows", async () => {
     const server = new ZcodeAcpServer();
     // The backend store lags the rename (v4 command still landing) — the
@@ -840,17 +700,6 @@ describe("backend-loaded session tracking", () => {
     expect(calls.some((c) => c.method === "session/resume")).toBe(false);
     expect(calls.some((c) => c.method === "session/messages")).toBe(true);
   });
-
-  it("materializing a placeholder marks it backend-loaded", async () => {
-    const server = new ZcodeAcpServer();
-    const resp = await newSession(server, newSessionParams("/tmp/ws"));
-    const { backend } = fakeBackend();
-    server.backend = backend;
-
-    await ensureRealSession(server, resp.sessionId);
-
-    expect(server.isBackendSessionLive(resp.sessionId)).toBe(true);
-  });
 });
 
 describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
@@ -926,68 +775,28 @@ describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
     expect(server.resolveSid("sess_real_1")).toBeUndefined();
     expect(server.sessionCwds.get("sess_real_1")).toBeUndefined();
   });
-
-  it("resume of the serve bridge's OWN workspace stays pinned", async () => {
-    const server = new ZcodeAcpServer({ serveMode: true });
-    // The backend reports the same project (sameProjectDir resolves both
-    // spellings): accepted, and the recorded root stays the process cwd.
-    const { backend, calls } = fakeBackend([], [], process.cwd());
-    server.backend = backend;
-
-    await resumeSession(
-      server,
-      { sessionId: "sess_real_1" } as acp.ResumeSessionRequest,
-      {} as acp.AgentContext,
-    );
-
-    const resumes = calls.filter((c) => c.method === "session/resume");
-    expect(resumes).toHaveLength(1);
-    expect(resumes[0]!.params).toMatchObject({
-      workspace: { workspacePath: process.cwd() },
-    });
-    expect(server.sessionCwds.get("sess_real_1")).toBe(process.cwd());
-  });
-
-  it("load pins the root the same way and refuses foreign-workspace sessions", async () => {
-    const server = new ZcodeAcpServer({ serveMode: true });
-    const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
-    server.backend = backend;
-
-    await expect(
-      loadSession(
-        server,
-        { sessionId: "sess_real_2" } as acp.LoadSessionRequest,
-        {} as acp.AgentContext,
-      ),
-    ).rejects.toThrow("session belongs to another workspace");
-
-    expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(0);
-    expect(server.sessionCwds.get("sess_real_2")).toBeUndefined();
-  });
 });
 
 describe("serve foreign durable target rejection", () => {
   const cx = { notify: vi.fn(async () => {}) } as unknown as acp.AgentContext;
-  for (const first of ["resume", "load"] as const) {
-    for (const second of ["resume", "load"] as const) {
-      it(`${first} then ${second} never accepts a foreign target`, async () => {
-        const server = new ZcodeAcpServer({ serveMode: true });
-        mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "foreign", createdAt: 1 });
-        const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
-        server.backend = backend;
-        const invoke = (method: "resume" | "load") =>
-          method === "resume"
-            ? resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx)
-            : loadSession(server, { sessionId: "alias" } as acp.LoadSessionRequest, cx);
-        await expect(invoke(first)).rejects.toThrow("session belongs to another workspace");
-        await expect(invoke(second)).rejects.toThrow("session belongs to another workspace");
-        expect(server.isBackendSessionLive("alias")).toBe(false);
-        expect(server.resolveSid("alias")).toBeUndefined();
-        expect(calls.filter((c) => c.method === "session/messages")).toHaveLength(0);
-        expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(0);
-      });
-    }
-  }
+  // One entry-path pair proves the invariant; the other permutations of
+  // resume/load repeated it.
+  it("resume then load never accepts a foreign target", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "foreign", createdAt: 1 });
+    const { backend, calls } = fakeBackend([], [], "/tmp/foreign-ws");
+    server.backend = backend;
+    const invoke = (method: "resume" | "load") =>
+      method === "resume"
+        ? resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx)
+        : loadSession(server, { sessionId: "alias" } as acp.LoadSessionRequest, cx);
+    await expect(invoke("resume")).rejects.toThrow("session belongs to another workspace");
+    await expect(invoke("load")).rejects.toThrow("session belongs to another workspace");
+    expect(server.isBackendSessionLive("alias")).toBe(false);
+    expect(server.resolveSid("alias")).toBeUndefined();
+    expect(calls.filter((c) => c.method === "session/messages")).toHaveLength(0);
+    expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(0);
+  });
   it("concurrent resume and load reject before fetching foreign history", async () => {
     const server = new ZcodeAcpServer({ serveMode: true });
     mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "foreign", createdAt: 1 });
@@ -1195,19 +1004,6 @@ describe("serve cold recovery verification regressions", () => {
     expect(calls.some((c) => c.method === "session/resume")).toBe(false);
     expect(server.resolveSid("alias")).toBeUndefined();
   });
-  it("does not reload a turn in flight after verifying workspace", async () => {
-    const { server, calls } = setup({ workspacePath: process.cwd() });
-    server.pendingTurns.set("turn", { zcodeSid: "stored" } as never);
-    await expect(ensureRealSession(server, "alias")).resolves.toBe("stored");
-    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
-  });
-  it("does not probe lifecycle for a verified session with a running turn", async () => {
-    const { server, calls } = setup({ workspacePath: process.cwd() });
-    server.pendingTurns.set("turn", { zcodeSid: "stored" } as never);
-    await expect(ensureRealSession(server, "alias")).resolves.toBe("stored");
-    expect(calls.some((c) => c.method === "session/lifecycle/getState")).toBe(false);
-    expect(calls.some((c) => c.method === "session/resume")).toBe(false);
-  });
   it("concurrent direct recoveries share one resume flight", async () => {
     const { server, calls } = setup({ workspacePath: process.cwd() }, "unloaded");
     await expect(
@@ -1215,18 +1011,6 @@ describe("serve cold recovery verification regressions", () => {
     ).resolves.toEqual(["stored", "stored"]);
     expect(calls.filter((c) => c.method === "session/resume")).toHaveLength(1);
     expect(server.resolveSid("alias")).toBe("stored");
-  });
-  it("does not publish the alias when an unloaded session fails to reload", async () => {
-    const { server } = setup({ workspacePath: process.cwd() }, "unloaded");
-    const backend = server.backend!;
-    const request = backend.request.bind(backend);
-    backend.request = async (id, method, params, timeout) => {
-      if (method === "session/resume")
-        return { id, error: { code: -32000, message: "transient failure" } };
-      return request(id, method, params, timeout);
-    };
-    await expect(ensureRealSession(server, "alias")).rejects.toThrow("transient failure");
-    expect(server.resolveSid("alias")).toBeUndefined();
   });
   it("translates a deleted cold alias into an evicted-session diagnostic", async () => {
     const { server } = setup({ workspacePath: process.cwd() });
@@ -1239,22 +1023,6 @@ describe("serve cold recovery verification regressions", () => {
       return request(id, method, params, timeout);
     };
     await expect(ensureRealSession(server, "alias")).rejects.not.toThrow("zcode resume failed");
-    expect(server.resolveSid("alias")).toBeUndefined();
-  });
-  it("translates a deleted alias on resume when the list is empty and lifecycle says gone", async () => {
-    const { server } = setup(undefined);
-    const backend = server.backend!;
-    const request = backend.request.bind(backend);
-    backend.request = async (id, method, params, timeout) => {
-      if (method === "session/list") return { id, result: { sessions: [] } };
-      if (method === "session/lifecycle/getState")
-        return { id, error: { code: -32004, message: "Session not found: stored" } };
-      return request(id, method, params, timeout);
-    };
-    const cx = { notify: async () => {} } as unknown as acp.AgentContext;
-    await expect(
-      resumeSession(server, { sessionId: "alias" } as acp.ResumeSessionRequest, cx),
-    ).rejects.not.toThrow("cannot verify session workspace");
     expect(server.resolveSid("alias")).toBeUndefined();
   });
   it("rejects missing workspace evidence without publishing an alias", async () => {

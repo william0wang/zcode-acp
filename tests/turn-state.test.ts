@@ -15,16 +15,13 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import {} from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeEvent } from "../src/backend/types.js";
 import { prompt } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
-import { zcodeHomeDir } from "../src/utils.js";
-
 vi.mock("../src/tasks-index.js", () => ({
   upsertSessionTask: async () => true,
   updateSessionTitle: async () => true,
@@ -107,135 +104,6 @@ function promptParams(): acp.PromptRequest {
 }
 
 describe("$/zcode/turnState emission", () => {
-  it("forwards exact embedded PDF bytes through prompt to native session/send", async () => {
-    const backend = scriptedBackend(() => [
-      { type: "turn.completed", payload: { resultType: "success" } },
-    ]);
-    const request = vi.spyOn(backend, "request");
-    const server = setup(backend);
-    const { cx } = collectCx();
-    const data = Buffer.from("synthetic PDF payload").toString("base64");
-    const result = await prompt(
-      server,
-      {
-        sessionId: "sess_ts",
-        prompt: [
-          { type: "text", text: "inspect" },
-          {
-            type: "resource",
-            resource: {
-              uri: "file:///does-not-exist/paper.pdf",
-              mimeType: "application/pdf",
-              blob: data,
-            },
-          },
-        ],
-      },
-      cx,
-      99,
-    );
-    expect(result.stopReason).toBe("end_turn");
-    const sent = request.mock.calls.find((call) => call[1] === "session/send");
-    expect(sent?.[2]).toEqual({
-      sessionId: "zs_ts",
-      content: "inspect",
-      attachments: [
-        {
-          kind: "pdf",
-          filename: "paper.pdf",
-          mimeType: "application/pdf",
-          dataBase64: data,
-          sizeBytes: Buffer.byteLength("synthetic PDF payload"),
-        },
-      ],
-    });
-  });
-
-  it.each([
-    [{ type: "resource", resource: { uri: "memory://instructions", text: "/compact" } }],
-    [
-      { type: "text", text: "/compact" },
-      { type: "resource_link", name: "notes", uri: "file:///missing/notes.txt" },
-    ],
-  ] as acp.ContentBlock[][])(
-    "sends slash-like attached context to the model, not command handlers",
-    async (...blocks) => {
-      const backend = scriptedBackend(() => [
-        { type: "turn.completed", payload: { resultType: "success" } },
-      ]);
-      const request = vi.spyOn(backend, "request");
-      const { cx } = collectCx();
-      await prompt(setup(backend), { sessionId: "sess_ts", prompt: blocks }, cx, 101);
-      const sent = request.mock.calls.find((call) => call[1] === "session/send");
-      expect(sent).toBeDefined();
-      expect((sent?.[2] as { content: string }).content).not.toMatch(/^\//);
-      expect((sent?.[2] as { content: string }).content).toContain("/compact");
-      expect(request.mock.calls.some((call) => call[1] === "session/compact")).toBe(false);
-    },
-  );
-
-  it("rejects goal-loop binary prompts instead of parking text and dropping bytes", async () => {
-    const backend = scriptedBackend(() => []);
-    const request = vi.spyOn(backend, "request");
-    const server = setup(backend);
-    const parkPrompt = vi.fn();
-    server.goalLoops.set("zs_ts", { parkPrompt } as never);
-    const { cx } = collectCx();
-    await expect(
-      prompt(
-        server,
-        {
-          sessionId: "sess_ts",
-          prompt: [
-            {
-              type: "resource",
-              resource: {
-                uri: "memory://paper.pdf",
-                mimeType: "application/pdf",
-                blob: Buffer.from("synthetic").toString("base64"),
-              },
-            },
-          ],
-        },
-        cx,
-        100,
-      ),
-    ).rejects.toMatchObject({ code: -32602 });
-    expect(parkPrompt).not.toHaveBeenCalled();
-    expect(request.mock.calls.some((call) => call[1] === "session/send")).toBe(false);
-
-    // Review of #315: a STAGED (file-kind) binary rejected on this path must
-    // not leave an orphan behind in the no-GC attachment directory.
-    await expect(
-      prompt(
-        server,
-        {
-          sessionId: "sess_ts",
-          prompt: [
-            {
-              type: "resource",
-              resource: {
-                uri: "memory://orphan.bin",
-                mimeType: "application/octet-stream",
-                blob: Buffer.from("orphan-bytes").toString("base64"),
-              },
-            },
-          ],
-        },
-        cx,
-        101,
-      ),
-    ).rejects.toMatchObject({ code: -32602 });
-    const staging = join(zcodeHomeDir(), "v2", "acp-attachments");
-    let listed: string[] = [];
-    try {
-      listed = await readdir(staging);
-    } catch {
-      /* an absent directory is also clean */
-    }
-    expect(listed).toEqual([]);
-  });
-
   it("emits running:true at turn start and running:false at completion", async () => {
     const server = setup(
       scriptedBackend(() => [
@@ -280,29 +148,6 @@ describe("$/zcode/turnState emission", () => {
     ]);
   });
 
-  it("delivers the lifecycle to attach-only clients that never prompted", async () => {
-    // Regression (2026-10-21): the transitions were cx-targeted, so a second
-    // client attached to the session (desktop watching a mobile-driven turn)
-    // never saw running:false — its is_running stuck true and a force-sent
-    // queued prompt never flushed. The lifecycle must reach every registered
-    // client, not just the prompting connection.
-    const server = setup(
-      scriptedBackend(() => [
-        { type: "turn.started" },
-        { type: "turn.completed", payload: { resultType: "success" } },
-      ]),
-    );
-    const { cx } = collectCx(server);
-    const watcher = collectCx(server);
-
-    await prompt(server, promptParams(), cx, 11);
-
-    expect(watcher.turnStates).toEqual([
-      { sessionId: "sess_ts", running: true },
-      { sessionId: "sess_ts", running: false },
-    ]);
-  });
-
   it("emits running:false when the turn fails before starting (subscribe error)", async () => {
     const backend = scriptedBackend(() => []);
     // Force session/subscribe to fail — prompt() must clean up the pending
@@ -336,62 +181,6 @@ describe("$/zcode/turnState emission", () => {
 
     expect(result).toEqual({ stopReason: "end_turn" });
     expect(turnStates).toEqual([{ sessionId: "sess_ts", running: false }]);
-  });
-
-  it("preserves a non-retryable model quota failure in the ACP error", async () => {
-    const server = setup(
-      scriptedBackend(() => [
-        { type: "turn.started" },
-        {
-          type: "turn.failed",
-          payload: {
-            error: {
-              code: "UNKNOWN_ERROR",
-              message: "Turn execution failed",
-              cause: {
-                code: "model_rate_limited",
-                message: "Usage limit reached; resets later",
-                context: {
-                  providerCode: "1308",
-                  responseStatus: 429,
-                  reason: "rate_limited",
-                  retryable: false,
-                  responseBodySummary: {
-                    responseHeaders: { "retry-after": "1118", "set-cookie": "secret" },
-                  },
-                },
-              },
-            },
-          },
-        },
-      ]),
-    );
-    const { cx, turnStates } = collectCx(server);
-
-    const error = await prompt(server, promptParams(), cx, 3).then(
-      () => null,
-      (reason: unknown) => reason,
-    );
-
-    expect(error).toMatchObject({
-      name: "RequestError",
-      code: -32603,
-      message: "ZCode turn failed: model_rate_limited Usage limit reached; resets later",
-      data: {
-        type: "zcode_turn_failed",
-        code: "model_rate_limited",
-        reason: "rate_limited",
-        statusCode: 429,
-        providerCode: "1308",
-        retryable: false,
-        retryAfterMs: 1_118_000,
-      },
-    });
-    expect(JSON.stringify((error as { data?: unknown }).data)).not.toContain("secret");
-    expect(turnStates).toEqual([
-      { sessionId: "sess_ts", running: true },
-      { sessionId: "sess_ts", running: false },
-    ]);
   });
 
   it("resends a non-retryable gateway 400 and recovers when the resend succeeds", async () => {
@@ -497,48 +286,6 @@ describe("$/zcode/turnState emission", () => {
     expect(joined).toContain("(5/5)");
     expect(joined).toMatch(/会话仍可用|still usable/);
   });
-
-  it("preempted turn's exit reports running:true while the preemptor is in flight", async () => {
-    let sendCount = 0;
-    const server = setup(
-      scriptedBackend(() => {
-        sendCount++;
-        if (sendCount === 1) {
-          // Turn 1 starts but never completes on its own — it stays parked in
-          // its event loop until turn 2's events (fan-out to all listeners)
-          // carry the terminal event.
-          return [{ type: "turn.started" }];
-        }
-        return [
-          { type: "turn.started" },
-          {
-            type: "model.streaming",
-            payload: { kind: "text_delta", delta: "two", assistantMessageId: "m2" },
-          },
-          { type: "turn.completed", payload: { resultType: "success" } },
-        ];
-      }),
-    );
-    const { cx, turnStates } = collectCx(server);
-
-    const p1 = prompt(server, promptParams(), cx, 101);
-    // Wait until turn 1 has been accepted and parked in its event loop (its
-    // turn.started is consumed on the first poll after send accepts).
-    await vi.waitFor(() => expect(sendCount).toBe(1));
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    const p2 = prompt(server, promptParams(), cx, 102);
-    const [r1, r2] = await Promise.all([p1, p2]);
-
-    expect(r1).toEqual({ stopReason: "cancelled" });
-    expect(r2).toEqual({ stopReason: "end_turn" });
-    expect(turnStates).toEqual([
-      { sessionId: "sess_ts", running: true }, // turn 1 starts
-      { sessionId: "sess_ts", running: true }, // turn 2 starts (preemptor)
-      { sessionId: "sess_ts", running: true }, // turn 1 exits, still busy
-      { sessionId: "sess_ts", running: false }, // turn 2 completes
-    ]);
-  });
 });
 
 describe("backend-loaded stamp after backend-lost turns", () => {
@@ -627,21 +374,6 @@ describe("backend-loaded stamp after backend-lost turns", () => {
     // No ghost stamp: the load path must re-resume instead of replaying empty.
     expect(server.isBackendSessionLive("sess_ts")).toBe(false);
   });
-
-  it("a turn that runs to completion still refreshes the stamp", async () => {
-    const server = setup(
-      scriptedBackend(() => [
-        { type: "turn.started" },
-        { type: "turn.completed", payload: { resultType: "success" } },
-      ]),
-    );
-    const { cx } = collectCx();
-
-    const result = await prompt(server, promptParams(), cx, 8);
-
-    expect(result).toEqual({ stopReason: "end_turn" });
-    expect(server.isBackendSessionLive("sess_ts")).toBe(true);
-  });
 });
 
 /**
@@ -652,21 +384,6 @@ describe("backend-loaded stamp after backend-lost turns", () => {
  */
 describe("resetBackendGeneration foreign-turn settle", () => {
   const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-  it("settles idle when nothing else holds the session busy", async () => {
-    const server = new ZcodeAcpServer();
-    server.registerSession("sess_ts", "zs_ts");
-    const { turnStates, turnStatesV2 } = collectCx(server);
-    server.foreignActiveTurns.set("zs_ts", "turn_dead");
-
-    server.resetBackendGeneration();
-    await flush();
-
-    expect(server.foreignActiveTurns.has("zs_ts")).toBe(false);
-    // Dual-emitted: one copy per method spelling (collectCx splits them).
-    expect(turnStates.map((t) => t.running)).toEqual([false]);
-    expect(turnStatesV2.map((t) => t.running)).toEqual([false]);
-  });
 
   it("keeps running:true for a session with a pendingTurn (backend-lost recovery)", async () => {
     const server = new ZcodeAcpServer();

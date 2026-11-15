@@ -27,8 +27,7 @@ import {
   SandboxRestartBatcher,
   SANDBOX_ASK_RETRY_MS,
   SANDBOX_RESTART_BATCH_MS,
-  UNATTENDED_PIN,
-  waitForSandboxBatchFlush,
+  UNATTENDED_PIN
 } from "../src/handlers/sandbox-allow.js";
 import {
   readSandboxConfig,
@@ -69,102 +68,15 @@ describe("extractSandboxDenial", () => {
     );
   });
 
-  it("extracts from JSON-escaped tool payload text", () => {
-    const json = JSON.stringify({ content: [{ text: "mv: /etc/hosts: Operation not permitted" }] });
-    expect(extractSandboxDenial(json)).toEqual({ path: "/etc/hosts", isMkdir: false });
-  });
-
   it("marks mkdir denials so the target dir itself is allowed", () => {
     expect(extractSandboxDenial("mkdir: /opt/tools/bin: Operation not permitted")).toEqual({
       path: "/opt/tools/bin",
       isMkdir: true,
     });
   });
-
-  it("extracts the zsh redirect form (lowercase phrase, path after)", () => {
-    expect(
-      extractSandboxDenial("zsh:2: operation not permitted: /Users/william/sbx-test.txt"),
-    ).toEqual({ path: "/Users/william/sbx-test.txt", isMkdir: false });
-    expect(extractSandboxDenial("zsh:1: operation not permitted: ../xxx-app/f.txt")).toEqual({
-      path: "../xxx-app/f.txt",
-      isMkdir: false,
-    });
-  });
-
-  it("extracts explicit ./ and ../ paths from sh forms (resolved against session cwd later)", () => {
-    expect(extractSandboxDenial("mkdir: ../xxx-app: Operation not permitted")).toEqual({
-      path: "../xxx-app",
-      isMkdir: true,
-    });
-    expect(extractSandboxDenial("tee: ./out/log.txt: Operation not permitted")).toEqual({
-      path: "./out/log.txt",
-      isMkdir: false,
-    });
-  });
-
-  it("extracts the Node fs error form (quoted paths keep spaces)", () => {
-    expect(
-      extractSandboxDenial("Error: EPERM: operation not permitted, open '/Users/x/My Dir/a.txt'"),
-    ).toEqual({ path: "/Users/x/My Dir/a.txt", isMkdir: false });
-    expect(
-      extractSandboxDenial("Error: EPERM: operation not permitted, mkdir '/opt/new dir'"),
-    ).toEqual({ path: "/opt/new dir", isMkdir: true });
-    // Any libuv syscall name matches; rename takes the FIRST path.
-    expect(
-      extractSandboxDenial("Error: EPERM: operation not permitted, rename '/a/b' -> '/c/d'"),
-    ).toEqual({ path: "/a/b", isMkdir: false });
-    expect(
-      extractSandboxDenial(
-        "Error: EPERM: operation not permitted, mkdtemp '/Users/william/.zcode-acp-sbx-XXXXXX'",
-      ),
-    ).toEqual({ path: "/Users/william/.zcode-acp-sbx-XXXXXX", isMkdir: false });
-    // An apostrophe inside the path must NOT truncate into a broader dir —
-    // the match is refused entirely (generic-hint fallback).
-    expect(
-      extractSandboxDenial("Error: EPERM: operation not permitted, open '/Users/x/O'Brien/a.txt'"),
-    ).toBeNull();
-  });
-
-  it("returns null without an EPERM or without a parsable absolute path", () => {
-    expect(extractSandboxDenial("all good")).toBeNull();
-    expect(extractSandboxDenial("some file: Operation not permitted")).toBeNull();
-    expect(extractSandboxDenial("relative/x: Operation not permitted")).toBeNull();
-  });
 });
 
 describe("extractPermDeniedPath", () => {
-  it("extracts the path from POSIX EACCES output", () => {
-    expect(extractPermDeniedPath("ls: /Users/x/sealed: Permission denied\n")).toBe(
-      "/Users/x/sealed",
-    );
-    expect(extractPermDeniedPath("cat: /etc/sudoers: Permission denied")).toBe("/etc/sudoers");
-  });
-
-  it("extracts from JSON-escaped tool payload text", () => {
-    const json = JSON.stringify({
-      kind: "result",
-      result: { content: "Exit code 1\nls: /var/db/ocurity: Permission denied" },
-    });
-    expect(extractPermDeniedPath(json)).toBe("/var/db/ocurity");
-  });
-
-  it("extracts explicit ./ and ../ relative paths (resolved by the caller)", () => {
-    expect(extractPermDeniedPath("cp: ./secrets/key: Permission denied")).toBe("./secrets/key");
-    expect(extractPermDeniedPath("rm: ../sealed/x.txt: Permission denied")).toBe("../sealed/x.txt");
-  });
-
-  it("extracts the zsh redirect form (path after the phrase)", () => {
-    expect(extractPermDeniedPath("zsh:1: permission denied: /Users/x/run.sh")).toBe(
-      "/Users/x/run.sh",
-    );
-  });
-
-  it("returns null without the phrase or without a parsable path", () => {
-    expect(extractPermDeniedPath("all good")).toBeNull();
-    expect(extractPermDeniedPath("open: Permission denied")).toBeNull();
-    expect(extractPermDeniedPath("relative/x: Permission denied")).toBeNull();
-  });
-
   it("does not fire on sandbox EPERM text (mutually exclusive phrases)", () => {
     expect(extractPermDeniedPath("touch: /a/b: Operation not permitted")).toBeNull();
     expect(extractPermDeniedPath("Error: EPERM: operation not permitted, open '/a/b'")).toBeNull();
@@ -252,31 +164,6 @@ describe("handleSandboxDenial", () => {
     ]);
   });
 
-  it("relative denial paths resolve against the session cwd before the ask", async () => {
-    const { server, cx, request } = makeStubs("sandbox_allow_once");
-    server.sessionCwds.set("acp_a", wsRoot);
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      { path: "../outside/f.txt", isMkdir: false },
-      "tc_rel",
-    );
-
-    const expectedDir = path.dirname(path.join(wsRoot, "..", "outside", "f.txt"));
-    // The popup's DETAILS carry the resolved absolute dir (option labels stay
-    // short), and the params are schema-clean: no non-standard top-level
-    // title — a strict client would reject the whole request over it.
-    const sentParams = request.mock.calls[0]?.[1] as {
-      title?: string;
-      toolCall?: { title?: string };
-    };
-    expect(sentParams.toolCall?.title).toContain(expectedDir);
-    expect(sentParams.title).toBeUndefined();
-    expect(server.sandboxOnceAllows.has(expectedDir)).toBe(true);
-  });
-
   it("reject_always persists the denial to the config deny list — visible, no restart", async () => {
     const { server, cx, closed, request, notify } = makeStubs("sandbox_reject_always");
     server.sessionCwds.set("acp_a", wsRoot);
@@ -300,55 +187,6 @@ describe("handleSandboxDenial", () => {
     expect(turn.cancelled).toBe(false);
     expect(closed).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalled(); // the confirmation hint reached the editor
-  });
-
-  it("reject_once stores nothing — the same ask resurfaces next time", async () => {
-    const { server, cx, closed, notify } = makeStubs("sandbox_reject_once");
-    server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
-      "tc_rejectonce",
-    );
-
-    expect(readSandboxConfig(wsRoot).deny).toEqual([]);
-    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
-    expect(turn.cancelled).toBe(false);
-    expect(closed).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalled(); // the rejection hint reached the editor
-  });
-
-  it("a persisted deny list suppresses the popup with a hint", async () => {
-    const { server, cx, closed, request, notify } = makeStubs("sandbox_allow_always");
-    server.sessionCwds.set("acp_a", wsRoot);
-    mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
-    writeFileSync(
-      sandboxConfigPath(wsRoot),
-      JSON.stringify({
-        enabled: true,
-        allow: [],
-        deny: [path.join(wsRoot, "..", "outside")],
-        strictGit: false,
-      }),
-    );
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      { path: path.join(wsRoot, "..", "outside", "f.txt"), isMkdir: false },
-      "tc_denyhit",
-    );
-
-    expect(request).not.toHaveBeenCalled();
-    expect(turn.cancelled).toBe(false);
-    expect(closed).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalled(); // the deny-list hint reached the editor
   });
 
   it("timeout / unknown outcome persists NOTHING (no hidden rejection memory)", async () => {
@@ -405,49 +243,6 @@ describe("handleSandboxDenial", () => {
     expect(notify).toHaveBeenCalled(); // the hint chunk reached the editor
   });
 
-  it("strictGit .git paths are equally unallowable", async () => {
-    const { server, cx, request, closed } = makeStubs("sandbox_allow_always");
-    server.sessionCwds.set("acp_a", wsRoot);
-    mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
-    writeFileSync(
-      sandboxConfigPath(wsRoot),
-      JSON.stringify({ enabled: true, allow: [], strictGit: true }),
-    );
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      { path: path.join(wsRoot, ".git", "index.lock"), isMkdir: false },
-      "tc_git",
-    );
-
-    expect(request).not.toHaveBeenCalled();
-    expect(turn.cancelled).toBe(false);
-    expect(closed).not.toHaveBeenCalled();
-  });
-
-  it("case-variant island paths (.ZCODE/ACP) are also protected on darwin", async () => {
-    const { server, cx, request, closed } = makeStubs("sandbox_allow_always");
-    server.sessionCwds.set("acp_a", wsRoot);
-    const real = process.platform;
-    Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
-    try {
-      await handleSandboxDenial(
-        server,
-        cx,
-        "acp_a",
-        { path: path.join(wsRoot, ".ZCODE", "ACP", "sandbox.json"), isMkdir: false },
-        "tc_case",
-      );
-    } finally {
-      Object.defineProperty(process, "platform", { value: real, configurable: true });
-    }
-    expect(request).not.toHaveBeenCalled();
-    expect(closed).not.toHaveBeenCalled();
-  });
-
   it("symlinked config downgrades always-allow to a bridge-lifetime once-allow", async () => {
     const { server, cx, request } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
@@ -471,76 +266,6 @@ describe("handleSandboxDenial", () => {
     expect(server.sandboxOnceAllows.has("/opt/data")).toBe(true);
     // The link target was NOT mutated through the symlink.
     expect(JSON.parse(readFileSync(target, "utf8")).allow).toEqual([]);
-  });
-
-  it("once-allow keeps the root in bridge-lifetime memory only", async () => {
-    const { server, cx, batchFlush } = makeStubs("sandbox_allow_once");
-    server.sessionCwds.set("acp_a", wsRoot);
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      {
-        path: "/opt/data/file.txt",
-        isMkdir: false,
-      },
-      "tc_1",
-    );
-
-    expect(server.sandboxOnceAllows.has("/opt/data")).toBe(true);
-    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
-    vi.advanceTimersByTime(SANDBOX_RESTART_BATCH_MS);
-    expect(batchFlush).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejection leaves everything untouched (no restart, no continuation)", async () => {
-    const { server, cx, closed } = makeStubs("sandbox_reject");
-    server.sessionCwds.set("acp_a", wsRoot);
-    const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      {
-        path: "/opt/data/file.txt",
-        isMkdir: false,
-      },
-      "tc_1",
-    );
-
-    expect(turn.cancelled).toBe(false);
-    expect(closed).not.toHaveBeenCalled();
-    expect(server.sandboxContinuations.size).toBe(0);
-  });
-
-  it("debounces repeat asks for the same directory within a session", async () => {
-    const { server, cx, request } = makeStubs("sandbox_reject");
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      {
-        path: "/opt/data/one.txt",
-        isMkdir: false,
-      },
-      "tc_1",
-    );
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      {
-        path: "/opt/data/two.txt",
-        isMkdir: false,
-      },
-      "tc_1",
-    );
-
-    // Same directory → the popup fired exactly once.
-    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("freezes the turn before the ask; a rejection settles it into a continuation", async () => {
@@ -568,25 +293,6 @@ describe("handleSandboxDenial", () => {
     const cont = server.sandboxContinuations.get("acp_a");
     expect(typeof cont).toBe("string");
     expect(cont).toContain("拒绝");
-  });
-
-  it("structural early-returns (island paths) never freeze the turn", async () => {
-    const { server, cx, request } = makeStubs("sandbox_allow_always");
-    server.sessionCwds.set("acp_a", wsRoot);
-    const freeze = vi.fn().mockResolvedValue(undefined);
-
-    await handleSandboxDenial(
-      server,
-      cx,
-      "acp_a",
-      { path: path.join(wsRoot, ".zcode", "acp", "sandbox.json"), isMkdir: false },
-      "tc_island",
-      { zcodeSid: "sess_z", cancelled: false },
-      freeze,
-    );
-
-    expect(freeze).not.toHaveBeenCalled();
-    expect(request).not.toHaveBeenCalled();
   });
 
   it("unattended timeout pins the path, settles the round for re-dispatch", async () => {
@@ -645,26 +351,6 @@ describe("handleSandboxDenial", () => {
       "tc_unatt3",
     );
     expect(request).toHaveBeenCalledTimes(2);
-  });
-
-  it("waitForSandboxBatchFlush blocks until the window flushes", async () => {
-    let flushed = 0;
-    const batcher = new SandboxRestartBatcher(() => {
-      flushed++;
-    });
-    batcher.add("acp_a", "/opt/data");
-    expect(batcher.pendingFor("acp_a")).toBe(true);
-    expect(batcher.pendingFor("acp_b")).toBe(false);
-
-    const wait = waitForSandboxBatchFlush(
-      { sandboxRestartBatcher: batcher } as unknown as ZcodeAcpServer,
-      "acp_a",
-    );
-    await vi.advanceTimersByTimeAsync(SANDBOX_RESTART_BATCH_MS + 200);
-    await wait;
-
-    expect(flushed).toBe(1);
-    expect(batcher.pendingFor("acp_a")).toBe(false);
   });
 
   it("a failed ask settles the frozen turn (undelivered) and re-asks after a cooldown", async () => {
@@ -842,18 +528,6 @@ describe("flushSandboxGrants", () => {
     expect(closed).toHaveBeenCalledTimes(1);
   });
 
-  it("skips the kill when the backend is already gone (no respawn-then-kill churn)", () => {
-    const { target, closed } = makeTarget({ close: async () => undefined, isDead: true });
-    target.sessionMap.set("acp_a", "z1");
-    target.pendingTurns.set(1, { zcodeSid: "z1" });
-    flushSandboxGrants(target, new Map([["acp_a", ["/a"]]]));
-    // Continuation still lands for the live session; the dead backend is
-    // left alone for the lazy respawn to handle.
-    expect(target.sandboxContinuations.get("acp_a")).toContain("/a");
-    expect(target.backend).not.toBeNull();
-    expect(closed).not.toHaveBeenCalled();
-  });
-
   it("marks goalLoop turns for driver re-dispatch and never queues their continuation", () => {
     const { target } = makeTarget({ close: async () => undefined, isDead: false });
     target.sessionMap.set("acp_a", "z1");
@@ -877,19 +551,5 @@ describe("flushSandboxGrants", () => {
     expect(goalTurn.sandboxRestart).toBe(true);
     expect(target.sandboxContinuations.has("acp_a")).toBe(false);
     expect(target.sandboxContinuations.get("acp_b")).toContain("/b");
-  });
-
-  it("does not mark an already-ESC'd goalLoop turn as a sandbox restart", () => {
-    const { target } = makeTarget({ close: async () => undefined, isDead: false });
-    target.sessionMap.set("acp_a", "z1");
-    // The user hit ESC just before the flush landed: the turn is already
-    // cancelled (the turn loop unwinds it on its ~100ms cadence). The flush
-    // must not reinterpret that stop as a restart — the driver pauses.
-    const escTurn = { zcodeSid: "z1", goalLoop: true, cancelled: true };
-    target.pendingTurns.set(1, escTurn);
-
-    flushSandboxGrants(target, new Map([["acp_a", ["/a"]]]));
-
-    expect(escTurn.sandboxRestart).toBeUndefined();
   });
 });

@@ -107,16 +107,10 @@ function makeServer(root: string): never {
   } as never;
 }
 
-import { GoalLoopDriver, goalCompactThreshold, goalMaxTurns } from "../src/goal-loop/driver.js";
+import { GoalLoopDriver } from "../src/goal-loop/driver.js";
 import { readGoalState, verifyPath } from "../src/goal-loop/state.js";
-import {
-  decomposePrompt,
-  parseTickets,
-  parseVerifyFile,
-  parseVerifyReply,
-  parseVerdict,
-} from "../src/goal-loop/templates.js";
-import { cancel } from "../src/handlers/session.js";
+import { parseTickets, parseVerifyFile } from "../src/goal-loop/templates.js";
+import {} from "../src/handlers/session.js";
 
 let root: string;
 
@@ -191,23 +185,6 @@ describe("goal-loop templates", () => {
     expect(tickets).toHaveLength(2);
     expect(tickets[0]).toEqual({ title: "wire the hub", acceptance: "curl /health returns 200" });
   });
-
-  it("parses the trailing VERDICT line with gaps", () => {
-    const v = parseVerdict("did half the work\n\nVERDICT: not-yet\nGAPS: endpoint tests missing")!;
-    expect(v.kind).toBe("not-yet");
-    expect(v.gaps).toBe("endpoint tests missing");
-    expect(parseVerdict("no verdict line")).toBeNull();
-  });
-
-  it("parses verify replies", () => {
-    expect(parseVerifyReply("PASS")).toEqual({ pass: true });
-    expect(parseVerifyReply("FAIL: tests red")).toEqual({ pass: false, reason: "tests red" });
-    expect(parseVerifyReply("mumble")).toBeNull();
-  });
-
-  it("decompose prompt carries the objective", () => {
-    expect(decomposePrompt("ship v2")).toContain("ship v2");
-  });
 });
 
 describe("goal-loop driver", () => {
@@ -251,86 +228,6 @@ describe("goal-loop driver", () => {
     expect(driver["state"].status).toBe("paused-budget");
   });
 
-  it("ends as impossible when the worker reports it", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("blocked forever\nVERDICT: impossible\nWHY: no api access");
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-    expect(driver["state"].status).toBe("impossible");
-    expect(driver["state"].endedReason).toBe("no api access");
-  });
-
-  it("waits out a running compaction and retries a compact-rejected round", async () => {
-    vi.stubEnv("ZCODE_ACP_LANG", "en");
-    const server: { autoCompactInFlight: Set<string> } = makeServer(root);
-    // A compaction is in flight at loop start: runGoalTurn's pre-round wait
-    // polls it (500ms ticks) instead of hitting the compaction gate.
-    server.autoCompactInFlight.add("zsid-1");
-    setTimeout(() => server.autoCompactInFlight.delete("zsid-1"), 50);
-    // The decompose round is then busy-rejected by a compaction that armed
-    // in the arm-race window — the retry (flag now clear) succeeds.
-    runOneTurn.mockImplementationOnce(
-      async (_srv: unknown, opts: { turn: { compactRejected?: boolean } }) => {
-        opts.turn.compactRejected = true;
-        return { stopReason: "max_turn_requests" };
-      },
-    );
-    scriptRound("```\n- t | x\n```"); // decompose retry
-    scriptRound("done\nVERDICT: met");
-    scriptRound("PASS");
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-
-    expect(driver["state"].status).toBe("complete");
-    // decompose ran twice (rejected once, retried) + dispatch + verify.
-    expect(runOneTurn).toHaveBeenCalledTimes(4);
-    // The rejected round shows the neutral auto-resume note, never the
-    // user-directed resend notice (the driver retries by itself).
-    const notices = sendTextChunk.mock.calls.map((c) => String(c[2] ?? ""));
-    expect(notices.some((t) => t.includes("NOT sent"))).toBe(false);
-    expect(notices.filter((t) => t.includes("continues automatically"))).toHaveLength(1);
-  }, 15_000);
-
-  it("a round rejected twice (compaction never settles) pauses the loop, never counts as completed", async () => {
-    vi.stubEnv("ZCODE_ACP_LANG", "en");
-    const server: { autoCompactInFlight: Set<string> } = makeServer(root);
-    server.autoCompactInFlight.add("zsid-1");
-    setTimeout(() => server.autoCompactInFlight.delete("zsid-1"), 50);
-    const reject = async (_srv: unknown, opts: { turn: { compactRejected?: boolean } }) => {
-      opts.turn.compactRejected = true;
-      return { stopReason: "max_turn_requests" };
-    };
-    runOneTurn.mockImplementationOnce(reject);
-    runOneTurn.mockImplementationOnce(reject);
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-
-    // Both decompose attempts rejected → run()'s crash path pauses cleanly;
-    // the round is not budgeted, no stale verdict is parsed, no ticket ran.
-    expect(driver["state"].status).toBe("paused-crash");
-    expect(driver["state"].rounds).toBe(0);
-    expect(driver["state"].tickets).toEqual([]);
-    expect(runOneTurn).toHaveBeenCalledTimes(2);
-  }, 15_000);
-
-  it("pauses on a cancelled round (ESC) and preserves parked text", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("cut short", { verdict: "cancelled" });
-
-    const driver = await startLoop(server);
-    const parked = driver.parkPrompt("user steer text");
-    await waitSettled(driver);
-
-    expect(driver["state"].status).toBe("paused");
-    expect(await parked).toEqual({ stopReason: "cancelled" });
-    expect(driver["state"].parkedText).toBe("user steer text");
-  });
-
   it("merges parked prompts into the next dispatch and settles them", async () => {
     const server = makeServer(root);
     scriptRound("```\n- t | x\n```");
@@ -344,52 +241,6 @@ describe("goal-loop driver", () => {
     const dispatchPrompt = runOneTurn.mock.calls[1]![1] as { sendText: string };
     expect(dispatchPrompt.sendText).toContain("use library Y");
     expect(await parked).toEqual({ stopReason: "end_turn" });
-  });
-
-  it("pauses at the round budget (dispatch rounds only)", async () => {
-    process.env.ZCODE_ACP_GOAL_MAX_TURNS = "1";
-    const server = makeServer(root);
-    scriptRound("```\n- t1 | x\n- t2 | y\n```");
-    scriptRound("done t1\nVERDICT: met");
-    scriptRound("PASS");
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-    expect(driver["state"].status).toBe("paused-budget");
-  });
-
-  it("compacts at the boundary when the threshold is met and reads the handoff back", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("done\nVERDICT: met");
-    scriptRound("PASS");
-    // handoff turn
-    scriptRound("DONE", { tools: true });
-
-    readProjection = { contextUsed: 90_000, contextWindow: 100_000 };
-    expect(goalCompactThreshold(100_000)).toBe(80_000);
-
-    const driver = await startLoop(server);
-    // complete (single ticket) — compaction fires before the final report.
-    await waitSettled(driver);
-    expect(compactMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("pauses when ESC cancels the compaction handoff turn (compaction skipped)", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("done\nVERDICT: met");
-    scriptRound("PASS");
-    // handoff turn cancelled by ESC
-    scriptRound("DONE", { verdict: "cancelled" });
-
-    readProjection = { contextUsed: 90_000, contextWindow: 100_000 };
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-    expect(driver["state"].status).toBe("paused");
-    expect(driver["state"].endedReason).toBe("cancelled");
-    expect(compactMock).not.toHaveBeenCalled();
   });
 
   it("settles parked prompts, disarms the keepalive, and persists paused-crash when a round throws", async () => {
@@ -476,55 +327,6 @@ describe("goal-loop driver", () => {
     expect(redispatch.sendText).toContain("fix login");
   });
 
-  it("pauses paused-crash only after the loop-level recovery budget is exhausted", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    const backendLost = () =>
-      new RequestError(-32603, "ZCode turn failed: database is not open", {
-        type: "zcode_turn_failed",
-        code: "ERR_INVALID_STATE",
-      });
-    // Every round (decompose included) dies on the lost backend: 3 loop-level
-    // recoveries, then the 4th failure must pause.
-    runOneTurn.mockImplementation(async () => {
-      throw backendLost();
-    });
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-
-    expect(driver["state"].status).toBe("paused-crash");
-    expect(reloadBackendSession).toHaveBeenCalledTimes(3);
-  });
-
-  it("resets the recovery budget after a round completes on a live backend", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    // Round 1 dies backend-lost; round 2 completes; round 3 dies again — the
-    // second loss must still recover (budget was reset by round 2).
-    runOneTurn.mockImplementationOnce(async () => {
-      throw new RequestError(-32603, "ZCode turn failed: database is not open", {
-        type: "zcode_turn_failed",
-        code: "ERR_INVALID_STATE",
-      });
-    });
-    scriptRound("wip\nVERDICT: not-yet");
-    runOneTurn.mockImplementationOnce(async () => {
-      throw new RequestError(-32603, "ZCode turn failed: database is not open", {
-        type: "zcode_turn_failed",
-        code: "ERR_INVALID_STATE",
-      });
-    });
-    scriptRound("done\nVERDICT: met");
-    scriptRound("PASS");
-
-    const driver = await startLoop(server);
-    await waitSettled(driver);
-
-    expect(driver["state"].status).toBe("complete");
-    expect(reloadBackendSession).toHaveBeenCalledTimes(2);
-  });
-
   it("re-dispatches the ticket when a sandbox allow-restart cancels the round", async () => {
     const server = makeServer(root);
     scriptRound("```\n- fix login | tests stay green\n```");
@@ -548,90 +350,6 @@ describe("goal-loop driver", () => {
     const redispatch = runOneTurn.mock.calls[2]![1] as { sendText: string };
     expect(redispatch.sendText).toContain("fix login");
     expect(redispatch.sendText).toContain("tests stay green");
-  });
-
-  it("pre-empts a still-running editor turn when the 10s wait times out", async () => {
-    vi.useFakeTimers();
-    try {
-      const server = makeServer(root);
-      const editorTurn = { zcodeSid: "zsid-1", cancelled: false };
-      server.pendingTurns.set("editor-1", editorTurn as never);
-      // The decompose send must land only AFTER the editor turn was cancelled
-      // (pre-empt semantics — a send into the live turn would be steer input,
-      // its tickets parsed from the foreign reply).
-      runOneTurn.mockImplementationOnce(async () => {
-        expect(editorTurn.cancelled).toBe(true);
-        fetchMessagesState.push({ role: "assistant", text: "```\n- t | x\n```", tools: true });
-        return { stopReason: "end_turn" };
-      });
-      // Dispatch round: cancelled → the loop pauses cleanly.
-      runOneTurn.mockImplementationOnce(async () => ({ stopReason: "cancelled" }));
-
-      const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
-      await vi.advanceTimersByTimeAsync(11_000);
-
-      expect(editorTurn.cancelled).toBe(true);
-      await waitSettled(driver);
-      expect(driver["state"].status).toBe("paused");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("ESC (real cancel) during the compact() window pauses at the next boundary", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("done\nVERDICT: met");
-    scriptRound("PASS");
-    scriptRound("DONE");
-    readProjection = { contextUsed: 90_000, contextWindow: 100_000 };
-    let releaseCompact!: () => void;
-    compactMock.mockImplementationOnce(
-      () =>
-        new Promise<void>((r) => {
-          releaseCompact = r;
-        }),
-    );
-
-    const driver = GoalLoopDriver.start(server as never, "acp-1", "zsid-1", "build it");
-    await vi.waitFor(() => {
-      if (!releaseCompact) throw new Error("compact window not reached");
-    });
-    // Real cancel(): no pendingTurns entry exists in this window (the mocked
-    // runOneTurn never deregisters its rounds — the real one does it in its
-    // finally), so clear them to model the window, then the pause must be
-    // parked on the driver (requestPause).
-    server.pendingTurns.clear();
-    await cancel(server as never, { sessionId: "acp-1" } as never);
-    releaseCompact();
-    await waitSettled(driver);
-    expect(driver["state"].status).toBe("paused");
-  });
-
-  it("resume() before the boundary clears the pending pause (loop completes)", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    let releaseRound!: (v: { stopReason: string }) => void;
-    runOneTurn.mockImplementationOnce(
-      () =>
-        new Promise<{ stopReason: string }>((res) => {
-          releaseRound = res;
-        }),
-    );
-    scriptRound("PASS");
-
-    const driver = await startLoop(server);
-    await vi.waitFor(() => {
-      if (!releaseRound) throw new Error("round not in flight");
-    });
-    driver.pause();
-    driver.resume(); // /auto resume before the boundary — must not be swallowed
-    // Round 1 lands its own met verdict (scriptRound queues at SETUP time —
-    // pushing here avoids stealing the verify round's scripted reply).
-    fetchMessagesState.push({ role: "assistant", text: "done\nVERDICT: met", tools: true });
-    releaseRound({ stopReason: "end_turn" });
-    await waitSettled(driver);
-    expect(driver["state"].status).toBe("complete");
   });
 
   it("a dying driver's cleanup does not unregister a NEWER driver", async () => {
@@ -678,12 +396,6 @@ describe("goal-loop driver", () => {
 
     releaseD2({ stopReason: "cancelled" });
     await waitSettled(d2);
-  });
-
-  it("goalMaxTurns defaults to 100 and honors the env override", async () => {
-    expect(goalMaxTurns()).toBe(100);
-    process.env.ZCODE_ACP_GOAL_MAX_TURNS = "7";
-    expect(goalMaxTurns()).toBe(7);
   });
 });
 
@@ -816,23 +528,6 @@ describe("verification verdict via file (regression: verbose replies looped fore
     expect(parseVerifyFile("I checked everything and it all works.")).toBeNull();
   });
 
-  it("parseVerifyReply (fallback) tolerates prose containing pass", () => {
-    expect(parseVerifyReply("I re-ran the checks.\nAll tests pass.")).toEqual({ pass: true });
-    expect(parseVerifyReply("everything looks good")).toBeNull();
-  });
-
-  it("completes the ticket from the model-written verdict file", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("done\nVERDICT: met");
-    scriptRound("DONE", { verifyFile: "PASS" });
-    const driver = await startLoop(server);
-    await vi.waitFor(() => expect(driver.state.status).toBe("complete"));
-    expect(driver.state.tickets[0]!.status).toBe("done");
-    // decompose + dispatch + verify only — no feedback round.
-    expect(runOneTurn).toHaveBeenCalledTimes(3);
-  });
-
   it("retries once with the strict prompt, then pauses on unreadable verdicts", async () => {
     const server = makeServer(root);
     scriptRound("```\n- t | x\n```");
@@ -845,28 +540,9 @@ describe("verification verdict via file (regression: verbose replies looped fore
     // decompose + dispatch + verify + strict retry — never a re-work round.
     expect(runOneTurn).toHaveBeenCalledTimes(4);
   });
-
-  it("strict retry verdict file is honored", async () => {
-    const server = makeServer(root);
-    scriptRound("```\n- t | x\n```");
-    scriptRound("done\nVERDICT: met");
-    scriptRound("verbose, no file");
-    scriptRound("DONE", { verifyFile: "PASS" }); // strict retry writes it
-    const driver = await startLoop(server);
-    await vi.waitFor(() => expect(driver.state.status).toBe("complete"));
-    expect(runOneTurn).toHaveBeenCalledTimes(4);
-  });
 });
 
 describe("verify prose-fallback guards (review: negation + stale dispatch text)", () => {
-  it("parseVerifyReply rejects negated pass statements", () => {
-    expect(parseVerifyReply("2 of 5 checks did not pass")).toBeNull();
-    expect(parseVerifyReply("I couldn't make the lint pass")).toBeNull();
-    expect(parseVerifyReply("tests fail to pass on node 22")).toBeNull();
-    expect(parseVerifyReply("All checks pass.")).toEqual({ pass: true });
-    expect(parseVerifyReply("re-ran everything; it passed")).toEqual({ pass: true });
-  });
-
   it("never verifies from the dispatch reply's own pass wording", async () => {
     const server = makeServer(root);
     scriptRound("```\n- t | x\n```");

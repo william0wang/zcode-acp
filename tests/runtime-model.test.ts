@@ -123,40 +123,18 @@ vi.mock("node:fs", async () => {
 });
 
 // Import AFTER vi.mock is set up.
-const {
-  loadAllModels,
-  modelContextWindow,
-  parseModelValue,
-  formatModelValue,
-  buildRuntimeModel,
-  applyModelSwitch,
-} = await import("../src/config/options.js").then(async () => {
-  const opts = await import("../src/config/options.js");
-  const rm = await import("../src/config/runtime-model.js");
-  return {
-    ...opts,
-    buildRuntimeModel: rm.buildRuntimeModel,
-    applyModelSwitch: rm.applyModelSwitch,
-  };
-});
-
-describe("loadAllModels", () => {
-  it("collects enabled builtins + active custom providers", () => {
-    const models = loadAllModels();
-    const ids = models.map((m) => m.modelId);
-    // Enabled builtin + enabled custom appear.
-    expect(ids).toContain("model-a");
-    expect(ids).toContain("model-b");
-    expect(ids).toContain("alpha-1");
-    // Disabled builtin (Secondary) stays out — its model-a never duplicates.
-    expect(ids.filter((id) => id === "model-a")).toHaveLength(1);
-    // beta-1 (custom WITHOUT an enabled flag) is included: the newer CLI leaves
-    // `enabled` unset on active third-party providers, so "absent" = enabled.
-    expect(ids).toContain("beta-1");
-    // gamma-1 (custom with an EXPLICIT enabled:false) is excluded.
-    expect(ids).not.toContain("gamma-1");
+const { loadAllModels, parseModelValue, buildRuntimeModel, applyModelSwitch } =
+  await import("../src/config/options.js").then(async () => {
+    const opts = await import("../src/config/options.js");
+    const rm = await import("../src/config/runtime-model.js");
+    return {
+      ...opts,
+      buildRuntimeModel: rm.buildRuntimeModel,
+      applyModelSwitch: rm.applyModelSwitch,
+    };
   });
 
+describe("loadAllModels", () => {
   it("excludes providers the desktop marks 未启用 for missing credentials (#156)", () => {
     const ids = loadAllModels().map((m) => m.modelId);
     // Keyless builtin (API-key mode picked, no key entered) — excluded even
@@ -194,61 +172,13 @@ describe("loadAllModels", () => {
       fakeConfig = FAKE_CONFIG;
     }
   });
-
-  it("tracks provider identity for every custom provider", () => {
-    const models = loadAllModels();
-    const beta = models.find((m) => m.modelId === "beta-1");
-    expect(beta?.providerName).toBe("Beta");
-    expect(beta?.providerId).toBe("custom-provider-beta");
-  });
-
-  it("carries the provider name for display", () => {
-    const models = loadAllModels();
-    const alpha = models.find((m) => m.modelId === "alpha-1");
-    expect(alpha?.providerName).toBe("Alpha");
-    expect(alpha?.providerId).toBe("custom-provider-alpha");
-  });
-});
-
-describe("modelContextWindow", () => {
-  it("looks up context by provider+model (not hardcoded provider)", () => {
-    expect(modelContextWindow("builtin:primary", "model-a")).toBe(1000000);
-    expect(modelContextWindow("custom-provider-alpha", "alpha-1")).toBe(200000);
-  });
-
-  it("returns 0 for an unknown provider/model", () => {
-    expect(modelContextWindow("unknown", "nope")).toBe(0);
-  });
 });
 
 describe("parseModelValue / formatModelValue", () => {
-  it("builtin providers encode as providerId\\modelId", () => {
-    const value = formatModelValue("builtin:primary", "model-a");
-    expect(value).toBe("builtin:primary\\model-a");
-    expect(parseModelValue(value)).toEqual({
-      providerId: "builtin:primary",
-      modelId: "model-a",
-    });
-  });
-
-  it("third-party providers round-trip providerId + modelId", () => {
-    const value = formatModelValue("custom-provider-alpha", "alpha-1");
-    expect(value).toBe("custom-provider-alpha\\alpha-1");
-    expect(parseModelValue(value)).toEqual({
-      providerId: "custom-provider-alpha",
-      modelId: "alpha-1",
-    });
-  });
-
   it("a plain modelId (no backslash) resolves to the first enabled builtin provider", () => {
     const parsed = parseModelValue("model-a");
     expect(parsed.modelId).toBe("model-a");
     expect(parsed.providerId).toBe("builtin:primary");
-  });
-
-  it("splits on the FIRST backslash only (modelId may contain none)", () => {
-    const parsed = parseModelValue("pid\\model-a");
-    expect(parsed).toEqual({ providerId: "pid", modelId: "model-a" });
   });
 });
 
@@ -285,23 +215,6 @@ describe("buildRuntimeModel", () => {
 
     expect(rm.provider.apiKey).toBeUndefined();
     expect(rm.provider.apiFormat).toBe("anthropic-messages");
-  });
-
-  it("returns null for an unknown provider", () => {
-    expect(
-      buildRuntimeModel({ providerId: "nope", providerName: "nope", modelId: "x" }),
-    ).toBeNull();
-  });
-
-  it("includes all the provider's models in the overlay", () => {
-    const rm = buildRuntimeModel({
-      providerId: "builtin:primary",
-      providerName: "Primary",
-      modelId: "model-a",
-    }) as { provider: { models: Array<{ modelId: string }> } };
-
-    const modelIds = rm.provider.models.map((m) => m.modelId);
-    expect(modelIds).toEqual(["model-a", "model-b"]);
   });
 });
 

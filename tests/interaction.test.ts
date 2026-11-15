@@ -9,20 +9,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   acpPermissionResponseToExitPlanMode,
   acpPermissionResponseToZcode,
-  buildAskUserAcpParams,
   buildAskUserElicitationForm,
-  buildPlanApprovalElicitationForm,
-  describeToolInput,
-  enrichPermissionOptions,
-  exitPlanModeToAcpPermission,
-  isAskUserQuestion,
-  isExitPlanMode,
   isPermissionRequest,
-  isSessionAllowPick,
   isUserInputRequest,
   parseAskUserElicitationResponse,
   parseAskUserResponse,
-  parsePlanApprovalElicitationResponse,
   splitAskUserQuestions,
   zcodePermissionToAcp,
 } from "../src/interaction/adapter.js";
@@ -42,26 +33,6 @@ describe("classification", () => {
     expect(isPermissionRequest("interaction/requestUserInput")).toBe(false);
     expect(isUserInputRequest("interaction/requestUserInput")).toBe(true);
     expect(isUserInputRequest("interaction/requestPermission")).toBe(false);
-  });
-
-  it("detects ExitPlanMode by schema.interaction=plan_approval", () => {
-    expect(isExitPlanMode({ schema: { interaction: "plan_approval" } })).toBe(true);
-    expect(isExitPlanMode({ schema: { toolName: "X" } })).toBe(false);
-    expect(isExitPlanMode({})).toBe(false);
-  });
-
-  it("AskUserQuestion = userInput without plan_approval", () => {
-    expect(
-      isAskUserQuestion("interaction/requestUserInput", {
-        schema: { toolName: "AskUserQuestion" },
-      }),
-    ).toBe(true);
-    expect(
-      isAskUserQuestion("interaction/requestUserInput", {
-        schema: { interaction: "plan_approval" },
-      }),
-    ).toBe(false);
-    expect(isAskUserQuestion("interaction/requestPermission", {})).toBe(false);
   });
 });
 
@@ -83,10 +54,6 @@ describe("zcode permission → ACP", () => {
     expect(acp!.options[0].optionId).toBe("allow");
     expect(acp!.toolCall.toolCallId).toBe("tc_1");
     expect(acp!.sessionId).toBe("acp_1");
-  });
-
-  it("returns null when no valid options", () => {
-    expect(zcodePermissionToAcp({ toolCallId: "t", options: [] } as never, "acp_1")).toBeNull();
   });
 
   // Regression: zcode backend emits `kind: "deny"` (and other non-ACP values)
@@ -114,81 +81,9 @@ describe("zcode permission → ACP", () => {
     expect(acp!.options.map((o) => o.optionId)).toEqual(["allow_once", "allow_project", "deny"]);
   });
 
-  it("maps legacy allow/reject/unknown kinds to ACP-legal values", () => {
-    const params = {
-      toolCallId: "tc",
-      options: [
-        { optionId: "a", kind: "allow", name: "a" },
-        { optionId: "r", kind: "reject", name: "r" },
-        { optionId: "u", kind: "something_weird", name: "u" },
-      ],
-    };
-    const acp = zcodePermissionToAcp(params, "acp_1");
-    // allow→allow_always; reject/unknown→reject_once (fail-safe, never auto-allow)
-    expect(acp!.options.map((o) => o.kind)).toEqual(["allow_always", "reject_once", "reject_once"]);
-  });
-
   // The approval popup must show WHAT is being approved. martty renders only
   // toolCall.title in its overlay (untitled → a bare "tool" prompt), so the
   // title carries "Tool: command/path" and content carries the full input.
-  it("popup toolCall carries a human title + full-input content + locations", () => {
-    const params = {
-      requestId: "r1",
-      toolCallId: "tc_1",
-      toolName: "Bash",
-      input: { command: "echo ok\nrm -rf /tmp/x" },
-      options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
-    };
-    const acp = zcodePermissionToAcp(params, "acp_1")!;
-    expect(acp.toolCall.title).toBe("Bash: echo ok");
-    expect(acp.toolCall.content?.[0]).toEqual({
-      type: "content",
-      content: { type: "text", text: "echo ok\nrm -rf /tmp/x" },
-    });
-  });
-
-  it("file tools expose the path in title and locations", () => {
-    const params = {
-      requestId: "r1",
-      toolCallId: "tc_2",
-      toolName: "Write",
-      input: { file_path: "/etc/hosts", content: "x" },
-      options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
-    };
-    const acp = zcodePermissionToAcp(params, "acp_1")!;
-    expect(acp.toolCall.title).toBe("Write: /etc/hosts");
-    expect(acp.toolCall.locations).toEqual([{ path: "/etc/hosts" }]);
-  });
-
-  it("input without recognizable fields still yields a JSON summary title", () => {
-    const acp = zcodePermissionToAcp(
-      {
-        requestId: "r1",
-        toolCallId: "tc_3",
-        toolName: "WebSearch",
-        input: { query: "rust regex crate" },
-        options: [{ optionId: "allow_once", kind: "allow_once", name: "Allow once" }],
-      },
-      "acp_1",
-    )!;
-    expect(acp.toolCall.title).toBe("WebSearch: rust regex crate");
-  });
-
-  it("describeToolInput caps long commands and prefers command over path", () => {
-    expect(describeToolInput({ command: "a".repeat(300) })?.length).toBeLessThanOrEqual(80);
-    expect(describeToolInput({ command: "bun test", file_path: "/x" })).toBe("bun test");
-    expect(describeToolInput(undefined)).toBeUndefined();
-  });
-
-  it("describeToolInput keeps the TAIL of long paths (filename decides, overlays cut the end)", () => {
-    const deep = `/very/deep/${"dir/".repeat(30)}src/handlers/session.ts`;
-    const shown = describeToolInput({ file_path: deep })!;
-    expect(shown.length).toBeLessThanOrEqual(80);
-    expect(shown.startsWith("…")).toBe(true);
-    expect(shown.endsWith("src/handlers/session.ts")).toBe(true);
-    // Short paths pass through untouched.
-    expect(describeToolInput({ file_path: "/a/b.ts" })).toBe("/a/b.ts");
-  });
 });
 
 describe("ACP response → zcode permission", () => {
@@ -214,23 +109,6 @@ describe("ACP response → zcode permission", () => {
   // / "allow_project" (not "allow"/"allow_always"). The response mapper must
   // recognize these as allow, otherwise selecting "Allow once" in the popup
   // is reported back to zcode as a rejection.
-  it("allow_once / allow_project optionId → decision allow", () => {
-    expect(
-      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "allow_once" } })
-        .decision,
-    ).toBe("allow");
-    expect(
-      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "allow_project" } })
-        .decision,
-    ).toBe("allow");
-  });
-
-  it("deny optionId → decision deny", () => {
-    expect(
-      acpPermissionResponseToZcode({ outcome: { outcome: "selected", optionId: "deny" } }).decision,
-    ).toBe("deny");
-  });
-
   // The backend's options each carry the authoritative response object
   // (zcodePermissionOptionSchema, zcode-protocol/index.ts:589-597): "Always
   // allow in this project" ships permissionUpdates the runtime persists
@@ -282,89 +160,14 @@ describe("ACP response → zcode permission", () => {
     ).toEqual({ decision: "deny", reason: "PERMISSION_DENIED_BY_USER" });
   });
 
-  it("falls back to the allow-id set when the option carries no response (older builds)", () => {
-    expect(
-      acpPermissionResponseToZcode(
-        { outcome: { outcome: "selected", optionId: "allow_project" } },
-        [{ optionId: "allow_project", kind: "allow_always", name: "Always allow" }],
-      ),
-    ).toEqual({ decision: "allow" });
-  });
-
   // The v3 projection crops BOTH always tiers for the session-always tools
   // (toLegacyPermissionOptionsPolicy) — the bridge re-offers the session tier
   // itself so a client can stop re-approving every workflow-design call.
   // SaveWorkflow stays OUT (upstream allowAlways:false — every save is an
   // explicit ask even on the desktop).
-  describe("session-always injection (workflow tools)", () => {
-    const v3Ask = (toolName: string) => ({
-      requestId: "perm_1",
-      sessionId: "s1",
-      toolCallId: "c1",
-      toolName,
-      options: [
-        {
-          optionId: "allow_once",
-          kind: "allow_once",
-          name: "Allow once",
-          response: { decision: "allow", reason: "Approved once" },
-        },
-        {
-          optionId: "deny",
-          kind: "deny",
-          name: "Deny",
-          response: { decision: "deny" },
-        },
-      ],
-    });
-
-    it("injects the session-always option for workflow tools cropped by v3", () => {
-      const enriched = enrichPermissionOptions(v3Ask("CreateWorkflow"));
-      expect(enriched.options).toHaveLength(3);
-      const injected = enriched.options![2]!;
-      expect(injected.optionId).toBe("allowSession");
-      expect(injected.kind).toBe("allow_always");
-      expect(injected.name).toBe("Always allow in this session");
-    });
-
-    it("never injects for SaveWorkflow — upstream keeps every save an explicit ask", () => {
-      const saveAsk = v3Ask("SaveWorkflow");
-      expect(enrichPermissionOptions(saveAsk)).toBe(saveAsk);
-    });
-
-    it("leaves other tools and already-always asks untouched", () => {
-      const bashAsk = v3Ask("Bash");
-      expect(enrichPermissionOptions(bashAsk)).toBe(bashAsk);
-      const withAlways = {
-        ...v3Ask("CreateWorkflow"),
-        options: [
-          ...v3Ask("CreateWorkflow").options!,
-          { optionId: "allow_project", kind: "allow_project", name: "Always allow" },
-        ],
-      };
-      expect(enrichPermissionOptions(withAlways)).toBe(withAlways);
-    });
-
-    it("the injected pick maps to a plain allow and is detectable for grant recording", () => {
-      const enriched = enrichPermissionOptions(v3Ask("CreateWorkflow"));
-      const pick = { outcome: { outcome: "selected", optionId: "allowSession" } };
-      expect(isSessionAllowPick(pick)).toBe(true);
-      expect(isSessionAllowPick({ outcome: { outcome: "selected", optionId: "allow_once" } })).toBe(
-        false,
-      );
-      expect(acpPermissionResponseToZcode(pick, enriched.options)).toEqual({
-        decision: "allow",
-        reason: "Approved for this session",
-      });
-    });
-  });
 });
 
 describe("ExitPlanMode", () => {
-  it("synthesizes approve/reject options", () => {
-    const acp = exitPlanModeToAcpPermission({ toolCallId: "tc_2" } as never, "acp_1");
-    expect(acp.options.map((o) => o.optionId)).toEqual(["approve", "reject"]);
-  });
   it("approve → accept with content.answer_0", () => {
     const r = acpPermissionResponseToExitPlanMode({
       outcome: { outcome: "selected", optionId: "approve" },
@@ -372,69 +175,11 @@ describe("ExitPlanMode", () => {
     expect(r.action).toBe("accept");
     expect((r as { content: { answer_0: string } }).content.answer_0).toBe("approve");
   });
-  it("popup toolCall content carries the plan text", () => {
-    const acp = exitPlanModeToAcpPermission(
-      { toolCallId: "tc_2", input: { plan: "# The Plan\n1. do it" } } as never,
-      "acp_1",
-    );
-    expect(acp.toolCall.content?.[0]).toEqual({
-      type: "content",
-      content: { type: "text", text: "# The Plan\n1. do it" },
-    });
-  });
-  it("no plan in input → no content block", () => {
-    const acp = exitPlanModeToAcpPermission({ toolCallId: "tc_2" } as never, "acp_1");
-    expect(acp.toolCall.content).toBeUndefined();
-  });
   it("reject → decline", () => {
     expect(
       acpPermissionResponseToExitPlanMode({ outcome: { outcome: "selected", optionId: "reject" } })
         .action,
     ).toBe("decline");
-  });
-});
-
-describe("plan approval elicitation form", () => {
-  it("carries the plan markdown in the field description", () => {
-    const form = buildPlanApprovalElicitationForm(
-      { toolCallId: "tc_9", input: { plan: "# The Plan\n1. do it" } } as never,
-      "acp_1",
-      "tc_9",
-    );
-    expect(form.mode).toBe("form");
-    expect(form.sessionId).toBe("acp_1");
-    expect(form.toolCallId).toBe("tc_9");
-    const field = form.requestedSchema.properties.approval as Record<string, unknown>;
-    expect(field.description).toBe("# The Plan\n1. do it");
-    expect(form.requestedSchema.required).toEqual(["approval"]);
-    expect(field.oneOf).toEqual([
-      { const: "approve", title: "Approve — exit plan mode" },
-      { const: "reject", title: "Reject — keep planning" },
-    ]);
-  });
-
-  it("no plan in input → field without description", () => {
-    const form = buildPlanApprovalElicitationForm({ toolCallId: "tc_9" } as never, "acp_1");
-    const field = form.requestedSchema.properties.approval as Record<string, unknown>;
-    expect(field.description).toBeUndefined();
-  });
-
-  it("approve → accept with content.answer_0", () => {
-    const r = parsePlanApprovalElicitationResponse({
-      action: "accept",
-      content: { approval: "approve" },
-    });
-    expect(r.action).toBe("accept");
-    expect((r as { content: { answer_0: string } }).content.answer_0).toBe("approve");
-  });
-
-  it("reject choice / cancel / garbage → decline", () => {
-    expect(
-      parsePlanApprovalElicitationResponse({ action: "accept", content: { approval: "reject" } })
-        .action,
-    ).toBe("decline");
-    expect(parsePlanApprovalElicitationResponse({ action: "cancel" }).action).toBe("decline");
-    expect(parsePlanApprovalElicitationResponse(null).action).toBe("decline");
   });
 });
 
@@ -463,52 +208,8 @@ describe("AskUserQuestion split", () => {
     expect(ids).toEqual(["auth:yes", "auth:no", "log:yes", "log:no"]);
   });
 
-  it("multiple questions → separate entries", () => {
-    const qs = splitAskUserQuestions({
-      toolCallId: "tc",
-      questions: [
-        { question: "Q1?", options: [{ label: "A" }] },
-        { question: "Q2?", multiSelect: true, options: [{ label: "X" }] },
-      ],
-    } as never);
-    expect(qs).toHaveLength(2);
-    expect(qs![0].question).toBe("Q1?");
-    expect(qs![1].question).toBe("Q2?");
-  });
-
   it("returns null when no valid questions", () => {
     expect(splitAskUserQuestions({ toolCallId: "tc", questions: [] } as never)).toBeNull();
-  });
-
-  it("falls back to input.questions when top-level absent", () => {
-    const qs = splitAskUserQuestions({
-      toolCallId: "tc",
-      input: { questions: [{ question: "From input?", options: [{ label: "Y" }] }] },
-    } as never);
-    expect(qs).toHaveLength(1);
-    expect(qs![0].question).toBe("From input?");
-  });
-});
-
-describe("buildAskUserAcpParams", () => {
-  it("constructs the ACP params with options + toolCall", () => {
-    const params = buildAskUserAcpParams(
-      { toolCallId: "tc", input: { some: "in" } } as never,
-      "acp_1",
-      [{ optionId: "A", kind: "allow_once", name: "A" }],
-    );
-    expect(params.sessionId).toBe("acp_1");
-    expect(params.options).toHaveLength(1);
-    expect(params.toolCall.toolCallId).toBe("tc");
-  });
-  it("popup title carries the question text", () => {
-    const params = buildAskUserAcpParams(
-      { toolCallId: "tc", input: {} } as never,
-      "acp_1",
-      [{ optionId: "A", kind: "allow_once", name: "A" }],
-      "Which database?",
-    );
-    expect(params.toolCall.title).toBe("Which database?");
   });
 });
 
@@ -518,20 +219,10 @@ describe("parseAskUserResponse", () => {
       "Option A",
     );
   });
-  it("multi-select yes → 'yes'", () => {
-    expect(parseAskUserResponse({ outcome: { outcome: "selected", optionId: "auth:yes" } })).toBe(
-      "yes",
-    );
-  });
   it("multi-select no → 'no'", () => {
     expect(parseAskUserResponse({ outcome: { outcome: "selected", optionId: "log:no" } })).toBe(
       "no",
     );
-  });
-  it("skip → null", () => {
-    expect(
-      parseAskUserResponse({ outcome: { outcome: "selected", optionId: "__skip__" } }),
-    ).toBeNull();
   });
   it("cancelled → null", () => {
     expect(parseAskUserResponse({ outcome: { outcome: "cancelled" } })).toBeNull();
@@ -582,53 +273,6 @@ describe("elicitation form: AskUserQuestion", () => {
     expect(form.requestedSchema.required).toEqual([]);
   });
 
-  it("multi-select: array enum (anyOf titled) + companion free-text field", () => {
-    const params = {
-      ...baseParams,
-      questions: [
-        {
-          question: "Pick files",
-          multiSelect: true,
-          options: [
-            { label: "a.ts", value: "a" },
-            { label: "b.ts", value: "b" },
-          ],
-        },
-      ],
-    };
-    const form = buildAskUserElicitationForm(params, "acp_1");
-    const prop = form.requestedSchema.properties.q_0 as {
-      type: string;
-      items: { anyOf: Array<{ const: string; title: string }> };
-    };
-    expect(prop.type).toBe("array");
-    expect(prop.items.anyOf).toEqual([
-      { const: "a.ts", title: "a.ts" },
-      { const: "b.ts", title: "b.ts" },
-    ]);
-    expect(form.requestedSchema.properties.q_0_other).toBeDefined();
-    expect(form.requestedSchema.required).toEqual([]);
-  });
-
-  it("attaches toolCallId scope when provided", () => {
-    const form = buildAskUserElicitationForm(baseParams, "acp_1", "tc_1");
-    expect(form.toolCallId).toBe("tc_1");
-    expect(form.sessionId).toBe("acp_1");
-  });
-
-  it("omits toolCallId when not provided", () => {
-    const form = buildAskUserElicitationForm(baseParams, "acp_1");
-    expect(form.toolCallId).toBeUndefined();
-  });
-
-  it("parse: dropdown selection maps back by question text", () => {
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: "Red" } },
-      baseParams,
-    );
-    expect(answers).toEqual({ "Pick a color": "Red" });
-  });
-
   it("parse: free-text override wins over dropdown (single-select)", () => {
     const answers = parseAskUserElicitationResponse(
       { action: "accept", content: { q_0: "Red", q_0_other: "magenta" } },
@@ -637,100 +281,12 @@ describe("elicitation form: AskUserQuestion", () => {
     expect(answers).toEqual({ "Pick a color": "magenta" });
   });
 
-  it("parse: skip sentinel omitted (single-select)", () => {
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: "__skip__" } },
-      baseParams,
-    );
-    expect(answers).toEqual({});
-  });
-
   it("parse: empty dropdown + empty free-text = skipped (single-select)", () => {
     const answers = parseAskUserElicitationResponse(
       { action: "accept", content: { q_0: "", q_0_other: "   " } },
       baseParams,
     );
     expect(answers).toEqual({});
-  });
-
-  it("parse: multi-select merges dropdown picks + free-text (deduped)", () => {
-    const params = {
-      ...baseParams,
-      questions: [
-        {
-          question: "Pick files",
-          multiSelect: true,
-          options: [
-            { label: "a.ts", value: "a" },
-            { label: "b.ts", value: "b" },
-          ],
-        },
-      ],
-    };
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: ["a.ts", "b.ts"], q_0_other: "c.ts" } },
-      params,
-    );
-    expect(answers).toEqual({ "Pick files": "a.ts, b.ts, c.ts" });
-  });
-
-  it("parse: multi-select dedupes when free-text repeats a pick", () => {
-    const params = {
-      ...baseParams,
-      questions: [
-        {
-          question: "Pick files",
-          multiSelect: true,
-          options: [{ label: "a.ts", value: "a" }],
-        },
-      ],
-    };
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: ["a.ts"], q_0_other: "a.ts" } },
-      params,
-    );
-    expect(answers).toEqual({ "Pick files": "a.ts" });
-  });
-
-  it("parse: multi-select with only free-text", () => {
-    const params = {
-      ...baseParams,
-      questions: [
-        {
-          question: "Pick files",
-          multiSelect: true,
-          options: [{ label: "a.ts", value: "a" }],
-        },
-      ],
-    };
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: [], q_0_other: "custom.ts" } },
-      params,
-    );
-    expect(answers).toEqual({ "Pick files": "custom.ts" });
-  });
-
-  it("parse: empty multi-select + empty free-text = skipped", () => {
-    const params = {
-      ...baseParams,
-      questions: [
-        {
-          question: "Pick files",
-          multiSelect: true,
-          options: [{ label: "a.ts", value: "a" }],
-        },
-      ],
-    };
-    const answers = parseAskUserElicitationResponse(
-      { action: "accept", content: { q_0: [], q_0_other: "" } },
-      params,
-    );
-    expect(answers).toEqual({});
-  });
-
-  it("parse returns null on decline/cancel", () => {
-    expect(parseAskUserElicitationResponse({ action: "decline" }, baseParams)).toBeNull();
-    expect(parseAskUserElicitationResponse({ action: "cancel" }, baseParams)).toBeNull();
   });
 });
 

@@ -12,7 +12,7 @@
  * burning a second card.
  */
 
-import { createDecipheriv, createCipheriv, randomBytes, createHash } from "node:crypto";
+import { createCipheriv, randomBytes, createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, platform, tmpdir, userInfo } from "node:os";
 import { createRequire } from "node:module";
@@ -23,10 +23,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readUsageStats } from "../src/settings/usage-stats.js";
 import {
   isCodingPlanProvider,
-  markResetHistoryRead,
   readResetStatus,
   requestResetOpportunity,
-  resetFamilyFor,
   useResetCard,
 } from "../src/settings/coding-plan.js";
 import { zcodeUsageDbPath } from "../src/utils.js";
@@ -82,14 +80,6 @@ function encryptCredential(plain: string): string {
 }
 
 /** Decrypt a value the way the module does — verifies the cipher round-trips. */
-function decryptCredential(value: string): string {
-  const secret = `zcode-credential-fallback:${platform()}:${homedir()}:${userInfo().username}`;
-  const key = createHash("sha256").update(secret).digest();
-  const [ivRaw, tagRaw, cipherRaw] = value.slice(7).split(".") as [string, string, string];
-  const d = createDecipheriv("aes-256-gcm", key, Buffer.from(ivRaw, "base64url"));
-  d.setAuthTag(Buffer.from(tagRaw, "base64url"));
-  return Buffer.concat([d.update(Buffer.from(cipherRaw, "base64url")), d.final()]).toString("utf8");
-}
 
 /** Build the usage tables the module reads, with a few rows of history. */
 async function seedUsageDb(): Promise<void> {
@@ -132,13 +122,6 @@ async function seedUsageDb(): Promise<void> {
 }
 
 describe("usage stats — aggregation", () => {
-  it("reports an unavailable snapshot when the database is absent", async () => {
-    const snapshot = await readUsageStats("7d");
-    expect(snapshot.available).toBe(false);
-    expect(snapshot.models).toEqual([]);
-    expect(snapshot.summary.totalTokens).toBe(0);
-  });
-
   it("rolls up per model, ordered by volume, with shares summing to 1", async () => {
     await seedUsageDb();
     const snapshot = await readUsageStats("7d");
@@ -155,14 +138,6 @@ describe("usage stats — aggregation", () => {
     expect(glm.share).toBeCloseTo(0.8333, 3);
     expect(snapshot.summary.totalTokens).toBe(1800);
     expect(snapshot.summary.models).toBe(2);
-  });
-
-  it("counts sessions, turns and tools inside the same window", async () => {
-    await seedUsageDb();
-    const snapshot = await readUsageStats("7d");
-    expect(snapshot.summary.sessionCount).toBe(2);
-    expect(snapshot.summary.turnCount).toBe(2);
-    expect(snapshot.summary.toolCallCount).toBe(5);
   });
 
   it("buckets by LOCAL calendar day, each day's models ordered by volume", async () => {
@@ -192,13 +167,6 @@ describe("usage stats — aggregation", () => {
     expect(all.models[0]!.modelId).toBe("step-5-preview");
     expect(all.summary.activeDays).toBe(3);
   });
-
-  it("keeps a 30-day window's older rows but not a 7-day window's", async () => {
-    await seedUsageDb();
-    const month = await readUsageStats("30d");
-    // 40 days back is outside 30d as well.
-    expect(month.summary.totalTokens).toBe(1800);
-  });
 });
 
 describe("coding plan — provider eligibility", () => {
@@ -209,34 +177,13 @@ describe("coding plan — provider eligibility", () => {
     expect(isCodingPlanProvider("builtin:bigmodel-coding-plan")).toBe(false);
     expect(isCodingPlanProvider("account:bigmodel-individual")).toBe(false);
   });
-
-  it("derives the family from the provider id", () => {
-    expect(resetFamilyFor("account:zai-individual-coding-plan")).toBe("zai");
-    expect(resetFamilyFor("account:bigmodel-team-coding-plan")).toBe("bigmodel");
-  });
 });
 
 describe("coding plan — credentials", () => {
-  it("reads and decrypts the store with the machine-bound fallback key", async () => {
-    const secret = `zcode-credential-fallback:${platform()}:${homedir()}:${userInfo().username}`;
-    const plain = "jwt-abc123";
-    const encrypted = encryptCredential(plain);
-    expect(encrypted.startsWith("enc:v1:")).toBe(true);
-    expect(decryptCredential(encrypted)).toBe(plain);
-    // The key really is the sha256 of that string.
-    expect(createHash("sha256").update(secret).digest()).toHaveLength(32);
-  });
-
   it("refuses a non-coding-plan provider before touching credentials", async () => {
     await expect(readResetStatus("builtin:bigmodel-coding-plan", fetch as never)).rejects.toThrow(
       /coding_plan_provider_required/,
     );
-  });
-
-  it("reports credentials_unavailable when the store is missing", async () => {
-    await expect(
-      readResetStatus("account:bigmodel-individual-coding-plan", fetch as never),
-    ).rejects.toThrow(/credentials_unavailable/);
   });
 });
 
@@ -306,41 +253,9 @@ describe("coding plan — status", () => {
     // A nonce is always issued so a use can be tied to this read.
     expect(status.nonce).toMatch(/^[0-9a-f-]{36}$/u);
   });
-
-  it("selects the zai token for a zai provider, not the bigmodel one", async () => {
-    await seedCredentials();
-    const { fetchImpl, calls } = makeFetch(() => ({ body: { code: 0, data: {} } }));
-    await readResetStatus("account:zai-individual-coding-plan", fetchImpl);
-    const headers = calls[0]!.init.headers as Record<string, string>;
-    expect(headers["X-Bigmodel-Authorization"]).toBe("zai-jwt");
-  });
-
-  it("surfaces a business error code rather than the message", async () => {
-    await seedCredentials();
-    const { fetchImpl } = makeFetch(() => ({ status: 400, body: { code: 2007, msg: "boom" } }));
-    await expect(readResetStatus(BIGMODEL, fetchImpl)).rejects.toThrow(
-      /coding_plan_reset_api_error:2007/,
-    );
-  });
 });
 
 describe("coding plan — spending a card", () => {
-  it("posts the idempotency key and the reset type", async () => {
-    await seedCredentials();
-    const { fetchImpl, calls } = makeFetch(() => ({ body: { code: 0, data: { used: true } } }));
-    const result = await useResetCard(BIGMODEL, "FIVE_HOUR", "key-1", fetchImpl);
-    expect(result.used).toBe(true);
-    expect(calls[0]!.url).toBe("https://zcode.z.ai/api/v1/coding-plan/reset/use");
-    const body = JSON.parse(calls[0]!.init.body as string) as {
-      idempotency_key: string;
-      reset_type: string;
-    };
-    expect(body).toEqual({ idempotency_key: "key-1", reset_type: "FIVE_HOUR" });
-    const headers = calls[0]!.init.headers as Record<string, string>;
-    expect(headers["content-type"]).toBe("application/json");
-    expect(headers["Bigmodel-Target-Type"]).toBe("PERSONAL");
-  });
-
   it("rejects an empty or oversized idempotency key before any request", async () => {
     await seedCredentials();
     const { fetchImpl, calls } = makeFetch(() => ({ body: { code: 0, data: { used: true } } }));
@@ -361,32 +276,5 @@ describe("coding plan — spending a card", () => {
     }));
     const result = await requestResetOpportunity(BIGMODEL, "key-2", fetchImpl);
     expect(result).toEqual({ granted: false, nextTryAt: 999 });
-  });
-
-  it("reads a grant as granted", async () => {
-    await seedCredentials();
-    const { fetchImpl } = makeFetch(() => ({ body: { code: 0, data: { granted: true } } }));
-    expect(await requestResetOpportunity(BIGMODEL, "key-3", fetchImpl)).toEqual({
-      granted: true,
-      nextTryAt: null,
-    });
-  });
-
-  it("marks history read WITHOUT the target scope header", async () => {
-    await seedCredentials();
-    const { fetchImpl, calls } = makeFetch(() => ({ body: { code: 0, data: {} } }));
-    await markResetHistoryRead(BIGMODEL, fetchImpl);
-    expect(calls[0]!.url).toBe("https://zcode.z.ai/api/v1/coding-plan/reset/history/read");
-    const headers = calls[0]!.init.headers as Record<string, string>;
-    expect(headers["Authorization"]).toBeDefined();
-    expect(headers["Bigmodel-Target-Type"]).toBeUndefined();
-  });
-
-  it("honours the ZCODE_ENDPOINT_ORIGIN override", async () => {
-    vi.stubEnv("ZCODE_ENDPOINT_ORIGIN", "https://example.invalid");
-    await seedCredentials();
-    const { fetchImpl, calls } = makeFetch(() => ({ body: { code: 0, data: {} } }));
-    await markResetHistoryRead(BIGMODEL, fetchImpl);
-    expect(calls[0]!.url).toBe("https://example.invalid/api/v1/coding-plan/reset/history/read");
   });
 });

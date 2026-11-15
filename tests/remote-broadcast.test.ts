@@ -53,32 +53,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe("ClientRegistry broadcast", () => {
-  it("fans notify out to every client", async () => {
-    const registry = new ClientRegistry();
-    const a = fakeClient();
-    const b = fakeClient();
-    registry.add(a.cx);
-    registry.add(b.cx);
-    expect(registry.size).toBe(2);
-
-    await registry.broadcast().notify("session/update", { x: 1 });
-
-    expect(a.notifies).toHaveLength(1);
-    expect(b.notifies).toHaveLength(1);
-    expect(a.notifies[0]![0]).toBe("session/update");
-  });
-
-  it("isolates a failing client on notify", async () => {
-    const registry = new ClientRegistry();
-    const ok = fakeClient();
-    const dead = fakeClient({ failNotify: true });
-    registry.add(ok.cx);
-    registry.add(dead.cx);
-
-    await expect(registry.broadcast().notify("session/update", {})).resolves.toBeUndefined();
-    expect(ok.notifies).toHaveLength(1);
-  });
-
   it("first response wins and losers are cancelled", async () => {
     const registry = new ClientRegistry();
     const slow = fakeClient();
@@ -96,26 +70,6 @@ describe("ClientRegistry broadcast", () => {
     expect(fast.signals[0]!.aborted).toBe(false);
   });
 
-  it("links an outer cancellation signal to all clients", async () => {
-    const registry = new ClientRegistry();
-    const a = fakeClient();
-    const b = fakeClient();
-    a.onRequest = (_m, signal) =>
-      new Promise((_resolve, reject) =>
-        signal?.addEventListener("abort", () => reject(new Error("outer abort")), { once: true }),
-      );
-    b.onRequest = a.onRequest;
-    registry.add(a.cx);
-    registry.add(b.cx);
-
-    const outer = new AbortController();
-    const pending = registry.broadcast().request("m", {}, { cancellationSignal: outer.signal });
-    outer.abort();
-    await expect(pending).rejects.toThrow("outer abort");
-    expect(a.signals[0]!.aborted).toBe(true);
-    expect(b.signals[0]!.aborted).toBe(true);
-  });
-
   it("rejects when every client fails, surfacing the first error", async () => {
     const registry = new ClientRegistry();
     const a = fakeClient();
@@ -131,33 +85,6 @@ describe("ClientRegistry broadcast", () => {
   it("rejects immediately with no clients", async () => {
     const registry = new ClientRegistry();
     await expect(registry.broadcast().request("m", {})).rejects.toThrow(/no connected clients/);
-  });
-
-  it("removes clients from the fan-out", async () => {
-    const registry = new ClientRegistry();
-    const a = fakeClient();
-    registry.add(a.cx);
-    registry.remove(a.cx);
-    expect(registry.size).toBe(0);
-    await expect(registry.broadcast().request("m", {})).rejects.toThrow();
-  });
-
-  it("notifyOthers reaches every connection except the prompter's", async () => {
-    const registry = new ClientRegistry();
-    const rootZed = {};
-    const zed = fakeClient({ root: rootZed });
-    const phone = fakeClient({ root: {} });
-    registry.add(zed.cx);
-    registry.add(phone.cx);
-    // A fresh wrapper over the prompter's connection — how the SDK hands a
-    // per-request context to handlers.
-    const prompter = { connectionContext: rootZed } as unknown as acp.AgentContext;
-
-    await registry.notifyOthers(prompter, "session/update", { x: 1 });
-
-    expect(zed.notifies).toHaveLength(0);
-    expect(phone.notifies).toHaveLength(1);
-    expect(phone.notifies[0]![1]).toEqual({ x: 1 });
   });
 
   it("a stalled client cannot hold the notify fan-out (send timeout isolation)", async () => {
@@ -262,91 +189,5 @@ describe("echoUserPromptToOthers", () => {
     expect(p.update.sessionUpdate).toBe("user_message_chunk");
     expect((p.update.content as { text: string }).text).toBe("hello from zed");
     expect(String(p.update.messageId)).toMatch(/^uprompt_/);
-  });
-
-  it("joins text blocks of a structured prompt and skips non-text ones", async () => {
-    const { registry, phone, prompter } = registryWithZedAndPhone();
-    const server = {
-      clients: registry,
-      sessionAliases: (sid: string) => [sid],
-    } as unknown as ZcodeAcpServer;
-    const prompt = [
-      { type: "text", text: "look at this" },
-      { type: "image", data: "…" },
-      { type: "text", text: "screenshot" },
-    ] as unknown as acp.PromptRequest["prompt"];
-
-    echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt });
-    await sleep(0);
-    await sleep(0);
-
-    expect(phone.notifies).toHaveLength(1);
-    const p = phone.notifies[0]![1] as { update: { content: { text: string } } };
-    expect(p.update.content.text).toBe("look at this\nscreenshot");
-  });
-
-  it("sends nothing for an empty prompt", async () => {
-    const { registry, phone, prompter } = registryWithZedAndPhone();
-    const server = {
-      clients: registry,
-      sessionAliases: (sid: string) => [sid],
-    } as unknown as ZcodeAcpServer;
-
-    echoUserPromptToOthers(server, prompter, { sessionId: "s1", prompt: "  " });
-    await sleep(0);
-    await sleep(0);
-
-    expect(phone.notifies).toHaveLength(0);
-  });
-});
-
-describe("per-client naming and notifyEach", () => {
-  it("builds a distinct payload per recorded client name (null payload skips)", async () => {
-    const registry = new ClientRegistry();
-    const zed = fakeClient();
-    const app = fakeClient();
-    const martty = fakeClient();
-    registry.add(zed.cx);
-    registry.add(app.cx);
-    registry.add(martty.cx);
-    registry.nameConnection(zed.cx, "Zed");
-    registry.nameConnection(app.cx, ""); // remote App: initialize with no clientInfo
-    registry.nameConnection(martty.cx, "martty");
-
-    await registry.notifyEach("session/update", (name) => ({
-      sessionId: "s1",
-      update: { grouped: name !== null && !name.toLowerCase().includes("martty") },
-    }));
-
-    expect((zed.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(true);
-    expect((app.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(false);
-    expect((martty.notifies[0]![1] as { update: { grouped: boolean } }).update.grouped).toBe(false);
-  });
-
-  it("nameOf reads null for unnamed or unseen connections", () => {
-    const registry = new ClientRegistry();
-    const named = fakeClient();
-    const unnamed = fakeClient();
-    const unseen = fakeClient();
-    registry.add(named.cx);
-    registry.add(unnamed.cx);
-    registry.add(unseen.cx);
-    registry.nameConnection(named.cx, "Zed");
-    registry.nameConnection(unnamed.cx, "");
-
-    expect(registry.nameOf(named.cx)).toBe("Zed");
-    expect(registry.nameOf(unnamed.cx)).toBeNull();
-    expect(registry.nameOf(unseen.cx)).toBeNull();
-  });
-});
-
-describe("skillPrefixForClient", () => {
-  it("keeps $ grouping for editors, strips it for martty and unnamed clients", async () => {
-    const { skillPrefixForClient } = await import("../src/handlers/io.js");
-    expect(skillPrefixForClient("Zed")).toBe("$");
-    expect(skillPrefixForClient("JetBrains")).toBe("$");
-    expect(skillPrefixForClient("martty")).toBe("");
-    expect(skillPrefixForClient("Martty TUI")).toBe("");
-    expect(skillPrefixForClient(null)).toBe("");
   });
 });

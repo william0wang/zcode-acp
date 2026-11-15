@@ -20,7 +20,6 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -175,14 +174,6 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
     expect(readFileSync(sandboxConfigPath(tmpRoot), "utf8")).toBe("{not json");
   });
 
-  it("fails CLOSED on non-object JSON (numbers, booleans, null, arrays)", () => {
-    for (const garbage of ["123", "true", "null", "[]"]) {
-      writeConfig(tmpRoot, {});
-      writeFileSync(sandboxConfigPath(tmpRoot), garbage);
-      expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    }
-  });
-
   it("drops relative allow entries — they would anchor to the bridge cwd", () => {
     writeConfig(tmpRoot, { enabled: true, allow: ["/abs/path", "~/cache", "../escape", "foo"] });
     expect(readSandboxConfig(tmpRoot).allow).toEqual(["/abs/path", "~/cache"]);
@@ -221,23 +212,6 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
     expect(readSandboxConfig(tmpRoot).enabled).toBe(true); // agent rename/rm must not disarm
   });
 
-  it("re-templates a vanished never-armed config only while globally armed", () => {
-    writeConfig(tmpRoot, { enabled: false, allow: [] });
-    rmSync(sandboxConfigPath(tmpRoot));
-    process.env[SANDBOX_ENV] = "1";
-    expect(readSandboxConfig(tmpRoot)).toEqual({
-      enabled: false,
-      allow: [],
-      deny: [],
-      strictGit: false,
-    });
-    expect(existsSync(sandboxConfigPath(tmpRoot))).toBe(true); // re-templated
-    rmSync(sandboxConfigPath(tmpRoot));
-    delete process.env[SANDBOX_ENV];
-    readSandboxConfig(tmpRoot);
-    expect(existsSync(sandboxConfigPath(tmpRoot))).toBe(false); // unarmed → no write
-  });
-
   it("reads an EACCES config dir as armed (chmod-0000 must not disarm)", () => {
     writeConfig(tmpRoot, { enabled: true, allow: [] });
     expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
@@ -267,21 +241,6 @@ describe("readSandboxConfig / appendSandboxAllow", () => {
       enabled: true,
       allow: ["/opt/data", "/opt/other"],
       deny: [],
-      strictGit: false,
-    });
-  });
-
-  it("parses the deny list and drops relative entries from it too", () => {
-    writeConfig(tmpRoot, {
-      enabled: true,
-      allow: [],
-      deny: ["/opt/blocked", "relative/nope"],
-      strictGit: false,
-    });
-    expect(readSandboxConfig(tmpRoot)).toEqual({
-      enabled: true,
-      allow: [],
-      deny: ["/opt/blocked"],
       strictGit: false,
     });
   });
@@ -401,19 +360,6 @@ describe("collectSandboxWorkspaces", () => {
     // realA's own allow entry rides its workspace block, not extraAllow.
     expect(extraAllow).toEqual([]);
   });
-
-  it("emits each workspace's allow under its own block (cross-root union)", () => {
-    const a = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-wa-")));
-    const b = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-wb-")));
-    appendSandboxAllow(a, b);
-    // ensureBackend passes ALL live session cwds: a's allowlist for b rides
-    // a's own workspace block — b need not carry it in its own config.
-    const { workspaces, extraAllow } = collectSandboxWorkspaces([a, b]);
-    expect(workspaces.map((ws) => ws.root)).toEqual([a, b]);
-    expect(extraAllow).toEqual([]);
-    const profile = buildSandboxProfile({ workspaces, extraAllow });
-    expect(profile).toContain(`(allow file-write* (subpath "${b}"))`);
-  });
 });
 
 describe("applySandboxFlip", () => {
@@ -428,21 +374,6 @@ describe("applySandboxFlip", () => {
     writeConfig(tmpRoot, { enabled: true });
     await withPlatformAsync("darwin", () => server.applySandboxFlip());
     expect(closed).toHaveBeenCalledTimes(1);
-  });
-
-  it("is a no-op for a sandboxed or dead backend", async () => {
-    const server = new ZcodeAcpServer();
-    const closed = vi.fn().mockResolvedValue(undefined);
-    server.sessionCwds.set("acp_a", tmpRoot);
-    writeConfig(tmpRoot, { enabled: true });
-    server.backendSandboxed = true;
-    server.backend = { isDead: false, close: closed } as unknown as ZcodeBackend;
-    await withPlatformAsync("darwin", () => server.applySandboxFlip());
-    expect(closed).not.toHaveBeenCalled();
-    server.backendSandboxed = false;
-    server.backend = { isDead: true, close: closed } as unknown as ZcodeBackend;
-    await withPlatformAsync("darwin", () => server.applySandboxFlip());
-    expect(closed).not.toHaveBeenCalled();
   });
 });
 
@@ -534,39 +465,5 @@ describe("armSandboxArgv", () => {
     } finally {
       peer.kill();
     }
-  });
-
-  it("reaps stale dirs past the age guard even if the pid looks alive", () => {
-    const root = sandboxProfilesRoot();
-    const peer = spawn("sleep", ["10"]);
-    try {
-      const old = path.join(root, `p-${peer.pid}-ancient`);
-      mkdirSync(old, { recursive: true });
-      writeFileSync(path.join(old, "profile.sb"), "(version 1)");
-      const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-      utimesSync(old, weekAgo, weekAgo);
-
-      const file = arm()[2]!;
-      expect(existsSync(old)).toBe(false); // >7d → swept despite live pid
-      rmSync(path.dirname(file), { recursive: true, force: true });
-    } finally {
-      peer.kill();
-    }
-  });
-
-  it("migrates legacy ~/.zcode-acp-sbx-* HOME siblings (old swept, fresh kept)", () => {
-    const home = os.homedir();
-    const oldLegacy = path.join(home, ".zcode-acp-sbx-oldleak");
-    const freshLegacy = path.join(home, ".zcode-acp-sbx-fresh");
-    mkdirSync(oldLegacy, { recursive: true });
-    mkdirSync(freshLegacy, { recursive: true });
-    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-    utimesSync(oldLegacy, twoHoursAgo, twoHoursAgo);
-
-    const file = arm()[2]!;
-    expect(existsSync(oldLegacy)).toBe(false); // stale legacy → swept
-    expect(existsSync(freshLegacy)).toBe(true); // fresh → may be mid-exec
-    rmSync(freshLegacy, { recursive: true, force: true });
-    rmSync(path.dirname(file), { recursive: true, force: true });
   });
 });

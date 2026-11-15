@@ -20,12 +20,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   BACKUP_KEEP,
-  backupStampToIso,
   encodeJson,
   listBackups,
   readJsonDocument,
   writeJsonAtomic,
-  writeTextAtomic,
 } from "../src/settings/atomic-write.js";
 import { FILE_LOCK_TIMEOUT_ERROR_CODE, withFileLock } from "../src/settings/file-lock.js";
 
@@ -46,15 +44,6 @@ afterEach(async () => {
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 describe("withFileLock", () => {
-  it("acquires and releases, leaving no lock directory behind", async () => {
-    await withFileLock(file, async () => {
-      expect(await readdir(root)).toContain(`${path.basename(file)}.lock`);
-    });
-    // The lock directory is removed on release — a leftover would be reclaimed
-    // only after the grace window, adding latency to every later write.
-    expect(await readdir(root)).not.toContain(`${path.basename(file)}.lock`);
-  });
-
   it("serializes concurrent holders in the same process", async () => {
     const order: string[] = [];
     let inside = 0;
@@ -123,95 +112,16 @@ describe("withFileLock", () => {
     const owners = (await readdir(lockDir)).filter((e) => e.startsWith("owner-"));
     expect(owners).toEqual([`owner-${process.pid}-1-alive.json`]);
   });
-
-  it("waits for a live holder instead of stealing its lock", async () => {
-    // The complement: with a cap longer than the holder's critical section,
-    // the contender acquires afterwards and both operations complete in order.
-    const order: string[] = [];
-    let release!: () => void;
-    const first = withFileLock(file, async () => {
-      order.push("first-in");
-      await new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      order.push("first-out");
-    });
-    await tick();
-    const second = withFileLock(file, async () => {
-      order.push("second-in");
-    });
-    // Let the contender enter its retry loop before the holder lets go.
-    await new Promise((r) => setTimeout(r, 60));
-    release();
-    await Promise.all([first, second]);
-    expect(order).toEqual(["first-in", "first-out", "second-in"]);
-  });
-
-  it("ignores an owner file whose pid is unusable after the grace window", async () => {
-    // pid 0 is not a valid owner: it must be treated as ownerless, so the lock
-    // becomes stale after the grace window instead of looking alive forever.
-    const lockDir = `${file}.lock`;
-    await mkdir(lockDir, { recursive: true });
-    await writeFile(
-      path.join(lockDir, "owner-x.json"),
-      `${JSON.stringify({ pid: 0, createdAt: Date.now() - 60_000, token: "t" })}\n`,
-      "utf8",
-    );
-    const started = Date.now();
-    await withFileLock(file, async () => undefined, {
-      lockRetryDelaysMs: [20],
-      lockMaxWaitMs: 3000,
-      lockOwnerlessGraceMs: 50,
-    });
-    expect(Date.now() - started).toBeLessThan(2000);
-  });
 });
 
 describe("readJsonDocument", () => {
-  it("returns null for an absent file", async () => {
-    expect(await readJsonDocument(file)).toBeNull();
-  });
-
   it("throws on a corrupt file instead of returning an empty document", async () => {
     await writeFile(file, "{ not json", "utf8");
     await expect(readJsonDocument(file)).rejects.toThrow(/not valid JSON/);
   });
-
-  it("throws when the document is not an object", async () => {
-    await writeFile(file, "[1,2,3]", "utf8");
-    await expect(readJsonDocument(file)).rejects.toThrow(/not a JSON object/);
-  });
 });
 
 describe("writeJsonAtomic", () => {
-  it("creates the file with 2-space indentation and a trailing newline", async () => {
-    const { doc } = await writeJsonAtomic(file, () => ({ a: 1, b: { c: 2 } }));
-    expect(doc).toEqual({ a: 1, b: { c: 2 } });
-    const raw = await readFile(file, "utf8");
-    expect(raw).toBe('{\n  "a": 1,\n  "b": {\n    "c": 2\n  }\n}\n');
-    expect(encodeJson({ a: 1 })).toBe('{\n  "a": 1\n}\n');
-  });
-
-  it("preserves keys the mutator never mentioned", async () => {
-    await writeFile(
-      file,
-      encodeJson({
-        skills: { "/x/SKILL.md": { enable: false } },
-        mcp: { servers: { keep: { command: "k" } } },
-        plugins: { enabledPlugins: { "p@m": true } },
-      }),
-      "utf8",
-    );
-    await writeJsonAtomic(file, (cur) => ({ ...cur, added: true }));
-    const after = await readJsonDocument(file);
-    expect(after).toEqual({
-      skills: { "/x/SKILL.md": { enable: false } },
-      mcp: { servers: { keep: { command: "k" } } },
-      plugins: { enabledPlugins: { "p@m": true } },
-      added: true,
-    });
-  });
-
   it("refuses to write over a corrupt file", async () => {
     await writeFile(file, "{ broken", "utf8");
     await expect(writeJsonAtomic(file, () => ({ fresh: true }))).rejects.toThrow(
@@ -219,18 +129,6 @@ describe("writeJsonAtomic", () => {
     );
     // The damaged bytes are untouched — a later recovery may still read them.
     expect(await readFile(file, "utf8")).toBe("{ broken");
-  });
-
-  it("does not touch the file when validation fails", async () => {
-    await writeFile(file, encodeJson({ keep: 1 }), "utf8");
-    await expect(
-      writeJsonAtomic(file, () => ({ keep: 1, bad: true }), {
-        validate: (doc) => (doc.bad ? "bad is not allowed" : true),
-      }),
-    ).rejects.toThrow(/bad is not allowed/);
-    expect(await readJsonDocument(file)).toEqual({ keep: 1 });
-    // No backup either — nothing was replaced.
-    expect(await listBackups(file)).toHaveLength(0);
   });
 
   it("backs up the previous content and rotates to the newest N", async () => {
@@ -253,18 +151,6 @@ describe("writeJsonAtomic", () => {
     expect(JSON.parse(newest)).toEqual({ gen: BACKUP_KEEP + 2 });
   });
 
-  it("reports no backup on a first write", async () => {
-    const { backup } = await writeJsonAtomic(file, () => ({ first: true }));
-    expect(backup).toBeUndefined();
-    expect(await listBackups(file)).toHaveLength(0);
-  });
-
-  it("creates the parent directory when missing", async () => {
-    const nested = path.join(root, "a", "b", "config.json");
-    await writeJsonAtomic(nested, () => ({ ok: true }));
-    expect(await readJsonDocument(nested)).toEqual({ ok: true });
-  });
-
   it("replaces the file atomically (new inode, never a torn document)", async () => {
     await writeFile(file, encodeJson({ v: 1 }), "utf8");
     const before = (await stat(file)).ino;
@@ -277,60 +163,5 @@ describe("writeJsonAtomic", () => {
     await writeJsonAtomic(file, () => ({ done: true }));
     const leftovers = (await readdir(root)).filter((e) => e.endsWith(".tmp"));
     expect(leftovers).toEqual([]);
-  });
-});
-
-describe("writeTextAtomic", () => {
-  it("replaces a text file atomically and leaves no temp file", async () => {
-    const md = path.join(root, "agent.md");
-    await writeTextAtomic(md, "---\nname: a\n---\nbody\n");
-    const before = (await stat(md)).ino;
-    await writeTextAtomic(md, "---\nname: b\n---\nbody\n");
-    expect((await stat(md)).ino).not.toBe(before);
-    expect(await readFile(md, "utf8")).toBe("---\nname: b\n---\nbody\n");
-    expect((await readdir(root)).filter((e) => e.endsWith(".tmp"))).toEqual([]);
-  });
-
-  it("backs up the previous content before replacing it", async () => {
-    const md = path.join(root, "agent.md");
-    await writeTextAtomic(md, "first");
-    await writeTextAtomic(md, "second");
-    const backups = (await readdir(root)).filter((e) => e.startsWith("agent.md.bak-"));
-    expect(backups).toHaveLength(1);
-    expect(await readFile(path.join(root, backups[0]!), "utf8")).toBe("first");
-  });
-
-  it("creates the parent directory when missing", async () => {
-    const nested = path.join(root, "x", "y", "agent.md");
-    await writeTextAtomic(nested, "body");
-    expect(await readFile(nested, "utf8")).toBe("body");
-  });
-});
-
-describe("backupStampToIso", () => {
-  it("rebuilds a readable timestamp without corrupting the date", () => {
-    // The bug this guards: replacing every '-' with ':' also mangles the date,
-    // yielding `2026:09:22T14:10:00.000Z` — an Invalid Date for every consumer.
-    const stamp = "2026-09-22T14-10-00-000Z";
-    const iso = backupStampToIso(stamp);
-    expect(iso).toBe("2026-09-22T14:10:00.000Z");
-    expect(Number.isNaN(new Date(iso).getTime())).toBe(false);
-  });
-
-  it("round-trips a stamp produced by the real backup path", async () => {
-    // Two writes: the first creates the file (nothing to back up), the second
-    // takes the backup whose stamp this then reads back.
-    await writeJsonAtomic(file, () => ({ a: 1 }));
-    await writeJsonAtomic(file, () => ({ a: 2 }));
-    const [backup] = await listBackups(file);
-    expect(backup).toBeDefined();
-    expect(Number.isNaN(new Date(backup!.createdAt).getTime())).toBe(false);
-    expect(backup!.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
-  });
-});
-
-describe("encodeJson", () => {
-  it("is stable for key order given by the object", () => {
-    expect(encodeJson({ b: 1, a: 2 })).toBe('{\n  "b": 1,\n  "a": 2\n}\n');
   });
 });

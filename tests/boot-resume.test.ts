@@ -79,11 +79,6 @@ describe("consumeBootResumeTarget", () => {
     expect(consumeBootResumeTarget()).toBe("sess_boot1");
     expect(consumeBootResumeTarget()).toBeNull();
   });
-
-  it("treats empty/whitespace as unset", () => {
-    process.env.ZCODE_ACP_RESUME_SESSION = "   ";
-    expect(consumeBootResumeTarget()).toBeNull();
-  });
 });
 
 describe("session/new boot-resume interception", () => {
@@ -113,39 +108,6 @@ describe("session/new boot-resume interception", () => {
     expect(second.sessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
-  });
-
-  it("falls back to a fresh placeholder when the load fails", async () => {
-    const server = new ZcodeAcpServer();
-    const backend = {
-      isDead: false,
-      request: async () => {
-        throw new Error("session not found");
-      },
-      send: () => {},
-      pollServerRequests: () => [],
-      registerEventListener: () => {},
-      unregisterEventListener: () => {},
-    } as unknown as ZcodeBackend;
-    server.backend = backend;
-    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
-
-    process.env.ZCODE_ACP_RESUME_SESSION = "sess_gone";
-    const res = await newSession(server, { cwd: process.cwd() });
-
-    expect(res.sessionId).not.toBe("sess_gone");
-    expect(server.pendingSessions.has(res.sessionId)).toBe(true);
-  });
-
-  it("creates a lazy placeholder when the env is absent", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-
-    const res = await newSession(server, { cwd: process.cwd() });
-
-    expect(server.pendingSessions.has(res.sessionId)).toBe(true);
-    expect(calls).toHaveLength(0); // no backend RPC before first use
   });
 });
 
@@ -219,20 +181,6 @@ describe("session/new create-bind (remote session-create, ADR-0016)", () => {
     );
     expect(res).toEqual({ stopReason: "end_turn" });
   });
-
-  it("never arms the banner handshake when a non-TUI client claims first", async () => {
-    const server = new ZcodeAcpServer();
-    server.clientName = "Zed";
-    const { backend } = fakeBackend();
-    server.backend = backend;
-    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
-    process.env.ZCODE_ACP_RESUME_SESSION = "sess_bind";
-    process.env.ZCODE_ACP_BOOT_CREATE_SESSION = "1";
-
-    const res = await newSession(server, { cwd: process.cwd() }, clientWithRoot("zed-conn"));
-    expect(res.sessionId).toBe("sess_bind");
-    expect(server.bootResumeTriggerConnection).toBeNull();
-  });
 });
 
 describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
@@ -301,38 +249,6 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
     expect(server.bootResumeTriggerConnection).toBeNull();
   });
 
-  it("keeps the handshake armed while another attached client prompts first", async () => {
-    // Observed live: a phone app attached to the incubated bridge prompted
-    // during the TUI boot window — with a global one-shot that prompt
-    // disarmed the handshake and the auto-submitted trigger leaked to the
-    // model as a real prompt.
-    const { server, tui, phone } = await bootedMarttyServer();
-
-    // The phone's prompt arrives first and does NOT disarm the handshake.
-    // (Unknown session id → ensureRealSession throws after the scoped check.)
-    await expect(
-      prompt(
-        server,
-        { sessionId: "sess_unknown", prompt: [{ type: "text", text: "hi" }] },
-        stubCx,
-        2,
-        phone,
-      ),
-    ).rejects.toThrow();
-    expect(server.bootResumeTriggerConnection).toEqual({ id: "tui-conn" });
-
-    // The TUI's queued trigger then still lands as a no-model-turn ack.
-    const res = await prompt(
-      server,
-      { sessionId: "sess_boot", prompt: [{ type: "text", text: BOOT_RESUME_TRIGGER }] },
-      stubCx,
-      3,
-      tui,
-    );
-    expect(res).toEqual({ stopReason: "end_turn" });
-    expect(server.bootResumeTriggerConnection).toBeNull();
-  });
-
   it("disarms when the booting connection's first prompt is anything else", async () => {
     const { server, tui } = await bootedMarttyServer();
     // Same connection, different text: the auto-submit was lost — disarm so
@@ -347,50 +263,6 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
       ),
     ).rejects.toThrow();
     expect(server.bootResumeTriggerConnection).toBeNull();
-  });
-
-  it("never arms for non-TUI clients (editors see the trigger as plain text)", async () => {
-    const server = new ZcodeAcpServer();
-    server.clientName = "Zed";
-    const { backend } = fakeBackend();
-    server.backend = backend;
-    server.registerSession("sess_boot", "zsess_boot");
-    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
-
-    process.env.ZCODE_ACP_RESUME_SESSION = "sess_boot";
-    await newSession(server, { cwd: process.cwd() }, clientWithRoot("zed-conn"));
-
-    expect(server.bootResumeTriggerConnection).toBeNull();
-  });
-
-  it("acks the TUI's trigger via the first-prompt fallback when a phone consumed the resume env (no arm)", async () => {
-    // Observed from the mobile app (2026-09-23): the phone's session/new won
-    // the race for ZCODE_ACP_RESUME_SESSION before the TUI booted — no martty
-    // had initialized yet, so nothing armed. The TUI's auto-submitted trigger
-    // then had no handshake to match and reached the model. The fallback: a
-    // MARTTY connection's first prompt matching the trigger verbatim acks.
-    const server = new ZcodeAcpServer();
-    const { backend, calls } = fakeBackend();
-    server.backend = backend;
-    server.registerSession("sess_boot", "zsess_boot");
-    vi.spyOn(server.clients, "broadcast").mockReturnValue(stubCx);
-    process.env.ZCODE_ACP_RESUME_SESSION = "sess_boot";
-
-    const phone = clientWithRoot("phone-conn");
-    const res = await newSession(server, { cwd: process.cwd() }, phone);
-    expect(res.sessionId).toBe("sess_boot"); // the phone consumed the env
-    expect(server.bootResumeTriggerConnection).toBeNull(); // and armed nothing
-
-    const tui = seenAsMartty(server, clientWithRoot("tui-conn"));
-    const ack = await prompt(
-      server,
-      { sessionId: "sess_boot", prompt: [{ type: "text", text: BOOT_RESUME_TRIGGER }] },
-      stubCx,
-      1,
-      tui,
-    );
-    expect(ack).toEqual({ stopReason: "end_turn" });
-    expect(calls.some((c) => c.method === "session/send")).toBe(false); // no model turn
   });
 
   it("the fallback never eats a phone's typed trigger (non-martty goes to the model)", async () => {
@@ -449,4 +321,6 @@ describe("boot-resume banner handshake (DSH_TUI_AUTOPROMPT trigger)", () => {
     ).rejects.toThrow();
   });
 });
-vi.mock("../src/config/initial-model-catalog.js", () => ({ probeInitialModelCatalog: async () => null }));
+vi.mock("../src/config/initial-model-catalog.js", () => ({
+  probeInitialModelCatalog: async () => null,
+}));

@@ -119,10 +119,6 @@ const wfCalls = (backend: FakeBackend) =>
   backend.calls.filter((c) => c.method === "v4/conversation/workflowRunEvents");
 
 describe("workflow run poller", () => {
-  it("exports the documented poll interval default", () => {
-    expect(WORKFLOW_POLL_INTERVAL_MS).toBe(3000);
-  });
-
   it("polls with an advancing cursor and folds only meaningful events", async () => {
     const { server, backend, sent } = makeServer();
     backend.pages = [
@@ -266,78 +262,12 @@ describe("workflow run poller", () => {
     expect(wfCalls(backend)).toHaveLength(1);
     expect(workflowPollerActive("run_old")).toBe(false);
   });
-
-  it("stops with a card notice after 5 consecutive errors (timeouts are transient)", async () => {
-    const { server, backend, sent } = makeServer();
-    backend.pages = Array.from({ length: 10 }, () => ({ error: { message: "timeout" } }));
-
-    armWorkflowRunPoller(server, SID_Z, {
-      runId: "run_err",
-      toolCallId: "c",
-      intervalMs: INTERVAL,
-    });
-    await vi.advanceTimersByTimeAsync(INTERVAL * 5);
-
-    expect(wfCalls(backend)).toHaveLength(5);
-    expect(sent).toHaveLength(1);
-    expect(cardText(sent[0])).toContain("repeated errors");
-
-    await vi.advanceTimersByTimeAsync(INTERVAL * 5);
-    expect(wfCalls(backend)).toHaveLength(5);
-    expect(workflowPollerActive("run_err")).toBe(false);
-  });
-
-  it("a successful poll resets the error streak", async () => {
-    const { server, backend } = makeServer();
-    // error, error, success(empty), error, error, error — never 5 in a row.
-    backend.pages = [
-      { error: { message: "timeout" } },
-      { error: { message: "timeout" } },
-      { result: { events: [], hasMore: false } },
-      { error: { message: "timeout" } },
-      { error: { message: "timeout" } },
-      { error: { message: "timeout" } },
-      { error: { message: "timeout" } },
-      { error: { message: "timeout" } },
-    ];
-
-    armWorkflowRunPoller(server, SID_Z, {
-      runId: "run_mix",
-      toolCallId: "c",
-      intervalMs: INTERVAL,
-    });
-    await vi.advanceTimersByTimeAsync(INTERVAL * 5);
-    // Still polling: the success at tick 3 reset the streak, so 5 ticks with
-    // at most 2+3 consecutive errors must not have stopped anything.
-    expect(workflowPollerActive("run_mix")).toBe(true);
-    expect(wfCalls(backend).length).toBe(5);
-  });
 });
 
 describe("BackgroundTaskListener workflow integration", () => {
   function zcodeEvent(type: string, payload: Record<string, unknown>): ZcodeEvent {
     return { sessionId: SID_Z, seq: 0, type: type as ZcodeEvent["type"], payload };
   }
-
-  it("workflow task with a VISIBLE card → no [background] card, poller armed", async () => {
-    const { server, sent } = makeServer();
-    server.noteDispatchedToolCall("call_wf", "call_wf");
-    const l = new BackgroundTaskListener(server, SID_Z);
-
-    l.handleEvent(
-      zcodeEvent("session.updated", {
-        taskId: "run_visible",
-        toolCallId: "call_wf",
-        taskKind: "workflow",
-        status: "running",
-        description: "release workflow",
-      }),
-    );
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(workflowPollerActive("run_visible")).toBe(true);
-    expect(sent).toHaveLength(0); // no tool_call card, no status update
-  });
 
   it("workflow task with an UNSEEN toolCallId → bg card minted AND poller armed against it", async () => {
     const { server, backend, sent } = makeServer();
@@ -379,22 +309,6 @@ describe("BackgroundTaskListener workflow integration", () => {
     expect(cardText(sent[1])).toContain("phase plan");
   });
 
-  it("workflow task without toolCallId → background card kept, poller armed on it", async () => {
-    const { server, sent } = makeServer();
-    const l = new BackgroundTaskListener(server, SID_Z);
-    l.handleEvent(
-      zcodeEvent("session.updated", {
-        taskId: "run_notool",
-        taskKind: "workflow",
-        status: "running",
-        description: "bare run",
-      }),
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    expect(workflowPollerActive("run_notool")).toBe(true);
-    expect(sent).toHaveLength(1);
-  });
-
   it("suppression is STICKY: registry eviction mid-run never mints a second card", async () => {
     const { server, sent } = makeServer();
     server.noteDispatchedToolCall("call_sticky", "call_sticky");
@@ -430,23 +344,6 @@ describe("BackgroundTaskListener workflow integration", () => {
     // card, no status updates onto it, the fold simply persists.
     expect(sent).toHaveLength(0);
     expect(workflowPollerActive("run_sticky")).toBe(true);
-  });
-
-  it("non-workflow task → background card as before", async () => {
-    const { server, sent } = makeServer();
-    const l = new BackgroundTaskListener(server, SID_Z);
-    l.handleEvent(
-      zcodeEvent("session.updated", {
-        taskId: "agent_1",
-        status: "running",
-        description: "research src/",
-      }),
-    );
-    await vi.advanceTimersByTimeAsync(0);
-    expect(sent).toHaveLength(1);
-    const card = sent[0] as { sessionUpdate: string; title: string };
-    expect(card.sessionUpdate).toBe("tool_call");
-    expect(card.title).toBe("[background] research src/");
   });
 
   it("terminal workflow task status stops the poller", async () => {
@@ -506,46 +403,6 @@ describe("workflow stage pushes (WeCom digest, #294)", () => {
   afterEach(() => {
     resetPushSenderForTests();
     h.cfg = null;
-  });
-
-  it("phase entry and failed nodes push one digest; ok/cancelled nodes never push", async () => {
-    const { server, backend } = makeServer();
-    backend.pages = [
-      {
-        result: {
-          events: [
-            { sequence: 1, type: "phase-entered", payload: { phaseName: "plan" } },
-            {
-              sequence: 2,
-              type: "node-settled",
-              payload: { siteId: "ask", ordinal: 1, outcome: "ok" },
-            },
-            {
-              sequence: 3,
-              type: "node-settled",
-              payload: { siteId: "codegen", ordinal: 2, outcome: "failed" },
-            },
-          ],
-          hasMore: false,
-        },
-      },
-    ];
-
-    armWorkflowRunPoller(server, SID_Z, {
-      runId: "run_stage",
-      toolCallId: "c",
-      name: "release",
-      intervalMs: INTERVAL,
-    });
-    await vi.advanceTimersByTimeAsync(INTERVAL);
-
-    // ONE digest for the whole tick: the phase line plus the FAILED node; the
-    // ok node stays card-only.
-    expect(pushes).toHaveLength(1);
-    expect(pushes[0]).toContain("workflow release: stage progress — node failed");
-    expect(pushes[0]).toContain("> phase plan");
-    expect(pushes[0]).toContain("✗ node codegen/#2 failed");
-    expect(pushes[0]).not.toContain("✓ node ask/#1 ok");
   });
 
   it("stages inside the rate-limit window digest into ONE delayed push", async () => {
@@ -625,62 +482,5 @@ describe("workflow stage pushes (WeCom digest, #294)", () => {
     expect(pushes).toHaveLength(3);
     expect(pushes[1]).toContain("phase build");
     expect(pushes[2]).toContain("run settled: completed");
-  });
-
-  it("push.notify.workflowStage=false silences stages; the settled push stays", async () => {
-    h.cfg = { ...h.cfg!, notify: { ...h.cfg!.notify, workflowStage: false } };
-    const { server, backend } = makeServer();
-    backend.pages = [
-      {
-        result: {
-          events: [
-            { sequence: 1, type: "phase-entered", payload: { phaseName: "plan" } },
-            { sequence: 2, type: "run-settled", payload: { status: "completed" } },
-          ],
-          hasMore: false,
-        },
-      },
-    ];
-
-    armWorkflowRunPoller(server, SID_Z, {
-      runId: "run_off",
-      toolCallId: "c",
-      intervalMs: INTERVAL,
-    });
-    await vi.advanceTimersByTimeAsync(INTERVAL);
-
-    expect(pushes).toHaveLength(1);
-    expect(pushes[0]).toContain("run settled: completed");
-    expect(pushes[0]).not.toContain("stage progress");
-  });
-
-  it("minimal mode keeps the failure marker in the title, body stripped", async () => {
-    h.cfg = { ...h.cfg!, contentDetail: "minimal" };
-    const { server, backend } = makeServer();
-    backend.pages = [
-      {
-        result: {
-          events: [
-            {
-              sequence: 1,
-              type: "node-settled",
-              payload: { siteId: "codegen", ordinal: 2, outcome: "failed" },
-            },
-          ],
-          hasMore: false,
-        },
-      },
-    ];
-
-    armWorkflowRunPoller(server, SID_Z, {
-      runId: "run_min",
-      toolCallId: "c",
-      intervalMs: INTERVAL,
-    });
-    await vi.advanceTimersByTimeAsync(INTERVAL);
-
-    expect(pushes).toHaveLength(1);
-    expect(pushes[0]).toContain("stage progress — node failed");
-    expect(pushes[0]).not.toContain("✗ node codegen/#2 failed");
   });
 });

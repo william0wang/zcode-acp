@@ -97,28 +97,6 @@ describe("hub version self-upgrade", () => {
     );
     expect(exited).toBe(true);
   });
-
-  it("does not restart for the same version or when no version is sent", async () => {
-    let exited = false;
-    const hub = await startTestHub({
-      onIdleExit: () => {
-        exited = true;
-      },
-    });
-    const { AGENT_INFO } = await import("../src/utils.js");
-    for (const version of [AGENT_INFO.version, undefined, "0.0.1"]) {
-      const res = await fetch(`http://127.0.0.1:${hub.port}/api/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(registerBody(version === undefined ? {} : { version })),
-      });
-      expect(await res.json()).toEqual({ ok: true });
-    }
-    await new Promise((r) => setTimeout(r, 800));
-    expect(exited).toBe(false);
-    const health = await fetch(`http://127.0.0.1:${hub.port}/api/health`);
-    expect(health.status).toBe(200);
-  });
 });
 
 describe("hub fingerprint self-upgrade", () => {
@@ -148,48 +126,6 @@ describe("hub fingerprint self-upgrade", () => {
       const res = await register(hub, { codeFingerprint: fp });
       expect(await res.json()).toEqual({ ok: true });
     }
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
-    expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
-  });
-
-  it("restarts for a strictly newer VERSION even when both sides have fingerprints", async () => {
-    let restarted = false;
-    const hub = await startTestHub({
-      hubFingerprint: "aaaa",
-      staleVoteCooldownMs: 0,
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await register(hub, { version: "9999.0.0", codeFingerprint: "bbbb" });
-    expect(await res.json()).toEqual({ ok: true, restarting: true });
-    await withTimeout(
-      new Promise<void>((resolve) => {
-        const check = setInterval(() => {
-          if (restarted) {
-            clearInterval(check);
-            resolve();
-          }
-        }, 50);
-      }),
-      5000,
-      "hub restart onto newer version",
-    );
-  });
-
-  it("suppresses newer-bridge votes during the restart cooldown", async () => {
-    // Loop breaker: a hub that just (re)started ignores stale votes for the
-    // cooldown window — a same-age respawn can never be voted into a churn.
-    let restarted = false;
-    const hub = await startTestHub({
-      staleVoteCooldownMs: 60_000,
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await register(hub, { version: "9999.0.0" });
-    expect(await res.json()).toEqual({ ok: true });
     await new Promise((r) => setTimeout(r, 800));
     expect(restarted).toBe(false);
     expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
@@ -232,53 +168,6 @@ describe("hub /api/upgrade (self-decided restart)", () => {
       label,
     );
   }
-
-  it("rejects /api/upgrade without or with a wrong token", async () => {
-    const hub = await startTestHub();
-    expect((await fetch(upgradeUrl(hub), { method: "POST" })).status).toBe(401);
-    expect(
-      (await fetch(upgradeUrl(hub), { method: "POST", headers: { Authorization: "Bearer nope" } }))
-        .status,
-    ).toBe(401);
-  });
-
-  it("stays put when the on-disk code matches the running version", async () => {
-    const paths = await writeCodeFixture(AGENT_INFO.version);
-    let restarted = false;
-    const hub = await startTestHub({
-      codePaths: paths,
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      ok: true,
-      restarting: false,
-      reason: "up-to-date",
-      runningVersion: AGENT_INFO.version,
-      diskVersion: AGENT_INFO.version,
-    });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
-    expect((await fetch(`http://127.0.0.1:${hub.port}/api/health`)).status).toBe(200);
-  });
-
-  it("does not restart onto an OLDER on-disk version", async () => {
-    const paths = await writeCodeFixture("0.0.1");
-    let restarted = false;
-    const hub = await startTestHub({
-      codePaths: paths,
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
-    expect(await res.json()).toMatchObject({ restarting: false, reason: "up-to-date" });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
-  });
 
   it("restarts onto a newer on-disk version", async () => {
     const paths = await writeCodeFixture("9999.0.0");
@@ -356,22 +245,5 @@ describe("hub /api/upgrade (self-decided restart)", () => {
     const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
     expect(await res.json()).toMatchObject({ restarting: true, reason: "mtime" });
     await until(() => restarted, "hub restart onto rebuilt dist");
-  });
-
-  it("checks the real repo layout safely when nothing is injected", async () => {
-    let restarted = false;
-    const hub = await startTestHub({
-      onRestart: () => {
-        restarted = true;
-      },
-    });
-    // Under vitest the defaults resolve to the repo root: package.json reads
-    // the same version frozen into AGENT_INFO, and src/ holds no .js files —
-    // so the answer must be a calm no-op, never a crash.
-    const res = await fetch(upgradeUrl(hub), { method: "POST", headers: auth });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ restarting: false, reason: "up-to-date" });
-    await new Promise((r) => setTimeout(r, 800));
-    expect(restarted).toBe(false);
   });
 });

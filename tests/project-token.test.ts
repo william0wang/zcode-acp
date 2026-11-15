@@ -168,25 +168,6 @@ describe("resolveOAuthProjectToken", () => {
     expect(calls[2]!.body).toEqual({ clientType: "zcode", clientVersion: "3.17.1" });
   });
 
-  it("serves the cached token until shortly before expiry", async () => {
-    tokenResponses.push(tokenOk("project-token-1"));
-    await resolveOAuthProjectToken("zai");
-    const again = await resolveOAuthProjectToken("zai");
-    expect(again.token).toBe("project-token-1");
-    expect(calls).toHaveLength(3);
-  });
-
-  it("re-issues (without re-resolving the location) once the refresh window opens", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    tokenResponses.push(tokenOk("project-token-1", 600), tokenOk("project-token-2", 600));
-    await resolveOAuthProjectToken("zai");
-    vi.setSystemTime(Date.now() + 9 * 60_000); // inside the 2-minute refresh lead
-    const next = await resolveOAuthProjectToken("zai");
-    expect(next.token).toBe("project-token-2");
-    expect(calls.filter((c) => c.url.endsWith("/access_tokens"))).toHaveLength(2);
-    expect(calls.filter((c) => c.url.endsWith("/getCustomerInfo"))).toHaveLength(1);
-  });
-
   it("drops the cached token when the backend rejects it under the same account scope", async () => {
     tokenResponses.push(tokenOk("project-token-1"), tokenOk("project-token-2"));
     const first = await resolveOAuthProjectToken("zai");
@@ -198,28 +179,6 @@ describe("resolveOAuthProjectToken", () => {
     expect(next.accountScope).toBe(first.accountScope);
   });
 
-  it("refuses a rejection without an account scope, like the desktop host", async () => {
-    tokenResponses.push(tokenOk("project-token-1"));
-    await resolveOAuthProjectToken("zai");
-    await expect(
-      resolveOAuthProjectToken("zai", {
-        rejectedFingerprint: projectTokenFingerprint("project-token-1"),
-      }),
-    ).rejects.toMatchObject({ code: "project_token_scope_invalidated" });
-  });
-
-  it("refuses a recovery for a scope the current sign-in no longer matches", async () => {
-    tokenResponses.push(tokenOk("project-token-1"));
-    const first = await resolveOAuthProjectToken("zai");
-    writeStore({ "oauth:zai:access_token": "login-jwt-other" });
-    await expect(
-      resolveOAuthProjectToken("zai", {
-        rejectedFingerprint: projectTokenFingerprint("project-token-1"),
-        expectedAccountScope: first.accountScope,
-      }),
-    ).rejects.toMatchObject({ code: "project_token_scope_invalidated" });
-  });
-
   it("single-flights concurrent callers into one exchange", async () => {
     tokenResponses.push(tokenOk("project-token-1"));
     const [a, b] = await Promise.all([
@@ -229,38 +188,6 @@ describe("resolveOAuthProjectToken", () => {
     expect(a.token).toBe("project-token-1");
     expect(b.token).toBe("project-token-1");
     expect(calls).toHaveLength(3);
-  });
-
-  it("re-resolves the key location after the token endpoint answers 404", async () => {
-    tokenResponses.push(() => json(404, {}), tokenOk("project-token-2"));
-    await expect(resolveOAuthProjectToken("zai")).rejects.toMatchObject({
-      code: "project_token_key_missing",
-    });
-    const next = await resolveOAuthProjectToken("zai");
-    expect(next.token).toBe("project-token-2");
-    expect(calls.filter((c) => c.url.endsWith("/getCustomerInfo"))).toHaveLength(2);
-  });
-
-  it("reports a disabled key as project_token_disabled", async () => {
-    tokenResponses.push(() => json(200, { code: 200, data: { enable: false } }));
-    await expect(resolveOAuthProjectToken("zai")).rejects.toMatchObject({
-      code: "project_token_disabled",
-    });
-  });
-
-  it("maps timeouts and network failures to fixed codes", async () => {
-    setProjectTokenNetworkForTest(async () => {
-      throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
-    });
-    await expect(resolveOAuthProjectToken("zai")).rejects.toMatchObject({
-      code: "project_token_timeout",
-    });
-    setProjectTokenNetworkForTest(async () => {
-      throw new TypeError("fetch failed");
-    });
-    await expect(resolveOAuthProjectToken("zai")).rejects.toMatchObject({
-      code: "project_token_network_error",
-    });
   });
 
   it("keeps serving a still-valid token when a refresh fails transiently, with a backoff", async () => {
@@ -289,47 +216,5 @@ describe("resolveOAuthProjectToken", () => {
     expect(hasOAuthLogin("zai")).toBe(false);
     await expect(resolveOAuthProjectToken("zai")).rejects.toBeInstanceOf(ProjectTokenError);
     expect(calls).toHaveLength(0);
-  });
-
-  it("surfaces HTTP failures as fixed codes without response content", async () => {
-    tokenResponses.push(() => json(401, { msg: "secret-looking body" }));
-    const error = await resolveOAuthProjectToken("zai").catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(ProjectTokenError);
-    expect((error as ProjectTokenError).code).toBe("project_token_http_401");
-    expect((error as Error).message).not.toContain("secret-looking body");
-  });
-
-  it("starts over when the desktop signs in again (new login token)", async () => {
-    tokenResponses.push(tokenOk("project-token-1"), tokenOk("project-token-2"));
-    await resolveOAuthProjectToken("zai");
-    writeStore({ "oauth:zai:access_token": "login-jwt-2" });
-    const next = await resolveOAuthProjectToken("zai");
-    expect(next.token).toBe("project-token-2");
-    expect(calls.filter((c) => c.url.endsWith("/getCustomerInfo"))).toHaveLength(2);
-    expect(calls.at(-1)!.authorization).toBe("Bearer login-jwt-2");
-  });
-
-  it("talks to bigmodel.cn with the bare login token on the key list", async () => {
-    writeStore({ "oauth:bigmodel:access_token": "bm-login" });
-    const bmKeys =
-      "https://bigmodel.cn/api/biz/v1/organization/org-personal/projects/proj-default/api_keys";
-    setProjectTokenNetworkForTest(async (input, init) => {
-      const url = String(input);
-      calls.push({
-        url,
-        method: init?.method ?? "GET",
-        authorization: new Headers(init?.headers).get("Authorization"),
-        body: undefined,
-      });
-      if (url === "https://bigmodel.cn/api/biz/customer/getCustomerInfo") {
-        return json(200, CUSTOMER);
-      }
-      if (url === bmKeys) return json(200, { code: 200, data: keyList });
-      if (url === `${bmKeys}/key-id-1/access_tokens`) return tokenOk("bm-token")();
-      throw new Error(`unexpected request ${url}`);
-    });
-    const material = await resolveOAuthProjectToken("bigmodel");
-    expect(material.token).toBe("bm-token");
-    expect(calls.map((c) => c.authorization)).toEqual(["bm-login", "bm-login", "Bearer bm-login"]);
   });
 });

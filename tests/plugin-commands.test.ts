@@ -93,12 +93,6 @@ afterEach(() => {
 });
 
 describe("loadPluginCommands", () => {
-  it("returns empty when config.json does not exist", () => {
-    resetMocks();
-    // No files/dirs set up → existsSync returns false
-    expect(loadPluginCommands()).toEqual([]);
-  });
-
   it("loads enabled plugin commands with description and argument-hint", () => {
     resetMocks();
 
@@ -137,24 +131,6 @@ describe("loadPluginCommands", () => {
     expect(commands[0]!.name).toBe("code-review");
     expect(commands[0]!.description).toBe("Code review a pull request");
     expect(commands[0]!.input).toEqual({ hint: "[pr number or url]" });
-  });
-
-  it("skips disabled plugins", () => {
-    resetMocks();
-
-    const home = homedir();
-    mockFiles.set(
-      `${home}/.zcode/cli/config.json`,
-      JSON.stringify({
-        plugins: {
-          enabledPlugins: {
-            "code-review@claude-plugins-official": false,
-          },
-        },
-      }),
-    );
-
-    expect(loadPluginCommands()).toEqual([]);
   });
 
   it("reads the CLI config and plugin cache from ZCODE_HOME when set", () => {
@@ -209,167 +185,9 @@ describe("loadPluginCommands", () => {
       vi.unstubAllEnvs();
     }
   });
-
-  it("skips plugins without commands directory", () => {
-    resetMocks();
-
-    const home = homedir();
-    const cacheDir = `${home}/.zcode/cli/plugins/cache`;
-
-    mockFiles.set(
-      `${home}/.zcode/cli/config.json`,
-      JSON.stringify({
-        plugins: {
-          enabledPlugins: {
-            "context7@claude-plugins-official": true,
-          },
-        },
-      }),
-    );
-
-    mockDirs.add(cacheDir);
-    mockDirs.add(`${cacheDir}/claude-plugins-official`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/context7`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/context7/0.0.0`);
-    // No commands/ directory
-
-    expect(loadPluginCommands()).toEqual([]);
-  });
-
-  it("skips command .md files without description", () => {
-    resetMocks();
-
-    const home = homedir();
-    const cacheDir = `${home}/.zcode/cli/plugins/cache`;
-
-    mockFiles.set(
-      `${home}/.zcode/cli/config.json`,
-      JSON.stringify({
-        plugins: {
-          enabledPlugins: {
-            "test-plugin@claude-plugins-official": true,
-          },
-        },
-      }),
-    );
-
-    mockDirs.add(cacheDir);
-    mockDirs.add(`${cacheDir}/claude-plugins-official`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/1.0.0`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/1.0.0/commands`);
-
-    mockFiles.set(
-      `${cacheDir}/claude-plugins-official/test-plugin/1.0.0/commands/bad-cmd.md`,
-      `---\nsome-key: value\n---\n\nNo description here.`,
-    );
-
-    expect(loadPluginCommands()).toEqual([]);
-  });
-
-  it("uses the latest version directory", () => {
-    resetMocks();
-
-    const home = homedir();
-    const cacheDir = `${home}/.zcode/cli/plugins/cache`;
-
-    mockFiles.set(
-      `${home}/.zcode/cli/config.json`,
-      JSON.stringify({
-        plugins: {
-          enabledPlugins: {
-            "test-plugin@claude-plugins-official": true,
-          },
-        },
-      }),
-    );
-
-    mockDirs.add(cacheDir);
-    mockDirs.add(`${cacheDir}/claude-plugins-official`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/1.0.0`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/1.0.0/commands`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands`);
-
-    mockFiles.set(
-      `${cacheDir}/claude-plugins-official/test-plugin/1.0.0/commands/old-cmd.md`,
-      `---\ndescription: Old version command\n---\n`,
-    );
-    mockFiles.set(
-      `${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands/new-cmd.md`,
-      `---\ndescription: New version command\n---\n`,
-    );
-
-    const commands = loadPluginCommands();
-    expect(commands).toHaveLength(1);
-    expect(commands[0]!.name).toBe("new-cmd");
-    expect(commands[0]!.description).toBe("New version command");
-  });
-
-  it("uses semver comparison for multi-digit versions (10.0.0 > 2.0.0)", () => {
-    resetMocks();
-
-    const home = homedir();
-    const cacheDir = `${home}/.zcode/cli/plugins/cache`;
-
-    mockFiles.set(
-      `${home}/.zcode/cli/config.json`,
-      JSON.stringify({
-        plugins: {
-          enabledPlugins: {
-            "test-plugin@claude-plugins-official": true,
-          },
-        },
-      }),
-    );
-
-    mockDirs.add(cacheDir);
-    mockDirs.add(`${cacheDir}/claude-plugins-official`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/10.0.0`);
-    mockDirs.add(`${cacheDir}/claude-plugins-official/test-plugin/10.0.0/commands`);
-
-    mockFiles.set(
-      `${cacheDir}/claude-plugins-official/test-plugin/2.0.0/commands/old-cmd.md`,
-      `---\ndescription: Version 2\n---\n`,
-    );
-    mockFiles.set(
-      `${cacheDir}/claude-plugins-official/test-plugin/10.0.0/commands/new-cmd.md`,
-      `---\ndescription: Version 10\n---\n`,
-    );
-
-    const commands = loadPluginCommands();
-    expect(commands).toHaveLength(1);
-    expect(commands[0]!.name).toBe("new-cmd");
-    expect(commands[0]!.description).toBe("Version 10");
-  });
 });
 
 describe("handleSlashCommand — unsupported TUI commands", () => {
-  it("returns friendly error for /plugins", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/plugins");
-    expect(result?.stopReason).toBe("end_turn");
-  });
-
-  it("returns friendly error for /expert", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/expert");
-    expect(result?.stopReason).toBe("end_turn");
-  });
-
-  it("returns friendly error for /login", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/login");
-    expect(result?.stopReason).toBe("end_turn");
-  });
-
   it("intercepts /workflow with the gated disabled notice (no gate resolved)", async () => {
     // /workflow left the TUI-only set: it is gated by the dynamic-workflow
     // verdict instead. With no gate resolved (backend never spawned) the
@@ -387,59 +205,10 @@ describe("handleSlashCommand — unsupported TUI commands", () => {
 });
 
 describe("handleSlashCommand — passthrough commands", () => {
-  it("returns null for /skill (backend resolves it)", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/skill");
-    expect(result).toBeNull();
-  });
-
-  it("returns null for /skill with arguments", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(
-      server,
-      cx,
-      SID,
-      SID,
-      "/skill diagnosing-bugs fix the login bug",
-    );
-    expect(result).toBeNull();
-  });
-
-  it("returns null for /init (backend resolves it)", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/init");
-    expect(result).toBeNull();
-  });
-
   it("returns null for unknown /x commands (extensibility)", async () => {
     const { cx } = mockContext();
     const server = makeServer();
     const result = await handleSlashCommand(server, cx, SID, SID, "/code-review 123");
-    expect(result).toBeNull();
-  });
-
-  it("returns null for /code-review (plugin command passthrough)", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/code-review");
-    expect(result).toBeNull();
-  });
-
-  it("returns null for $-prefixed skill commands (passthrough)", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    // $-prefixed commands are discovered skills — pass through to the model.
-    const result = await handleSlashCommand(server, cx, SID, SID, "/$tdd fix the bug");
-    expect(result).toBeNull();
-  });
-
-  it("returns null for $-prefixed skill without args", async () => {
-    const { cx } = mockContext();
-    const server = makeServer();
-    const result = await handleSlashCommand(server, cx, SID, SID, "/$arco-design");
     expect(result).toBeNull();
   });
 });

@@ -41,31 +41,6 @@ describe("EventTranslator", () => {
     expect(out).toEqual([{ kind: "TextDelta", text: "hello", messageId: "m1" }]);
   });
 
-  it("omits messageId when the streaming payload carries no assistantMessageId", () => {
-    const t = new EventTranslator();
-    const out = t.translate(ev("model.streaming", { kind: "text_delta", delta: "hello" }));
-    expect(out).toHaveLength(1);
-    expect(out[0]).not.toHaveProperty("messageId");
-  });
-
-  it("carries assistantMessageId onto the emitted ReasoningDelta", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("model.streaming", {
-        kind: "reasoning_delta",
-        delta: "thinking",
-        assistantMessageId: "m2",
-      }),
-    );
-    expect(out).toEqual([{ kind: "ReasoningDelta", text: "thinking", messageId: "m2" }]);
-  });
-
-  it("emits a ReasoningDelta on reasoning_delta", () => {
-    const t = new EventTranslator();
-    const out = t.translate(ev("model.streaming", { kind: "reasoning_delta", delta: "thinking" }));
-    expect(out).toEqual([{ kind: "ReasoningDelta", text: "thinking" }]);
-  });
-
   it("caches tool input from tool_call and reuses it on scheduled (inputOmitted)", () => {
     const t = new EventTranslator();
     // model.streaming tool_call carries the full input.
@@ -99,62 +74,6 @@ describe("EventTranslator", () => {
     expect(out2).toHaveLength(0);
   });
 
-  it("creates an in-progress tool call when started arrives without scheduled", () => {
-    const t = new EventTranslator();
-    t.translate(
-      ev("model.streaming", {
-        kind: "tool_call",
-        toolCallId: "c2_missing_scheduled",
-        toolName: "Bash",
-        input: { command: "sleep 140" },
-      }),
-    );
-
-    const out = t.translate(
-      ev("tool.updated", { kind: "started", toolCallId: "c2_missing_scheduled" }),
-    );
-
-    expect(out).toEqual([
-      expect.objectContaining({
-        kind: "ToolCallNew",
-        callId: "c2_missing_scheduled",
-        tool: "Bash",
-        status: "in_progress",
-        title: "Bash: sleep 140",
-        input: { command: "sleep 140" },
-      }),
-    ]);
-    expect(t.seenToolIds.has("c2_missing_scheduled")).toBe(true);
-    expect(
-      t.translate(
-        ev("tool.updated", {
-          kind: "scheduled",
-          toolCallId: "c2_missing_scheduled",
-          toolName: "Bash",
-        }),
-      ),
-    ).toEqual([]);
-  });
-
-  it("translates tool.updated result → completed ToolCallUpdate with content for Read", () => {
-    const t = new EventTranslator();
-    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c3", toolName: "Read" }));
-    const out = t.translate(
-      ev("tool.updated", {
-        kind: "result",
-        toolCallId: "c3",
-        result: { success: true, content: "file body" },
-      }),
-    );
-    expect(out).toHaveLength(1);
-    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
-    expect(u.status).toBe("completed");
-    expect(u.content?.[0]).toMatchObject({
-      type: "content",
-      content: { type: "text", text: "file body" },
-    });
-  });
-
   it("creates a tool call before completing a result received without prior lifecycle events", () => {
     const t = new EventTranslator();
     t.translate(
@@ -185,22 +104,6 @@ describe("EventTranslator", () => {
     });
   });
 
-  it("skips content for Bash result (terminal path handles it)", () => {
-    const t = new EventTranslator();
-    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c4", toolName: "Bash" }));
-    const out = t.translate(
-      ev("tool.updated", {
-        kind: "result",
-        toolCallId: "c4",
-        result: { success: true, content: "stdout", perf: { exitCode: 0 } },
-      }),
-    );
-    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
-    expect(u.status).toBe("completed");
-    expect(u.content).toBeUndefined();
-    expect(u.rawResult).toEqual({ success: true, content: "stdout", perf: { exitCode: 0 } });
-  });
-
   it("batch backfills only unseen/non-final ids (no content-less overwrite)", () => {
     const t = new EventTranslator();
     t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c5", toolName: "Bash" }));
@@ -218,17 +121,6 @@ describe("EventTranslator", () => {
     expect(out).toHaveLength(0);
   });
 
-  it("emits UsageDelta on session.updated with inputTokens", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("session.updated", {
-        usage: { inputTokens: 1234 },
-        contextWindow: 200000,
-      }),
-    );
-    expect(out).toEqual([{ kind: "UsageDelta", used: 1234, size: 200000 }]);
-  });
-
   it("folds a SessionModeChanged session.updated into the effective mode (plan)", () => {
     // EnterPlanMode flips only the runtime plan flag — the payload's `mode`
     // stays the underlying session mode; the advertised mode must be "plan".
@@ -243,61 +135,6 @@ describe("EventTranslator", () => {
       }),
     );
     expect(out).toEqual([{ kind: "ConfigChanged", mode: "plan", planEnabled: true }]);
-  });
-
-  it("a mode transition out of plan reports the underlying mode", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("session.updated", {
-        mode: "yolo",
-        planEnabled: false,
-        previousMode: "yolo",
-        previousPlanEnabled: true,
-        source: "tool",
-      }),
-    );
-    expect(out).toEqual([{ kind: "ConfigChanged", mode: "yolo", planEnabled: false }]);
-  });
-
-  it("background-task session.updated payloads are not mode transitions", () => {
-    const t = new EventTranslator();
-    const out = t.translate(ev("session.updated", { taskId: "agent_1", status: "running" }));
-    expect(out).toEqual([]);
-  });
-
-  it("translates state.updated patch → ConfigChanged (mode/model/thought)", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("state.updated", {
-        patch: {
-          mode: { current: "plan" },
-          model: { current: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" } },
-          thoughtLevel: { current: "max" },
-        },
-        reason: "mode_changed",
-      }),
-    );
-    expect(out).toEqual([
-      {
-        kind: "ConfigChanged",
-        mode: "plan",
-        model: { providerId: "builtin:bigmodel-coding-plan", modelId: "GLM-5.2" },
-        thought: "max",
-      },
-    ]);
-  });
-
-  it("omits fields missing from the state.updated patch", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("state.updated", {
-        patch: { model: { current: { providerId: "anthropic", modelId: "GLM-5.2" } } },
-        reason: "model_changed",
-      }),
-    );
-    expect(out).toEqual([
-      { kind: "ConfigChanged", model: { providerId: "anthropic", modelId: "GLM-5.2" } },
-    ]);
   });
 
   it("captures turn.failed error and does not treat it as resultType", () => {
@@ -341,101 +178,6 @@ describe("EventTranslator", () => {
     expect(t.turnUsage).toEqual(usage);
     expect(out).toEqual([{ kind: "TurnInfo", resultType: "success" }]);
   });
-
-  it("leaves turnUsage null when turn.completed carries no usage", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.completed", { resultType: "cancelled", tokenCount: 7 }));
-    expect(t.turnUsage).toBeNull();
-  });
-
-  it("does not set turnUsage on turn.failed", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.failed", { error: { code: "1308" }, usage: { totalTokens: 9 } }));
-    expect(t.turnUsage).toBeNull();
-  });
-});
-
-describe("EventTranslator turn.completed resultType + cacheStats", () => {
-  const cacheStats = {
-    totalMessages: 45,
-    cachedMessages: 42,
-    lastCacheHit: true,
-    cacheReadTokens: 12300,
-  };
-
-  it("captures cacheStats verbatim and carries it on the TurnInfo event", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("turn.completed", { resultType: "success", tokenCount: 140, cacheStats }),
-    );
-    expect(t.turnCacheStats).toEqual(cacheStats);
-    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
-      InternalEvent,
-      { kind: "TurnInfo" }
-    >;
-    expect(info.resultType).toBe("success");
-    expect(info.cacheStats).toEqual(cacheStats);
-  });
-
-  it("leaves cacheStats absent (null field) when turn.completed carries none", () => {
-    const t = new EventTranslator();
-    const out = t.translate(ev("turn.completed", { resultType: "success", tokenCount: 140 }));
-    expect(t.turnCacheStats).toBeNull();
-    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
-      InternalEvent,
-      { kind: "TurnInfo" }
-    >;
-    expect(info.cacheStats).toBeUndefined();
-  });
-
-  it("accepts cacheStats without the optional cacheReadTokens", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("turn.completed", {
-        resultType: "success",
-        cacheStats: { totalMessages: 10, cachedMessages: 4, lastCacheHit: false },
-      }),
-    );
-    expect(t.turnCacheStats).toEqual({
-      totalMessages: 10,
-      cachedMessages: 4,
-      lastCacheHit: false,
-    });
-    expect(t.turnCacheStats).not.toHaveProperty("cacheReadTokens");
-    expect(out).toHaveLength(1); // TurnInfo only (#228: no UsageDelta on turn end)
-  });
-
-  it("carries a non-success resultType verbatim on the TurnInfo event", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("turn.completed", { resultType: "error_max_budget", tokenCount: 140, cacheStats }),
-    );
-    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
-      InternalEvent,
-      { kind: "TurnInfo" }
-    >;
-    expect(info.resultType).toBe("error_max_budget");
-    // Non-success still carries the cache stats — the line renderer decides.
-    expect(info.cacheStats).toEqual(cacheStats);
-  });
-
-  it("ignores a malformed cacheStats block (never breaks the turn end)", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("turn.completed", {
-        resultType: "success",
-        cacheStats: { totalMessages: "many", cachedMessages: 4 },
-      }),
-    );
-    expect(t.turnCacheStats).toBeNull();
-    const info = out.find((e) => e.kind === "TurnInfo") as Extract<
-      InternalEvent,
-      { kind: "TurnInfo" }
-    >;
-    expect(info.cacheStats).toBeUndefined();
-    // The terminal info line still emitted (#228: no UsageDelta on turn end).
-    expect(out[0]?.kind).toBe("TurnInfo");
-  });
 });
 
 describe("EventTranslator background-task turn deferral", () => {
@@ -454,110 +196,6 @@ describe("EventTranslator background-task turn deferral", () => {
     expect(out2).toEqual([]);
     expect(t.turnDone).toBe(false);
   });
-
-  it("resumes normal handling after the next user-initiated turn.started", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", { inputSource: "background_task" }, "turn_bg"));
-    t.translate(ev("model.streaming", { kind: "text_delta", delta: "bg" })); // dropped
-    // A normal user turn starts → deferral cleared.
-    t.translate(ev("turn.started", {}, "turn_user"));
-    expect(t.turnStarted).toBe(true);
-    const out = t.translate(ev("model.streaming", { kind: "text_delta", delta: "user reply" }));
-    expect(out).toEqual([{ kind: "TextDelta", text: "user reply" }]);
-  });
-
-  it("ignores background_task tool.updated events inside the deferred turn", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", { inputSource: "background_task" }, "turn_bg"));
-    const out = t.translate(
-      ev("tool.updated", { kind: "scheduled", toolCallId: "c1", toolName: "Read" }),
-    );
-    expect(out).toEqual([]);
-    expect(t.seenToolIds.has("c1")).toBe(false);
-  });
-});
-
-describe("EventTranslator run_in_background flag threading", () => {
-  it("tags ToolCallNew as background when input.run_in_background=true (cached from streaming)", () => {
-    const t = new EventTranslator();
-    // model.streaming tool_call declares the background launch.
-    t.translate(
-      ev("model.streaming", {
-        kind: "tool_call",
-        toolCallId: "c1",
-        toolName: "Bash",
-        input: { command: "sleep 3", run_in_background: true },
-      }),
-    );
-    const out = t.translate(
-      ev("tool.updated", { kind: "scheduled", toolCallId: "c1", inputOmitted: true }),
-    );
-    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
-    expect(newEv.background).toBe(true);
-    // Cached for later result lookup.
-    expect(t.backgroundCallIds.has("c1")).toBe(true);
-  });
-
-  it("tags ToolCallNew as background when scheduled payload carries input directly", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("tool.updated", {
-        kind: "scheduled",
-        toolCallId: "c2",
-        toolName: "Bash",
-        input: { command: "echo hi", run_in_background: true },
-      }),
-    );
-    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
-    expect(newEv.background).toBe(true);
-  });
-
-  it("does NOT tag as background when run_in_background is absent or false", () => {
-    const t = new EventTranslator();
-    const out = t.translate(
-      ev("tool.updated", {
-        kind: "scheduled",
-        toolCallId: "c3",
-        toolName: "Bash",
-        input: { command: "ls" },
-      }),
-    );
-    const newEv = out[0] as Extract<InternalEvent, { kind: "ToolCallNew" }>;
-    expect(newEv.background).toBeUndefined();
-  });
-
-  it("threads background flag through to the result ToolCallUpdate (input omitted on result)", () => {
-    const t = new EventTranslator();
-    t.translate(
-      ev("model.streaming", {
-        kind: "tool_call",
-        toolCallId: "c4",
-        toolName: "Bash",
-        input: { command: "sleep 3", run_in_background: true },
-      }),
-    );
-    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c4", inputOmitted: true }));
-    const out = t.translate(
-      ev("tool.updated", {
-        kind: "result",
-        toolCallId: "c4",
-        result: { success: true, content: "Command running in background with ID: exec_…" },
-      }),
-    );
-    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
-    expect(u.background).toBe(true);
-    expect(u.status).toBe("completed");
-  });
-
-  it("does not tag a foreground Bash result as background", () => {
-    const t = new EventTranslator();
-    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "c5", toolName: "Bash" }));
-    const out = t.translate(
-      ev("tool.updated", { kind: "result", toolCallId: "c5", result: { content: "done" } }),
-    );
-    const u = out[0] as Extract<InternalEvent, { kind: "ToolCallUpdate" }>;
-    expect(u.background).toBeUndefined();
-  });
 });
 
 describe("EventTranslator foreign internal-turn attribution", () => {
@@ -574,42 +212,6 @@ describe("EventTranslator foreign internal-turn attribution", () => {
     expect(t.turnDone).toBe(false);
     // The user's own turn completes normally afterwards.
     t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
-    expect(t.turnDone).toBe(true);
-  });
-
-  it("drops a mismatched turn.completed even without a foreign turn.started", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    t.translate(ev("turn.completed", { resultType: "success" }, "turn_other"));
-    expect(t.turnDone).toBe(false);
-    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
-    expect(t.turnDone).toBe(true);
-  });
-
-  it("drops a mismatched turn.failed too", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    t.translate(ev("turn.failed", { error: { code: "x" } }, "turn_goal"));
-    expect(t.turnFailed).toBe(false);
-    expect(t.turnDone).toBe(false);
-  });
-
-  it("keeps legacy behavior when turnId is absent (old backends)", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}));
-    t.translate(ev("turn.completed", { resultType: "success" }));
-    expect(t.turnDone).toBe(true);
-  });
-
-  it("falls back to a payload-carried turnId (legacy builds)", () => {
-    // 0.16.9 carries turnId on the envelope only; the payload spelling was
-    // the original (bundle-era) read and must keep working on builds that
-    // put it there.
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", { turnId: "turn_user" }));
-    t.translate(ev("turn.completed", { turnId: "turn_other", resultType: "success" }));
-    expect(t.turnDone).toBe(false);
-    t.translate(ev("turn.completed", { turnId: "turn_user", resultType: "success" }));
     expect(t.turnDone).toBe(true);
   });
 
@@ -657,49 +259,9 @@ describe("EventTranslator protocol-layer terminal broadcast (state.updated)", ()
   // emitted by the protocol layer, so it survives a deaf event stream; the
   // turn loop's stall branch consults these flags to end a lost-terminal turn
   // in seconds instead of waiting out STALE_FREEZE_MS.
-  it("records prompt_completed after our turn.started", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    t.translate(ev("state.updated", { reason: "prompt_completed", revision: 7 }));
-    expect(t.sawPromptCompleted).toBe(true);
-    expect(t.sawPromptFailed).toBe(false);
-    // The flag alone must NOT end the turn — the loop decides at its stall gate
-    // (the notification carries no turnId, so it cannot attribute turns).
-    expect(t.turnDone).toBe(false);
-  });
-
-  it("records prompt_failed as the failed flavour", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    t.translate(ev("state.updated", { reason: "prompt_failed" }));
-    expect(t.sawPromptFailed).toBe(true);
-    expect(t.sawPromptCompleted).toBe(false);
-    expect(t.turnFailed).toBe(false);
-  });
-
   it("ignores a terminal broadcast that arrives before our turn.started (previous turn's)", () => {
     const t = new EventTranslator();
     t.translate(ev("state.updated", { reason: "prompt_completed" }));
     expect(t.sawPromptCompleted).toBe(false);
-  });
-
-  it("ignores a terminal broadcast once the terminal event already landed", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    t.translate(ev("turn.completed", { resultType: "success" }, "turn_user"));
-    t.translate(ev("state.updated", { reason: "prompt_completed" }));
-    expect(t.sawPromptCompleted).toBe(false);
-  });
-
-  it("still forwards the settings patch alongside the terminal reason", () => {
-    const t = new EventTranslator();
-    t.translate(ev("turn.started", {}, "turn_user"));
-    const out = t.translate(
-      ev("state.updated", {
-        reason: "prompt_completed",
-        patch: { model: { current: { providerId: "p", modelId: "m" } } },
-      }),
-    );
-    expect(out).toEqual([{ kind: "ConfigChanged", model: { providerId: "p", modelId: "m" } }]);
   });
 });

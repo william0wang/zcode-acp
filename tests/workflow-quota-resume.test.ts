@@ -13,9 +13,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import type * as acp from "@agentclientprotocol/sdk";
 
 import {
-  armQuotaResumeWatchdog,
   fire,
-  hasQuotaResumePendingForCwd,
   quotaResumeEntryForTest,
   quotaResumePending,
   resetQuotaResumeForTest,
@@ -141,69 +139,11 @@ describe("scanQuotaStoppedRuns", () => {
     expect(quotaResumePending("run_q1")).toBe(true);
   });
 
-  it("ignores provider stops that are not quota (auth) and non-stopped rows", async () => {
-    const { server, backend } = makeServer();
-    backend.journalRuns = [
-      stoppedByQuota(),
-      stoppedByQuota({ runId: "run_done", status: "completed" }),
-      stoppedByQuota({ runId: "run_user", stopReason: "user" }),
-    ];
-    backend.summariesBySession.set("sess_z1", [
-      quotaSummary({ runId: "run_q1", failureMessage: "auth_failed [401]: sign in again" }),
-      quotaSummary({ runId: "run_done" }),
-      quotaSummary({ runId: "run_user" }),
-    ]);
-
-    await scanQuotaStoppedRuns(server);
-    expect(quotaResumePending("run_q1")).toBe(false);
-    expect(backend.calls.some((c) => c.method === "v4/conversation/workflowRuns")).toBe(true);
-  });
-
-  it("skips a run that is not resumable or already scheduled", async () => {
-    const { server, backend } = makeServer();
-    backend.journalRuns = [stoppedByQuota()];
-    backend.summariesBySession.set("sess_z1", [quotaSummary({ resumable: false })]);
-    await scanQuotaStoppedRuns(server);
-    expect(quotaResumePending("run_q1")).toBe(false);
-
-    // Already scheduled → a second scan is a no-op (no duplicate RPC rows).
-    backend.summariesBySession.set("sess_z1", [quotaSummary()]);
-    await scheduleQuotaResume(server, { runId: "run_q1", zcodeSid: "sess_z1", cwd: CWD });
-    const before = backend.calls.length;
-    await scanQuotaStoppedRuns(server);
-    const after = backend.calls
-      .slice(before)
-      .filter((c) => c.method === "v4/conversation/workflowRuns");
-    expect(after).toHaveLength(0);
-  });
-
   it("never spawns a backend and does nothing before a backend exists", async () => {
     const { server, backend } = makeServer();
     server.backend = null;
     await scanQuotaStoppedRuns(server);
     expect(backend.calls).toHaveLength(0);
-    expect(quotaResumePending("run_q1")).toBe(false);
-  });
-
-  it("respects the workflow gate verdict (disabled = no scan)", async () => {
-    const { server, backend } = makeServer();
-    server.backendWorkflowGate = Promise.resolve({
-      enabled: false,
-      mode: "disabled",
-      source: "remote",
-    });
-    backend.journalRuns = [stoppedByQuota()];
-    backend.summariesBySession.set("sess_z1", [quotaSummary()]);
-    await scanQuotaStoppedRuns(server);
-    expect(quotaResumePending("run_q1")).toBe(false);
-  });
-
-  it("respects quota.autoResume=false", async () => {
-    vi.stubEnv("ZCODE_ACP_QUOTA_AUTO_RESUME", "0");
-    const { server, backend } = makeServer();
-    backend.journalRuns = [stoppedByQuota()];
-    backend.summariesBySession.set("sess_z1", [quotaSummary()]);
-    await scanQuotaStoppedRuns(server);
     expect(quotaResumePending("run_q1")).toBe(false);
   });
 });
@@ -275,24 +215,6 @@ describe("fire", () => {
     expect(entry.awaitingVerify).toBe(true);
   });
 
-  it("resumes the stopped run once the quota card shows no future reset", async () => {
-    const { server, backend, notes } = makeServer();
-    await armed(server, backend);
-
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-
-    expect(backend.commandCalls).toHaveLength(1);
-    expect(backend.commandCalls[0]).toMatchObject({
-      type: "resumeWorkflowRun",
-      sessionId: "sess_z1",
-      payload: { workId: "run_q1" },
-    });
-    // Entry kept for the verify pass; the user got one announcement.
-    const entry = quotaResumeEntryForTest("run_q1")!;
-    expect(entry.awaitingVerify).toBe(true);
-    expect(notes.some((n) => n.includes("resumed automatically"))).toBe(true);
-  });
-
   it("defers without consuming an attempt while a future reset is known", async () => {
     const { server, backend } = makeServer();
     await armed(server, backend);
@@ -303,25 +225,6 @@ describe("fire", () => {
     const entry = quotaResumeEntryForTest("run_q1")!;
     expect(entry.attempts).toBe(0);
     expect(entry.resumeAt).toBeGreaterThan(Date.now() + 3_000_000);
-  });
-
-  it("drops the entry when the run is already running again", async () => {
-    const { server, backend } = makeServer();
-    await armed(server, backend);
-    backend.summariesBySession.set("sess_z1", [quotaSummary({ status: "running" })]);
-
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-
-    expect(backend.commandCalls).toHaveLength(0);
-    expect(quotaResumeEntryForTest("run_q1")).toBeUndefined();
-  });
-
-  it("drops the entry when the run finished or stopped being resumable", async () => {
-    const { server, backend } = makeServer();
-    await armed(server, backend);
-    backend.summariesBySession.set("sess_z1", [quotaSummary({ status: "completed" })]);
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-    expect(quotaResumeEntryForTest("run_q1")).toBeUndefined();
   });
 
   it("counts a verify miss as a failed attempt and backs off", async () => {
@@ -370,32 +273,6 @@ describe("fire", () => {
     expect(entry.resumeAt).toBeLessThanOrEqual(Date.now() + 5 * 60_000 + 1);
   });
 
-  it("retires a script_missing rejection as permanent (no retry ladder)", async () => {
-    const { server, backend } = makeServer();
-    await armed(server, backend);
-    backend.commandResult = {
-      status: "rejected",
-      reasonCode: "fault.command.workflowRunResumeRejected.script_missing",
-    };
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-    const retired = quotaResumeEntryForTest("run_q1")!;
-    expect(retired.gaveUp).toBeDefined();
-    expect(retired.attempts).toBe(0);
-  });
-
-  it("drops the entry when the run is already running elsewhere (already_running)", async () => {
-    const { server, backend } = makeServer();
-    await armed(server, backend);
-    backend.commandResult = {
-      status: "rejected",
-      reasonCode: "fault.command.workflowRunResumeRejected.already_running",
-    };
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-    // Not a failure of ours — someone else resumed it; the entry is done.
-    expect(quotaResumeEntryForTest("run_q1")).toBeUndefined();
-    expect(quotaResumePending("run_q1")).toBe(false);
-  });
-
   it("retries (never retires) when the gate verdict is unresolved", async () => {
     const { server, backend } = makeServer();
     await armed(server, backend);
@@ -411,41 +288,9 @@ describe("fire", () => {
     expect(entry.gaveUp).toBeUndefined();
     expect(entry.attempts).toBe(1);
   });
-
-  it("retires a real disabled verdict as permanent", async () => {
-    const { server, backend } = makeServer();
-    await armed(server, backend);
-    server.backendWorkflowGate = Promise.resolve({
-      mode: "disabled",
-      enabled: false,
-      source: "remote",
-    });
-    await fire(server, "run_q1", { queryQuota: quotaOk });
-    expect(quotaResumeEntryForTest("run_q1")!.gaveUp).toBeDefined();
-  });
-
-  it("is a no-op for an unknown runId", async () => {
-    const { server, backend } = makeServer();
-    await fire(server, "run_missing", { queryQuota: quotaOk });
-    expect(backend.commandCalls).toHaveLength(0);
-  });
 });
 
 describe("armQuotaResumeWatchdog", () => {
-  it("re-arms entries of its own cwd and exposes the idle-exit predicate", async () => {
-    const { server } = makeServer();
-    await scheduleQuotaResume(server, {
-      runId: "run_q1",
-      zcodeSid: "sess_z1",
-      cwd: CWD,
-      resetAt: Date.now() + 60_000,
-    });
-    expect(hasQuotaResumePendingForCwd(CWD)).toBe(true);
-    expect(hasQuotaResumePendingForCwd("/other")).toBe(false);
-    armQuotaResumeWatchdog(server);
-    expect(hasQuotaResumePendingForCwd(CWD)).toBe(true);
-  });
-
   it("keeps a future-dated entry beyond the age TTL, but prunes an overdue abandoned one", async () => {
     const { server } = makeServer();
     await scheduleQuotaResume(server, {

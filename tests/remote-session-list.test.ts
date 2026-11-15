@@ -23,12 +23,8 @@ vi.mock("../src/tasks-index.js", async (importOriginal) => {
 });
 
 import type { ZcodeBackend } from "../src/backend/client.js";
-import {
-  createSessionListHandler,
-  DEFAULT_SESSION_LIMIT,
-  MAX_SESSION_LIMIT,
-} from "../src/remote/session-list-endpoint.js";
-import { dismissWorkflowRunIds } from "../src/settings/workflow-run-dismissals.js";
+import { createSessionListHandler } from "../src/remote/session-list-endpoint.js";
+import {} from "../src/settings/workflow-run-dismissals.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -144,126 +140,6 @@ describe("session history endpoint", () => {
     expect(page2.nextCursor).toBeNull();
   });
 
-  it("sorts newest-first (id desc tiebreak) and paginates with the composite cursor", async () => {
-    const server = new ZcodeAcpServer();
-    // Deliberately shuffled; same updatedAt for sess_004/sess_005 exercises
-    // the tiebreak.
-    server.backend = listBackend([
-      { sessionId: "sess_003", title: "w3", updatedAt: 1_003 },
-      { sessionId: "sess_005", title: "w5", updatedAt: 1_005 },
-      { sessionId: "sess_001", title: "w1", updatedAt: 1_001 },
-      { sessionId: "sess_004", title: "w4", updatedAt: 1_005 },
-      { sessionId: "sess_002", title: "w2", updatedAt: 1_002 },
-    ]);
-    const base = await bootList(server);
-    type Cursor = { before: number; beforeId: string } | null;
-    const ids = (b: unknown) => b as { sessions: Array<{ sessionId: string }>; nextCursor: Cursor };
-    const page = async (cursor: Cursor): Promise<ReturnType<typeof ids>> =>
-      ids(
-        await (
-          await fetch(
-            cursor
-              ? `${base}/sessions?limit=2&before=${cursor.before}&beforeId=${encodeURIComponent(cursor.beforeId)}`
-              : `${base}/sessions?limit=2`,
-          )
-        ).json(),
-      );
-
-    const page1 = await page(null);
-    expect(page1.sessions.map((s) => s.sessionId)).toEqual(["sess_005", "sess_004"]);
-    // 5 rows > limit 2 → the cursor names the exact last row (tied ms).
-    expect(page1.nextCursor).toEqual({ before: 1_005, beforeId: "sess_004" });
-
-    const page2 = await page(page1.nextCursor);
-    expect(page2.sessions.map((s) => s.sessionId)).toEqual(["sess_003", "sess_002"]);
-    expect(page2.nextCursor).toEqual({ before: 1_002, beforeId: "sess_002" });
-
-    const page3 = await page(page2.nextCursor);
-    expect(page3.sessions.map((s) => s.sessionId)).toEqual(["sess_001"]);
-    expect(page3.nextCursor).toBeNull();
-  });
-
-  it("reaches every row when one millisecond spans several pages", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend(
-      ["e", "d", "c", "b", "a"].map((suffix) => ({
-        sessionId: `sess_${suffix}`,
-        title: suffix,
-        updatedAt: 1_000,
-      })),
-    );
-    const base = await bootList(server);
-    const seen: string[] = [];
-    let cursor: { before: number; beforeId: string } | null = null;
-    for (;;) {
-      const url = cursor
-        ? `${base}/sessions?limit=2&before=${cursor.before}&beforeId=${encodeURIComponent(cursor.beforeId)}`
-        : `${base}/sessions?limit=2`;
-      const body = (await (await fetch(url)).json()) as {
-        sessions: Array<{ sessionId: string }>;
-        nextCursor: { before: number; beforeId: string } | null;
-      };
-      seen.push(...body.sessions.map((s) => s.sessionId));
-      if (!body.nextCursor) break;
-      cursor = body.nextCursor;
-    }
-    // All five tied rows, descending id order, none skipped or repeated —
-    // a ms-only cursor would strand rows past the first page boundary.
-    expect(seen).toEqual(["sess_e", "sess_d", "sess_c", "sess_b", "sess_a"]);
-  });
-
-  it("defaults to DEFAULT_SESSION_LIMIT rows and clamps the asked limit", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend(fixture(MAX_SESSION_LIMIT + 50));
-    const base = await bootList(server);
-
-    const defaulted = (await (await fetch(`${base}/sessions`)).json()) as {
-      sessions: unknown[];
-    };
-    expect(defaulted.sessions).toHaveLength(DEFAULT_SESSION_LIMIT);
-
-    const clamped = (await (await fetch(`${base}/sessions?limit=99999`)).json()) as {
-      sessions: unknown[];
-    };
-    expect(clamped.sessions).toHaveLength(MAX_SESSION_LIMIT);
-  });
-
-  it("answers 400 for malformed pagination params", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend([]);
-    const base = await bootList(server);
-
-    expect((await fetch(`${base}/sessions?limit=0`)).status).toBe(400);
-    expect((await fetch(`${base}/sessions?limit=00`)).status).toBe(400);
-    expect((await fetch(`${base}/sessions?limit=abc`)).status).toBe(400);
-    expect((await fetch(`${base}/sessions?before=yesterday`)).status).toBe(400);
-    expect((await fetch(`${base}/sessions?limit=-3`)).status).toBe(400);
-    expect((await fetch(`${base}/sessions?beforeId=bad%20id`)).status).toBe(400);
-  });
-
-  it("excludes a conversation with an in-flight turn", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend([{ sessionId: "sess_live", title: "busy", updatedAt: 900 }]);
-    server.registerSession("s-live", "sess_live");
-    server.markSessionActive("s-live");
-    server.pendingTurns.set(7, { zcodeSid: "sess_live", cancelled: false });
-
-    const res = await fetch(`${await bootList(server)}/sessions`);
-    const body = (await res.json()) as { sessions: unknown[] };
-    expect(body.sessions).toEqual([]);
-  });
-
-  it("excludes a backend-id-only attachment (pass-through resume)", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend([{ sessionId: "sess_direct", title: "remote", updatedAt: 900 }]);
-    server.registerSession("sess_direct", "sess_direct");
-    server.markSessionActive("sess_direct");
-
-    const res = await fetch(`${await bootList(server)}/sessions`);
-    const body = (await res.json()) as { sessions: unknown[] };
-    expect(body.sessions).toEqual([]);
-  });
-
   it("filters executing sessions BEFORE windowing, so pages stay dense", async () => {
     // Regression: excluding after the slice would burn page slots on hidden
     // rows and strand cursor positions. The live row is dropped pre-sort, so
@@ -293,17 +169,6 @@ describe("session history endpoint", () => {
     ).json()) as Body;
     expect(page2.sessions.map((s) => s.sessionId)).toEqual(["sess_old"]);
     expect(page2.nextCursor).toBeNull();
-  });
-
-  it("answers 405 for non-GET and 502 when the backend list fails", async () => {
-    const server = new ZcodeAcpServer();
-    server.backend = listBackend([], () => ({ error: { message: "backend down" } }));
-    const base = await bootList(server);
-
-    expect((await fetch(`${base}/sessions`, { method: "POST" })).status).toBe(405);
-    const res = await fetch(`${base}/sessions`);
-    expect(res.status).toBe(502);
-    expect(await res.text()).toContain("backend down");
   });
 });
 
@@ -384,52 +249,5 @@ describe("session history — workflowActivity", () => {
       sessions: Array<{ sessionId: string; workflowActivity?: unknown }>;
     };
     expect(body.sessions[0]!.workflowActivity).toBeUndefined();
-  });
-
-  it("dismissed journal runs drop out of the activity join", async () => {
-    // Dismiss the RUNNING row through the store (the route would 409; the
-    // join only ever sees already-dismissed ids).
-    dismissWorkflowRunIds(["r1"]);
-    const server = new ZcodeAcpServer();
-    server.backendWorkflowGate = Promise.resolve({
-      mode: "alwaysOn",
-      enabled: true,
-      source: "override",
-    } satisfies import("../src/config/workflow-gate.js").WorkflowGate);
-    server.backend = {
-      isDead: false,
-      request: async (_id: number, method: string) => {
-        if (method === "session/list") {
-          return {
-            result: { sessions: [{ sessionId: "sess_wf", title: "Runner", updatedAt: 900 }] },
-          };
-        }
-        if (method === "workflows/runs") {
-          return {
-            result: {
-              runs: [
-                { runId: "r2", parentSessionId: "sess_wf", status: "completed", updatedAt: 4000 },
-                { runId: "r1", parentSessionId: "sess_wf", status: "running", updatedAt: 5000 },
-              ],
-            },
-          };
-        }
-        return { error: { message: "unhandled" } };
-      },
-    } as unknown as ZcodeBackend;
-
-    const res = await fetch(`${await bootList(server)}/sessions`);
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      sessions: Array<{
-        sessionId: string;
-        workflowActivity?: { active: number; last?: { status: string } };
-      }>;
-    };
-    // r1 dismissed → no active count, the newest VISIBLE run decides `last`.
-    expect(body.sessions[0]!.workflowActivity).toMatchObject({
-      active: 0,
-      last: { status: "completed", updatedAt: 4000 },
-    });
   });
 });

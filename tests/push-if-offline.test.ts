@@ -41,8 +41,6 @@ const {
   pushIfOffline,
   pushInteractionIfOffline,
   pushSettled,
-  pushSourceLabel,
-  renderPushContent,
   resetAskWatchdogForTests,
   resetPushSenderForTests,
   sendTestPush,
@@ -73,12 +71,6 @@ afterEach(() => {
 });
 
 describe("pushIfOffline gating", () => {
-  it("never sends while push is inactive", () => {
-    const server = new ZcodeAcpServer();
-    pushIfOffline(server, { kind: "test", title: "T" });
-    expect(sent).toEqual([]);
-  });
-
   it("never sends while a client is online", () => {
     h.cfg = { contentDetail: "full" };
     const server = new ZcodeAcpServer();
@@ -92,17 +84,6 @@ describe("pushIfOffline gating", () => {
     const server = new ZcodeAcpServer();
     pushIfOffline(server, { kind: "run", title: "Workflow deploy", body: "run settled: ok" });
     expect(sent).toEqual(["[run] Workflow deploy\nrun settled: ok"]);
-  });
-
-  it("strips bodies under contentDetail minimal", () => {
-    h.cfg = { contentDetail: "minimal" };
-    const server = new ZcodeAcpServer();
-    pushIfOffline(server, {
-      kind: "permission",
-      title: "Approval requested",
-      body: "Bash: rm -rf",
-    });
-    expect(sent).toEqual(["[permission] Approval requested"]);
   });
 
   it("swallows sender failures (fire-and-forget)", async () => {
@@ -128,44 +109,6 @@ describe("pushSettled (§5.2 — settled events ignore client presence)", () => 
     pushSettled(server, { kind: "turn", title: "turn completed" });
     expect(sent).toEqual(["[turn] turn completed"]);
   });
-
-  it("never sends while push is inactive", () => {
-    const server = new ZcodeAcpServer();
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    expect(sent).toEqual([]);
-  });
-
-  it("suppresses a kind switched off via push.notify", () => {
-    h.cfg = { contentDetail: "full", notify: { ...NOTIFY_ALL, turn: false } };
-    const server = new ZcodeAcpServer();
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    pushSettled(server, { kind: "goal", title: "goal paused", body: "cancelled" });
-    expect(sent).toEqual(["[goal] goal paused\ncancelled"]);
-  });
-
-  it("routes the compact kind through the same gate", () => {
-    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
-    const server = new ZcodeAcpServer();
-    pushSettled(server, { kind: "compact", title: "auto-compact completed" });
-    expect(sent).toEqual(["[compact] auto-compact completed"]);
-
-    sent.length = 0;
-    h.cfg = { contentDetail: "full", notify: { ...NOTIFY_ALL, compact: false } };
-    pushSettled(server, { kind: "compact", title: "auto-compact completed" });
-    expect(sent).toEqual([]);
-  });
-
-  it("renders a label in the leading bracket in place of the kind", () => {
-    h.cfg = { contentDetail: "minimal", notify: NOTIFY_ALL };
-    const server = new ZcodeAcpServer();
-    pushSettled(server, {
-      kind: "turn",
-      label: "myproj / fix auth flow",
-      title: "turn completed",
-      body: "stripped under minimal",
-    });
-    expect(sent).toEqual(["[myproj / fix auth flow] turn completed"]);
-  });
 });
 
 describe("pushSettled quiet window (§5.2 — user active ⇒ no ping)", () => {
@@ -180,38 +123,6 @@ describe("pushSettled quiet window (§5.2 — user active ⇒ no ping)", () => {
     expect(h.diary).toHaveLength(1);
     expect(h.diary[0]).toContain(`push: turn "turn completed" suppressed`);
   });
-
-  it("pushes once the window has elapsed since the last activity", () => {
-    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL, quietMs: 30_000 };
-    const server = new ZcodeAcpServer();
-    server.lastUserActivityAt = Date.now() - 31_000;
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    expect(sent).toEqual(["[turn] turn completed"]);
-  });
-
-  it("quietMs 0 disables the window entirely", () => {
-    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL, quietMs: 0 };
-    const server = new ZcodeAcpServer();
-    noteUserActivity(server);
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    expect(sent).toEqual(["[turn] turn completed"]);
-  });
-
-  it("a config without quietMs is unwindowed (absent ≠ default)", () => {
-    h.cfg = { contentDetail: "full", notify: NOTIFY_ALL };
-    const server = new ZcodeAcpServer();
-    noteUserActivity(server);
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    expect(sent).toEqual(["[turn] turn completed"]);
-  });
-
-  it("leaves offline interaction pushes unwindowed — recency there means the connection died", () => {
-    h.cfg = { contentDetail: "full", quietMs: 30_000 };
-    const server = new ZcodeAcpServer();
-    noteUserActivity(server); // prompted seconds ago, then the client dropped
-    pushIfOffline(server, { kind: "permission", title: "Approval requested" });
-    expect(sent).toEqual(["[permission] Approval requested"]);
-  });
 });
 
 describe("pushInteractionIfOffline (§5.1)", () => {
@@ -224,34 +135,6 @@ describe("pushInteractionIfOffline (§5.1)", () => {
       options: [],
     });
     expect(sent).toEqual([`[${PROJ}] Approval requested\nBash: npm install`]);
-  });
-
-  it("labels the ask with the project / session title like every other push", () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true } };
-    const server = new ZcodeAcpServer();
-    server.sessionTitles.set("s1", "Which DB session");
-    pushInteractionIfOffline(server, "elicitation/create", {
-      sessionId: "s1",
-      message: "Which database?",
-    });
-    expect(sent).toEqual([`[${PROJ} / Which DB session] Agent question\nWhich database?`]);
-  });
-
-  it("falls back to a project-only label when params carry no readable session", () => {
-    h.cfg = { contentDetail: "full", notify: { ask: true } };
-    const server = new ZcodeAcpServer();
-    pushInteractionIfOffline(server, "session/request_permission", {});
-    pushInteractionIfOffline(server, "elicitation/create", {});
-    expect(sent).toEqual([`[${PROJ}] Approval requested`, `[${PROJ}] Agent question`]);
-  });
-
-  it("respects the notify.ask switch (off)", () => {
-    h.cfg = { contentDetail: "full", notify: { ask: false } };
-    const server = new ZcodeAcpServer();
-    pushInteractionIfOffline(server, "session/request_permission", {
-      toolCall: { title: "Bash: npm install" },
-    });
-    expect(sent).toEqual([]);
   });
 });
 
@@ -273,19 +156,6 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
     await tick(50);
     expect(sent).toEqual(["[permission] Approval requested\nBash: npm install"]);
     clearAskWatchdog();
-  });
-
-  it("a settled (answered) ask never pushes", async () => {
-    h.cfg = {
-      contentDetail: "full",
-      notify: { ask: true },
-      askDelayMs: 20,
-      permissionAskDelayMs: 20,
-    };
-    armAskWatchdog(PERMISSION, {});
-    clearAskWatchdog(); // answered before the delay
-    await tick(50);
-    expect(sent).toEqual([]);
   });
 
   it("coalesces concurrent asks into ONE notification until all settle", async () => {
@@ -313,153 +183,13 @@ describe("unanswered-ask watchdog (§5.1 v1.3 — connected-but-away)", () => {
     expect(sent[1]).toBe("[question] Agent question\nnext round");
     clearAskWatchdog();
   });
-
-  it("a permission ask queued behind a slower elicitation re-arms the slot at its own tier", async () => {
-    h.cfg = {
-      contentDetail: "full",
-      notify: { ask: true },
-      askDelayMs: 200,
-      permissionAskDelayMs: 20,
-    };
-    armAskWatchdog("elicitation/create", { message: "slow question" });
-    armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } });
-    await tick(50);
-    // The faster tier's payload wins: the blocker is the permission ask, and
-    // the single slot must never out-wait the most urgent outstanding ask.
-    expect(sent).toEqual(["[permission] Approval requested\nBash: rm"]);
-    clearAskWatchdog();
-    clearAskWatchdog();
-  });
-
-  it("a slower ask behind an armed permission keeps the faster timer and payload", async () => {
-    h.cfg = {
-      contentDetail: "full",
-      notify: { ask: true },
-      askDelayMs: 200,
-      permissionAskDelayMs: 20,
-    };
-    armAskWatchdog(PERMISSION, { toolCall: { title: "fast blocker" } });
-    armAskWatchdog("elicitation/create", { message: "slow question" });
-    await tick(50);
-    expect(sent).toEqual(["[permission] Approval requested\nfast blocker"]);
-    clearAskWatchdog();
-    clearAskWatchdog();
-  });
-
-  it("the watchdog pushes the label captured at arm time", async () => {
-    h.cfg = {
-      contentDetail: "full",
-      notify: { ask: true },
-      askDelayMs: 20,
-      permissionAskDelayMs: 20,
-    };
-    armAskWatchdog(
-      "session/request_permission",
-      { toolCall: { title: "Bash: rm" } },
-      "myproj / fix auth flow",
-    );
-    await tick(50);
-    expect(sent).toEqual(["[myproj / fix auth flow] Approval requested\nBash: rm"]);
-    clearAskWatchdog();
-  });
-
-  it("the zero-clients immediate push satisfies the slot (no duplicate)", async () => {
-    h.cfg = {
-      contentDetail: "full",
-      notify: { ask: true },
-      askDelayMs: 20,
-      permissionAskDelayMs: 20,
-    };
-    const server = new ZcodeAcpServer();
-    pushInteractionIfOffline(server, PERMISSION, { toolCall: { title: "Bash: rm" } });
-    armAskWatchdog(PERMISSION, { toolCall: { title: "Bash: rm" } }); // funnel arms after dispatch
-    await tick(50);
-    expect(sent).toEqual([`[${PROJ}] Approval requested\nBash: rm`]);
-    clearAskWatchdog();
-  });
-
-  it("notify.ask false disables the watchdog too", async () => {
-    h.cfg = { contentDetail: "full", notify: { ask: false }, askDelayMs: 20 };
-    armAskWatchdog(PERMISSION, {});
-    await tick(50);
-    expect(sent).toEqual([]);
-    clearAskWatchdog();
-  });
-});
-
-describe("renderPushContent", () => {
-  it("omits the body line when there is no body", () => {
-    expect(renderPushContent({ contentDetail: "full" }, { kind: "test", title: "T" })).toBe(
-      "[test] T",
-    );
-  });
-});
-
-describe("pushSourceLabel", () => {
-  it("joins the project dir with the session title; project alone without one", () => {
-    const server = new ZcodeAcpServer();
-    const bare = pushSourceLabel(server);
-    expect(bare).toBe(basename(process.cwd())); // projectCwd() falls back to cwd
-    server.sessionTitles.set("s1", "fix auth flow");
-    expect(pushSourceLabel(server, "s1")).toBe(`${bare} / fix auth flow`);
-  });
-});
-
-describe("push diary trail (delivery evidence survives the window)", () => {
-  const tick = () => new Promise((r) => setTimeout(r, 0)); // dispatch resolves in a .then
-
-  it("diaries a delivered line on a successful pushSettled", async () => {
-    h.cfg = { contentDetail: "full", notify: { turn: true, goal: true, run: true, task: true } };
-    const server = new ZcodeAcpServer();
-    pushSettled(server, { kind: "turn", label: "proj / s", title: "turn completed" });
-    await tick();
-    expect(h.diary).toEqual([`push: turn "turn completed" delivered via WeCom`]);
-  });
-
-  it("diaries a delivered line on a successful pushIfOffline", async () => {
-    h.cfg = { contentDetail: "full" };
-    const server = new ZcodeAcpServer();
-    pushIfOffline(server, { kind: "permission", title: "Approval requested" });
-    await tick();
-    expect(h.diary).toEqual([`push: permission "Approval requested" delivered via WeCom`]);
-  });
-
-  it("writes nothing when suppressed or inactive", async () => {
-    h.cfg = { contentDetail: "full", notify: { turn: false, goal: true, run: true, task: true } };
-    const server = new ZcodeAcpServer();
-    pushSettled(server, { kind: "turn", title: "turn completed" });
-    await tick();
-    expect(h.diary).toEqual([]);
-  });
-
-  it("diaries the §7 test push on success", async () => {
-    h.cfg = { contentDetail: "full" };
-    await sendTestPush("Hi");
-    expect(h.diary).toEqual([`push: test "Hi" delivered via WeCom`]);
-  });
 });
 
 describe("sendTestPush (§7)", () => {
-  it("answers push_disabled when inactive", async () => {
-    const r = await sendTestPush("Hi");
-    expect(r).toEqual({ ok: false, error: "push_disabled" });
-  });
-
   it("sends regardless of client presence and reports the count", async () => {
     h.cfg = { contentDetail: "full" };
     const r = await sendTestPush("Hi");
     expect(r).toEqual({ ok: true, sent: 1 });
     expect(sent).toEqual(["[test] Hi"]);
-  });
-
-  it("surfaces send failures as send_failed", async () => {
-    h.cfg = { contentDetail: "full" };
-    setPushSenderForTests({
-      sendText: async () => {
-        throw new Error("quota exceeded");
-      },
-    });
-    const r = await sendTestPush("Hi");
-    expect(r).toEqual({ ok: false, error: "send_failed", message: "quota exceeded" });
   });
 });

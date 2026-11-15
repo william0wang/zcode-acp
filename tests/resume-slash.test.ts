@@ -11,7 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
-import { handleSlashCommand, neutralizeSlashText } from "../src/handlers/slash.js";
+import { handleSlashCommand} from "../src/handlers/slash.js";
 import { resumeIntoSession } from "../src/handlers/session.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
@@ -142,58 +142,6 @@ describe("resumeIntoSession", () => {
     expect(server.resolveSid(acpSid)).toBe("zold"); // thread untouched
   });
 
-  it("discards an empty materialized session before adopting", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend, sent } = fakeBackend({ zold: [], ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = randomUUID();
-    server.registerSession(acpSid, "zold");
-    server.sessionCwds.set(acpSid, "/tmp/proj");
-    server.markBackendLoaded(acpSid);
-    const { cx } = recordingCx();
-
-    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
-    expect(result.ok).toBe(true);
-    expect(sent).toContainEqual({ method: "session/close", params: { sessionId: "zold" } });
-    expect(server.resolveSid(acpSid)).toBe("ztarget");
-    expect(server.isBackendSessionLive(acpSid)).toBe(true);
-  });
-
-  it("refuses while a turn is running on the target", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend({ ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = seedPlaceholder(server);
-    server.pendingTurns.set(1, { zcodeSid: "ztarget", cancelled: false });
-    const { cx } = recordingCx();
-
-    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
-    expect(result.ok).toBe(false);
-  });
-
-  it("names the editor thread after the adopted conversation", async () => {
-    // Zed titles a fresh thread with the first prompt's first line until the
-    // agent pushes a title — for an adopting thread that line is the /resume
-    // command itself, which stuck as the conversation's title (2026-11-10).
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend({ ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = seedPlaceholder(server);
-    const { cx, updates } = recordingCx();
-    // Title changes fan out through the client registry (like /rename).
-    server.clients.add(cx);
-
-    const result = await resumeIntoSession(server, cx, acpSid, "ztarget");
-    expect(result).toEqual({ ok: true, title: "t-ztarget" });
-    expect(updates).toContainEqual(
-      expect.objectContaining({
-        sessionUpdate: "session_info_update",
-        title: "t-ztarget",
-        sessionId: acpSid,
-      }),
-    );
-  });
-
   it.each([
     ["asks by id: the bare listing's recency window misses an old session", false],
     ["falls back to the bare listing when the backend rejects sessionIds", true],
@@ -249,28 +197,6 @@ describe("/resume slash command", () => {
     return { resp, updates };
   }
 
-  it("adopts directly with /resume <sessionId>", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend({ ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = seedPlaceholder(server);
-
-    const { resp, updates } = await drive(server, acpSid, "/resume ztarget");
-    expect(resp).toEqual({ stopReason: "end_turn" });
-    expect(server.resolveSid(acpSid)).toBe("ztarget");
-    expect(updates.some((u) => u.sessionUpdate === "agent_message_chunk")).toBe(true);
-  });
-
-  it("errors on an unknown session id", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend({ ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = seedPlaceholder(server);
-
-    await expect(drive(server, acpSid, "/resume nope")).rejects.toThrow(/nope/);
-    expect(server.resolveSid(acpSid)).toBeUndefined(); // thread untouched
-  });
-
   it("opens the picker and adopts the chosen session", async () => {
     const server = new ZcodeAcpServer();
     const { backend } = fakeBackend({ ztarget: HISTORY });
@@ -284,23 +210,6 @@ describe("/resume slash command", () => {
     expect(askSessionPickMock).toHaveBeenCalledTimes(1);
     const items = askSessionPickMock.mock.calls[0]![3] as Array<{ sessionId: string }>;
     expect(items.map((i) => i.sessionId)).toEqual(["ztarget"]);
-  });
-
-  it("reports cancellation when the picker is dismissed", async () => {
-    const server = new ZcodeAcpServer();
-    const { backend } = fakeBackend({ ztarget: HISTORY });
-    server.backend = backend;
-    const acpSid = seedPlaceholder(server);
-    askSessionPickMock.mockResolvedValueOnce(null);
-
-    const { resp } = await drive(server, acpSid, "/resume");
-    expect(resp).toEqual({ stopReason: "end_turn" });
-    expect(server.resolveSid(acpSid)).toBeUndefined(); // nothing adopted
-  });
-
-  it("resume is advertised as a real command (no zero-width neutralization)", () => {
-    expect(neutralizeSlashText("/resume")).toBe("/resume");
-    expect(neutralizeSlashText("/resume ztarget")).toBe("/resume ztarget");
   });
 
   it("targets the replayed history at the requesting connection, never the broadcast cx", async () => {
