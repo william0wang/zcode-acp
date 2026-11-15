@@ -1,7 +1,7 @@
 /**
  * Dynamic-workflow Settings API tests (plan §7) — the management plane.
  *
- * Two layers, mirroring settings-api.test.ts:
+ * Two layers:
  * - a REAL hub (machine-level mount, no server) for the 409 per-instance
  *   pointer and the `/settings/all` degrade block, plus the per-instance
  *   proxy proving a workflow route reaches the bridge's loopback mount;
