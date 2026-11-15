@@ -291,7 +291,12 @@ export function createTerminalRelay(opts: TerminalRelayOptions): TerminalRelay {
 
     close(): void {
       clearInterval(ping);
-      dropClients("no_carrier", "hub shutting down");
+      // NOT no_carrier: that code means "the desktop control link is verifi
+      // ably gone" and the phone treats it as fatal (terminal → closed). A
+      // hub shutdown is transient (self-upgrade) — clients must read this as
+      // retry-later and let their reconnect ladder reattach once the hub is
+      // back, per spec §Reconnect.
+      dropClients("hub_going_away", "hub restarting");
       control?.close(1001, "hub shutting down");
       control = null;
       wss.close();

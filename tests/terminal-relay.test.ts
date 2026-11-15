@@ -239,6 +239,23 @@ describe("terminal relay pairing", () => {
     expect(close.code).toBe(4001);
   });
 
+  it("tells clients hub_going_away (retryable) on hub shutdown", async () => {
+    // no_carrier is FATAL on the phone (the desktop link is verifiably gone);
+    // a hub shutdown is transient (self-upgrade) and must read as retry-later
+    // so the client's reconnect ladder reattaches once the hub is back.
+    const hub = await startTestHub();
+    const control = controlWs(hub);
+    await opened(control);
+    const client = clientWs(hub);
+    await opened(client);
+
+    const frame = nextMessage(client);
+    const gone = nextClose(client);
+    await hub.close();
+    expect(await frame).toMatchObject({ type: "error", code: "hub_going_away" });
+    expect((await gone).code).toBe(4001);
+  });
+
   it("supersedes a second control connection", async () => {
     const hub = await startTestHub();
     const first = controlWs(hub);
