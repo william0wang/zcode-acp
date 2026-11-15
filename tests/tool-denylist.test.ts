@@ -43,6 +43,7 @@ vi.mock("../src/lazy-sessions.js", () => ({
       createdAt: existing?.createdAt ?? Date.now(),
     });
   },
+  recordAdvertisedModel: () => {},
   lookupLazySession: (acpSid: string) => mockStore.get(acpSid),
   lookupModelChoiceByZcodeSid: () => undefined,
 }));

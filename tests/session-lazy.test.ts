@@ -83,6 +83,7 @@ vi.mock("../src/lazy-sessions.js", () => ({
       modelChoice: { ...(existing.modelChoice ?? {}), ...patch },
     });
   },
+  recordAdvertisedModel: () => {},
   lookupLazySession: (acpSid: string) => mockStore.get(acpSid),
   lookupModelChoiceByZcodeSid: (zcodeSid: string) => {
     let best: { model?: string; thought?: string; at?: number } | undefined;

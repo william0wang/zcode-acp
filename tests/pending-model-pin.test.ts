@@ -23,7 +23,7 @@ import type { ZcodeResponse } from "../src/backend/types.js";
 import { ensureRealSession, newSession } from "../src/handlers/session.js";
 import { lookupLazySession } from "../src/lazy-sessions.js";
 import { ZcodeAcpServer } from "../src/server.js";
-import { ZCODE_CREDS_PATH } from "../src/utils.js";
+import { ZCODE_CREDS_PATH, zcodePersonalProviderPath } from "../src/utils.js";
 
 // The deferred catalog probe spawns an isolated backend; keep it inert unless a
 // test opts in (none do today — the initial projection is what this file locks).
@@ -69,12 +69,51 @@ const FAKE_CONFIG = {
   },
 };
 
+/**
+ * A personal provider_config.json fixture whose provider exists NOWHERE in
+ * config.json — the advertised leader is personal-only. Swapped in by the
+ * personal-only test; null (absent file) otherwise.
+ */
+let fakePersonal: unknown = null;
+/** Swapped by the personal-only test; the shared FAKE_CONFIG otherwise. */
+let fakeConfig: unknown = FAKE_CONFIG;
+const PERSONAL_ONLY = {
+  schemaVersion: 1,
+  config: {
+    providerConfigRules: {
+      providerRules: [
+        {
+          providerId: "uuid-personal",
+          providerName: "PersonalOnly",
+          enabled: true,
+          config: {
+            access: { type: "api-key", apiKey: "personal-key" },
+            api: { type: "openai-chat-completions", baseUrl: "http://127.0.0.1:8/v1" },
+          },
+        },
+      ],
+    },
+    modelConfigRules: {
+      providerModelRules: [
+        {
+          providerId: "uuid-personal",
+          modelId: "pm-1",
+          config: { enabled: true, properties: { contextWindow: 200000 } },
+        },
+      ],
+    },
+  },
+};
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
     ...actual,
     readFileSync: (p: string) => {
-      if (p === ZCODE_CREDS_PATH) return JSON.stringify(FAKE_CONFIG);
+      if (p === ZCODE_CREDS_PATH) return JSON.stringify(fakeConfig);
+      if (p === zcodePersonalProviderPath() && fakePersonal !== null) {
+        return JSON.stringify(fakePersonal);
+      }
       return actual.readFileSync(p);
     },
   };
@@ -151,6 +190,8 @@ function newSessionParams(cwd: string): acp.NewSessionRequest {
 
 beforeEach(() => {
   vi.unstubAllEnvs();
+  fakePersonal = null;
+  fakeConfig = FAKE_CONFIG;
 });
 
 afterEach(() => {
@@ -252,6 +293,56 @@ describe("pending model advertisement", () => {
     expect(setModels[0]?.params).toMatchObject({
       sessionId: sid,
       model: { modelId: "GLM-5.3" },
+    });
+  });
+
+  it("re-pins the advertised model after a bridge restart via the durable record", async () => {
+    const first = new ZcodeAcpServer();
+    const resp = await newSession(first, newSessionParams("/tmp/pin-ws"));
+    // The advertisement survives in the durable store, not just in memory.
+    expect(lookupLazySession(resp.sessionId)?.advertisedModel).toBe(ADVERTISED);
+
+    const second = new ZcodeAcpServer(); // fresh process: no in-memory pending
+    const { backend, calls } = fakeBackend();
+    second.backend = backend;
+    const sid = await ensureRealSession(second, resp.sessionId);
+
+    const setModels = calls.filter((c) => c.method === "session/setModel");
+    expect(setModels).toHaveLength(1);
+    expect(setModels[0]?.params).toMatchObject({
+      sessionId: sid,
+      model: { providerId: "custom-first", modelId: "first-model" },
+    });
+  });
+
+  it("pins a personal-only advertised provider (absent from config.json)", async () => {
+    // Every config.json provider disabled — the personal rule is the leader
+    // (loadAllModels leaks no default provider since #156).
+    fakeConfig = {
+      provider: {
+        "custom-first": { ...FAKE_CONFIG.provider["custom-first"]!, enabled: false },
+        "builtin:bigmodel-coding-plan": {
+          ...FAKE_CONFIG.provider["builtin:bigmodel-coding-plan"]!,
+          enabled: false,
+        },
+      },
+    };
+    fakePersonal = PERSONAL_ONLY;
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/pin-ws"));
+    const model = resp.configOptions.find((o) => o.id === "model");
+    expect(model?.type === "select" ? model.currentValue : undefined).toBe("uuid-personal\\pm-1");
+
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+    await ensureRealSession(server, resp.sessionId);
+
+    // The old findProviderConfig guard skipped exactly this case; the backend
+    // registry resolves personal providers fine, so the pin must fire.
+    const setModels = calls.filter((c) => c.method === "session/setModel");
+    expect(setModels).toHaveLength(1);
+    expect(setModels[0]?.params).toMatchObject({
+      model: { providerId: "uuid-personal", modelId: "pm-1" },
     });
   });
 });

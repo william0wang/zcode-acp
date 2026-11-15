@@ -34,6 +34,7 @@ vi.mock("../src/tasks-index.js", () => ({
 vi.mock("../src/lazy-sessions.js", () => ({
   rememberLazySession: () => {},
   recordMaterializedSession: () => {},
+  recordAdvertisedModel: () => {},
   lookupLazySession: () => undefined,
 }));
 

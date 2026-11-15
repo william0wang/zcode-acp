@@ -55,6 +55,13 @@ export interface LazySessionRecord {
    * (editor + TUI attach), so ensureRealSession re-seeds newer-wins.
    */
   modelChoice?: { model?: string; thought?: string; at?: number };
+  /**
+   * The model `currentValue` the pending menu advertised at session/new (the
+   * projection the create-path pin makes true — see ensureRealSession). A
+   * bridge restart between session/new and first use re-hydrates the pending
+   * entry from this record, and without it the pin would silently skip.
+   */
+  advertisedModel?: string;
 }
 
 /** Store file lives next to config.json / tasks-index.sqlite under ~/.zcode/v2/. */
@@ -164,6 +171,14 @@ export function rememberLazySession(acpSid: string, cwd: string): void {
   // silently drops records a concurrent bridge process just added.
   const { kept } = readTable();
   persist({ ...kept, [acpSid]: { cwd, createdAt: Date.now() } });
+}
+
+/** Persist the pending menu's advertised model so a restart's recovery can re-pin it. */
+export function recordAdvertisedModel(acpSid: string, model: string): void {
+  const { kept } = readTable();
+  const existing = kept[acpSid];
+  if (!existing || existing.advertisedModel === model) return;
+  persist({ ...kept, [acpSid]: { ...existing, advertisedModel: model } });
 }
 
 /** Attach the backend session id once the placeholder materializes. */

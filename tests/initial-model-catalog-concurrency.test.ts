@@ -6,6 +6,7 @@ vi.mock("../src/config/initial-model-catalog.js", () => ({
 }));
 vi.mock("../src/lazy-sessions.js", () => ({
   rememberLazySession: () => {},
+  recordAdvertisedModel: () => {},
   lookupLazySession: () => undefined,
 }));
 vi.mock("../src/tasks-index.js", () => ({ reviveTombstonesOnActivity: async () => 0 }));

@@ -39,7 +39,6 @@ import {
   buildInitialConfigOptions,
   DEFAULT_MODEL_ID,
   DEFAULT_PROVIDER_ID,
-  findProviderConfig,
   formatModelValue,
   loadAllModels,
   modelContextWindow,
@@ -68,6 +67,7 @@ import { messages } from "../i18n.js";
 import {
   lookupLazySession,
   lookupModelChoiceByZcodeSid,
+  recordAdvertisedModel,
   recordMaterializedSession,
   rememberLazySession,
 } from "../lazy-sessions.js";
@@ -230,7 +230,10 @@ function updateInitialCatalog(
           // only ever see this later menu before it prompts, so the pin at
           // materialization must follow the LATEST advertised value.
           const advertised = advertisedModelFrom(options);
-          if (advertised) pending.advertisedModel = advertised;
+          if (advertised) {
+            pending.advertisedModel = advertised;
+            recordAdvertisedModel(sid, advertised);
+          }
           await (client ?? server.clients.broadcast()).notify("session/update", {
             sessionId: sid,
             update: { sessionUpdate: "config_option_update", configOptions: options },
@@ -696,7 +699,10 @@ export async function newSession(
     const configOptions = await buildInitialConfigOptions(server, bindRoot, catalog.cached);
     const boundPending = server.pendingSessions.get(bindSid);
     const boundModel = advertisedModelFrom(configOptions);
-    if (boundPending && boundModel) boundPending.advertisedModel = boundModel;
+    if (boundPending && boundModel) {
+      boundPending.advertisedModel = boundModel;
+      recordAdvertisedModel(bindSid, boundModel);
+    }
     updateInitialCatalog(server, cwd, bindSid, client, catalog.flight);
     return { sessionId: bindSid, modes, configOptions };
   }
@@ -824,7 +830,10 @@ export async function newSession(
   );
   const pendingAtNew = server.pendingSessions.get(acpSid);
   const advertisedModel = advertisedModelFrom(configOptions);
-  if (pendingAtNew && advertisedModel) pendingAtNew.advertisedModel = advertisedModel;
+  if (pendingAtNew && advertisedModel) {
+    pendingAtNew.advertisedModel = advertisedModel;
+    recordAdvertisedModel(acpSid, advertisedModel);
+  }
   updateInitialCatalog(server, cwd, acpSid, client, catalog.flight);
   return { sessionId: acpSid, modes, configOptions };
 }
@@ -1100,7 +1109,7 @@ export async function ensureRealSession(
       // the guard above already proved the record's cwd matches).
       const cwd = server.serveMode ? process.cwd() : record.cwd;
       const mcpServers = server.sessionMcpServers.get(acpSid);
-      pending = { cwd, mcpServers };
+      pending = { cwd, mcpServers, advertisedModel: record.advertisedModel };
       server.pendingSessions.set(acpSid, pending);
       if (cwd !== "/") server.sessionCwds.set(acpSid, cwd);
     }
@@ -1217,12 +1226,7 @@ export async function ensureRealSession(
       !(pinnedProvider && pinnedModel) &&
       advertised &&
       pinAdvertisedModel() &&
-      !server.sessionModelChoices.get(sid) &&
-      // applyModelSwitch resolves providers from config.json; a provider that
-      // exists only in provider_config.json cannot be pinned (same limitation
-      // as any other switch) — leave the backend default instead of a failed
-      // switch on every new session.
-      findProviderConfig(parseModelValue(advertised).providerId)
+      !server.sessionModelChoices.get(sid)
     ) {
       if (await applyModelSwitch(server, sid, advertised)) {
         // Remember it: a setModel before the session's first input applies

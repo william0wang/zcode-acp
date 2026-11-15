@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeMessage } from "../src/backend/types.js";
 import { loadSession } from "../src/handlers/session.js";
-import { fetchMessages, loadEarlier} from "../src/handlers/replay.js";
+import { fetchMessages, loadEarlier } from "../src/handlers/replay.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
 vi.mock("../src/tasks-index.js", () => ({
@@ -26,6 +26,7 @@ vi.mock("../src/tasks-index.js", () => ({
 vi.mock("../src/lazy-sessions.js", () => ({
   rememberLazySession: () => {},
   recordMaterializedSession: () => {},
+  recordAdvertisedModel: () => {},
   lookupLazySession: () => undefined,
 }));
 

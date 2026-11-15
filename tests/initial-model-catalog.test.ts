@@ -23,6 +23,7 @@ vi.mock("../src/config/provider-registry.js", () => ({
 }));
 vi.mock("../src/lazy-sessions.js", () => ({
   rememberLazySession: () => {},
+  recordAdvertisedModel: () => {},
   lookupLazySession: () => undefined,
 }));
 vi.mock("../src/tasks-index.js", () => ({ reviveTombstonesOnActivity: async () => 0 }));
