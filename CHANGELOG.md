@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.85.3](https://github.com/william0wang/zcode-acp/compare/v0.85.2...v0.85.3) (2026-11-15)
+
+
+### Bug Fixes
+
+* **config:** resolve registry-dialect model refs to display names ([c257591](https://github.com/william0wang/zcode-acp/commit/c25759157cd9fc7992775c17183dd3d21127b891))
+* persist advertised model across restarts and pin personal-only providers ([dc9372b](https://github.com/william0wang/zcode-acp/commit/dc9372b7a49dedc63f1d08466073f8abba9bed22))
+* pin the advertised model when a lazy session materializes ([#388](https://github.com/william0wang/zcode-acp/issues/388)) ([2facf3f](https://github.com/william0wang/zcode-acp/commit/2facf3ff9ce3fd1b7ed34c095bc9104d196062e2))
+
 ## [0.85.2](https://github.com/william0wang/zcode-acp/compare/v0.85.1...v0.85.2) (2026-11-15)
 
 
