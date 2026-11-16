@@ -20,8 +20,6 @@
 import type { FormatOptions } from "./format.js";
 import { renderGlmSection } from "./format.js";
 import { queryQuota } from "./index.js";
-import { formatCpSection, queryCpUsage } from "./cliproxy/index.js";
-import type { CpQueryResult } from "./cliproxy/types.js";
 import { formatOcSection, queryOcUsage } from "./ollama-cloud/index.js";
 import type { OcQueryResult } from "./ollama-cloud/types.js";
 import { formatGoSection, queryGoUsage } from "./opencode-go/index.js";
@@ -29,16 +27,13 @@ import type { GoQueryResult, GoWindowKey } from "./opencode-go/types.js";
 import type { QuotaResult } from "./types.js";
 
 /** Which provider(s) to query. */
-export type Provider = "all" | "glm" | "go" | "oc" | "cp";
+export type Provider = "all" | "glm" | "go" | "oc";
 
 /** The combined result of all providers. */
 export interface CombinedResult {
   glm: QuotaResult;
   go: GoQueryResult;
   oc: OcQueryResult;
-  cp: CpQueryResult;
-  /** Non-Gemini CLIProxyAPI account count (renderer tail line). */
-  cpOtherCount: number;
 }
 
 /**
@@ -67,28 +62,21 @@ export async function queryCombined(provider: Provider): Promise<CombinedResult>
   // cheaper and avoids touching credentials the user may not have set. We
   // still return all fields so the formatter's shape is uniform.
   const NONE_GLM: QuotaResult = { kind: "unavailable" };
-  const NONE: GoQueryResult | OcQueryResult | CpQueryResult = { kind: "not_configured" };
+  const NONE: GoQueryResult | OcQueryResult = { kind: "not_configured" };
   const tasks = {
-    glm:
-      provider === "go" || provider === "oc" || provider === "cp"
-        ? Promise.resolve(NONE_GLM)
-        : queryQuota(),
+    glm: provider === "go" || provider === "oc" ? Promise.resolve(NONE_GLM) : queryQuota(),
     go:
-      provider === "glm" || provider === "oc" || provider === "cp"
+      provider === "glm" || provider === "oc"
         ? Promise.resolve(NONE as GoQueryResult)
         : queryGoUsage(),
     oc:
-      provider === "glm" || provider === "go" || provider === "cp"
+      provider === "glm" || provider === "go"
         ? Promise.resolve(NONE as OcQueryResult)
         : queryOcUsage(),
-    cp:
-      provider === "glm" || provider === "go" || provider === "oc"
-        ? Promise.resolve({ result: NONE as CpQueryResult, otherCount: 0 })
-        : queryCpUsage(),
   };
 
-  const [glm, go, oc, cp] = await Promise.all([tasks.glm, tasks.go, tasks.oc, tasks.cp]);
-  return { glm, go, oc, cp: cp.result, cpOtherCount: cp.otherCount };
+  const [glm, go, oc] = await Promise.all([tasks.glm, tasks.go, tasks.oc]);
+  return { glm, go, oc };
 }
 
 /**
@@ -200,7 +188,7 @@ function renderCombinedLines(
    *  first section (e.g. `refresh in 29s`). */
   refreshSuffix?: string,
 ): string[] {
-  const { glm, go, oc, cp } = combined;
+  const { glm, go, oc } = combined;
   const sep = separatorLine(refreshSuffix);
   // Fold the color flag into the GLM FormatOptions so it reaches renderGlmSection
   // alongside detail/compact without each caller having to set it.
@@ -226,12 +214,6 @@ function renderCombinedLines(
     const lines = [section.header, ...section.body];
     return sep ? [...lines, sep] : lines;
   }
-  // Single-provider CLIProxyAPI: header + body, no banner/divider.
-  if (provider === "cp") {
-    const section = formatCpSection(cp, color, combined.cpOtherCount);
-    const lines = [section.header, ...section.body];
-    return sep ? [...lines, sep] : lines;
-  }
 
   // Combined `all` mode. GLM renders full (MCP on its own line) — the layout
   // is short enough now that compact mode isn't worth the lost detail.
@@ -241,14 +223,10 @@ function renderCombinedLines(
     ? formatGoSection(go, goWindows ?? defaultGoWindows("all"), Date.now(), color)
     : null;
   const ocSection = shouldShowSection(oc, provider, "oc") ? formatOcSection(oc, color) : null;
-  const cpSection = shouldShowSection(cp, provider, "cp")
-    ? formatCpSection(cp, color, combined.cpOtherCount)
-    : null;
 
   const hasGlm = glmSection.body.length > 0;
   const hasGo = !!goSection && goSection.body.length > 0;
   const hasOc = !!ocSection && ocSection.body.length > 0;
-  const hasCp = !!cpSection && cpSection.body.length > 0;
 
   // The separator line always follows the FIRST rendered section, so its row
   // is fixed regardless of how many sections follow.
@@ -256,7 +234,6 @@ function renderCombinedLines(
   if (hasGlm) sections.push([` ${glmSection.header}`, ...glmSection.body]);
   if (hasGo) sections.push([` ${goSection!.header}`, ...goSection!.body]);
   if (hasOc) sections.push([` ${ocSection!.header}`, ...ocSection!.body]);
-  if (hasCp) sections.push([` ${cpSection!.header}`, ...cpSection!.body]);
 
   if (sections.length === 0) {
     return ["  ⚠ no usage data available"];

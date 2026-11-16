@@ -16,8 +16,6 @@
  */
 
 import { pickOverlay, renderColorBar } from "./color.js";
-import { aggregateCpFamilies, bindingCpWindow } from "./cliproxy/aggregate.js";
-import type { CpQueryResult } from "./cliproxy/types.js";
 import type { OcQueryResult } from "./ollama-cloud/types.js";
 import type { GoQueryResult } from "./opencode-go/types.js";
 import { roundTenth } from "./rounding.js";
@@ -373,23 +371,6 @@ export function formatOcDockSegment(oc: OcQueryResult): string | null {
 export function composeQuotaDock(...segments: (string | null)[]): string | null {
   const parts = segments.filter((s): s is string => s !== null);
   return parts.length > 0 ? parts.join(" · ") : null;
-}
-
-/**
- * Compact CLIProxy segment for the dock: the POOL-WIDE binding window — every
- * Gemini subscription's usage aggregated (total used over total capacity),
- * as `cp 13.2% 10-18` — percent plus the earliest reset date of that window
- * across accounts (when capacity starts coming back). `null` when the proxy
- * is not usable (not configured, auth error, unavailable) or reports nothing.
- */
-export function formatCpDockSegment(cp: CpQueryResult): string | null {
-  if (cp.kind !== "success") return null;
-  const binding = bindingCpWindow(aggregateCpFamilies(cp.accounts));
-  if (!binding) return null;
-  const pct = roundTenth(Math.max(0, Math.min(100, binding.used * 100)));
-  const label = Number.isInteger(pct) ? String(pct) : pct.toFixed(1);
-  const date = formatResetDate(binding.resetAt);
-  return `cp ${label}%${date ? ` ${date}` : ""}`;
 }
 
 /**

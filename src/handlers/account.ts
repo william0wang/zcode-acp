@@ -9,20 +9,16 @@
  * The response mirrors the CLI card's data model so clients can reproduce it
  * exactly: one GLM section (plan level + per-window items with per-model
  * details), one Opencode Go section (rolling/weekly/monthly windows, the
- * relative reset countdown converted to an absolute timestamp), one Ollama
+ * relative reset countdown converted to an absolute timestamp), and one Ollama
  * Cloud section (session/weekly/monthly fractions as percents, with the
- * derived reset moments when available — the API itself returns none), and
- * one CLIProxy section (per-Gemini-account per-model usage fractions as
- * percents with reset moments). Provider failures are reported per-section as
+ * derived reset moments when available — the API itself returns none).
+ * Provider failures are reported per-section as
  * `kind` strings rather than throwing — the client renders the same status
  * line the CLI would (a `not_configured` section is simply omitted, matching
  * the CLI).
  */
 
 import { parseRemoteConfig } from "../remote/config.js";
-import { aggregateCpFamilies, combinedCpWindows } from "../quota/cliproxy/aggregate.js";
-import type { CpFamilyWindow } from "../quota/cliproxy/aggregate.js";
-import type { CpQueryResult } from "../quota/cliproxy/types.js";
 import { queryCombined } from "../quota/combined.js";
 import type { OcQueryResult } from "../quota/ollama-cloud/types.js";
 import type { GoQueryResult, GoWindowKey } from "../quota/opencode-go/types.js";
@@ -88,43 +84,10 @@ export interface OcUsageStats {
   usage?: OcUsageDetail;
 }
 
-/** One window of one CLIProxy Gemini model family: usage fraction as percent. */
-export interface CpWindowEntry {
-  window: "5h" | "week";
-  usedPercent: number;
-  resetsAt?: number;
-}
-
-/** One CLIProxy Gemini model family and its per-window usage. */
-export interface CpModelEntry {
-  name: string;
-  windows: CpWindowEntry[];
-}
-
-/** One CLIProxy Gemini account and its per-family usage. */
-export interface CpAccountEntry {
-  label: string;
-  models: CpModelEntry[];
-}
-
-/**
- * CLIProxy section — `accounts` (per-subscription detail) and `combined`
- * (pool-wide per-window rows across all subscriptions, the numbers the CLI
- * card renders) present only on success, plus the count of non-Gemini
- * accounts the proxy routes (informational tail for clients).
- */
-export interface CpUsageStats {
-  kind: CpQueryResult["kind"];
-  accounts?: CpAccountEntry[];
-  combined?: CpWindowEntry[];
-  otherAccounts?: number;
-}
-
 export interface UsageStatsResult {
   glm: GlmUsageStats;
   opencode: GoUsageStats;
   ollama: OcUsageStats;
-  cliproxy: CpUsageStats;
 }
 
 /** Window labels matching the CLI's card (`5h` / `Week` / `Month`). */
@@ -208,41 +171,13 @@ function toOcStats(result: OcQueryResult): OcUsageStats {
   return { kind: "success", windows, ...(usage !== undefined && { usage }) };
 }
 
-/** CLIProxy windows pass through with the 0..1 fraction converted to percent. */
-function toCpWindowEntries(windows: CpFamilyWindow[]): CpWindowEntry[] {
-  return windows.map((w) => ({
-    window: w.window,
-    usedPercent: w.used * 100,
-    ...(w.resetAt !== undefined && { resetsAt: w.resetAt }),
-  }));
-}
-
-/** CLIProxy stats: per-account detail plus the pool-wide combined rows. */
-function toCpStats(result: CpQueryResult, otherCount: number): CpUsageStats {
-  if (result.kind !== "success") return { kind: result.kind };
-  const families = aggregateCpFamilies(result.accounts);
-  return {
-    kind: "success",
-    accounts: result.accounts.map((account) => ({
-      label: account.label,
-      models: account.models.map((model) => ({
-        name: model.name,
-        windows: toCpWindowEntries(model.windows),
-      })),
-    })),
-    combined: toCpWindowEntries(combinedCpWindows(families)),
-    ...(otherCount > 0 && { otherAccounts: otherCount }),
-  };
-}
-
 /** `account/usage_stats` handler — all providers, queried in parallel. */
 export async function accountUsageStats(): Promise<UsageStatsResult> {
-  const { glm, go, oc, cp, cpOtherCount } = await queryCombined("all");
+  const { glm, go, oc } = await queryCombined("all");
   return {
     glm: toGlmStats(glm),
     opencode: toGoStats(go),
     ollama: toOcStats(oc),
-    cliproxy: toCpStats(cp, cpOtherCount),
   };
 }
 
@@ -274,11 +209,7 @@ export async function accountUsageStatsViaHub(
       });
       if (resp.ok) {
         const body = (await resp.json()) as Partial<UsageStatsResult>;
-        // Require the `cliproxy` section too: an older hub without it would
-        // silently hide the section from clients. The hub auto-upgrades onto
-        // the current dist, so the skew window is short; meanwhile a local
-        // query keeps the answer complete.
-        if (body.glm && body.cliproxy) return body as UsageStatsResult;
+        if (body.glm) return body as UsageStatsResult;
       }
     } catch {
       // hub absent/restarting — local fallback below

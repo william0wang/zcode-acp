@@ -113,14 +113,6 @@ export interface QuotaUserConfig {
   autoResume?: boolean;
   /** Ollama Cloud API key for the `zcode-acp quota` card (cloud.ollama.ai). */
   ollamaApiKey?: string;
-  /** CLIProxyAPI management base URL (`https://host:port`) — the remote proxy
-   *  fronting Gemini/Codex/… OAuth accounts. No trailing path: the management
-   *  route prefix is appended per request. */
-  cliproxyUrl?: string;
-  /** CLIProxyAPI management key (`remote-management.secret-key` in the
-   *  server's config.yaml) — MUST go over HTTPS; the key can drive
-   *  credential-bearing upstream calls (`/api-call`). */
-  cliproxyManagementKey?: string;
   /** Opencode Go workspace id (`wrk_…`) — see the quota CLI docs. */
   opencodeGoWorkspaceId?: string;
   /** Opencode Go `auth` cookie value (`Fe26.2**…`). */
@@ -371,8 +363,6 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
       const q: QuotaUserConfig = {};
       for (const [jsonKey, prop] of [
         ["ollamaApiKey", "ollamaApiKey"],
-        ["cliproxyUrl", "cliproxyUrl"],
-        ["cliproxyManagementKey", "cliproxyManagementKey"],
         ["opencodeGoWorkspaceId", "opencodeGoWorkspaceId"],
         ["opencodeGoAuthCookie", "opencodeGoAuthCookie"],
         ["opencodeGoSessionToken", "opencodeGoSessionToken"],

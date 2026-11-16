@@ -28,11 +28,6 @@ vi.mock("../src/quota/index.js", () => ({ queryQuota: queryQuotaMock }));
 const { queryOcUsageMock } = vi.hoisted(() => ({ queryOcUsageMock: vi.fn() }));
 vi.mock("../src/quota/ollama-cloud/index.js", () => ({ queryOcUsage: queryOcUsageMock }));
 
-// CLIProxy dock segment — same isolation: an inherited config or env pair
-// must not reach the remote relay from tests.
-const { queryCpUsageMock } = vi.hoisted(() => ({ queryCpUsageMock: vi.fn() }));
-vi.mock("../src/quota/cliproxy/index.js", () => ({ queryCpUsage: queryCpUsageMock }));
-
 // tasks-index surface the delete routes consult. Defaults mirror the real
 // module under a hermetic HOME (no index): no known workspaces, nothing
 // deleted — existing tests behave exactly as before.
