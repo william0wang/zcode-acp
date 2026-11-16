@@ -47,6 +47,20 @@ export function isAskUserQuestion(method: string, params: unknown): boolean {
   return isUserInputRequest(method) && !isExitPlanMode(params);
 }
 
+/**
+ * Whether this client renders an elicitation form schema as a multi-step
+ * wizard — one step per field — instead of one single form.
+ *
+ * T3 Code does: its stepper walks the AskUserQuestion answer field and the
+ * free-text companion as if they were two consecutive questions, and the
+ * companion's answer overrides the dropdown pick by design. For such clients
+ * the `session/request_permission` fallback — one popup with the option list
+ * and a Skip — is the correct surface, so the elicitation form is gated off.
+ */
+export function clientPrefersPermissionPopups(clientName: string | null | undefined): boolean {
+  return (clientName ?? "").toLowerCase().includes("t3-code");
+}
+
 // ---------- zcode permission → ACP requestPermission ----------
 
 /**

@@ -10,6 +10,7 @@ import {
   acpPermissionResponseToExitPlanMode,
   acpPermissionResponseToZcode,
   buildAskUserElicitationForm,
+  clientPrefersPermissionPopups,
   isPermissionRequest,
   isUserInputRequest,
   parseAskUserElicitationResponse,
@@ -33,6 +34,22 @@ describe("classification", () => {
     expect(isPermissionRequest("interaction/requestUserInput")).toBe(false);
     expect(isUserInputRequest("interaction/requestUserInput")).toBe(true);
     expect(isUserInputRequest("interaction/requestPermission")).toBe(false);
+  });
+});
+
+describe("clientPrefersPermissionPopups", () => {
+  it("gates off the elicitation form for T3 Code (per-field wizard stepper)", () => {
+    expect(clientPrefersPermissionPopups("t3-code-session-manager")).toBe(true);
+    expect(clientPrefersPermissionPopups("t3-code-provider-test")).toBe(true);
+    expect(clientPrefersPermissionPopups("T3-Code")).toBe(true);
+  });
+
+  it("keeps the elicitation form for other clients", () => {
+    expect(clientPrefersPermissionPopups("Zed")).toBe(false);
+    expect(clientPrefersPermissionPopups("martty")).toBe(false);
+    expect(clientPrefersPermissionPopups(null)).toBe(false);
+    expect(clientPrefersPermissionPopups(undefined)).toBe(false);
+    expect(clientPrefersPermissionPopups("")).toBe(false);
   });
 });
 
