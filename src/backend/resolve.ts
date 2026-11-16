@@ -142,6 +142,52 @@ function nodeSupportsSqlite(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
 }
 
 /**
+ * Parse `reg query` output for ZCode uninstallation entries to find InstallLocation.
+ * Exported for testing.
+ */
+export function parseRegUninstallLocations(output: string): string[] {
+  const locations: string[] = [];
+  const sections = output.split(/\r?\n(?=HKEY_)/);
+  for (const sec of sections) {
+    if (!/DisplayName\s+REG_SZ\s+.*ZCode/i.test(sec)) continue;
+    const match = sec.match(/InstallLocation\s+REG_SZ\s+(.*)/i);
+    if (match && match[1]) {
+      const loc = match[1].trim();
+      if (loc) locations.push(loc);
+    }
+  }
+  return locations;
+}
+
+/**
+ * Query the Windows Registry for ZCode installation locations.
+ * Checks both HKCU and HKLM Uninstall keys (including 32-bit Wow6432Node).
+ */
+export function windowsRegistryZcodeLocations(): string[] {
+  if (process.platform !== "win32") return [];
+  const roots = [
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+    "HKLM\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+  ];
+  const locations: string[] = [];
+  for (const root of roots) {
+    try {
+      const out = execFileSync("reg", ["query", root, "/s", "/f", "ZCode", "/d"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 3000,
+        windowsHide: true,
+      });
+      locations.push(...parseRegUninstallLocations(out));
+    } catch {
+      // Key absent, query failed, or timed out — ignore silently.
+    }
+  }
+  return locations;
+}
+
+/**
  * Well-known desktop-app bundle locations of the shipped `zcode.cjs`
  * (mirrors the per-platform table in README). The app never adds the CLI to
  * PATH, so a bare terminal launch of the REPL/editor bridge finds it here.
@@ -151,12 +197,20 @@ export function bundledZcodeCandidates(): string[] {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
     const programFiles = process.env.ProgramFiles ?? "C:\\Program Files";
-    // Two observed install layouts: per-user (LOCALAPPDATA) and machine-wide
-    // (Program Files — the desktop installer's default when elevating).
-    return [
+    const candidates = [
       path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs"),
       path.join(programFiles, "ZCode", "resources", "glm", "zcode.cjs"),
     ];
+    for (const installLoc of windowsRegistryZcodeLocations()) {
+      candidates.push(path.join(installLoc, "resources", "glm", "zcode.cjs"));
+    }
+    const seen = new Set<string>();
+    return candidates.filter((c) => {
+      const norm = path.normalize(c).toLowerCase();
+      if (seen.has(norm)) return false;
+      seen.add(norm);
+      return true;
+    });
   }
   return [
     "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",

@@ -15,6 +15,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   bundledZcodeCandidates,
   candidateNodeBinaries,
+  parseRegUninstallLocations,
   resolveZcodeCommand,
   windowsPathWhich,
 } from "../src/backend/resolve.js";
@@ -76,6 +77,47 @@ describe("bundledZcodeCandidates", () => {
       cands.some((c) => c.toLowerCase().includes("localappdata") || /appdata[/\\]local/i.test(c)),
     ).toBe(true);
     expect(cands.some((c) => /program files[/\\]zcode/i.test(c))).toBe(true);
+  });
+
+  it.skipIf(!isWin)("deduplicates candidates", () => {
+    const cands = bundledZcodeCandidates();
+    const lower = cands.map((c) => c.toLowerCase());
+    expect(new Set(lower).size).toBe(cands.length);
+  });
+});
+
+describe("parseRegUninstallLocations", () => {
+  it("extracts InstallLocation from ZCode registry query output", () => {
+    const output = `
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\268ce9e6-a30b-5890-ad18-d4b3ebba5377
+    DisplayName    REG_SZ    ZCode 3.18.2
+    InstallLocation    REG_SZ    D:\\Develop\\Agent\\Zcode
+    UninstallString    REG_SZ    "D:\\Develop\\Agent\\Zcode\\Uninstall ZCode.exe"
+
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OtherApp
+    DisplayName    REG_SZ    Some Other App
+    InstallLocation    REG_SZ    C:\\OtherApp
+`;
+    const locations = parseRegUninstallLocations(output);
+    expect(locations).toEqual(["D:\\Develop\\Agent\\Zcode"]);
+  });
+
+  it("returns empty array for output without ZCode", () => {
+    const output = `
+HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OtherApp
+    DisplayName    REG_SZ    Some Other App
+    InstallLocation    REG_SZ    C:\\OtherApp
+`;
+    expect(parseRegUninstallLocations(output)).toEqual([]);
+  });
+
+  it("handles empty or garbage output gracefully", () => {
+    expect(parseRegUninstallLocations("")).toEqual([]);
+    expect(
+      parseRegUninstallLocations(
+        "ERROR: The system was unable to find the specified registry key or value.",
+      ),
+    ).toEqual([]);
   });
 });
 
