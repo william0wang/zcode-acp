@@ -27,7 +27,12 @@ import {
 } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "../handlers/io.js";
-import { configProviderIdFor, entitledCodingPlanModels } from "./account-provider.js";
+import {
+  accountProviderIdFor,
+  configProviderIdFor,
+  entitledCodingPlanModels,
+  readBuiltinTable,
+} from "./account-provider.js";
 import { readCredentialConfig } from "./bridge-accounts.js";
 import { initialSessionMode } from "./settings.js";
 
@@ -717,10 +722,11 @@ export async function buildConfigOptions(
   // name. Resolve the name through the config dialect (configProviderIdFor
   // folds the alias); ids the config cannot name keep the raw id as the
   // label — distinct, if ugly.
-  const providerNames = new Map(loadAllModels().map((m) => [m.providerId, m.providerName]));
+  const localModels = loadAllModels();
+  const providerNames = providerDisplayNames(localModels);
   const allModels =
     snapshot === undefined
-      ? loadAllModels()
+      ? localModels
       : snapshot
           .filter((m): m is typeof m & { providerId: string; modelId: string } =>
             Boolean(m.providerId && m.modelId),
@@ -728,7 +734,9 @@ export async function buildConfigOptions(
           .map((m) => ({
             providerId: m.providerId,
             providerName:
-              providerNames.get(configProviderIdFor(m.providerId)) ?? m.providerId,
+              providerNames.get(configProviderIdFor(m.providerId)) ??
+              providerNames.get(m.providerId) ??
+              m.providerId,
             modelId: m.modelId,
           }));
   const currentProvider = currentProviderId || allModels[0]?.providerId || DEFAULT_PROVIDER_ID;
@@ -805,6 +813,68 @@ export async function buildConfigOptions(
   return options;
 }
 
+function providerDisplayNames(localModels: ModelRef[]): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const rule of readBuiltinTable()?.table.config?.providerConfigRules?.providerRules ?? []) {
+    if (!rule.providerId || !rule.providerName) continue;
+    names.set(rule.providerId, rule.providerName);
+    names.set(configProviderIdFor(rule.providerId), rule.providerName);
+  }
+  for (const m of localModels) {
+    names.set(m.providerId, m.providerName);
+  }
+  return names;
+}
+
+/**
+ * Promote fallback `builtin:*` coding-plan models onto the backend's `account:*`
+ * registry dialect when `zcode-builtin.json` is present, merging any additional
+ * entitled models for already-enabled providers so `session/new` matches
+ * `session/set_config_option` synchronously before the cold probe finishes.
+ */
+function canonicalizeInitialModelOption(
+  options: acp.SessionConfigOption[],
+): acp.SessionConfigOption[] {
+  const localModels = loadAllModels();
+  if (localModels.length === 0) return options.filter((option) => option.id !== "model");
+  if (!readBuiltinTable()) return options;
+  const index = options.findIndex((option) => option.id === "model");
+  const existing = options[index];
+  if (index < 0 || existing?.type !== "select") return options;
+
+  const enabledConfigPids = new Set(localModels.map((m) => configProviderIdFor(m.providerId)));
+  const names = providerDisplayNames(localModels);
+  const models: ModelRef[] = [];
+  const seen = new Set<string>();
+  const push = (providerId: string, providerName: string, modelId: string): void => {
+    const key = formatModelValue(providerId, modelId);
+    if (seen.has(key)) return;
+    seen.add(key);
+    models.push({ providerId, providerName, modelId });
+  };
+  for (const m of localModels) {
+    const pid = accountProviderIdFor(m.providerId);
+    push(pid, names.get(configProviderIdFor(pid)) ?? names.get(pid) ?? m.providerName, m.modelId);
+  }
+  for (const m of entitledCodingPlanModels()) {
+    if (!enabledConfigPids.has(configProviderIdFor(m.providerId))) continue;
+    const pid = accountProviderIdFor(m.providerId);
+    push(pid, names.get(configProviderIdFor(pid)) ?? names.get(pid) ?? m.providerName, m.modelId);
+  }
+
+  const choices = buildModelSelectOptions(models);
+  const parsedCurrent = parseModelValue(String(existing.currentValue ?? ""));
+  const mappedCurrent = formatModelValue(
+    accountProviderIdFor(parsedCurrent.providerId),
+    parsedCurrent.modelId,
+  );
+  const currentValue = choices.some((choice) => choice.value === mappedCurrent)
+    ? mappedCurrent
+    : (choices[0]?.value ?? existing.currentValue);
+  options[index] = { ...existing, currentValue, options: choices };
+  return options;
+}
+
 /** Apply a validated, ephemeral create snapshot to a lazy session's initial menu. */
 export async function buildInitialConfigOptions(
   server: ZcodeAcpServer,
@@ -819,20 +889,19 @@ export async function buildInitialConfigOptions(
     !Array.isArray(available) ||
     available.some((entry) => !entry?.ref?.providerId || !entry.ref.modelId)
   )
-    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+    return canonicalizeInitialModelOption(options);
   // ACP requires a currentValue. A registry that has no current selection
   // cannot safely claim the locally configured default is active.
-  if (!current?.providerId || !current.modelId)
-    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+  if (!current?.providerId || !current.modelId) return canonicalizeInitialModelOption(options);
   // Same naming rule as buildConfigOptions' snapshot path: values stay in the
   // create result's registry dialect (identity-preserving), names resolve
   // through the config dialect so the raw provider id never reads as a label.
-  const names = new Map(loadAllModels().map((m) => [m.providerId, m.providerName]));
+  const names = providerDisplayNames(loadAllModels());
   const models = available.map((entry) => {
     const pid = entry.ref!.providerId!;
     return {
       providerId: pid,
-      providerName: names.get(configProviderIdFor(pid)) ?? pid,
+      providerName: names.get(configProviderIdFor(pid)) ?? names.get(pid) ?? pid,
       modelId: entry.ref!.modelId!,
     };
   });
@@ -841,7 +910,7 @@ export async function buildInitialConfigOptions(
   if (!choices.some((choice) => choice.value === currentValue)) {
     // A current model absent from the registry snapshot is not a verified
     // selectable option. Do not advertise it as switchable.
-    return loadAllModels().length ? options : options.filter((option) => option.id !== "model");
+    return canonicalizeInitialModelOption(options);
   }
   const index = options.findIndex((option) => option.id === "model");
   const existing = options[index];

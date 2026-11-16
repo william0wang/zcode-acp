@@ -10,8 +10,12 @@
  * modelIds are qualified with the provider name.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { BUILTIN_PROVIDER_ENV } from "../src/backend/resolve.js";
 import { ZCODE_CREDS_PATH } from "../src/utils.js";
 import { ZcodeAcpServer } from "../src/server.js";
 
@@ -42,6 +46,11 @@ function collidingPlansConfig() {
 
 let fakeConfig: unknown = collidingPlansConfig();
 
+vi.mock("../src/backend/resolve.js", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  builtinProviderEnv: () => ({}),
+}));
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
   return {
@@ -53,11 +62,23 @@ vi.mock("node:fs", async () => {
   };
 });
 
-const { buildConfigOptions, buildModes, formatModelValue, loadAllModels, parseModelValue } =
-  await import("../src/config/options.js");
+const {
+  buildConfigOptions,
+  buildInitialConfigOptions,
+  buildModes,
+  formatModelValue,
+  loadAllModels,
+  parseModelValue,
+} = await import("../src/config/options.js");
+
+const tempDirs: string[] = [];
 
 afterEach(() => {
   fakeConfig = collidingPlansConfig();
+  vi.unstubAllEnvs();
+  while (tempDirs.length > 0) {
+    rmSync(tempDirs.pop()!, { recursive: true, force: true });
+  }
 });
 
 describe("model configOptions uniqueness", () => {
@@ -166,6 +187,84 @@ describe("registry snapshot dialect (account: refs)", () => {
     expect(model?.currentValue).toBe("account:zai-individual-coding-plan\\GLM-5.3");
     expect(model?.options.map((option) => option.value)).toEqual([
       "account:zai-individual-coding-plan\\GLM-5.3",
+    ]);
+  });
+
+  it("canonicalizes pending session/new coding-plan options to account: dialect when builtin table exists", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "zcode-builtin-table-"));
+    tempDirs.push(dir);
+    const tablePath = path.join(dir, "zcode-builtin.json");
+    writeFileSync(
+      tablePath,
+      JSON.stringify({
+        revision: 1,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              {
+                providerId: "account:zai-individual-coding-plan",
+                providerName: "Z.ai - Coding Plan",
+                config: {
+                  builtinModelIds: ["GLM-5.3", "GLM-5.3-Flash"],
+                  access: {
+                    type: "zhipu-account",
+                    accountType: "zai",
+                    mode: "individual-coding-plan",
+                  },
+                },
+              },
+              {
+                providerId: "account:zai-start-plan",
+                providerName: "Z.ai - Start Plan",
+                config: {
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                  access: { type: "zhipu-account", accountType: "zai", mode: "start-plan" },
+                },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    vi.stubEnv(BUILTIN_PROVIDER_ENV, tablePath);
+    fakeConfig = {
+      provider: {
+        "builtin:zai-coding-plan": codingPlan(
+          "Z.ai - Coding Plan",
+          "https://api.z.ai/api/anthropic",
+        ),
+        "builtin:zai-start-plan": {
+          name: "Z.ai - Start Plan",
+          kind: "anthropic",
+          enabled: true,
+          options: {
+            apiKey: "plan-token",
+            apiKeyRequired: true,
+            baseURL: "https://zcode.z.ai/api/v1/zcode-plan/anthropic",
+          },
+          models: { "GLM-5.3-Flash": { limit: { context: 200000 } } },
+        },
+      },
+    };
+
+    const options = await buildInitialConfigOptions(new ZcodeAcpServer(), undefined, null);
+    const model = options.find((option) => option.id === "model");
+    expect(model?.type).toBe("select");
+    if (model?.type !== "select") throw Error("model option missing");
+
+    expect(model.currentValue).toBe("account:zai-individual-coding-plan\\GLM-5.3");
+    expect(model.options).toEqual([
+      { value: "account:zai-individual-coding-plan\\GLM-5.3", name: "GLM-5.3" },
+      {
+        value: "account:zai-individual-coding-plan\\GLM-5.3-Flash",
+        name: "Z.ai - Coding Plan › GLM-5.3-Flash",
+      },
+      {
+        value: "account:zai-start-plan\\GLM-5.3-Flash",
+        name: "Z.ai - Start Plan › GLM-5.3-Flash",
+      },
+      { value: "account:zai-start-plan\\GLM-5.2", name: "GLM-5.2" },
+      { value: "account:zai-start-plan\\GLM-5-Turbo", name: "GLM-5-Turbo" },
     ]);
   });
 });
