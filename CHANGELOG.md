@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.86.0](https://github.com/william0wang/zcode-acp/compare/v0.85.3...v0.86.0) (2026-11-16)
+
+
+### Features
+
+* remove the CLIProxyAPI Gemini quota card ([d7d17f9](https://github.com/william0wang/zcode-acp/commit/d7d17f935cfd588f7c2563405eea02f3a951aaa8))
+
 ## [0.85.3](https://github.com/william0wang/zcode-acp/compare/v0.85.2...v0.85.3) (2026-11-15)
 
 
