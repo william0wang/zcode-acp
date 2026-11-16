@@ -1626,6 +1626,11 @@ export async function resumeSession(
   // Resolving a durable alias may restore its recorded cwd; read it afterward.
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
 
+  // Same settle-before-read as loadSession (the TUI's deferred history replay
+  // fetches right after this returns; an active notification turn's final
+  // text only persists at its completion).
+  await waitForBackgroundTurnIdle(server, zcodeSid);
+
   if (!alreadyLive) {
     // No runtimeModel pinning here: the session keeps its own persisted
     // model (see resumePreservingModel — an overlay is a FALLBACK only, when
@@ -1782,6 +1787,9 @@ export async function resumeIntoSession(
   // flight's snapshot instead of re-querying mid-hydration.
   let settledHistory: ZcodeMessage[] | undefined;
   try {
+    // Same settle-before-read as loadSession: the resume flight's history
+    // snapshot must not race an active background notification turn's tail.
+    await waitForBackgroundTurnIdle(server, zcodeTarget);
     await syncProviderRegistry(server, cwd);
     const outcome = await resumePreservingModel(
       server,
@@ -1859,6 +1867,71 @@ export async function resumeIntoSession(
   return { ok: true, title: server.sessionTitles.get(acpSid) };
 }
 
+/** Poll cadence / cap for waitForBackgroundTurnIdle (see below). */
+const BG_TURN_SETTLE_POLL_MS = 250;
+const BG_TURN_SETTLE_TIMEOUT_MS = 45_000;
+/** Freshness bound for notifyTurnActiveSince, shared with the prompt path. */
+const BG_TURN_STALE_MS = 600_000;
+
+/**
+ * Wait out an ACTIVE background notification turn (the model turn the backend
+ * runs when a background task finishes) BEFORE a load/resume reads history.
+ *
+ * The turn's final reply persists only at COMPLETION — upstream writes the
+ * assistant message row at request start but its text parts at finish
+ * (turn-model-step.ts persistAssistantMessage/persistPart) — so a history
+ * fetch racing the turn's tail reads a row with no text. The attach then
+ * ships an empty-shell last reply, the client caches it as synced (same
+ * message count), and the notification's text stays invisible until the next
+ * prompt changes the count (observed 2026-11-15 on sess_70cd94db: the WeCom
+ * "task done" push fires the moment the notification turn STARTS, so the
+ * user's re-open reliably lands inside the generation window — every load in
+ * the window replayed the reply-less shell and each follow-up metadata
+ * attach saw matching counts, so it never re-fetched; the user had to ask a
+ * new question to see the result). Waiting for the turn's terminal event
+ * makes the subsequent read complete, and the wait runs BEFORE the client
+ * attach takes effect (registerSession), so no live text-delta forwarding
+ * interleaves with the replayed history either.
+ *
+ * Best-effort and bounded: on timeout the read proceeds as before
+ * (incomplete tail) instead of blocking the attach forever, and a marker
+ * older than BG_TURN_STALE_MS (the listener never saw the terminal event —
+ * dropped stream) is ignored outright, mirroring the prompt path's
+ * notify-turn busy budget in runPrompt.
+ *
+ * Exported for tests.
+ */
+export async function waitForBackgroundTurnIdle(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+): Promise<boolean> {
+  const activeAt = server.notifyTurnActiveSince.get(zcodeSid);
+  if (activeAt === undefined || Date.now() - activeAt >= BG_TURN_STALE_MS) return true;
+  const startedAt = Date.now();
+  log(
+    `  [bg-settle] background notification turn active; waiting up to ` +
+      `${Math.round(BG_TURN_SETTLE_TIMEOUT_MS / 1000)}s before reading history`,
+  );
+  while (Date.now() - startedAt < BG_TURN_SETTLE_TIMEOUT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, BG_TURN_SETTLE_POLL_MS));
+    const since = server.notifyTurnActiveSince.get(zcodeSid);
+    if (since === undefined) {
+      log(`  [bg-settle] notification turn settled after ${Date.now() - startedAt}ms`);
+      return true;
+    }
+    // A marker that went stale mid-wait (terminal lost) stops waiting; a
+    // FRESH replacement marker (a second notification turn started) keeps
+    // the wait alive under the same overall cap.
+    if (Date.now() - since >= BG_TURN_STALE_MS) break;
+  }
+  warn(
+    `  [bg-settle] notification turn still active after ` +
+      `${Math.round((Date.now() - startedAt) / 1000)}s; reading history anyway ` +
+      `(the last reply may attach incomplete)`,
+  );
+  return false;
+}
+
 /**
  * `session/load` → zcode `session/resume` + stream conversation history back as
  * `session/update` notifications (text/reasoning/简化 tool_call).
@@ -1880,6 +1953,10 @@ export async function loadSession(
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
   const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
+  // BEFORE the resume flight and the history read: an active background
+  // notification turn persists its final text only at completion, so a fetch
+  // racing its tail ships an empty-shell last reply (see waitForBackgroundTurnIdle).
+  await waitForBackgroundTurnIdle(server, zcodeSid);
   // Resolving a durable alias may restore its recorded cwd; read it afterward.
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
   // Settled history from a resume flight THIS call took part in (performer or

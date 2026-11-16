@@ -673,6 +673,38 @@ generation, revision, lastError}` with states unloaded/starting/ready/
   Residual, accepted: a read landing ABOVE the watermark while a
   false-stable hydration still grows ships a prefix — the client-side
   last-message-id reconciliation is that defense.
+- **A background NOTIFICATION turn's reply is invisible after re-attach unless
+  the load WAITS the turn out (2026-11-15, sess_70cd94db)**: upstream writes
+  the notification turn's assistant message ROW at request start but its TEXT
+  PARTS only at turn completion (`turn-model-step.ts` persistAssistantMessage /
+  persistPart) — so a history fetch racing the turn's tail reads a row with no
+  text. The attach ships an empty-shell last reply, the client caches it as
+  synced (same message COUNT — the row exists), and every follow-up metadata
+  attach sees matching counts, never re-fetching: the task result is invisible
+  until the user's next prompt changes the count ("每次都要重新问才能继续",
+  reported as desktop-only because the desktop client IS
+  `zcode-acp-remote-desktop` — bridge-attached, not the ZCode app). The race
+  is near-deterministic: the WeCom "background task done" push fires the
+  moment the notification turn STARTS (`pushTaskTerminal` on the task's
+  terminal status), so the user's re-open reliably lands inside the
+  generation window (observed: push 10:10:23.388, attach fetch 10:10:51.069,
+  turn terminal 10:10:51.208 — 140ms short). The store itself is fine (rows +
+  semantics `assistant_response`/visible persist correctly; v3 read, v4
+  hydration, and `replayMessages` all surface the full text afterwards), and
+  a completion-diff supplement is NOT the fix — `forwardText` registers
+  `noteLiveTextDelta` even when ZERO clients received the delta, so the
+  differ's content suppression would eat the supplement. `waitForBackgroundTurnIdle`
+  (session.ts) gates `loadSession` / `resumeSession` / `resumeIntoSession`
+  BEFORE their resume flight and BEFORE `registerSession` (250ms poll on
+  `notifyTurnActiveSince`, cap 45s, marker staleness 10min mirroring the
+  prompt path's busy budget; timeout degrades to the old read, never blocks
+  forever). Before-registerSession matters: waiting after the attach takes
+  effect would interleave the turn's live `forwardText` deltas with the
+  replayed full history. Residual window: a notification turn STARTING between
+  the wait check and the fetch (sub-second); a shell cached by a pre-fix
+  attach stays invisible until the next prompt (App-side reconcile should
+  eventually also verify the last assistant message's `finish`, not just the
+  count — zcode-acp-app follow-up, not owed here).
 - **Remote failures never touch stdio**: any remote-side failure (port, hub,
   token) must warn and disable remote only — the editor link stays up.
 - **A remote close's retirement must OUTLIVE the serve bridge (ADR-0006
