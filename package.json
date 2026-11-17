@@ -46,7 +46,7 @@
     "smoke": "node dist/cli.js doctor && node dist/index.js < /dev/null",
     "smoke:tui": "node dist/cli.js tui --check",
     "prepublishOnly": "pnpm run build && pnpm run test",
-    "postinstall": "node dist/remote/hub-upgrade-notify.js 2>/dev/null || true"
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",
