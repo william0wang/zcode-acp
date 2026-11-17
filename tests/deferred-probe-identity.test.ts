@@ -22,10 +22,12 @@ import {
   boundDeferredProbeCommand,
   catalogProbeDiagnostic,
   deferredProbeCapabilityVerified,
+  desktopBundleEntryPath,
+  readAsarPackageVersion,
   resetDeferredProbeMemosForTests,
 } from "../src/config/deferred-probe-capability.js";
 
-const entry = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+const entry = desktopBundleEntryPath();
 const oldDigest = "26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d";
 const newDigest = "08726b5ef69e1e9072828baa4656713cb3aac93bb096938681278c5600312b2c";
 const installedDigest = existsSync(entry)
@@ -60,12 +62,31 @@ describe("deferred capability identity", () => {
     reads.count = 0;
     const argv = [process.execPath, entry, "app-server", "--stdio"];
     expect(deferredProbeCapabilityVerified(argv)).toBe(true);
-    // Info.plist + the bundle itself — nothing more on repeat checks.
-    expect(reads.count).toBe(2);
+    const expectedReads = process.platform === "win32" ? 1 : 2;
+    expect(reads.count).toBe(expectedReads);
     expect(deferredProbeCapabilityVerified(argv)).toBe(true);
     expect(boundDeferredProbeCommand(argv)).not.toBeNull();
-    expect(reads.count).toBe(2);
+    expect(reads.count).toBe(expectedReads);
     resetDeferredProbeMemosForTests();
+  });
+  it("reads package.json version from an Electron app.asar header", () => {
+    const dir = mkdtempSync(path.join(process.env.HOME!, "asar-ver-"));
+    const asarPath = path.join(dir, "app.asar");
+    const pkgBytes = Buffer.from(JSON.stringify({ name: "zcode", version: "3.18.2" }), "utf8");
+    const headerJson = Buffer.from(
+      JSON.stringify({ files: { "package.json": { size: pkgBytes.length, offset: "0" } } }),
+      "utf8",
+    );
+    const alignedLen = (headerJson.length + 3) & ~3;
+    const sizeBuf = Buffer.alloc(16);
+    sizeBuf.writeUInt32LE(4, 0);
+    sizeBuf.writeUInt32LE(8 + alignedLen, 4);
+    sizeBuf.writeUInt32LE(4 + alignedLen, 8);
+    sizeBuf.writeUInt32LE(headerJson.length, 12);
+    const pad = Buffer.alloc(alignedLen - headerJson.length);
+    writeFileSync(asarPath, Buffer.concat([sizeBuf, headerJson, pad, pkgBytes]));
+
+    expect(readAsarPackageVersion(asarPath)).toBe("3.18.2");
   });
   it("rejects wrappers, unknown executables, and misleading command arguments", () => {
     for (const argv of [
