@@ -226,6 +226,18 @@ export class EventTranslator {
     } else if (this.skippingForeignTurn) {
       return results;
     } else if (etype === "model.streaming") {
+      // A stream whose envelope names ANOTHER turn is not this turn's output:
+      // a background notification turn (or subagent stream) that was already
+      // in flight when this translator subscribed had its turn.started BEFORE
+      // the subscription, so neither skippingBackgroundTurn nor
+      // skippingForeignTurn caught it — forwarding it here would duplicate
+      // text the session-scoped background listener already owns (#393).
+      // Events without any turnId (legacy backends) keep flowing.
+      const streamTurnId = event.turnId ?? (payload["turnId"] as string) ?? null;
+      if (streamTurnId && this.activeTurnId && streamTurnId !== this.activeTurnId) {
+        log(`  [event] model.streaming (foreign turn ${streamTurnId.slice(-8)}) → ignored`);
+        return results;
+      }
       results.push(...this.translateStreaming(payload));
     } else if (etype === "tool.updated") {
       results.push(...this.translateTool(payload));

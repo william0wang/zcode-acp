@@ -441,3 +441,37 @@ describe("preemptInFlightTurn cancels ALL matching turns", () => {
     expect(pendingTurns.get(201)?.cancelled).toBe(false);
   });
 });
+
+describe("late-subscriber foreign stream (issue #393)", () => {
+  it("drops model.streaming of a turn that predates this translator's subscription", () => {
+    const t = new EventTranslator();
+    // Our own turn starts (send accepted, turn.started observed).
+    t.translate({ type: "turn.started", turnId: "t_user", payload: {} });
+    // A background notification turn that was ALREADY in flight (its
+    // turn.started predates this subscription, so skippingBackgroundTurn
+    // never armed) keeps streaming — its text belongs to the session-scoped
+    // background listener, not this turn. Forwarding it duplicated every
+    // chunk interleaved (#393).
+    const foreign = t.translate({
+      type: "model.streaming",
+      turnId: "t_notify",
+      payload: { kind: "text_delta", delta: "duplicated text" },
+    });
+    expect(foreign.filter((e) => e.kind === "TextDelta")).toHaveLength(0);
+
+    // Our own turn's stream still flows (same envelope turnId).
+    const mine = t.translate({
+      type: "model.streaming",
+      turnId: "t_user",
+      payload: { kind: "text_delta", delta: "real reply" },
+    });
+    expect(mine.filter((e) => e.kind === "TextDelta")).toHaveLength(1);
+
+    // Legacy backends without an envelope turnId keep flowing.
+    const legacy = t.translate({
+      type: "model.streaming",
+      payload: { kind: "text_delta", delta: "legacy" },
+    });
+    expect(legacy.filter((e) => e.kind === "TextDelta")).toHaveLength(1);
+  });
+});
