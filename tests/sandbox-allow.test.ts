@@ -4,15 +4,7 @@
  * backend respawn run against a stubbed AgentContext / server.
  */
 
-import {
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -27,18 +19,24 @@ import {
   SandboxRestartBatcher,
   SANDBOX_ASK_RETRY_MS,
   SANDBOX_RESTART_BATCH_MS,
-  UNATTENDED_PIN
+  UNATTENDED_PIN,
 } from "../src/handlers/sandbox-allow.js";
 import {
-  readSandboxConfig,
+  globalSandboxConfigDir,
+  globalSandboxConfigPath,
+  readGlobalSandboxConfig,
   resetSandboxDecisionForTest,
   resolveReal,
-  sandboxConfigPath,
 } from "../src/backend/sandbox.js";
 import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
 
+let xdgRoot: string;
+
 beforeEach(() => {
   process.env.ZCODE_ACP_SANDBOX = "1";
+  // Scratch XDG root so popup persistence lands in the test's own tree.
+  xdgRoot = mkdtempSync(path.join(os.tmpdir(), "sb-allow-xdg-"));
+  process.env.XDG_CONFIG_HOME = xdgRoot;
   // These tests assert the Chinese message table.
   vi.stubEnv("ZCODE_ACP_LANG", "zh");
   resetSandboxDecisionForTest();
@@ -46,7 +44,9 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.ZCODE_ACP_SANDBOX;
+  delete process.env.XDG_CONFIG_HOME;
   vi.unstubAllEnvs();
+  rmSync(xdgRoot, { recursive: true, force: true });
   resetSandboxDecisionForTest();
 });
 
@@ -126,7 +126,7 @@ describe("handleSandboxDenial", () => {
     rmSync(wsRoot, { recursive: true, force: true });
   });
 
-  it("always-allow persists to the project config, arms the batched restart", async () => {
+  it("always-allow persists to the global config, arms the batched restart", async () => {
     const { server, cx, closed, request, batchFlush } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
     const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
@@ -148,7 +148,7 @@ describe("handleSandboxDenial", () => {
     const sentParams = request.mock.calls[0]?.[1] as { toolCall?: { toolCallId?: string } };
     expect(sentParams.toolCall?.toolCallId).toBe("tc_eperm");
     // Directory-granularity: the FILE's directory is what got allowlisted.
-    expect(readSandboxConfig(wsRoot).allow).toEqual([
+    expect(readGlobalSandboxConfig().allow).toEqual([
       path.dirname(path.join(wsRoot, "..", "outside", "decoy.txt")),
     ]);
     // The restart is BATCHED: the grant is queued, but nothing is cancelled
@@ -178,12 +178,12 @@ describe("handleSandboxDenial", () => {
     );
 
     expect(request).toHaveBeenCalledTimes(1);
-    // VISIBLE persistence: recorded in the project config, never in hidden
+    // VISIBLE persistence: recorded in the global config, never in hidden
     // bridge memory — the user can review/undo it by editing the file.
-    expect(readSandboxConfig(wsRoot).deny).toEqual([
+    expect(readGlobalSandboxConfig().deny).toEqual([
       path.dirname(path.join(wsRoot, "..", "outside", "f.txt")),
     ]);
-    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
+    expect(readGlobalSandboxConfig().allow).toEqual([]);
     expect(turn.cancelled).toBe(false);
     expect(closed).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalled(); // the confirmation hint reached the editor
@@ -201,8 +201,8 @@ describe("handleSandboxDenial", () => {
       "tc_unknown",
     );
 
-    expect(readSandboxConfig(wsRoot).deny).toEqual([]);
-    expect(readSandboxConfig(wsRoot).allow).toEqual([]);
+    expect(readGlobalSandboxConfig().deny).toEqual([]);
+    expect(readGlobalSandboxConfig().allow).toEqual([]);
   });
 
   it("phantom-guard: $HOME-wide grants never get a popup", async () => {
@@ -224,7 +224,7 @@ describe("handleSandboxDenial", () => {
     expect(notify).toHaveBeenCalled(); // the too-broad hint reached the editor
   });
 
-  it("island paths get a hint instead of a doomed popup (deny always wins)", async () => {
+  it("global-config-dir paths get a hint instead of a doomed popup (deny always wins)", async () => {
     const { server, cx, closed, request, notify } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
     const turn: PendingTurn = { zcodeSid: "sess_z", cancelled: false };
@@ -233,7 +233,7 @@ describe("handleSandboxDenial", () => {
       server,
       cx,
       "acp_a",
-      { path: path.join(wsRoot, ".zcode", "acp", "sandbox.json"), isMkdir: false },
+      { path: path.join(globalSandboxConfigDir(), "sandbox.json"), isMkdir: false },
       "tc_island",
     );
 
@@ -243,13 +243,12 @@ describe("handleSandboxDenial", () => {
     expect(notify).toHaveBeenCalled(); // the hint chunk reached the editor
   });
 
-  it("symlinked config downgrades always-allow to a bridge-lifetime once-allow", async () => {
+  it("an unparseable global config downgrades always-allow to a once-allow, bytes survive", async () => {
     const { server, cx, request } = makeStubs("sandbox_allow_always");
     server.sessionCwds.set("acp_a", wsRoot);
-    const target = path.join(wsRoot, "cfg.json");
-    writeFileSync(target, JSON.stringify({ enabled: true, allow: [] }));
-    mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
-    symlinkSync(target, sandboxConfigPath(wsRoot));
+    const file = globalSandboxConfigPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "{not json");
 
     await handleSandboxDenial(
       server,
@@ -259,13 +258,13 @@ describe("handleSandboxDenial", () => {
         path: "/opt/data/file.txt",
         isMkdir: false,
       },
-      "tc_syn",
+      "tc_corrupt",
     );
 
     expect(request).toHaveBeenCalled();
     expect(server.sandboxOnceAllows.has("/opt/data")).toBe(true);
-    // The link target was NOT mutated through the symlink.
-    expect(JSON.parse(readFileSync(target, "utf8")).allow).toEqual([]);
+    // The user's (broken) bytes were NOT clobbered by the grant.
+    expect(readFileSync(file, "utf8")).toBe("{not json");
   });
 
   it("freezes the turn before the ask; a rejection settles it into a continuation", async () => {

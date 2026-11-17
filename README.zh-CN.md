@@ -117,7 +117,7 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
     "mode": "backend", // "backend" 恢复旧的后端 /goal 路由
   },
   "interaction": { "timeoutMs": 0 }, // 权限请求等待上限,毫秒(0 = 一直等)
-  "sandbox": { "enabled": false }, // 全局 Seatbelt 开关(项目级: sandbox.json)
+   "sandbox": { "enabled": false }, // 全局 Seatbelt 开关(路径放行: sandbox.json)
   "remote": {/* 见远程访问 */},
   "quota": {/* quota 卡片凭据 */},
 }
@@ -151,14 +151,16 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 | `ZCODE_ACP_HUB_PORT`               | `8377`           | 机器级 `zcode-acp-hub` 的端口。隧道只映射这一个端口。                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`      | hub 绑定地址。`0.0.0.0` 会暴露仅 token 保护的明文面——只用于容器化隧道 agent 所在的私网接口（见[远程访问](#远程访问)）。                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`           | bridge ACP 端点的起始回环端口。每个 bridge（每个编辑器窗口）自动递增取下一个空闲端口。                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `ZCODE_ACP_SANDBOX`                | _（未设置）_     | 设为 `1` 全局启用 macOS Seatbelt 沙箱限制 Agent 的文件写入；项目级则在 `<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`（见[沙箱](#沙箱)）。                                                                                                                                                                                                                                                                                                                                                                                        |
+| `ZCODE_ACP_SANDBOX`                | _（未设置）_     | 设为 `1` 全局启用 macOS Seatbelt 沙箱限制 Agent 的文件写入（与用户配置 `sandbox.enabled` 等效）；路径放行统一配置在 `~/.config/zcode-acp/sandbox.json`（见[沙箱](#沙箱)）。                                                                                                                                                                                                                                                                                                                                                                  |
 | `ZCODE_ACP_LANG`                   | _（继承）_       | 桥的用户可见文案（弹窗、状态/提示行、命令菜单描述）语言：`zh` 或 `en`。未设置时继承 ZCode APP 的语言设置（`~/.zcode/v2/setting.json` 的 `localePreference`/`locale`），再退回 `LC_ALL`/`LC_MESSAGES`/`LANG` 区域设置，默认英文。                                                                                                                                                                                                                                                                                                             |
 
 ## 沙箱
 
-可选的 macOS Seatbelt 写入隔离：双开关（全局 `ZCODE_ACP_SANDBOX=1`，或项目
-级在自动创建的 `<工作区>/.zcode/acp/sandbox.json` 里设 `"enabled": true`），
-白名单之外的写入会弹放行/拒绝确认，"始终"决定可见地持久化在该配置里；放行
+可选的 macOS Seatbelt 写入隔离：单一全局开关（`ZCODE_ACP_SANDBOX=1`，或
+`~/.config/zcode-acp/config.json` 里 `"sandbox": {"enabled": true}`），路径
+放行统一在 `~/.config/zcode-acp/sandbox.json`（首次启动自动创建，预置
+`~/go`、`~/.gradle`、`~/.m2` 等工具链目录模板；不再向工作区写任何配置），
+白名单之外的写入会弹放行/拒绝确认，"始终"决定可见地持久化在该文件里；放行
 后后端自动以加宽的 profile 重启并续接被中断的任务。完整手册（英文）：
 [docs/SANDBOX.md](docs/SANDBOX.md)。
 

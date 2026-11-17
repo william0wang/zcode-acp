@@ -970,13 +970,32 @@ payload}` for years and the translator read `payload["turnId"]`, which on
   deny-priority** — an `allow` emitted after a `deny` re-permits the write
   (verified via scripts/verify-sandbox.sh; the deny-island test failed until
   the denies were moved to the end). `buildSandboxProfile` therefore emits
-  base deny-all → all allows → island/strictGit denies LAST. Also:
+  base deny-all → all allows → config-dir/strictGit denies LAST. Also:
   subpath filters match REAL paths — every path (roots, allows, $TMPDIR)
   must go through `resolveReal`, or a symlinked prefix (/tmp →
   /private/tmp, $TMPDIR under /var/folders) silently fails to match. The
-  sandbox design lives in ADR-0011 (`.zcode/docs/adr/`): writes-only model,
-  per-project config in `.zcode/acp/sandbox.json` (deny island — only the
-  bridge may write it), dynamic allow = ask → persist → BATCHED backend
+  sandbox design lives in ADR-0011 (`.zcode/docs/adr/`; see its 2026-11-17
+  amendment): writes-only model, ONE machine-global config at
+  `~/.config/zcode-acp/sandbox.json` (XDG aware; auto-created on first
+  backend spawn with a pre-granted toolchain template — `~/go`,
+  `~/.gradle`, `~/.m2`, `~/.cargo`, `~/.rustup`, `~/.cocoapods`,
+  `~/.pub-cache`, `~/.nuget`, `~/.pnpm-store`, `~/.bun`, `~/.android`,
+  `~/Library/Android/sdk`; deleting the file = empty grants, NOT
+  re-created), `{allow, deny, strictGit}` — the per-project
+  `.zcode/acp/sandbox.json` and its deny island were REMOVED, and its last
+  state is migrated ONCE (live roots' allow/deny/strictGit unioned into the
+  global file; a legacy `enabled:true` carries onto the GLOBAL switch —
+  config.json `sandbox.enabled` via `writeJsonAtomic`, an explicit `false`
+  wins — so an upgrade never silently disarms; migration runs even unarmed
+  from `ensureGlobalSandboxConfig` at every ensureBackend, once per
+  process, `wx`-create so a sibling bridge's file wins the race). The
+  global config DIR is denied in every profile, after every allow — the
+  agent cannot edit its own allowlist or the config.json/hub credentials
+  beside it, and the deny holds even when a workspace root covers the dir
+  (workspace rooted at $HOME). Popup persistence goes through
+  `persistGlobalSandboxConfig` (sync temp+rename merge-at-write; REFUSES to
+  overwrite unparseable bytes — the caller downgrades to a once-allow).
+  Dynamic allow = ask → persist → BATCHED backend
   restart (3s window: grants collect, then one cancel-wave + continuation
   - close — a per-approval restart killed sibling popups still pending on
     other denied paths; the flush sets a continuation ONLY for sessions with
@@ -990,7 +1009,7 @@ payload}` for years and the translator read `payload["turnId"]`, which on
     phone: popup "expired" unanswered, model free-ran on, the WeCom notice
     pointed at a dead ask). (1) FREEZE: a real ask first sends the stop pair
     — the EPERM result already reached the model and it works past the
-    denial otherwise; structural early-returns (island/over-broad/
+    denial otherwise; structural early-returns (config-dir/over-broad/
     deny-listed/generic/debounce) never freeze. Every settled outcome then
     ends the round `cancelled` + continuation: allow → the batched restart
     as before; rejection/timeout/an ask that died UNDELIVERED (all attempts
@@ -1023,10 +1042,10 @@ payload}` for years and the translator read `payload["turnId"]`, which on
     /var/tmp, /private/var/folders) are DEFAULT-ALLOWED — tools hardcode /tmp
     and $TMPDIR names only the per-user /var/folders leaf; don't "tighten"
     them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
-    the same reason). Arming is dual-switch: `ZCODE_ACP_SANDBOX=1` globally
-    or `enabled: true` in that config per project (auto-created template ships
-    `false`; a malformed or non-object config reads as enabled — fail closed,
-    never rewrite the user's bytes). `server.backendSandboxed` is the process
+    the same reason). Arming is the GLOBAL switch only
+    (`ZCODE_ACP_SANDBOX=1` or `sandbox.enabled` in the user config;
+  `sandboxActive()` takes no roots anymore — the project opt-in is gone
+    with the file). `server.backendSandboxed` is the process
     fact the EPERM flow gates on — not `sandboxActive()`, which is the config
     wish re-checked per call (a mid-run flip to `true` is applied by
     `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on
@@ -1038,11 +1057,7 @@ payload}` for years and the translator read `payload["turnId"]`, which on
     prior sandboxed generations too, so a $TMPDIR profile is raceable across
     generations; each arm sweeps dead-pid dirs and legacy `~/.zcode-acp-sbx-*`
     HOME siblings, which the per-bridge chain-cleanup used to leak one per
-    restart), and
-    the config must pass the integrity check before the bridge persists
-    through it (symlink/hardlink pierces the deny island; a config read as
-    armed then EACCES/ENOTDIR/vanished also reads as armed — falling back to
-    the template would silently disarm). `/dev/null` must stay write-allowed
+    restart). `/dev/null` must stay write-allowed
     or every `git commit` breaks. `openpty` (`/dev/ptmx` + the granted
     `/dev/ttysNNN`, both `O_RDWR`) needs its two explicit write allows or
     `script`/`expect`/TUI binaries die with a bare `openpty: Operation not

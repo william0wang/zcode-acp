@@ -18,10 +18,10 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { randomUUID } from "node:crypto";
 
 import {
-  appendSandboxAllow,
-  appendSandboxDeny,
-  collectSandboxWorkspaces,
-  readSandboxConfig,
+  appendGlobalSandboxAllow,
+  appendGlobalSandboxDeny,
+  globalSandboxConfigDir,
+  readGlobalSandboxConfig,
   resolveReal,
 } from "../backend/sandbox.js";
 import { sandboxUnattendedAskTimeoutMs } from "../config/settings.js";
@@ -326,17 +326,16 @@ export function extractPermDeniedPath(text: string): string | null {
 }
 
 /**
- * Paths that no popup can ever allow: the deny island (config self-edit =
- * self-escalation) and strictGit's .git — their denies are emitted LAST in
- * the profile (SBPL last-match), so an allow line can never override them.
- * Offering the popup there would just white-flash and dead-end.
+ * Paths that no popup can ever allow: the global config dir (config
+ * self-edit = self-escalation) and strictGit's .git — their denies are
+ * emitted LAST in the profile (SBPL last-match), so an allow line can never
+ * override them. Offering the popup there would just white-flash and
+ * dead-end.
  */
 export function protectedSandboxPaths(cwdRoots: Iterable<string>): string[] {
-  const { workspaces } = collectSandboxWorkspaces(cwdRoots);
-  const out: string[] = [];
-  for (const ws of workspaces) {
-    out.push(path.join(ws.root, ".zcode", "acp"));
-    if (ws.config.strictGit) out.push(path.join(ws.root, ".git"));
+  const out = [globalSandboxConfigDir()];
+  if (readGlobalSandboxConfig().strictGit) {
+    for (const root of cwdRoots) out.push(path.join(resolveReal(root), ".git"));
   }
   return out;
 }
@@ -383,7 +382,6 @@ export async function handleSandboxDenial(
   // that, not the bridge's own cwd (they differ for remote/hub clients).
   const raw = denial.isMkdir ? denial.path : path.dirname(denial.path);
   const cwd = server.sessionCwds.get(acpSid);
-  const wsRoot = cwd;
   const targetReal = resolveReal(
     path.isAbsolute(raw) ? raw : path.resolve(cwd ?? process.cwd(), raw),
   );
@@ -410,10 +408,10 @@ export async function handleSandboxDenial(
   }
   asked.set(targetReal, Date.now());
 
-  // Island / strictGit denials are unallowable by construction (their denies
-  // win the last-match). Tell the USER why instead of a doomed popup — the
-  // model only ever sees the bare EPERM in its tool output. Structural:
-  // hinted once, pinned forever.
+  // Global-config-dir / strictGit denials are unallowable by construction
+  // (their denies win the last-match). Tell the USER why instead of a doomed
+  // popup — the model only ever sees the bare EPERM in its tool output.
+  // Structural: hinted once, pinned forever.
   if (underAny(targetReal, protectedSandboxPaths(server.sandboxRoots()))) {
     asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxProtectedHint, randomUUID());
@@ -433,7 +431,7 @@ export async function handleSandboxDenial(
 
   // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
   // memory: no popup, and the asked-mark above keeps later repeats silent.
-  if (wsRoot && underAny(targetReal, readSandboxConfig(wsRoot).deny.map(resolveReal))) {
+  if (underAny(targetReal, readGlobalSandboxConfig().deny.map(resolveReal))) {
     asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxDenyListedHint(targetReal), randomUUID());
     return;
@@ -565,10 +563,10 @@ export async function handleSandboxDenial(
   asked.set(targetReal, Number.POSITIVE_INFINITY);
 
   if (decision === "reject_always") {
-    // The user's denial is persisted VISIBLY into the project config — never
+    // The user's denial is persisted VISIBLY into the global config — never
     // silently remembered in bridge memory. If the config can't be written,
     // nothing is stored: the ask simply resurfaces next time.
-    const persisted = wsRoot ? appendSandboxDeny(wsRoot, targetReal) : false;
+    const persisted = appendGlobalSandboxDeny(targetReal);
     // The turn was frozen for this ask — resume it with the denial context
     // (the model only saw a bare EPERM; without this it free-runs into
     // retrying the same path).
@@ -591,16 +589,11 @@ export async function handleSandboxDenial(
   }
 
   if (decision === "always") {
-    // Persist into the session's project config — the bridge writes this
-    // file from OUTSIDE the sandbox (the .zcode/acp deny island keeps the
-    // agent from editing its own allowlist). A symlinked/hardlinked config
-    // or an unwritable path downgrades to a bridge-lifetime once-allow.
-    if (wsRoot) {
-      if (!appendSandboxAllow(wsRoot, targetReal)) server.sandboxOnceAllows.add(targetReal);
-    } else {
-      server.sandboxOnceAllows.add(targetReal);
-      warn("sandbox: no workspace root known — allow persisted for this bridge lifetime only");
-    }
+    // Persist into the machine-global config — the bridge writes this file
+    // from OUTSIDE the sandbox (the config dir is denied in every profile, so
+    // the agent cannot edit its own allowlist). An unparseable or unwritable
+    // file downgrades to a bridge-lifetime once-allow.
+    if (!appendGlobalSandboxAllow(targetReal)) server.sandboxOnceAllows.add(targetReal);
   } else {
     server.sandboxOnceAllows.add(targetReal);
   }

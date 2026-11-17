@@ -16,16 +16,19 @@ export { resolveZcodeCommand, builtinProviderEnv, zcodeDataBaseDirEnv } from "./
 export { loadZcodeCredentials, mergeEnvWithCreds, type ZcodeCredentials } from "./credentials.js";
 export {
   SANDBOX_ENV,
-  appendSandboxAllow,
+  appendGlobalSandboxAllow,
+  appendGlobalSandboxDeny,
   armSandboxArgv,
   buildSandboxProfile,
-  collectSandboxWorkspaces,
-  projectSandboxEnabled,
-  readSandboxConfig,
+  ensureGlobalSandboxConfig,
+  globalSandboxConfigDir,
+  globalSandboxConfigPath,
+  type GlobalSandboxConfig,
+  readGlobalSandboxConfig,
   resetSandboxDecisionForTest,
   sandboxActive,
   sandboxConfigPath,
-  type SandboxConfig,
+  type SandboxArmInput,
 } from "./sandbox.js";
 export type {
   ZcodeRequest,

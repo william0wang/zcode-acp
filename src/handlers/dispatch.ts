@@ -50,7 +50,7 @@ function hintSandboxEperm(server: ZcodeAcpServer, ev: InternalEvent): void {
   warn(
     "  ⚠ tool output contained 'Operation not permitted' with the Seatbelt sandbox armed — " +
       "likely a sandbox denial, not a tool bug (docs/TROUBLESHOOTING.md; path grants go in " +
-      ".zcode/acp/sandbox.json)",
+      "~/.config/zcode-acp/sandbox.json)",
   );
 }
 

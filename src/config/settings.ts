@@ -96,7 +96,7 @@ export function interactionTimeoutMs(env: NodeJS.ProcessEnv = process.env): numb
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
-/** Global Seatbelt arming switch (per-project opt-in stays in sandbox.json). */
+/** Global Seatbelt arming switch (path grants live in the global sandbox.json). */
 export function globalSandboxEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const file = loadUserConfig(env).sandbox?.enabled;
   if (file !== undefined) return file;

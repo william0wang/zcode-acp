@@ -19,7 +19,12 @@ import {
   zcodeDataBaseDirEnv,
   ZcodeBackend,
 } from "./backend/index.js";
-import { armSandboxArgv, collectSandboxWorkspaces, sandboxActive } from "./backend/sandbox.js";
+import {
+  armSandboxArgv,
+  ensureGlobalSandboxConfig,
+  readGlobalSandboxConfig,
+  sandboxActive,
+} from "./backend/sandbox.js";
 import { clearClosedSessionIds } from "./closed-sessions.js";
 import {
   captureGate,
@@ -733,8 +738,8 @@ export class ZcodeAcpServer {
 
   /**
    * Lazily spawn the zcode backend on first use (initialize doesn't need it).
-   * With the sandbox armed (ZCODE_ACP_SANDBOX=1 globally, or any live
-   * workspace's .zcode/acp/sandbox.json — ADR-0011), the spawn is wrapped in
+   * With the sandbox armed (the global switch: ZCODE_ACP_SANDBOX=1 or
+   * sandbox.enabled in the user config — ADR-0011), the spawn is wrapped in
    * a Seatbelt profile built from the live workspace roots — session/new
    * records cwds before any backend RPC (lazy placeholders), so the whitelist
    * is complete by the time the backend materializes here.
@@ -800,12 +805,17 @@ export class ZcodeAcpServer {
       delete env.NODE_OPTIONS;
       delete env.NODE_PATH;
     }
-    this.backendSandboxed = sandboxActive(this.sandboxRoots());
+    // One-shot global-config settle BEFORE the arm decision: the machine-wide
+    // sandbox.json is created (toolchain template + legacy per-project
+    // migration) here, and a legacy `enabled: true` arms the global switch —
+    // which sandboxActive() reads live right after.
+    await ensureGlobalSandboxConfig(this.sandboxRoots());
+    this.backendSandboxed = sandboxActive();
     if (this.backendSandboxed) {
-      const { workspaces, extraAllow } = collectSandboxWorkspaces(this.sandboxRoots());
       argv = armSandboxArgv(argv, {
-        workspaces,
-        extraAllow: [...extraAllow, ...this.sandboxOnceAllows],
+        workspaceRoots: this.sandboxRoots(),
+        config: readGlobalSandboxConfig(),
+        onceAllows: this.sandboxOnceAllows,
       });
       // Birth-mark the wrapped process: the marker is inherited down any
       // spawn chain (a hub (re)spawned below a sandboxed backend carries
@@ -916,20 +926,20 @@ export class ZcodeAcpServer {
   }
 
   /**
-   * Project-level sandbox flip (ADR-0011): flipping `enabled: true` in a live
-   * workspace's .zcode/acp/sandbox.json arms the sandbox mid-run, without a
-   * global env. If the flip happened after the current backend spawned
-   * unsandboxed, kill it — the caller's next ensureBackend() respawns under
-   * the profile, and prompt()'s subscribe recovery reloads the session. The
-   * reverse (flipping back to false) never restarts a live sandboxed backend;
-   * the next natural respawn drops the wrap. Best-effort: a failed kill
-   * leaves things as they were (the sandbox arms on a later respawn).
+   * Global sandbox flip: turning `sandbox.enabled` on in the user config (or
+   * setting ZCODE_ACP_SANDBOX=1) after the current backend spawned unsandboxed
+   * must arm on THIS prompt, not on the next bridge restart — kill the old
+   * process; the caller's next ensureBackend() respawns under the profile,
+   * and prompt()'s subscribe recovery reloads the session. The reverse (the
+   * switch going back off) never restarts a live sandboxed backend; the next
+   * natural respawn drops the wrap. Best-effort: a failed kill leaves things
+   * as they were (the sandbox arms on a later respawn).
    */
   async applySandboxFlip(): Promise<void> {
     if (this.backendSandboxed) return;
     if (!this.backend || this.backend.isDead) return;
-    if (!sandboxActive(this.sandboxRoots())) return;
-    warn("sandbox: project config armed mid-run — restarting backend under sandbox-exec");
+    if (!sandboxActive()) return;
+    warn("sandbox: global switch armed mid-run — restarting backend under sandbox-exec");
     this.cancelAllPendingTurns();
     try {
       await this.backend.close();

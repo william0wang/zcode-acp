@@ -2843,11 +2843,12 @@ async function runPrompt(
   continuationRound = false,
   client?: acp.AgentContext,
 ): Promise<acp.PromptResponse> {
-  // Project-level sandbox flip (ADR-0011): a .zcode/acp/sandbox.json created
-  // after the backend spawned unsandboxed must arm on THIS prompt, not on the
-  // next bridge restart — kill the old process; the ensureBackend() below
-  // respawns under the profile and the subscribe-recovery path reloads the
-  // session. No-op unless the config appeared mid-run.
+  // Global sandbox flip: `sandbox.enabled` turned on in the user config (or
+  // ZCODE_ACP_SANDBOX=1 exported) after the backend spawned unsandboxed must
+  // arm on THIS prompt, not on the next bridge restart — kill the old
+  // process; the ensureBackend() below respawns under the profile and the
+  // subscribe-recovery path reloads the session. No-op unless the switch
+  // flipped mid-run.
   await server.applySandboxFlip();
   const backend = await server.ensureBackend();
 

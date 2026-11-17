@@ -12,11 +12,17 @@
  * (name-banning executables would be trivially bypassed and is deliberately
  * not done).
  *
- * Arming is dual-switch (see sandboxActive): ZCODE_ACP_SANDBOX=1 forces it
- * globally, or a workspace opts in via `enabled: true` in its own
- * .zcode/acp/sandbox.json — the template is auto-created with enabled:false
- * only while the sandbox is globally armed (an unarmed bridge leaves the
- * workspace untouched), so opting in is always an explicit user edit.
+ * Arming is the GLOBAL switch only (`sandbox.enabled` in the user config
+ * file, or ZCODE_ACP_SANDBOX=1). The per-project switch
+ * (`<workspace>/.zcode/acp/sandbox.json`) was REMOVED (2026-11-17): all
+ * path grants now live in one machine-global file next to the user config
+ * (`~/.config/zcode-acp/sandbox.json`, XDG aware), auto-created on first
+ * backend spawn with a pre-granted toolchain template (~/go, ~/.gradle,
+ * ~/.m2, ...). A legacy per-project file still lying around is migrated
+ * once — its allow/deny/strictGit merged into the global file, and its
+ * `enabled: true` carried onto the global switch so an upgrade never
+ * silently disarms a machine that had the sandbox on. Workspaces stay
+ * untouched (#332): nothing is ever written into the project tree.
  *
  * Whitelist (frozen at spawn, rebuilt on backend restart):
  * - workspace roots of all live sessions (union of server.sessionCwds)
@@ -24,25 +30,29 @@
  *   denying it breaks session/create itself)
  * - system temp + regenerable cache dirs (zero-value targets, constant
  *   toolchain traffic)
- * - each project's `.zcode/acp/sandbox.json` `allow` list
- * - bridge-lifetime once-allows granted via the dynamic allow flow
+ * - the global config's `allow` list + bridge-lifetime once-allows granted
+ *   via the dynamic allow flow
  *
- * `<workspace>/.zcode/acp/` is a DENY island inside every allowed workspace:
- * the sandbox forbids writes there while the bridge — outside the sandbox —
- * persists "always allow" entries on the user's behalf. The agent cannot
- * edit its own allowlist.
+ * The global config directory (`~/.config/zcode-acp/`) is DENIED in every
+ * profile: the bridge — outside the sandbox — persists popup grants there on
+ * the user's behalf, and the agent must not be able to edit its own
+ * allowlist or the hub credentials that live beside it. The base write-deny
+ * already covers it; the explicit deny also holds in the
+ * workspace-root-is-its-ancestor edge (a workspace rooted at $HOME would
+ * otherwise re-permit it).
  *
  * macOS-only: Seatbelt is a macOS facility. Setting the env elsewhere warns
  * once and runs unsandboxed (see sandboxActive()).
  */
 
 import {
-  lstatSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -53,10 +63,13 @@ import process from "node:process";
 
 import { log, warn } from "../utils.js";
 import { globalSandboxEnabled } from "../config/settings.js";
+import { userConfigPath } from "../config/user-config.js";
+import { readJsonDocument, writeJsonAtomic } from "../settings/atomic-write.js";
 
 /**
  * The global env/config switch (`ZCODE_ACP_SANDBOX`, or `sandbox.enabled` in
- * the user config file). Every other knob is project config.
+ * the user config file). Path grants live in the global sandbox.json — this
+ * switch only arms.
  */
 export const SANDBOX_ENV = "ZCODE_ACP_SANDBOX";
 
@@ -85,231 +98,344 @@ const DEFAULT_TEMP_DIRS = ["/private/tmp", "/private/var/tmp", "/private/var/fol
 /** Backend state roots that must stay writable for the bridge to function. */
 const ZCODE_STATE_DIRS = ["~/.zcode", "~/.zcode-beta", "~/.zcode-plugin"];
 
-export interface SandboxConfig {
-  /**
-   * Project-level switch: true arms the sandbox for this workspace without
-   * the global env. The auto-created template ships false — opting in is an
-   * explicit user edit.
-   */
-  enabled: boolean;
-  /** Absolute realpaths OUTSIDE the workspace granted permanent write. */
+/**
+ * Toolchain home dirs the auto-created template pre-grants. All are
+ * regenerable-or-reinstallable targets with constant build traffic; the user
+ * edits the file to trim or extend the list (~/Library/Caches-style cache
+ * trees are already covered by DEFAULT_CACHE_DIRS). Same risk class as the
+ * long-default-writable ~/.npm (which also carries .npmrc tokens).
+ */
+const TOOLCHAIN_TEMPLATE_ALLOW = [
+  "~/go", // GOPATH default: module cache (pkg/mod) + go install bin
+  "~/.gradle", // wrapper dists, dependency caches, daemon registry
+  "~/.m2", // Maven local repository
+  "~/.cargo", // Rust registry + installed cargo binaries
+  "~/.rustup", // Rust toolchains
+  "~/.cocoapods", // CocoaPods specs/repos
+  "~/.pub-cache", // Dart/Flutter packages
+  "~/.nuget", // .NET package cache
+  "~/.pnpm-store", // pnpm content-addressable store
+  "~/.bun", // Bun install cache + binaries
+  "~/.android", // Android debug keystores, AVD data
+  "~/Library/Android/sdk", // Android SDK (gradle writes build artifacts)
+];
+
+/** The machine-global sandbox config (grants; arming lives in config.json). */
+export interface GlobalSandboxConfig {
+  /** Absolute or `~/`-prefixed realpaths granted permanent write. */
   allow: string[];
-  /**
-   * Absolute realpaths the user chose NEVER to grant ("永不放行") — the
-   * popup is suppressed for these. Visible config, not hidden memory: the
-   * user can review or undo a denial by editing this file.
-   */
+  /** Realpaths the user chose NEVER to grant ("永不放行") — popup suppressed. */
   deny: string[];
   /** true = .git sits behind the allow popup instead of default-writable. */
   strictGit: boolean;
 }
 
-/** Path of the per-project sandbox config inside a workspace root. */
-export function sandboxConfigPath(workspaceRoot: string): string {
-  return path.join(workspaceRoot, ".zcode", "acp", "sandbox.json");
-}
-
-/** Roots whose template auto-creation already failed — warn once, not per call. */
-const templateFailedRoots = new Set<string>();
-/** Config issues already warned — once per root(+issue), not per read. */
-const warnedConfigIssues = new Set<string>();
-/**
- * Last enabled value successfully parsed per config file. A config that
- * becomes unreadable (EACCES/ENOTDIR) or VANISHES after parsing enabled:true
- * must fail closed: the sandboxed agent can produce all of those from inside
- * the sandbox (chmod 0000 `.zcode`, replace `.zcode` with a file, rename it
- * away) — falling back to the disabled template would silently disarm.
- */
-const lastEnabledSeen = new Map<string, boolean>();
-
-function defaultConfig(enabled: boolean): SandboxConfig {
-  return { enabled, allow: [], deny: [], strictGit: false };
+/** Path of the machine-global sandbox config, beside the user config file. */
+export function globalSandboxConfigPath(): string {
+  return path.join(path.dirname(userConfigPath()), "sandbox.json");
 }
 
 /**
- * The config file must be a REGULAR file whose real location is exactly
- * <root>/.zcode/acp/sandbox.json. A symlinked or hardlinked-away config
- * pierces the deny island: the agent writes the link target inside the
- * allowed workspace and thereby edits its own allowlist. Missing files are
- * fine — that is the auto-create path.
+ * Directory holding the global config (and config.json itself). Denied in
+ * every profile — the agent must not edit its own allowlist or the hub
+ * credentials next to it, and this deny must survive a workspace allow that
+ * covers the directory (workspace rooted at $HOME).
  */
-function configIntegrityOk(workspaceRoot: string, file: string): boolean {
-  try {
-    const st = lstatSync(file);
-    if (!st.isFile() || st.nlink > 1) return false;
-    return realpathSync(file) === sandboxConfigPath(resolveReal(workspaceRoot));
-  } catch {
-    return true; // missing (or unreadable parents) → template path
+export function globalSandboxConfigDir(): string {
+  return resolveReal(path.dirname(userConfigPath()));
+}
+
+/** Config issues already warned — once per issue, not per read. */
+const warnedGlobalIssues = new Set<string>();
+
+/**
+ * Filter to absolute/`~/` entries and warn once about the dropped rest.
+ * Relative entries would anchor to the BRIDGE's cwd — a shared file must
+ * speak in absolute paths or `~/` only.
+ */
+function sanitizePathList(raw: unknown, file: string, issueKey: string): string[] {
+  if (!Array.isArray(raw)) return [];
+  const list = raw.filter((p): p is string => typeof p === "string");
+  const absolute = list.filter((p) => p.startsWith("/") || p.startsWith("~/"));
+  if (absolute.length !== list.length && !warnedGlobalIssues.has(`${file}:${issueKey}`)) {
+    warnedGlobalIssues.add(`${file}:${issueKey}`);
+    warn(
+      `sandbox: dropped ${list.length - absolute.length} non-absolute ${issueKey} entries in ${file}`,
+    );
   }
+  return absolute;
+}
+
+/** Parse a global-config-shaped object (unknown fields ignored). */
+function sanitizeGlobalSandboxConfig(parsed: Partial<GlobalSandboxConfig>): GlobalSandboxConfig {
+  return {
+    allow: Array.isArray(parsed.allow) ? parsed.allow : [],
+    deny: Array.isArray(parsed.deny) ? parsed.deny : [],
+    strictGit: parsed.strictGit === true,
+  };
 }
 
 /**
- * Read the project sandbox config. While the sandbox is globally armed, a
- * missing config is auto-created as the discovery template (enabled: false)
- * so the user finds the file and can flip the switch — the PRESENCE of the
- * file is never the switch, only `enabled` is, so the auto-create cannot arm
- * anything by itself. An unarmed bridge writes NOTHING: headless per-task
- * runs must not leave an untracked .zcode/ in every workspace they touch
- * (#332). A malformed or non-object file
- * falls back to enabled:true WITHOUT rewriting it: corruption must fail
- * CLOSED (the user opted in; losing that to a half-saved file would silently
- * disarm), and clobbering the user's mid-edit bytes with a template would be
- * worse than the transient read. A symlinked/hardlinked config is treated
- * the same way (armed, persistence disabled) — see configIntegrityOk. So is
- * a config that was armed and then became unreadable or disappeared — only
- * the agent could do that from inside the sandbox.
+ * Live-read the machine-global sandbox config. Absent = nothing granted (the
+ * file is only auto-created once, by ensureGlobalSandboxConfig; a user
+ * DELETING it chose empty grants, and it is not resurrected). Malformed
+ * bytes read as empty + a one-time warn, and persistGlobalSandboxConfig
+ * refuses to overwrite them — the user's half-saved buffer survives.
  */
-export function readSandboxConfig(workspaceRoot: string): SandboxConfig {
-  const file = sandboxConfigPath(workspaceRoot);
-  if (!configIntegrityOk(workspaceRoot, file)) {
-    if (!warnedConfigIssues.has(file)) {
-      warnedConfigIssues.add(file);
-      warn(
-        `sandbox: ${file} is symlinked/hardlinked outside the deny island — reading as armed; fix the link (persistence stays disabled until then)`,
-      );
-    }
-    return defaultConfig(true);
-  }
+export function readGlobalSandboxConfig(): GlobalSandboxConfig {
+  const file = globalSandboxConfigPath();
   let text: string;
   try {
     text = readFileSync(file, "utf8");
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    // ENOENT on a never-armed project is the normal pre-template state.
-    // Everything else — EACCES/ENOTDIR (agent tampered with `.zcode`), or a
-    // miss on a config this bridge already read as armed — fails closed.
-    if (code === "ENOENT" && lastEnabledSeen.get(file) !== true) {
-      // The discovery template is written ONLY while the sandbox is globally
-      // armed (user config sandbox.enabled or ZCODE_ACP_SANDBOX=1): a
-      // headless client that starts a bridge per task must not litter every
-      // workspace with an untracked .zcode/ the user never opted into
-      // (#332). The project switch cannot be on while the file is missing,
-      // so the global arm is the only one that can license the write.
-      // Best-effort either way; a read-only workspace just never gets one —
-      // the sandbox can still be env-armed.
-      if (globalWanted() && !templateFailedRoots.has(workspaceRoot)) {
-        try {
-          mkdirSync(path.dirname(file), { recursive: true });
-          writeFileSync(file, JSON.stringify(defaultConfig(false), null, 2) + "\n");
-        } catch (err) {
-          templateFailedRoots.add(workspaceRoot);
-          warn(
-            `sandbox: could not create ${file}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      return defaultConfig(false);
-    }
-    const issue = code ?? "vanished";
-    if (!warnedConfigIssues.has(`${file}:${issue}`)) {
-      warnedConfigIssues.add(`${file}:${issue}`);
-      warn(`sandbox: ${file} unreadable (${issue}) — reading as armed`);
-    }
-    return defaultConfig(true);
+  } catch {
+    return { allow: [], deny: [], strictGit: false };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    lastEnabledSeen.set(file, true);
-    return defaultConfig(true);
+    if (!warnedGlobalIssues.has(`${file}:malformed`)) {
+      warnedGlobalIssues.add(`${file}:malformed`);
+      warn(`sandbox: ${file} is not valid JSON — reading as empty grants`);
+    }
+    return { allow: [], deny: [], strictGit: false };
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    lastEnabledSeen.set(file, true);
-    return defaultConfig(true);
+    if (!warnedGlobalIssues.has(`${file}:shape`)) {
+      warnedGlobalIssues.add(`${file}:shape`);
+      warn(`sandbox: ${file} is not a JSON object — reading as empty grants`);
+    }
+    return { allow: [], deny: [], strictGit: false };
   }
-  const cfg = parsed as Partial<SandboxConfig>;
-  const allow = Array.isArray(cfg.allow) ? cfg.allow.filter((p) => typeof p === "string") : [];
-  const deny = Array.isArray(cfg.deny) ? cfg.deny.filter((p) => typeof p === "string") : [];
-  // Relative (or `~user`) entries would silently anchor to the BRIDGE's cwd —
-  // a committed config must speak in absolute paths or `~/` only.
-  const absoluteAllow = allow.filter((p) => p.startsWith("/") || p.startsWith("~/"));
-  const absoluteDeny = deny.filter((p) => p.startsWith("/") || p.startsWith("~/"));
-  if (absoluteAllow.length !== allow.length && !warnedConfigIssues.has(`${file}:relative`)) {
-    warnedConfigIssues.add(`${file}:relative`);
-    warn(
-      `sandbox: dropped ${allow.length - absoluteAllow.length} non-absolute allow entries in ${file}`,
-    );
-  }
-  if (absoluteDeny.length !== deny.length && !warnedConfigIssues.has(`${file}:relative-deny`)) {
-    warnedConfigIssues.add(`${file}:relative-deny`);
-    warn(
-      `sandbox: dropped ${deny.length - absoluteDeny.length} non-absolute deny entries in ${file}`,
-    );
-  }
-  lastEnabledSeen.set(file, cfg.enabled === true);
+  const cfg = sanitizeGlobalSandboxConfig(parsed as Partial<GlobalSandboxConfig>);
   return {
-    enabled: cfg.enabled === true,
-    allow: absoluteAllow,
-    deny: absoluteDeny,
-    strictGit: cfg.strictGit === true,
+    allow: sanitizePathList(cfg.allow, file, "allow"),
+    deny: sanitizePathList(cfg.deny, file, "deny"),
+    strictGit: cfg.strictGit,
   };
 }
 
 /**
- * Bridge-side persistence for "always allow" (the deny island keeps the
- * agent from writing this file itself). Round-trips the whole config so the
- * enabled flag survives the write. Dedupes by exact string. Returns false
- * when persistence is impossible (symlinked config, unwritable path) — the
- * caller then downgrades to a bridge-lifetime once-allow.
+ * Sync read-modify-write persistence (temp file + rename, lazy-alias-store
+ * pattern). The only writers are bridge processes outside the sandbox, so a
+ * lost update between two concurrent bridges costs one re-asked popup, never
+ * a torn file. REFUSES to write over unparseable bytes.
  */
-export function appendSandboxAllow(workspaceRoot: string, allowedPath: string): boolean {
-  const file = sandboxConfigPath(workspaceRoot);
-  if (!configIntegrityOk(workspaceRoot, file)) {
-    warn(`sandbox: refusing to persist through a symlinked/hardlinked ${file}`);
-    return false;
+function persistGlobalSandboxConfig(
+  mutate: (cfg: GlobalSandboxConfig) => GlobalSandboxConfig,
+): boolean {
+  const file = globalSandboxConfigPath();
+  let cfg: GlobalSandboxConfig;
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    raw = ""; // absent — mutate starts from empty
   }
-  const cfg = readSandboxConfig(workspaceRoot);
-  if (cfg.allow.includes(allowedPath)) return true;
-  cfg.allow.push(allowedPath);
+  if (raw !== "") {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    if (
+      parsed === undefined ||
+      parsed === null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed)
+    ) {
+      if (!warnedGlobalIssues.has(`${file}:refuse-write`)) {
+        warnedGlobalIssues.add(`${file}:refuse-write`);
+        warn(`sandbox: ${file} is unparseable — refusing to overwrite it (fix the file by hand)`);
+      }
+      return false;
+    }
+    cfg = sanitizeGlobalSandboxConfig(parsed as Partial<GlobalSandboxConfig>);
+  } else {
+    cfg = { allow: [], deny: [], strictGit: false };
+  }
+  const next = mutate(cfg);
   try {
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(
-      file,
-      JSON.stringify(
-        { enabled: cfg.enabled, allow: cfg.allow, deny: cfg.deny, strictGit: cfg.strictGit },
-        null,
-        2,
-      ) + "\n",
+    const tmp = path.join(
+      path.dirname(file),
+      `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`,
     );
-    log(`sandbox: allowlisted ${allowedPath} in ${file}`);
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n");
+    renameSync(tmp, file);
     return true;
   } catch (e) {
-    warn(`sandbox: could not persist allowlist: ${e instanceof Error ? e.message : String(e)}`);
+    warn(`sandbox: could not persist ${file}: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
 }
 
 /**
- * Bridge-side persistence for the popup's "永不放行" choice — the visible
- * counterpart of appendSandboxAllow: a denied path is RECORDED in the
- * config (never hidden in bridge memory), so the ask never resurfaces for
- * it and the user can review or undo the decision by editing the file.
+ * Bridge-side persistence for the popup's "始终允许" choice: append to the
+ * global allow list. Returns false when persistence is impossible
+ * (unparseable/unwritable file) — the caller downgrades to a bridge-lifetime
+ * once-allow.
  */
-export function appendSandboxDeny(workspaceRoot: string, deniedPath: string): boolean {
-  const file = sandboxConfigPath(workspaceRoot);
-  if (!configIntegrityOk(workspaceRoot, file)) {
-    warn(`sandbox: refusing to persist through a symlinked/hardlinked ${file}`);
-    return false;
+export function appendGlobalSandboxAllow(allowedPath: string): boolean {
+  const ok = persistGlobalSandboxConfig((cfg) =>
+    cfg.allow.includes(allowedPath) ? cfg : { ...cfg, allow: [...cfg.allow, allowedPath] },
+  );
+  if (ok) log(`sandbox: allowlisted ${allowedPath} in ${globalSandboxConfigPath()}`);
+  return ok;
+}
+
+/**
+ * The visible counterpart for "永不放行": a denied path is RECORDED in the
+ * global config, so the ask never resurfaces for it and the user can review
+ * or undo the decision by editing the file.
+ */
+export function appendGlobalSandboxDeny(deniedPath: string): boolean {
+  const ok = persistGlobalSandboxConfig((cfg) =>
+    cfg.deny.includes(deniedPath) ? cfg : { ...cfg, deny: [...cfg.deny, deniedPath] },
+  );
+  if (ok) log(`sandbox: denylisted ${deniedPath} in ${globalSandboxConfigPath()}`);
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy per-project config (REMOVED as a config source 2026-11-17; read
+// exactly once, during migration into the global file).
+// ---------------------------------------------------------------------------
+
+/** The removed per-project config shape — kept for the one-shot migration. */
+export interface LegacySandboxConfig {
+  enabled: boolean;
+  allow: string[];
+  deny: string[];
+  strictGit: boolean;
+}
+
+/** Path of the deprecated per-project config (migration reads only). */
+export function sandboxConfigPath(workspaceRoot: string): string {
+  return path.join(workspaceRoot, ".zcode", "acp", "sandbox.json");
+}
+
+/**
+ * Tolerant legacy read for migration: missing/unparseable → null (nothing to
+ * migrate — a corrupt leftover must not block the global template), relative
+ * entries dropped (same rule the file always had).
+ */
+function readLegacySandboxConfig(workspaceRoot: string): LegacySandboxConfig | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(sandboxConfigPath(workspaceRoot), "utf8"));
+  } catch {
+    return null;
   }
-  const cfg = readSandboxConfig(workspaceRoot);
-  if (cfg.deny.includes(deniedPath)) return true;
-  cfg.deny.push(deniedPath);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const cfg = parsed as Partial<LegacySandboxConfig>;
+  const keep = (list: unknown): string[] =>
+    Array.isArray(list)
+      ? list.filter((p) => typeof p === "string" && (p.startsWith("/") || p.startsWith("~/")))
+      : [];
+  return {
+    enabled: cfg.enabled === true,
+    allow: keep(cfg.allow),
+    deny: keep(cfg.deny),
+    strictGit: cfg.strictGit === true,
+  };
+}
+
+/** Settled flag: the global config settle (create+migrate) runs once per process. */
+let globalConfigSettled = false;
+
+/**
+ * One-shot per process: materialize the machine-global sandbox config.
+ * Absent file → create it (O_EXCL — a sibling bridge winning the race is
+ * fine, its content stands) from the toolchain template UNIONed with any
+ * legacy per-project configs of the live roots. A legacy `enabled: true`
+ * arms the GLOBAL switch (never silently disarm an upgraded machine); an
+ * explicit `sandbox.enabled: false` in the user config wins over the
+ * migration. Never writes into workspaces (#332).
+ */
+export async function ensureGlobalSandboxConfig(cwdRoots: Iterable<string>): Promise<void> {
+  if (globalConfigSettled) return;
+  globalConfigSettled = true; // set first: a failure must not retry every spawn
+  const file = globalSandboxConfigPath();
+  if (existsSync(file)) return; // user-managed from here on; deletion = empty grants
+
+  const legacyAllow: string[] = [];
+  const legacyDeny: string[] = [];
+  let legacyStrictGit = false;
+  let legacyArmed = false;
+  for (const root of cwdRoots) {
+    const legacy = readLegacySandboxConfig(resolveReal(root));
+    if (!legacy) continue;
+    for (const p of legacy.allow) if (!legacyAllow.includes(p)) legacyAllow.push(p);
+    for (const p of legacy.deny) if (!legacyDeny.includes(p)) legacyDeny.push(p);
+    legacyStrictGit = legacyStrictGit || legacy.strictGit;
+    legacyArmed = legacyArmed || legacy.enabled;
+  }
+  const config: GlobalSandboxConfig = {
+    allow: [...new Set([...TOOLCHAIN_TEMPLATE_ALLOW, ...legacyAllow])],
+    deny: [...new Set(legacyDeny)],
+    strictGit: legacyStrictGit,
+  };
   try {
     mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(
-      file,
-      JSON.stringify(
-        { enabled: cfg.enabled, allow: cfg.allow, deny: cfg.deny, strictGit: cfg.strictGit },
-        null,
-        2,
-      ) + "\n",
+    writeFileSync(file, JSON.stringify(config, null, 2) + "\n", { flag: "wx" });
+    log(
+      `sandbox: created ${file}` +
+        (legacyAllow.length + legacyDeny.length > 0
+          ? ` (migrated ${legacyAllow.length} allow / ${legacyDeny.length} deny legacy entries)`
+          : " (toolchain template)"),
     );
-    log(`sandbox: denylisted ${deniedPath} in ${file}`);
-    return true;
   } catch (e) {
-    warn(`sandbox: could not persist denylist: ${e instanceof Error ? e.message : String(e)}`);
-    return false;
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+      warn(`sandbox: could not create ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      return; // the read path treats absence as empty grants; nothing else to do
+    }
+    // EEXIST: a sibling bridge won the create race — its content stands.
+  }
+  if (legacyArmed) await migrateLegacyArming();
+}
+
+/**
+ * Carry a legacy per-project `enabled: true` onto the global switch. The
+ * project switch no longer exists, so doing nothing would silently disarm a
+ * machine that had the sandbox on — the arming intent migrates instead
+ * (fail-closed direction). An explicit `sandbox.enabled: false` in the user
+ * config is the user's later decision and wins; then we only warn.
+ */
+async function migrateLegacyArming(): Promise<void> {
+  const file = userConfigPath();
+  try {
+    if (globalSandboxEnabled()) return; // already armed (env or file)
+    const current = await readJsonDocument(file);
+    const sandbox =
+      current !== null && typeof current["sandbox"] === "object" && current["sandbox"] !== null
+        ? (current["sandbox"] as Record<string, unknown>)
+        : null;
+    if (sandbox !== null && sandbox["enabled"] === false) {
+      warn(
+        `sandbox: a legacy project config had enabled:true, but ${file} explicitly sets ` +
+          "sandbox.enabled:false — NOT arming; flip that key to re-arm",
+      );
+      return;
+    }
+    await writeJsonAtomic(file, (cur) => {
+      const section =
+        typeof cur["sandbox"] === "object" && cur["sandbox"] !== null
+          ? { ...(cur["sandbox"] as Record<string, unknown>) }
+          : {};
+      if (section["enabled"] === true) return cur;
+      return { ...cur, sandbox: { ...section, enabled: true } };
+    });
+    warn(
+      `sandbox: legacy per-project sandbox switch migrated — armed globally via ` +
+        `sandbox.enabled:true in ${file} (edit that file to turn it off)`,
+    );
+  } catch (e) {
+    warn(
+      `sandbox: legacy arm migration failed (${e instanceof Error ? e.message : String(e)}) — ` +
+        `set sandbox.enabled:true in ${file} to re-arm`,
+    );
   }
 }
 
@@ -353,10 +479,12 @@ function sb(p: string): string {
 }
 
 export interface SandboxArmInput {
-  /** Workspace roots (already real) with their per-project configs. */
-  workspaces: Array<{ root: string; config: SandboxConfig }>;
-  /** Extra writable roots: allowlists from other workspaces + once-allows. */
-  extraAllow: string[];
+  /** Live workspace roots (resolved + deduped here). */
+  workspaceRoots: Iterable<string>;
+  /** Machine-global grants: allow list + strictGit flag. */
+  config: GlobalSandboxConfig;
+  /** Bridge-lifetime once-allows granted via the dynamic allow flow. */
+  onceAllows?: Iterable<string>;
   /**
    * Directory the profile file itself lives in — self-denied LAST so the
    * sandboxed agent cannot race/symlink/occupy the next respawn's profile
@@ -377,30 +505,31 @@ export interface SandboxArmInput {
  * Build the SBPL profile text. SBPL resolves overlapping rules by LAST
  * match (verified empirically: an allow emitted after a deny re-permits the
  * write), so the layout is: base deny-all, then every allow, then the deny
- * carve-outs (island, strictGit) LAST so nothing can override them.
+ * carve-outs (global config dir, strictGit, profile dirs) LAST so nothing
+ * can override them.
  */
 export function buildSandboxProfile(input: SandboxArmInput): string {
   const allows: string[] = [];
   const denies: string[] = [];
-  for (const ws of input.workspaces) {
+  const seenRoots = new Set<string>();
+  for (const root of input.workspaceRoots) {
     // Resolve here too (idempotent): direct callers may pass symlinked
     // roots (/tmp → /private/tmp) that would silently fail subpath match.
-    const root = resolveReal(ws.root);
-    allows.push(`(allow file-write* (subpath ${sb(root)}))`);
-    // Deny island: the sandbox config lives INSIDE the writable workspace —
-    // without this carve-out the agent could grant itself permissions.
-    denies.push(`(deny file-write* (subpath ${sb(path.join(root, ".zcode", "acp"))}))`);
-    if (ws.config.strictGit) {
-      denies.push(`(deny file-write* (subpath ${sb(path.join(root, ".git"))}))`);
+    const real = resolveReal(root);
+    if (seenRoots.has(real)) continue;
+    seenRoots.add(real);
+    allows.push(`(allow file-write* (subpath ${sb(real)}))`);
+    if (input.config.strictGit) {
+      denies.push(`(deny file-write* (subpath ${sb(path.join(real, ".git"))}))`);
     }
-    for (const allowed of ws.config.allow) {
-      allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
-    }
+  }
+  for (const allowed of input.config.allow) {
+    allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
   }
   for (const p of [...ZCODE_STATE_DIRS, ...DEFAULT_CACHE_DIRS, ...DEFAULT_TEMP_DIRS]) {
     allows.push(`(allow file-write* (subpath ${sb(resolveReal(p))}))`);
   }
-  for (const allowed of input.extraAllow) {
+  for (const allowed of input.onceAllows ?? []) {
     allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
   }
   allows.push(
@@ -424,6 +553,11 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
     `(allow file-write* (require-all (regex #"^/dev/ttys[0-9]+$") ` +
       `(extension "com.apple.sandbox.pty")))`,
   );
+  // The global config dir (sandbox.json + config.json + hub credentials):
+  // agent-unreachable by policy — the bridge persists grants there from
+  // OUTSIDE the sandbox. Emitted in the deny tail so a workspace allow that
+  // covers it (a workspace rooted at $HOME) can never re-permit it.
+  denies.push(`(deny file-write* (subpath ${sb(globalSandboxConfigDir())}))`);
   if (input.profileDir) {
     denies.push(`(deny file-write* (subpath ${sb(input.profileDir)}))`);
   }
@@ -435,70 +569,29 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
   );
 }
 
-/** Resolved arm input for the CURRENT spawn: union of all live workspaces. */
-export function collectSandboxWorkspaces(cwdRoots: Iterable<string>): {
-  workspaces: Array<{ root: string; config: SandboxConfig }>;
-  extraAllow: string[];
-} {
-  const seen = new Set<string>();
-  const workspaces: Array<{ root: string; config: SandboxConfig }> = [];
-  const extraAllow: string[] = [];
-  for (const root of cwdRoots) {
-    const real = resolveReal(root);
-    if (seen.has(real)) continue;
-    seen.add(real);
-    const config = readSandboxConfig(real);
-    workspaces.push({ root: real, config });
-    // Allowlists from OTHER workspaces still apply when they share this
-    // backend: the agent may hop projects in one bridge lifetime.
-    for (const allowed of config.allow) extraAllow.push(allowed);
-  }
-  // A workspace's own allow entries are emitted with its block above; drop
-  // them from extraAllow so they don't appear twice (harmless, but noisy).
-  const own = new Set(workspaces.flatMap((ws) => ws.config.allow.map(resolveReal)));
-  return {
-    workspaces,
-    extraAllow: [...new Set(extraAllow.map(resolveReal))].filter((p) => !own.has(p)),
-  };
-}
-
 let platformWarned = false;
 
-/**
- * Global arm request: `sandbox.enabled` in the user config file (file wins)
- * or ZCODE_ACP_SANDBOX=1/true. Live read — a config flip mid-run is seen at
- * the next sandboxActive call (applySandboxFlip applies it at prompt entry).
- */
+/** Global arm request: `sandbox.enabled` in the user config file (file wins) or ZCODE_ACP_SANDBOX=1/true. */
 function globalWanted(): boolean {
   return globalSandboxEnabled();
 }
 
 /**
- * The project-level switch: `enabled: true` inside the workspace's sandbox
- * config. Reading also materializes the template for discovery — but only
- * while the sandbox is globally armed (see readSandboxConfig). Once the
- * sandbox is armed the deny island keeps the agent from flipping the switch
- * back off.
+ * Whether the sandbox should arm for this bridge: the GLOBAL switch only
+ * (user config `sandbox.enabled` or ZCODE_ACP_SANDBOX=1) — the per-project
+ * opt-in was removed with the per-project config (2026-11-17; a legacy
+ * enabled:true was migrated onto the global switch by
+ * ensureGlobalSandboxConfig). Live read — a config flip mid-run is seen at
+ * the next sandboxActive call (applySandboxFlip applies it at prompt entry).
+ * macOS-only: elsewhere a requested sandbox warns once and runs unsandboxed.
  */
-export function projectSandboxEnabled(workspaceRoot: string): boolean {
-  return readSandboxConfig(workspaceRoot).enabled;
-}
-
-/**
- * Whether the sandbox should arm for this bridge: the global switch
- * (config file `sandbox.enabled` or ZCODE_ACP_SANDBOX=1) OR any given
- * workspace root opted in via sandbox.json `enabled` (project switch,
- * re-checked per call so a flip mid-run is seen). macOS-only: elsewhere a
- * requested sandbox warns once and runs unsandboxed.
- */
-export function sandboxActive(roots: Iterable<string> = [process.cwd()]): boolean {
-  const wanted = globalWanted() || [...roots].some(projectSandboxEnabled);
-  if (!wanted) return false;
+export function sandboxActive(): boolean {
+  if (!globalWanted()) return false;
   if (process.platform !== "darwin") {
     if (!platformWarned) {
       platformWarned = true;
       warn(
-        `sandbox: requested (${SANDBOX_ENV}=1, config file, or project config) but Seatbelt is macOS-only — running WITHOUT sandbox`,
+        `sandbox: requested (${SANDBOX_ENV}=1 or config file) but Seatbelt is macOS-only — running WITHOUT sandbox`,
       );
     }
     return false;
@@ -509,9 +602,8 @@ export function sandboxActive(roots: Iterable<string> = [process.cwd()]): boolea
 /** Test hook: reset cached decisions and warn-once sets. */
 export function resetSandboxDecisionForTest(): void {
   platformWarned = false;
-  templateFailedRoots.clear();
-  warnedConfigIssues.clear();
-  lastEnabledSeen.clear();
+  warnedGlobalIssues.clear();
+  globalConfigSettled = false;
 }
 
 /** Previous respawn's profile dir — removed once superseded (its backend is dead). */

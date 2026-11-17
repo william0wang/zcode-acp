@@ -37,6 +37,9 @@
  * developer with it exported (Linux desktops, dotfile shells) would point the
  * suite's file-config reads at their real config — e.g. a real
  * `sandbox.enabled: true` would flip "sandbox stays off by default" tests.
+ * ZCODE_ACP_SANDBOX is DELETED for the same reason: a vitest run started
+ * from inside a sandboxed bridge session inherits the arm env, and the
+ * global-config settle/arming would run against the hermetic HOME.
  *
  * ZCODE_DYNAMIC_WORKFLOW_MODE is DELETED for the same reason: it is the
  * workflow-gate local override, and a developer exporting it (the headless
@@ -69,6 +72,7 @@ const home = mkdtempSync(path.join(tmpdir(), "zacp-test-home-"));
 process.env.HOME = home;
 delete process.env.ZCODE_HOME;
 delete process.env.XDG_CONFIG_HOME;
+delete process.env.ZCODE_ACP_SANDBOX;
 delete process.env.ZCODE_DYNAMIC_WORKFLOW_MODE;
 delete process.env.ZCODE_MODEL;
 delete process.env.ANTHROPIC_API_KEY;

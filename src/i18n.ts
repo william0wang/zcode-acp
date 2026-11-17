@@ -280,19 +280,19 @@ const zh: Messages = {
   permissionAlwaysSession: "本会话始终允许",
   sandboxPopupTitle: (p) => `沙箱写入放行:${p}`,
   sandboxPopupDetails: (p) =>
-    `沙箱拒绝了工作区外的写入:${p}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(.zcode/acp/sandbox.json,可编辑撤销)。`,
+    `沙箱拒绝了工作区外的写入:${p}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(~/.config/zcode-acp/sandbox.json,全局生效,可编辑撤销)。`,
   sandboxProtectedHint:
-    "[该路径受沙箱保护(.zcode/acp 配置区或 strictGit 的 .git),不能通过弹窗放行。strictGit 可在 .zcode/acp/sandbox.json 中关闭。]",
+    "[该路径受沙箱保护(全局配置目录 ~/.config/zcode-acp/ 或 strictGit 的 .git),不能通过弹窗放行。strictGit 可在 ~/.config/zcode-acp/sandbox.json 中关闭。]",
   sandboxOverBroadHint: (p) =>
-    `[${p} 范围过宽($HOME 或其上级),沙箱不会弹窗放行;确需放行请手动编辑 .zcode/acp/sandbox.json 的 allow 列表。]`,
+    `[${p} 范围过宽($HOME 或其上级),沙箱不会弹窗放行;确需放行请手动编辑 ~/.config/zcode-acp/sandbox.json 的 allow 列表。]`,
   sandboxDenyListedHint: (p) =>
-    `[${p} 已在 .zcode/acp/sandbox.json 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
+    `[${p} 已在 ~/.config/zcode-acp/sandbox.json 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
   sandboxRejectAlwaysPersisted: (p) =>
-    `[已记入始终拒绝 ${p}(.zcode/acp/sandbox.json 的 deny 列表,可编辑撤销)。]`,
+    `[已记入始终拒绝 ${p}(~/.config/zcode-acp/sandbox.json 的 deny 列表,可编辑撤销)。]`,
   sandboxRejectAlwaysUnpersisted: (p) =>
     `[已拒绝 ${p}(配置不可写,未持久化,同类写入下次仍会询问。)]`,
   sandboxRejectOnceHint: (p) =>
-    `[已拒绝沙箱放行 ${p},未保存任何决定,同类写入会再次询问;如需放行,可编辑 .zcode/acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
+    `[已拒绝沙箱放行 ${p},未保存任何决定,同类写入会再次询问;如需放行,可编辑 ~/.config/zcode-acp/sandbox.json 的 allow 列表(由桥写入,Agent 不可改)。]`,
   sandboxRejectContinuation: (p) =>
     `[用户拒绝了对 ${p} 的沙箱写入授权,沙箱保持原样。请改在已授权的目录内完成写入,或调整方案后继续任务。]`,
   sandboxUnattendedTimeoutHint: (p) =>
@@ -310,7 +310,7 @@ const zh: Messages = {
     `[沙箱已放行 ${p},数秒内将合并重启后端以应用新权限;若重启后任务未自动继续,请重新发送一条消息(例如"继续刚才的任务")。]`,
   sandboxResumedStatus: "[沙箱后端已重启,会话已恢复,自动继续刚才的任务…]",
   sandboxGenericDenialHint:
-    "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 .zcode/acp/sandbox.json 后重启会话。]",
+    "[沙箱拒绝了白名单外的写入。可放行目录:在弹窗中选择允许,或编辑 ~/.config/zcode-acp/sandbox.json 后重启会话。]",
   fsPermDeniedHint: (p) =>
     `[命令被文件系统权限拒绝(Permission denied):${p}。这不是沙箱拦截,弹窗无法放行——请检查该目录的权限(chmod/chown)或 macOS 隐私设置,或让 Agent 改用有权限的路径。(同一路径仅提示一次。)]`,
   networkRetry: (attempt, total) => `[网络异常，正在重试 (${attempt}/${total})…]`,
@@ -448,19 +448,19 @@ const en: Messages = {
   permissionAlwaysSession: "Always allow in this session",
   sandboxPopupTitle: (p) => `Sandbox write request: ${p}`,
   sandboxPopupDetails: (p) =>
-    `The sandbox denied a write outside the workspace: ${p}\n"Always allow" persists to the config's allow list, "Always reject" to its deny list (.zcode/acp/sandbox.json, editable to undo).`,
+    `The sandbox denied a write outside the workspace: ${p}\n"Always allow" persists to the config's allow list, "Always reject" to its deny list (~/.config/zcode-acp/sandbox.json, machine-global, editable to undo).`,
   sandboxProtectedHint:
-    "[This path is sandbox-protected (the .zcode/acp config area, or .git under strictGit) and cannot be granted via popup. strictGit can be disabled in .zcode/acp/sandbox.json.]",
+    "[This path is sandbox-protected (the global config dir ~/.config/zcode-acp/, or .git under strictGit) and cannot be granted via popup. strictGit can be disabled in ~/.config/zcode-acp/sandbox.json.]",
   sandboxOverBroadHint: (p) =>
-    `[${p} is too broad ($HOME or an ancestor) for a popup grant; to allow it, edit the allow list in .zcode/acp/sandbox.json by hand.]`,
+    `[${p} is too broad ($HOME or an ancestor) for a popup grant; to allow it, edit the allow list in ~/.config/zcode-acp/sandbox.json by hand.]`,
   sandboxDenyListedHint: (p) =>
-    `[${p} is in the deny list of .zcode/acp/sandbox.json (you chose "Always reject" earlier). Edit that file's deny array to undo.]`,
+    `[${p} is in the deny list of ~/.config/zcode-acp/sandbox.json (you chose "Always reject" earlier). Edit that file's deny array to undo.]`,
   sandboxRejectAlwaysPersisted: (p) =>
-    `[Recorded as always-rejected: ${p} (deny list in .zcode/acp/sandbox.json, editable to undo).]`,
+    `[Recorded as always-rejected: ${p} (deny list in ~/.config/zcode-acp/sandbox.json, editable to undo).]`,
   sandboxRejectAlwaysUnpersisted: (p) =>
     `[Rejected ${p} (config not writable, nothing persisted; the same write will ask again.)]`,
   sandboxRejectOnceHint: (p) =>
-    `[Sandbox grant rejected for ${p}; no decision was saved and the same write will ask again. To grant, edit the allow list in .zcode/acp/sandbox.json (bridge-written, not agent-writable).]`,
+    `[Sandbox grant rejected for ${p}; no decision was saved and the same write will ask again. To grant, edit the allow list in ~/.config/zcode-acp/sandbox.json (bridge-written, not agent-writable).]`,
   sandboxRejectContinuation: (p) =>
     `[The user rejected the sandbox write grant for ${p}; the sandbox is unchanged. Write inside already-granted directories, or adjust the plan and continue the task.]`,
   sandboxUnattendedTimeoutHint: (p) =>
@@ -479,7 +479,7 @@ const en: Messages = {
     `[Sandbox granted ${p}; the backend restarts in a few seconds to apply it (approvals meanwhile join the same restart). If the task does not auto-continue after the restart, resend a message (e.g. "continue the previous task").]`,
   sandboxResumedStatus: "[Sandbox backend restarted, session restored; continuing the task…]",
   sandboxGenericDenialHint:
-    "[The sandbox denied a write outside the whitelist. To grant a directory: choose Allow in the popup, or edit .zcode/acp/sandbox.json and restart the session.]",
+    "[The sandbox denied a write outside the whitelist. To grant a directory: choose Allow in the popup, or edit ~/.config/zcode-acp/sandbox.json and restart the session.]",
   fsPermDeniedHint: (p) =>
     `[A command was denied by filesystem permissions (Permission denied): ${p}. This is not a sandbox block and cannot be granted via popup — check the directory's permissions (chmod/chown) or macOS privacy settings, or steer the agent to a path it may access. (One-time notice per path.)]`,
   networkRetry: (attempt, total) => `[Network error, retrying (${attempt}/${total})…]`,

@@ -1,46 +1,47 @@
 /**
- * Unit tests for the Seatbelt sandbox layer (ADR-0011): profile generation
- * (workspace allow + deny island + strictGit + /dev/null + profile self-deny),
- * project config (auto-created template, enabled switch, integrity checks,
- * allowlist append), dual-switch arming (env OR project opt-in), mid-run flip
- * via applySandboxFlip, and hardened argv arming. Real sandbox behaviour
- * (deny-rule precedence) is exercised by scripts/verify-sandbox.sh — CI
- * runners are linux where sandbox-exec does not exist, so every "arms"
- * assertion runs under a stubbed darwin platform.
+ * Unit tests for the Seatbelt sandbox layer (ADR-0011): the machine-global
+ * config (template creation, legacy per-project migration, arm carry-over,
+ * append persistence), profile generation (workspace allow + global allow +
+ * strictGit + /dev/null + config-dir deny + profile self-deny), global-switch
+ * arming, mid-run flip via applySandboxFlip, and hardened argv arming. Real
+ * sandbox behaviour (deny-rule precedence) is exercised by
+ * scripts/verify-sandbox.sh — CI runners are linux where sandbox-exec does
+ * not exist, so every "arms" assertion runs under a stubbed darwin platform.
  */
 
 import { spawn, spawnSync } from "node:child_process";
 import {
-  chmodSync,
   existsSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import process from "node:process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ZcodeAcpServer } from "../src/server.js";
 import type { ZcodeBackend } from "../src/backend/index.js";
 import {
   SANDBOX_ENV,
-  appendSandboxAllow,
-  appendSandboxDeny,
+  appendGlobalSandboxAllow,
+  appendGlobalSandboxDeny,
   armSandboxArgv,
   buildSandboxProfile,
-  collectSandboxWorkspaces,
-  readSandboxConfig,
+  ensureGlobalSandboxConfig,
+  globalSandboxConfigDir,
+  globalSandboxConfigPath,
+  readGlobalSandboxConfig,
   resetSandboxDecisionForTest,
   sandboxActive,
   sandboxConfigPath,
   sandboxProfilesRoot,
 } from "../src/backend/sandbox.js";
+import { userConfigPath } from "../src/config/user-config.js";
 
 // The arm tests redirect os.homedir() to a repo-local fixture (sandboxed
 // agent sessions deny writes to the real $HOME); the passthrough mock keeps
@@ -55,6 +56,10 @@ vi.mock("node:os", async (importOriginal) => {
 // os.tmpdir() is symlinked on macOS (/var → /private/var) and Seatbelt
 // matches real paths — every fixture must be realpath'd like production.
 let tmpRoot: string;
+// Scratch XDG root so the global sandbox.json / config.json land in the
+// test's own tree (userConfigPath is XDG aware; hermetic-home deleted the
+// ambient variable).
+let xdgRoot: string;
 
 beforeEach(() => {
   // A sandboxed agent session exports ZCODE_ACP_SANDBOX itself; clear it up
@@ -62,10 +67,14 @@ beforeEach(() => {
   // afterEach delete only helps tests that run after the first one).
   delete process.env[SANDBOX_ENV];
   tmpRoot = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-test-")));
+  xdgRoot = mkdtempSync(path.join(os.tmpdir(), "sb-xdg-"));
+  process.env.XDG_CONFIG_HOME = xdgRoot;
 });
 
 afterEach(() => {
   rmSync(tmpRoot, { recursive: true, force: true });
+  rmSync(xdgRoot, { recursive: true, force: true });
+  delete process.env.XDG_CONFIG_HOME;
   delete process.env[SANDBOX_ENV];
   resetSandboxDecisionForTest();
 });
@@ -91,189 +100,192 @@ async function withPlatformAsync<R>(platform: NodeJS.Platform, body: () => Promi
   }
 }
 
-/** Write a project config with the given fields (mkdir included). */
-function writeConfig(root: string, cfg: Record<string, unknown>): void {
+/** Write a legacy per-project config with the given fields (mkdir included). */
+function writeLegacyConfig(root: string, cfg: Record<string, unknown>): void {
   mkdirSync(path.join(root, ".zcode", "acp"), { recursive: true });
   writeFileSync(sandboxConfigPath(root), JSON.stringify(cfg));
 }
 
 describe("sandboxActive", () => {
-  it("stays off with no env and no opted-in root; the read writes NO file", () => {
+  it("stays off with no env and no config switch", () => {
     const armed = withPlatform("darwin", () => {
       resetSandboxDecisionForTest();
-      return sandboxActive([tmpRoot]);
+      return sandboxActive();
     });
     expect(armed).toBe(false);
-    expect(readSandboxConfig(tmpRoot)).toEqual({
-      enabled: false,
-      allow: [],
-      deny: [],
-      strictGit: false,
-    });
-    expect(existsSync(sandboxConfigPath(tmpRoot))).toBe(false);
   });
 
-  it("env arms globally regardless of configs", () => {
+  it("env arms globally", () => {
     const armed = withPlatform("darwin", () => {
       process.env[SANDBOX_ENV] = "1";
       resetSandboxDecisionForTest();
-      return sandboxActive([tmpRoot]);
+      return sandboxActive();
     });
     expect(armed).toBe(true);
   });
 
-  it("flipping enabled:true arms the project (any-of roots)", () => {
-    const other = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-other-")));
-    try {
-      appendSandboxAllow(tmpRoot, "/opt/data"); // materializes the template
-      expect(withPlatform("darwin", () => sandboxActive([tmpRoot, other]))).toBe(false);
-      writeConfig(tmpRoot, { enabled: true });
-      expect(withPlatform("darwin", () => sandboxActive([tmpRoot, other]))).toBe(true);
-    } finally {
-      rmSync(other, { recursive: true, force: true });
-    }
-  });
-
-  it("fails CLOSED on a malformed config — a corrupted opt-in must not disarm", () => {
-    writeConfig(tmpRoot, {}); // then corrupt it
-    writeFileSync(sandboxConfigPath(tmpRoot), "{not json");
-    expect(withPlatform("darwin", () => sandboxActive([tmpRoot]))).toBe(true);
+  it("config-file sandbox.enabled arms (file wins over unset env)", () => {
+    mkdirSync(path.dirname(userConfigPath()), { recursive: true });
+    writeFileSync(userConfigPath(), JSON.stringify({ sandbox: { enabled: true } }));
+    expect(withPlatform("darwin", () => sandboxActive())).toBe(true);
   });
 
   it("stays unsandboxed (with a warn) on non-macOS even when armed", () => {
     const armed = withPlatform("linux", () => {
       process.env[SANDBOX_ENV] = "1";
       resetSandboxDecisionForTest();
-      return sandboxActive([tmpRoot]);
+      return sandboxActive();
     });
     expect(armed).toBe(false);
   });
 });
 
-describe("readSandboxConfig / appendSandboxAllow", () => {
-  it("writes NO template on first read while unarmed (#332)", () => {
-    const cfg = readSandboxConfig(tmpRoot);
-    expect(cfg).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
-    expect(existsSync(sandboxConfigPath(tmpRoot))).toBe(false);
+describe("readGlobalSandboxConfig", () => {
+  it("absent file reads as empty grants", () => {
+    expect(readGlobalSandboxConfig()).toEqual({ allow: [], deny: [], strictGit: false });
   });
 
-  it("auto-creates the discovery template (enabled:false) on first read once globally armed", () => {
-    process.env[SANDBOX_ENV] = "1";
-    const cfg = readSandboxConfig(tmpRoot);
-    expect(cfg).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
-    const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
-    expect(onDisk).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
+  it("malformed bytes read as empty grants and are never rewritten", () => {
+    const file = globalSandboxConfigPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "{not json");
+    expect(readGlobalSandboxConfig()).toEqual({ allow: [], deny: [], strictGit: false });
+    expect(readFileSync(file, "utf8")).toBe("{not json");
   });
 
-  it("fails CLOSED on a malformed file and never rewrites the user's bytes", () => {
-    writeConfig(tmpRoot, { enabled: true });
-    writeFileSync(sandboxConfigPath(tmpRoot), "{not json");
-    const cfg = readSandboxConfig(tmpRoot);
-    expect(cfg).toEqual({ enabled: true, allow: [], deny: [], strictGit: false });
-    // A half-saved editor buffer must survive — no template clobbering.
-    expect(readFileSync(sandboxConfigPath(tmpRoot), "utf8")).toBe("{not json");
-  });
-
-  it("drops relative allow entries — they would anchor to the bridge cwd", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: ["/abs/path", "~/cache", "../escape", "foo"] });
-    expect(readSandboxConfig(tmpRoot).allow).toEqual(["/abs/path", "~/cache"]);
-  });
-
-  it("reads a symlinked config as armed (island piercing fails closed)", () => {
-    // The attack: sandbox.json -> ../../cfg.json; the agent writes cfg.json
-    // (inside the allowed workspace, outside the island) to edit its own
-    // allowlist. The bridge must not follow the link.
-    const target = path.join(tmpRoot, "cfg.json");
-    writeFileSync(target, JSON.stringify({ enabled: true, allow: ["~/.ssh"] }));
-    mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
-    symlinkSync(target, sandboxConfigPath(tmpRoot));
-    expect(readSandboxConfig(tmpRoot)).toEqual({
-      enabled: true,
-      allow: [],
+  it("drops relative entries — they would anchor to the bridge cwd", () => {
+    const file = globalSandboxConfigPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(
+      file,
+      JSON.stringify({
+        allow: ["/abs/path", "~/cache", "../escape", "foo"],
+        deny: [],
+        strictGit: true,
+      }),
+    );
+    expect(readGlobalSandboxConfig()).toEqual({
+      allow: ["/abs/path", "~/cache"],
       deny: [],
-      strictGit: false,
-    });
-    expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(false);
-    expect(JSON.parse(readFileSync(target, "utf8")).allow).toEqual(["~/.ssh"]);
-  });
-
-  it("reads a hardlinked config as armed and refuses to persist through it", () => {
-    const real = path.join(tmpRoot, "cfg.json");
-    writeConfig(tmpRoot, { enabled: true, allow: [] });
-    linkSync(sandboxConfigPath(tmpRoot), real); // nlink now 2 → island pierced
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(false);
-  });
-
-  it("reads a config that VANISHED after being armed as still armed (fail closed)", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: [] });
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    rmSync(sandboxConfigPath(tmpRoot));
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true); // agent rename/rm must not disarm
-  });
-
-  it("reads an EACCES config dir as armed (chmod-0000 must not disarm)", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: [] });
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    chmodSync(path.join(tmpRoot, ".zcode"), 0o000);
-    try {
-      expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    } finally {
-      chmodSync(path.join(tmpRoot, ".zcode"), 0o755);
-    }
-  });
-
-  it("reads a config behind a `.zcode` FILE (ENOTDIR) as armed once seen", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: [] });
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-    rmSync(path.join(tmpRoot, ".zcode"), { recursive: true, force: true });
-    writeFileSync(path.join(tmpRoot, ".zcode"), "agent-planted file");
-    expect(readSandboxConfig(tmpRoot).enabled).toBe(true);
-  });
-
-  it("persists always-allow entries without duplicates, preserving enabled", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: [], deny: [], strictGit: false });
-    expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(true);
-    expect(appendSandboxAllow(tmpRoot, "/opt/data")).toBe(true);
-    expect(appendSandboxAllow(tmpRoot, "/opt/other")).toBe(true);
-    const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
-    expect(onDisk).toEqual({
-      enabled: true,
-      allow: ["/opt/data", "/opt/other"],
-      deny: [],
-      strictGit: false,
-    });
-  });
-
-  it("appendSandboxDeny persists visibly and preserves every other field", () => {
-    writeConfig(tmpRoot, { enabled: true, allow: ["/opt/ok"], strictGit: true });
-    expect(appendSandboxDeny(tmpRoot, "/opt/blocked")).toBe(true);
-    expect(appendSandboxDeny(tmpRoot, "/opt/blocked")).toBe(true); // dedupe
-    const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
-    expect(onDisk).toEqual({
-      enabled: true,
-      allow: ["/opt/ok"],
-      deny: ["/opt/blocked"],
       strictGit: true,
     });
   });
 });
 
+describe("appendGlobalSandboxAllow / appendGlobalSandboxDeny", () => {
+  it("persists always-allow entries without duplicates, preserving other fields", () => {
+    expect(appendGlobalSandboxAllow("/opt/data")).toBe(true);
+    expect(appendGlobalSandboxAllow("/opt/data")).toBe(true);
+    expect(appendGlobalSandboxAllow("/opt/other")).toBe(true);
+    const onDisk = JSON.parse(readFileSync(globalSandboxConfigPath(), "utf8"));
+    expect(onDisk).toEqual({ allow: ["/opt/data", "/opt/other"], deny: [], strictGit: false });
+  });
+
+  it("appendGlobalSandboxDeny persists visibly and preserves every other field", () => {
+    appendGlobalSandboxAllow("/opt/ok");
+    appendGlobalSandboxDeny("/opt/blocked");
+    expect(appendGlobalSandboxDeny("/opt/blocked")).toBe(true); // dedupe
+    const onDisk = JSON.parse(readFileSync(globalSandboxConfigPath(), "utf8"));
+    expect(onDisk).toEqual({ allow: ["/opt/ok"], deny: ["/opt/blocked"], strictGit: false });
+  });
+
+  it("refuses to overwrite an unparseable file (bytes survive)", () => {
+    const file = globalSandboxConfigPath();
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, "{not json");
+    expect(appendGlobalSandboxAllow("/opt/data")).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe("{not json");
+  });
+});
+
+describe("ensureGlobalSandboxConfig", () => {
+  it("creates the toolchain template when no legacy config exists", async () => {
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    const onDisk = JSON.parse(readFileSync(globalSandboxConfigPath(), "utf8"));
+    expect(onDisk.strictGit).toBe(false);
+    expect(onDisk.deny).toEqual([]);
+    expect(onDisk.allow[0]).toBe("~/go");
+    expect(onDisk.allow).toContain("~/.gradle");
+    expect(onDisk.allow).toContain("~/.m2");
+    // #332: nothing is ever written into the workspace.
+    expect(existsSync(path.join(tmpRoot, ".zcode"))).toBe(false);
+    // enabled:false legacy (or none) must NOT touch the user config's switch.
+    expect(existsSync(userConfigPath())).toBe(false);
+  });
+
+  it("migrates legacy allow/deny/strictGit from the live roots", async () => {
+    writeLegacyConfig(tmpRoot, {
+      enabled: false,
+      allow: ["/opt/legacy", "/opt/legacy"],
+      deny: ["/opt/blocked"],
+      strictGit: true,
+    });
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    const onDisk = JSON.parse(readFileSync(globalSandboxConfigPath(), "utf8"));
+    expect(onDisk.allow).toContain("/opt/legacy");
+    expect(onDisk.allow[0]).toBe("~/go"); // template + legacy union
+    expect(onDisk.deny).toEqual(["/opt/blocked"]);
+    expect(onDisk.strictGit).toBe(true);
+    // enabled:false — no arm carry-over.
+    expect(existsSync(userConfigPath())).toBe(false);
+  });
+
+  it("legacy enabled:true carries onto the global switch (never silently disarm)", async () => {
+    writeLegacyConfig(tmpRoot, { enabled: true, allow: [] });
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    const userCfg = JSON.parse(readFileSync(userConfigPath(), "utf8"));
+    expect(userCfg.sandbox.enabled).toBe(true);
+  });
+
+  it("an explicit sandbox.enabled:false in the user config wins over the migration", async () => {
+    writeLegacyConfig(tmpRoot, { enabled: true, allow: [] });
+    mkdirSync(path.dirname(userConfigPath()), { recursive: true });
+    writeFileSync(userConfigPath(), JSON.stringify({ sandbox: { enabled: false } }));
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    const userCfg = JSON.parse(readFileSync(userConfigPath(), "utf8"));
+    expect(userCfg.sandbox.enabled).toBe(false);
+  });
+
+  it("an existing global file wins — legacy files are ignored entirely", async () => {
+    mkdirSync(path.dirname(globalSandboxConfigPath()), { recursive: true });
+    writeFileSync(globalSandboxConfigPath(), JSON.stringify({ allow: ["/x"] }));
+    writeLegacyConfig(tmpRoot, { enabled: true, allow: ["/opt/legacy"] });
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    const onDisk = JSON.parse(readFileSync(globalSandboxConfigPath(), "utf8"));
+    expect(onDisk).toEqual({ allow: ["/x"] });
+    expect(existsSync(userConfigPath())).toBe(false);
+  });
+
+  it("settles once per process — a later deletion is not resurrected", async () => {
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    rmSync(globalSandboxConfigPath());
+    await ensureGlobalSandboxConfig([tmpRoot]);
+    expect(existsSync(globalSandboxConfigPath())).toBe(false);
+    expect(readGlobalSandboxConfig().allow).toEqual([]); // deletion = empty grants
+  });
+});
+
 describe("buildSandboxProfile", () => {
-  it("denies writes by default, allows the workspace, carves the .zcode/acp deny island", () => {
+  it("denies writes by default, allows the workspace, denies the global config dir", () => {
     const profile = buildSandboxProfile({
-      workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
-      ],
-      extraAllow: [],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: false },
+      onceAllows: [],
     });
     const lines = profile.split("\n");
     expect(lines[0]).toBe("(version 1)");
     expect(lines).toContain("(deny file-write*)");
     expect(lines).toContain(`(allow file-write* (subpath "${tmpRoot}"))`);
-    expect(lines).toContain(
-      `(deny file-write* (subpath "${path.join(tmpRoot, ".zcode", "acp")}"))`,
+    // The per-project deny island is GONE with the per-project config.
+    expect(profile).not.toContain(".zcode/acp");
+    // The global config dir is denied — after every allow (SBPL last-match).
+    const configDirDeny = `(deny file-write* (subpath "${globalSandboxConfigDir()}"))`;
+    expect(lines).toContain(configDirDeny);
+    const firstDenyIdx = lines.findIndex((l) => l.startsWith("(deny file-write*"));
+    expect(lines.indexOf(configDirDeny)).toBeGreaterThan(
+      lines.lastIndexOf(`(allow file-write* (subpath "${tmpRoot}"))`),
     );
+    expect(firstDenyIdx).toBeGreaterThan(0);
     // Default cache dirs + zcode state are present (resolved under $HOME).
     expect(profile).toContain('/.zcode"');
     expect(profile).toContain('/.npm"');
@@ -291,7 +303,7 @@ describe("buildSandboxProfile", () => {
         '(extension "com.apple.sandbox.pty")))',
     );
     // SBPL is LAST-MATCH: these allows only hold while no later deny matches
-    // /dev too (all emitted denies are workspace/island/self subpaths).
+    // /dev too (all emitted denies are config-dir/workspace/self subpaths).
     // A future deny touching /dev would silently re-break openpty with the
     // allows still present in the text — pin that it can never happen.
     const denyLines = lines.filter((l) => l.startsWith("(deny"));
@@ -308,10 +320,9 @@ describe("buildSandboxProfile", () => {
     // The profile's own dir self-denies LAST — the agent runs with $TMPDIR
     // writable and must not touch the next respawn's profile.
     const profile2 = buildSandboxProfile({
-      workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
-      ],
-      extraAllow: [],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: false },
+      onceAllows: [],
       profileDir: "/fake/sbx-dir",
     });
     const lines2 = profile2.split("\n");
@@ -320,58 +331,42 @@ describe("buildSandboxProfile", () => {
 
   it("adds a .git deny only under strictGit", () => {
     const strict = buildSandboxProfile({
-      workspaces: [{ root: tmpRoot, config: { enabled: true, allow: [], strictGit: true } }],
-      extraAllow: [],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: true },
+      onceAllows: [],
     });
     expect(strict).toContain(`(deny file-write* (subpath "${path.join(tmpRoot, ".git")}"))`);
     const lax = buildSandboxProfile({
-      workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
-      ],
-      extraAllow: [],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: false },
+      onceAllows: [],
     });
     expect(lax).not.toContain('".git"');
   });
 
-  it("includes config allow entries and extraAllow roots", () => {
+  it("includes global config allow entries and once-allows", () => {
     // realpath BEFORE removing: resolveReal must land on the resolved prefix.
     const outside = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-out-")));
     rmSync(outside, { recursive: true, force: true }); // not created: resolveReal must survive
     const profile = buildSandboxProfile({
-      workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [outside], deny: [], strictGit: false } },
-      ],
-      extraAllow: [path.join(tmpRoot, "elsewhere")],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [outside], deny: [], strictGit: false },
+      onceAllows: [path.join(tmpRoot, "elsewhere")],
     });
     expect(profile).toContain(`(allow file-write* (subpath "${outside}"))`);
     expect(profile).toContain(`(allow file-write* (subpath "${path.join(tmpRoot, "elsewhere")}"))`);
   });
 });
 
-describe("collectSandboxWorkspaces", () => {
-  it("dedupes symlinked duplicates and unions allowlists across workspaces", () => {
-    const realA = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-a-")));
-    const linkA = path.join(tmpRoot, "link-a");
-    symlinkSync(realA, linkA);
-    appendSandboxAllow(realA, path.join(tmpRoot, "granted"));
-    const { workspaces, extraAllow } = collectSandboxWorkspaces([realA, linkA]);
-    expect(workspaces).toHaveLength(1);
-    expect(workspaces[0]?.root).toBe(realA);
-    // realA's own allow entry rides its workspace block, not extraAllow.
-    expect(extraAllow).toEqual([]);
-  });
-});
-
 describe("applySandboxFlip", () => {
-  it("kills an unsandboxed live backend once a workspace opted in mid-run", async () => {
+  it("kills an unsandboxed live backend once the global switch arms mid-run", async () => {
     const server = new ZcodeAcpServer();
     const closed = vi.fn().mockResolvedValue(undefined);
     server.backend = { isDead: false, close: closed } as unknown as ZcodeBackend;
     server.sessionCwds.set("acp_a", tmpRoot);
-    appendSandboxAllow(tmpRoot, "/opt/data"); // template only (enabled:false)
     await withPlatformAsync("darwin", () => server.applySandboxFlip());
     expect(closed).not.toHaveBeenCalled();
-    writeConfig(tmpRoot, { enabled: true });
+    process.env[SANDBOX_ENV] = "1";
     await withPlatformAsync("darwin", () => server.applySandboxFlip());
     expect(closed).toHaveBeenCalledTimes(1);
   });
@@ -398,10 +393,9 @@ describe("armSandboxArgv", () => {
 
   const arm = () =>
     armSandboxArgv(["/usr/local/bin/node", "/glm/zcode.cjs", "app-server", "--stdio"], {
-      workspaces: [
-        { root: tmpRoot, config: { enabled: true, allow: [], deny: [], strictGit: false } },
-      ],
-      extraAllow: [],
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: false },
+      onceAllows: [],
     });
 
   it("prefixes sandbox-exec, writes a self-denying profile OUTSIDE whitelisted paths", () => {

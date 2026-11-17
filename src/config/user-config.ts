@@ -177,15 +177,15 @@ export interface TuiUserConfig {
   stats?: string;
 }
 
-/** The `sandbox` section: global Seatbelt arming switch (per-project stays in sandbox.json). */
+/** The `sandbox` section: global Seatbelt arming switch (path grants live in the global sandbox.json). */
 export interface SandboxUserConfig {
   /** true = arm the sandbox globally (same as ZCODE_ACP_SANDBOX=1). */
   enabled?: boolean;
   /**
    * Milliseconds a sandbox ask waits inside an unattended context (goal-loop
    * round, workflow-run parent session) before ending no-decision so the
-   * chain keeps moving. 0 = wait forever even unattended. Per-project
-   * allow/deny content stays in sandbox.json — this is pacing, not content.
+   * chain keeps moving. 0 = wait forever even unattended. Allow/deny content
+   * lives in the machine-global sandbox.json — this is pacing, not content.
    */
   unattendedAskTimeoutMs?: number;
 }
