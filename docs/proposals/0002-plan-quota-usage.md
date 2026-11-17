@@ -79,3 +79,13 @@ the existing context-bar styling.
   replayed on attach; quota is account-wide and would replay stale values.
 - **Hub-level `/api/usage`**: violates ADR-0002 (the hub is a stateless byte
   proxy with no backend connection; only bridges talk to app-server).
+
+## Update 2026-11-15 — the `zcode` section (Start Plan grants)
+
+The Start Plan gateway (`zcode.z.ai`) feeds an additive `zcode` section:
+each entry is one `one_time` grant with absolute token counters, and
+`resetsAt` carries that grant's `expires_at` deadline — a deadline, never a
+guaranteed refill; clients must render it as an expiry, not a "resets in Xh"
+countdown. Failure kinds follow the vocabulary above: `auth_error` comes from both the
+envelope `code` (401) and the HTTP status line (401/403); `rate_limited`
+comes from the status line (429); anything else degrades to `unavailable`.
