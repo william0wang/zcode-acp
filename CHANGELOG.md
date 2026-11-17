@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.87.0](https://github.com/william0wang/zcode-acp/compare/v0.86.1...v0.87.0) (2026-11-17)
+
+
+### Features
+
+* **quota:** expose ZCode Start Plan usage via account/usage_stats ([#391](https://github.com/william0wang/zcode-acp/issues/391)) ([8a993e3](https://github.com/william0wang/zcode-acp/commit/8a993e388a67cb8eeb9c1e6d24708316110d6615)), closes [#390](https://github.com/william0wang/zcode-acp/issues/390)
+* replace per-project sandbox config with a machine-global allowlist file ([a58706e](https://github.com/william0wang/zcode-acp/commit/a58706eb582c47cf3c9bd8468459eda11e22b8a1))
+
+
+### Bug Fixes
+
+* **config:** support Windows catalog probe and canonicalize pending account model ids ([#395](https://github.com/william0wang/zcode-acp/issues/395)) ([7fb250e](https://github.com/william0wang/zcode-acp/commit/7fb250ebcdc7b0eea30a2050eaa0aa208a231b3d))
+* drop model.streaming events naming a foreign turn in the translator ([c08427f](https://github.com/william0wang/zcode-acp/commit/c08427f51a9567a2b685c8738e36dc7733fc2900))
+* ship scripts/postinstall.mjs in the npm package ([eb466b8](https://github.com/william0wang/zcode-acp/commit/eb466b85780294bbd74afc1b396f265d55b4fc0a))
+* **win:** cross-platform postinstall and registry discovery for zcode candidates ([#398](https://github.com/william0wang/zcode-acp/issues/398)) ([fb1fe1e](https://github.com/william0wang/zcode-acp/commit/fb1fe1e8fbc72b04cbf33839d4b2f214e2fcc815))
+
 ## [0.86.1](https://github.com/william0wang/zcode-acp/compare/v0.86.0...v0.86.1) (2026-11-16)
 
 
