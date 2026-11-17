@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.88.0](https://github.com/william0wang/zcode-acp/compare/v0.87.0...v0.88.0) (2026-11-17)
+
+
+### Features
+
+* expose provider metadata to ACP clients via _meta.zcode ([244b4e1](https://github.com/william0wang/zcode-acp/commit/244b4e110247b05a72d95ea192909fcabb57f9db))
+
 ## [0.87.0](https://github.com/william0wang/zcode-acp/compare/v0.86.1...v0.87.0) (2026-11-17)
 
 
