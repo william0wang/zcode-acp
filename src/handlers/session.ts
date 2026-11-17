@@ -617,6 +617,21 @@ function consumeBootCreateBind(): string | null {
 export const BOOT_RESUME_TRIGGER = "resume session";
 
 /**
+ * `_meta.zcode` on the session/new response (#400): the provider metadata ACP
+ * clients render a provider picker from, mirroring the `model` configOption's
+ * `_meta.zcode` payload verbatim — one source, so the response copy can never
+ * drift from the option the same response carries. The option-level `_meta`
+ * is the refresh vehicle (every config_option_update re-attaches it); this
+ * response-level copy is the boot snapshot integrators code against. Absent
+ * when the model option itself was omitted (no provider identity).
+ */
+function attachProviderMeta(resp: acp.NewSessionResponse): acp.NewSessionResponse {
+  const meta = resp.configOptions?.find((option) => option.id === "model")?._meta?.["zcode"];
+  if (meta !== undefined) resp._meta = { zcode: meta };
+  return resp;
+}
+
+/**
  * `session/new` → local placeholder id. The real zcode `session/create` is
  * deferred to first use (`ensureRealSession`) so an editor startup that never
  * sends a message leaves no empty session in the backend or the App's task
@@ -704,7 +719,7 @@ export async function newSession(
       recordAdvertisedModel(bindSid, boundModel);
     }
     updateInitialCatalog(server, cwd, bindSid, client, catalog.flight);
-    return { sessionId: bindSid, modes, configOptions };
+    return attachProviderMeta({ sessionId: bindSid, modes, configOptions });
   }
   const bootResume = consumeBootResumeTarget();
   if (bootResume) {
@@ -758,11 +773,11 @@ export async function newSession(
       }
       emitBootUsageUpdate(server, bootResume);
       scheduleQuotaDockBackstop(server);
-      return {
+      return attachProviderMeta({
         sessionId: bootResume,
         modes: loaded.modes,
         configOptions: loaded.configOptions,
-      };
+      });
     } catch (e) {
       warn(
         `session/new: boot-resume of ${bootResume} failed (` +
@@ -835,7 +850,7 @@ export async function newSession(
     recordAdvertisedModel(acpSid, advertisedModel);
   }
   updateInitialCatalog(server, cwd, acpSid, client, catalog.flight);
-  return { sessionId: acpSid, modes, configOptions };
+  return attachProviderMeta({ sessionId: acpSid, modes, configOptions });
 }
 
 /**

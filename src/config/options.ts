@@ -205,12 +205,32 @@ export interface ModelRef {
  *     local baseURL (llama.cpp/ollama-style providers work keyless).
  */
 export function providerSelectable(pid: string, p: ProviderEntry | undefined): boolean {
-  if (!p) return false;
-  if (isBuiltinProvider(pid)) return p.enabled === true && Boolean(p.options?.apiKey);
-  if (p.enabled === false) return false;
-  if (p.options?.apiKey) return true;
-  if (p.options?.apiKeyRequired === false) return true;
-  return isLocalBaseURL(p.options?.baseURL);
+  return providerUnselectableReason(pid, p) === null;
+}
+
+/**
+ * Why a provider entry is NOT selectable (null = selectable) — the reason
+ * taxonomy exported to ACP clients as `unselectableReason` in
+ * `_meta.zcode.providers` (#400), so a client can render "link account in the
+ * desktop app" instead of silently omitting the provider.
+ */
+export type ProviderUnselectableReason = "disabled" | "keyless-builtin" | "non-local-keyless";
+
+export function providerUnselectableReason(
+  pid: string,
+  p: ProviderEntry | undefined,
+): ProviderUnselectableReason | null {
+  if (!p) return "disabled";
+  if (isBuiltinProvider(pid)) {
+    if (p.enabled !== true) return "disabled";
+    if (!p.options?.apiKey) return "keyless-builtin";
+    return null;
+  }
+  if (p.enabled === false) return "disabled";
+  if (p.options?.apiKey) return null;
+  if (p.options?.apiKeyRequired === false) return null;
+  if (isLocalBaseURL(p.options?.baseURL)) return null;
+  return "non-local-keyless";
 }
 
 /** localhost-style baseURL (llama.cpp / Ollama / LM Studio run keyless). */
@@ -222,6 +242,50 @@ function isLocalBaseURL(url: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/** Synthesize a config.json-shaped provider entry from a personal rule. */
+function personalRuleEntry(rule: PersonalProviderRule): ProviderEntry {
+  return {
+    name: rule.providerName,
+    enabled: rule.enabled,
+    options: {
+      apiKey: rule.config?.access?.apiKey,
+      baseURL: rule.config?.api?.baseUrl,
+    },
+  };
+}
+
+/**
+ * A config.json entry with the 3.12+ personal rule overlaid — custom
+ * providers toggled/updated in the desktop app write their new `enabled` /
+ * `apiKey` / `baseUrl` only to provider_config.json, leaving legacy
+ * config.json frozen at its pre-3.12 state. Without the overlay a provider
+ * disabled in 3.12+ stays selectable via config.json.
+ */
+function effectiveProviderEntry(
+  pid: string,
+  p: ProviderEntry | undefined,
+  personal: PersonalModels | null,
+): ProviderEntry | undefined {
+  const personalRule = !isBuiltinProvider(pid)
+    ? personal?.providers.find((entry) => entry.pid === pid)?.rule
+    : undefined;
+  if (!p || !personalRule) return p;
+  return {
+    ...p,
+    name: personalRule.providerName ?? p.name,
+    enabled: personalRule.enabled ?? p.enabled,
+    options: {
+      ...p.options,
+      ...(personalRule.config?.access?.apiKey !== undefined
+        ? { apiKey: personalRule.config.access.apiKey }
+        : {}),
+      ...(personalRule.config?.api?.baseUrl !== undefined
+        ? { baseURL: personalRule.config.api.baseUrl }
+        : {}),
+    },
+  };
 }
 
 /**
@@ -239,15 +303,7 @@ function appendPersonalOnlyProviders(
   for (const { pid, rule } of personal.providers) {
     if (known.has(pid)) continue;
     if (pinned && pid !== pinned) continue;
-    const synthesized: ProviderEntry = {
-      name: rule.providerName,
-      enabled: rule.enabled,
-      options: {
-        apiKey: rule.config?.access?.apiKey,
-        baseURL: rule.config?.api?.baseUrl,
-      },
-    };
-    if (!providerSelectable(pid, synthesized)) continue;
+    if (!providerSelectable(pid, personalRuleEntry(rule))) continue;
     const providerName = rule.providerName ?? pid;
     for (const modelId of personal.modelsByProvider.get(pid) ?? []) {
       out.push({ providerId: pid, providerName, modelId });
@@ -311,31 +367,7 @@ export function loadAllModels(): ModelRef[] {
     // ZCODE_PROVIDER pins the dropdown to one provider id.
     for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
       if (pinned && pid !== pinned) continue;
-      // Custom providers toggled or updated in the 3.12+ desktop app write
-      // their new `enabled` / `apiKey` / `baseUrl` / `providerName` only to
-      // `provider_config.json`, leaving legacy `config.json` frozen at its
-      // pre-3.12 state. Overlay the personal rule before checking selectability
-      // so a provider disabled in 3.12+ does not stay selectable via config.json.
-      const personalRule = !isBuiltinProvider(pid)
-        ? personal?.providers.find((entry) => entry.pid === pid)?.rule
-        : undefined;
-      const effective: ProviderEntry | undefined =
-        p && personalRule
-          ? {
-              ...p,
-              name: personalRule.providerName ?? p.name,
-              enabled: personalRule.enabled ?? p.enabled,
-              options: {
-                ...p.options,
-                ...(personalRule.config?.access?.apiKey !== undefined
-                  ? { apiKey: personalRule.config.access.apiKey }
-                  : {}),
-                ...(personalRule.config?.api?.baseUrl !== undefined
-                  ? { baseURL: personalRule.config.api.baseUrl }
-                  : {}),
-              },
-            }
-          : p;
+      const effective = effectiveProviderEntry(pid, p, personal);
       if (!providerSelectable(pid, effective)) continue;
       const providerName = effective?.name ?? pid;
       // Custom providers: once the personal config tracks the provider's
@@ -391,6 +423,105 @@ function entitledOrDefaultModels(pinned: string | undefined): ModelRef[] {
       modelId: DEFAULT_MODEL_ID,
     },
   ];
+}
+
+// ---------- ACP provider metadata (`_meta.zcode`, #400) ----------
+
+/** One provider entry in the ACP-facing `_meta.zcode.providers` list. */
+export interface ProviderMetadataEntry {
+  /**
+   * Config-dialect provider id (`builtin:…` slug / custom UUID) — NOT the
+   * registry's `account:` spelling, so it matches the other config.json-sourced
+   * fields a client sees.
+   */
+  id: string;
+  /** Display name (the desktop app's providerName; the raw id when unnamed). */
+  name: string;
+  /** Whether the model dropdown offers this provider's models. */
+  selectable: boolean;
+  /** Present only when selectable is false — why the dropdown skips it. */
+  unselectableReason?: ProviderUnselectableReason;
+  /**
+   * The modelId the dropdown lists first for the provider — what a session
+   * started on it actually runs (`loadZcodeCredentials` dispatches the first
+   * config.json key, same order the dropdown derives from).
+   */
+  defaultModel?: string;
+}
+
+/** The `_meta.zcode` payload on the model configOption and session/new responses. */
+export interface ProviderMetaPayload {
+  providers: ProviderMetadataEntry[];
+  /** Config dialect of the current provider (`account:` refs fold to `builtin:`). */
+  currentProviderId: string;
+}
+
+/**
+ * The provider list ACP clients render a provider picker from (#400) —
+ * without mirroring `providerSelectable` and the config scan in their own
+ * code. Selectable providers come FIRST, derived from the SAME
+ * `loadAllModels()` output the model dropdown offers (pass `models` when the
+ * caller already holds it), so metadata and dropdown can never disagree —
+ * including the ZCODE_PROVIDER pin and entitled coding plans. Unselectable
+ * config.json / personal-only entries follow with a reason code, so a client
+ * can render "keyless — link account in the desktop app" instead of a
+ * silent gap.
+ */
+export function providerMetadataList(
+  models: ModelRef[] = loadAllModels(),
+): ProviderMetadataEntry[] {
+  const pinned = process.env.ZCODE_PROVIDER;
+  const out: ProviderMetadataEntry[] = [];
+  const seen = new Set<string>();
+  for (const m of models) {
+    if (seen.has(m.providerId)) continue;
+    seen.add(m.providerId);
+    out.push({ id: m.providerId, name: m.providerName, selectable: true, defaultModel: m.modelId });
+  }
+  const personal = loadPersonalModels();
+  const appendConfigDialect = (
+    pid: string,
+    entry: ProviderEntry | undefined,
+    name: string,
+  ): void => {
+    if (seen.has(pid)) return;
+    seen.add(pid);
+    const reason = providerUnselectableReason(pid, entry);
+    // A "selectable" verdict here means the provider is usable but carries no
+    // models (empty models map) — loadAllModels never listed it. Stay honest
+    // rather than inventing a reason.
+    out.push(
+      reason === null
+        ? { id: pid, name, selectable: true }
+        : { id: pid, name, selectable: false, unselectableReason: reason },
+    );
+  };
+  try {
+    const cfg = readConfig() as ConfigShape;
+    for (const [pid, p] of Object.entries(cfg.provider ?? {})) {
+      if (pinned && pid !== pinned) continue;
+      const effective = effectiveProviderEntry(pid, p, personal);
+      appendConfigDialect(pid, effective, effective?.name ?? pid);
+    }
+  } catch {
+    // unreadable config.json — the selectable set from loadAllModels stands alone
+  }
+  for (const { pid, rule } of personal?.providers ?? []) {
+    if (pinned && pid !== pinned) continue;
+    appendConfigDialect(pid, personalRuleEntry(rule), rule.providerName ?? pid);
+  }
+  return out;
+}
+
+/** Assemble the `_meta.zcode` payload; the current provider id normalizes to the config dialect. */
+export function buildProviderMeta(
+  currentProviderId: string,
+  models: ModelRef[] = loadAllModels(),
+): ProviderMetaPayload {
+  return {
+    providers: providerMetadataList(models),
+    currentProviderId: configProviderIdFor(currentProviderId),
+  };
 }
 
 /** Look up a provider entry by id (any provider, not just enabled).
@@ -763,6 +894,11 @@ export async function buildConfigOptions(
       type: "select",
       currentValue: currentModel,
       options: modelOptions,
+      // Provider metadata for ACP clients (#400). The model option is the
+      // refresh vehicle: every rebuild (switch, credential change, config_
+      // option_update) re-attaches it, so the provider list stays live for
+      // the whole session lifetime. See docs/CONFIG-OPTIONS.md.
+      _meta: { zcode: buildProviderMeta(currentProvider, localModels) },
     },
     {
       id: "mode",

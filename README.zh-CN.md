@@ -229,6 +229,7 @@ CI 会在每次 push 和 pull request 时运行 `typecheck`、`lint`、`build` �
 
 - [架构](docs/ARCHITECTURE.md) —— 事件流、双路径去重、模块职责
 - [协议](docs/PROTOCOL.md) —— ZCode JSON-RPC 协议细节
+- [配置选项](docs/CONFIG-OPTIONS.md) —— configOptions、model 值编码、`_meta.zcode` provider 元数据（ACP 客户端集成指南）
 - [沙箱](docs/SANDBOX.md) —— 沙箱完整手册（开关、白名单、弹窗、验证）
 - [远程访问](docs/REMOTE.md) —— hub、发现 API、隧道、远程创建会话
 - [统一 CLI](docs/CLI.md) —— REPL、配额卡片、hub/server 子命令

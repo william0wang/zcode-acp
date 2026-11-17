@@ -336,6 +336,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture docum
 
 - [Architecture](docs/ARCHITECTURE.md) — event stream, dual-path deduplication, module responsibilities
 - [Protocol](docs/PROTOCOL.md) — ZCode JSON-RPC protocol details
+- [Config Options](docs/CONFIG-OPTIONS.md) — configOptions, model value encoding, `_meta.zcode` provider metadata (ACP client guide)
 - [Sandbox](docs/SANDBOX.md) — full sandbox manual (switches, whitelist, popups, verification)
 - [Remote Access](docs/REMOTE.md) — hub, discovery API, tunnels, remote session-create
 - [Unified CLI](docs/CLI.md) — interactive TUI, quota cards, hub/server subcommands
