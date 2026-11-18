@@ -132,6 +132,16 @@ function cardTitle(description: string | undefined): string {
   return messages().backgroundTaskTitle((description ?? "").trim());
 }
 
+/**
+ * How long a rewind claim stays claimable. The replacement turn follows its
+ * admission within seconds (upstream command FIFO); anything starting later
+ * is an unrelated foreign turn and must not be misclaimed.
+ */
+const REWIND_CLAIM_TTL_MS = 90_000;
+
+/** Ownership-token sequence for the single rewind-claim slot (per process). */
+let rewindClaimTokenSeq = 0;
+
 export class BackgroundTaskListener implements EventListener {
   private readonly server: ZcodeAcpServer;
   readonly zcodeSid: string;
@@ -143,10 +153,78 @@ export class BackgroundTaskListener implements EventListener {
    * to the client as `agent_message_chunk`.
    */
   private activeNotifyTurnId: string | null = null;
+  /**
+   * Rewind claim (rewind.ts): a bridge-sent v4 editUserQuery/retryTurn admits
+   * its replacement turn through the command channel — no turn loop ever owns
+   * it, so without a claim its text would be silently dropped. Non-null while
+   * a rewind command is in flight or admitted-but-not-yet-started; the first
+   * non-background `turn.started` after it claims the notification-turn
+   * forwarding path. Timestamp (not boolean) so the TTL backstop can expire a
+   * claim whose turn never started (queue-admission edge).
+   */
+  private rewindClaimAt: number | null = null;
+  private rewindClaimToken: number | null = null;
+  private rewindClaimTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(server: ZcodeAcpServer, zcodeSid: string) {
     this.server = server;
     this.zcodeSid = zcodeSid;
+  }
+
+  /**
+   * Pre-claim the replacement turn of a rewind command (called by rewind.ts
+   * BEFORE the v4 command is sent, so a turn starting while the ack is still
+   * settling is caught too). The claim arms the notification-turn forwarding
+   * path — the busy window is held by `notifyTurnActiveSince` + foreign-turn
+   * tracking, and settles at the turn's terminal. Returns an ownership
+   * token: the claim is single-slot, and a concurrent rewind's claim
+   * supersedes an earlier one — `releaseRewindClaim(token)` is a no-op when
+   * the slot belongs to a newer claim, so a FAILED concurrent call cannot
+   * drop the claim of the one still in flight.
+   */
+  claimRewindTurn(): number {
+    const token = ++rewindClaimTokenSeq;
+    this.rewindClaimAt = Date.now();
+    this.rewindClaimToken = token;
+    if (this.rewindClaimTimer) clearTimeout(this.rewindClaimTimer);
+    // Backstop: an accepted rewind whose replacement turn never starts (queue
+    // admission edge) would otherwise leave the busy window open forever —
+    // the handler deliberately does not settle the accepted path.
+    this.rewindClaimTimer = setTimeout(() => {
+      this.rewindClaimTimer = null;
+      if (this.rewindClaimAt === null) return;
+      this.rewindClaimAt = null;
+      this.rewindClaimToken = null;
+      warn(`  [bg] rewind claim expired without a turn — settling busy state`);
+      // Settle only when nothing else holds the session busy: a later
+      // legitimate turn (prompted while our claim sat unarmed) must not be
+      // unlocked by OUR expired claim.
+      if (this.sessionBusyElsewhere()) return;
+      const acpSid = this.server.acpSidByZcodeSid.get(this.zcodeSid);
+      if (acpSid) void emitSessionTurnState(this.server, acpSid, false);
+    }, REWIND_CLAIM_TTL_MS).unref();
+    return token;
+  }
+
+  /** True while a turn OTHER than our (expired) claim holds the session. */
+  private sessionBusyElsewhere(): boolean {
+    return (
+      [...this.server.pendingTurns.values()].some((t) => t.zcodeSid === this.zcodeSid) ||
+      this.server.foreignActiveTurns.has(this.zcodeSid) ||
+      this.server.notifyTurnActiveSince.has(this.zcodeSid)
+    );
+  }
+
+  /** Drop a claim that never armed (command rejected / errored). No-op when
+   * the slot was re-claimed by a newer rewind call. */
+  releaseRewindClaim(token: number): void {
+    if (this.rewindClaimToken !== token) return;
+    this.rewindClaimAt = null;
+    this.rewindClaimToken = null;
+    if (this.rewindClaimTimer) {
+      clearTimeout(this.rewindClaimTimer);
+      this.rewindClaimTimer = null;
+    }
   }
 
   handleEvent(event: ZcodeEvent): void {
@@ -195,6 +273,26 @@ export class BackgroundTaskListener implements EventListener {
             this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
             log(`  [bg] background notification turn started (${turnId.slice(-8)})`);
           }
+        } else if (this.rewindClaimAt !== null && !this.activeNotifyTurnId) {
+          // The replacement turn of a bridge-sent v4 editUserQuery/retryTurn:
+          // admitted through the command channel, so no turn loop owns it and
+          // its inputSource is not "background_task". Claim it into the
+          // notification-turn forwarding path so its text streams to clients;
+          // the busy window and running transitions ride the foreign-turn
+          // tracking below (this branch only owns the text forwarding).
+          //
+          // A registered-but-not-started pendingTurn does NOT block the
+          // claim: upstream serializes turns FIFO, so the replacement always
+          // runs BEFORE a prompt queued behind it — and that prompt's turn
+          // loop drops foreign-turn events anyway (skippingForeignTurn), so
+          // forwarding here can never double-render. Skipping instead would
+          // LOSE the replacement text and strand the claim until the TTL
+          // backstop misfires its busy settle.
+          this.activeNotifyTurnId = turnId || null;
+          this.firstMessageId = null;
+          this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
+          this.releaseRewindClaim(this.rewindClaimToken!);
+          log(`  [bg] rewind replacement turn claimed (${(turnId || "?").slice(-8)})`);
         } else if (this.activeNotifyTurnId) {
           // A non-background turn starting while a notification is marked
           // active means the notification's terminal event was never observed

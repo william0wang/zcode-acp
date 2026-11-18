@@ -26,6 +26,7 @@ import {
   sandboxActive,
 } from "./backend/sandbox.js";
 import { clearClosedSessionIds } from "./closed-sessions.js";
+import { desktopBundleAtLeast } from "./config/deferred-probe-capability.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -59,6 +60,14 @@ export interface ClientCapabilities {
   elicitation?: { form?: unknown; url?: unknown };
   _meta?: Record<string, unknown>;
 }
+
+/**
+ * Desktop bundle floor for the rewind extensions (`_meta.zcode.rewind`): the
+ * v4 conversation commands editUserQuery/retryTurn and the rowsRange read
+ * have existed since the earliest visible upstream tag (3.14.3) and were
+ * audited additive through 3.18.2 — see the initialize capability flag.
+ */
+const REWIND_BUNDLE_FLOOR = "3.14.3";
 
 /** A pending prompt turn. */
 export interface PendingTurn {
@@ -1520,7 +1529,21 @@ export class ZcodeAcpServer {
         // endpoint, hub-proxied at /api/instances/{id}/fs/* (ADR-0004).
         // turnState: the out-of-band running notifications this bridge emits,
         // old and new spellings (#311) — see TURN_STATE_METHODS.
-        _meta: { zcode: { fs: true, turnState: [...TURN_STATE_METHODS] } },
+        // rewind: session/edit_user_message + session/retry_turn (v4
+        // editUserQuery/retryTurn). The floor is source-verified — the v4
+        // rewind command set and rowsRange predate desktop 3.14.3 (the
+        // earliest upstream tag) and were audited additive through 3.18.2 —
+        // so the static bundle version gates at initialize (before any
+        // backend exists to probe), fail closed on unreadable bundles.
+        // Absent (not false) below the floor — the established "unsupported"
+        // spelling, cf. _meta.zcode.fs.
+        _meta: {
+          zcode: {
+            fs: true,
+            turnState: [...TURN_STATE_METHODS],
+            ...(desktopBundleAtLeast(REWIND_BUNDLE_FLOOR) ? { rewind: true } : {}),
+          },
+        },
       },
       // Credentials come from the ZCode side — the desktop app's config.json
       // / provider_config.json, or `zcode-acp setup`'s saved accounts — and

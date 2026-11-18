@@ -333,3 +333,83 @@ describe("normalizeWireMessages (3.18+ wire shape: info.messageId, no info.id)",
     expect(out.map((m) => m.info.id)).toEqual(["msg_u1", "msg_a1"]);
   });
 });
+
+describe("replayMessages _meta.zcode.mid (rewind addressing)", () => {
+  function collectCx() {
+    const updates: Array<Record<string, unknown>> = [];
+    return {
+      cx: {
+        notify: async (_m: string, params: unknown) => {
+          updates.push(params as Record<string, unknown>);
+        },
+      },
+      updates,
+    };
+  }
+  const meta = (u: Record<string, unknown>): Record<string, unknown> =>
+    ((u.update as Record<string, unknown>)._meta ?? {}) as Record<string, unknown>;
+
+  it("carries the store message id on user/agent/thought chunks", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      msg("u1", "user", "question"),
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          { type: "reasoning", text: "thinking" },
+          { type: "text", text: "answer" },
+        ],
+      },
+    ]);
+    expect(updates).toHaveLength(3);
+    const [u, thought, agent] = updates.map((p) => p.update as Record<string, unknown>);
+    expect(u.sessionUpdate).toBe("user_message_chunk");
+    expect(meta(updates[0]!).zcode).toEqual({ mid: "u1" });
+    // The thought chunk's top-level id is thought_-prefixed, but the mid is
+    // the raw message id — the value rowsRange's entityId matches.
+    expect(thought.messageId).toBe("thought_a1");
+    expect(meta(updates[1]!).zcode).toEqual({ mid: "a1" });
+    expect(agent.sessionUpdate).toBe("agent_message_chunk");
+    expect(meta(updates[2]!).zcode).toEqual({ mid: "a1" });
+  });
+
+  it("skips the mid for id-less rows (positional fallback is not an address)", async () => {
+    const { cx, updates } = collectCx();
+    await replayMessages(cx, "s", [
+      { info: { role: "user" }, parts: [{ type: "text", text: "anon" }] },
+    ]);
+    const u = updates[0]!.update as Record<string, unknown>;
+    expect(u.messageId).toBe("hist_0");
+    expect(u._meta).toBeUndefined();
+  });
+
+  it("merges the mid beside earlierPage and existing _meta keys", async () => {
+    const { cx, updates } = collectCx();
+    const history: ZcodeMessage[] = [
+      msg("u1", "user", "q"),
+      {
+        info: { id: "a1", role: "assistant" },
+        parts: [
+          {
+            type: "tool",
+            callId: "c1",
+            tool: "Bash",
+            state: { title: "Run", status: "completed", input: "ls", output: "f" },
+          },
+          { type: "text", text: "done" },
+        ],
+      },
+    ];
+    await withReplayBatch("s", () => replayMessages(cx, "s", history));
+    const tool = updates[1]!.update as Record<string, unknown>;
+    // tool_call keeps its claudeCode _meta and gains zcode.mid.
+    const toolMeta = tool._meta as { claudeCode?: unknown; zcode?: { mid: string } };
+    expect(toolMeta.claudeCode).toEqual({ toolName: "Bash" });
+    expect(toolMeta.zcode).toEqual({ mid: "a1" });
+
+    const { cx: cx2, updates: earlier } = collectCx();
+    await withReplayBatch("s", () => replayMessages(cx2, "s", history.slice(0, 1), { earlierPage: true }));
+    const pageMeta = meta(earlier[0]!).zcode as Record<string, unknown>;
+    expect(pageMeta).toEqual({ mid: "u1", earlierPage: true });
+  });
+});

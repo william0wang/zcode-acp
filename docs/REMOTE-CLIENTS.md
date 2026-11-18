@@ -962,6 +962,33 @@ Errors: `400` missing/empty title or oversized body (>4 KB), `401` bad token,
 `404` unknown session (or instance), `502` bridge unreachable. Renaming during
 a running turn is allowed — titles are no longer turn-coupled.
 
+## Editing or regenerating a message (rewind)
+
+Edit-and-resend of the latest user message and regenerate of the latest turn
+ride two ACP extension methods (NOT hub routes — they go over the client's own
+ACP connection, like `session/prompt`):
+
+```json
+{ "method": "session/edit_user_message",
+  "params": { "sessionId": "…", "messageId": "<_meta.zcode.mid>", "newText": "…" } }
+{ "method": "session/retry_turn",
+  "params": { "sessionId": "…", "messageId": "<_meta.zcode.mid, optional>" } }
+```
+
+Gate on the `initialize` capability `agentCapabilities._meta.zcode.rewind ===
+true` (absent on older bridges/backends — hide the actions and degrade to
+quote-to-composer). Addressing uses the `_meta.zcode.mid` every replayed
+message update carries (see `docs/PROTOCOL.md` §Extension Methods).
+
+Client recipe on the ack (`{ok, rewoundMessageId}`): the rewound tail is
+already committed — refetch history (`session/load`); the replacement turn
+streams to every attached client as `agent_message_chunk` while the session
+reports busy via `$/zcode/turnState`. A second attached client's cached tail
+is stale until its next replay (v1: single user; the edit happens on the
+viewed client). Only the LATEST user message can be edited and the latest
+assistant reply regenerated — anything else answers `-32602` without a
+backend round trip.
+
 ## Deleting a project or session
 
 ```text

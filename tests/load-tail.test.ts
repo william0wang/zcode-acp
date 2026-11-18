@@ -233,7 +233,11 @@ describe("context handoff collapse marker", () => {
     };
     expect(update.title).toBe("Context handoff");
     expect(update.toolCallId).toBe("histfold_u3");
-    expect(update._meta).toEqual({ zcode: { collapsed: true, kind: "context-handoff" } });
+    // The collapsed card carries the rewind handle beside its collapse meta
+    // (uniform _meta.zcode.mid on every replayed update).
+    expect(update._meta).toEqual({
+      zcode: { collapsed: true, kind: "context-handoff", mid: "u3" },
+    });
     expect(update.content![0]!.content!.text).toContain("The summary below covers");
   });
 });

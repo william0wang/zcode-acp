@@ -33,9 +33,10 @@ export function auditedBundleMatches(version: string, digest: string): boolean {
  * — and the mismatch warn below then fires once per process, not per session. */
 let bundleStateMemo: { entry: string; version?: string; digest: string } | null = null;
 
-/** Test hook — drop the per-process bundle-state memo. */
+/** Test hook — drop the per-process bundle-state memos. */
 export function resetDeferredProbeMemosForTests(): void {
   bundleStateMemo = null;
+  bundleVersionMemo = null;
 }
 
 /** Read `package.json` version from an Electron app.asar header without buffering the archive. */
@@ -90,6 +91,47 @@ function bundleState(entry = desktopBundleEntryPath()): { version?: string; dige
     bundleStateMemo = { entry, version, digest };
   }
   return bundleStateMemo;
+}
+
+/** Per-process bundle-VERSION memo (no entry hashing — capability gates that
+ * only need the version must not pay the sha256 of the whole bundle). */
+let bundleVersionMemo: { entry: string; version?: string } | null = null;
+
+/** Desktop bundle version, or undefined when unreadable (non-desktop setups). */
+export function desktopBundleVersion(entry = desktopBundleEntryPath()): string | undefined {
+  if (!bundleVersionMemo || bundleVersionMemo.entry !== entry) {
+    let version: string | undefined;
+    try {
+      version = readDesktopBundleVersion(entry);
+    } catch {
+      version = undefined;
+    }
+    bundleVersionMemo = { entry, version };
+  }
+  return bundleVersionMemo.version;
+}
+
+/** Numeric segment compare of dot-separated version strings. */
+function versionAtLeast(version: string, min: string): boolean {
+  const a = version.split(".").map((s) => Number.parseInt(s, 10));
+  const b = min.split(".").map((s) => Number.parseInt(s, 10));
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    if (av !== bv) return av > bv;
+  }
+  return true;
+}
+
+/**
+ * Whether the desktop bundle's version is >= `min`. Used by capability gates
+ * that must answer at `initialize` — before any backend exists to probe —
+ * against a source-verified version floor. Fail closed: an unreadable bundle
+ * (non-desktop setups) answers false, never a wrong claim of support.
+ */
+export function desktopBundleAtLeast(min: string): boolean {
+  const version = desktopBundleVersion();
+  return version !== undefined && versionAtLeast(version, min);
 }
 
 /** Read-only bundle pin diagnostics; no backend or user state is opened. */
