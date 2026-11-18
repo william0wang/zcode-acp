@@ -56,7 +56,11 @@ import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
 import { initialSessionMode, pinAdvertisedModel } from "../config/settings.js";
 import { probeInitialModelCatalog } from "../config/initial-model-catalog.js";
-import { applyModelSwitch, buildResumeRuntimeModel } from "../config/runtime-model.js";
+import {
+  applyModelSwitch,
+  buildResumeRuntimeModel,
+  lastSwitchedModelValue,
+} from "../config/runtime-model.js";
 import {
   effectiveWorkflowGate,
   effectiveWorkflowGateNow,
@@ -1246,8 +1250,14 @@ export async function ensureRealSession(
       if (await applyModelSwitch(server, sid, advertised)) {
         // Remember it: a setModel before the session's first input applies
         // in-memory only, and a later resume reverts to the workspace default
-        // — the re-assert path needs this to restore the same model.
-        rememberModelChoice(server, acpSid, sid, { model: advertised });
+        // — the re-assert path needs this to restore the same model. Record
+        // the registry-dialect identity the switch LANDED on (#403): the
+        // advertised value may be a stale-dialect ref that only resolved via
+        // model-resolution, and re-asserting it raw would re-run the whole
+        // resolution (or fail on a no-snapshot resume).
+        rememberModelChoice(server, acpSid, sid, {
+          model: lastSwitchedModelValue(server, sid) ?? advertised,
+        });
         log(`session/new ${acpSid}: pinned the advertised model ${advertised}`);
       } else {
         warn(
@@ -3204,7 +3214,11 @@ export async function setConfigOptionHandler(
     params.sessionId,
   );
   if (!result) {
-    throw new Error(`unsupported config option or switch failed: ${params.configId}`);
+    throw new Error(
+      params.configId === "model"
+        ? `model switch failed: "${params.value}" was not accepted (see the bridge log for the registry resolution)`
+        : `unsupported config option or switch failed: ${params.configId}`,
+    );
   }
   const { options } = await emitConfigOptionUpdate(
     server,

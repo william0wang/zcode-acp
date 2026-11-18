@@ -76,17 +76,25 @@ describe("slash switches remember the model choice", () => {
     const { backend, calls } = fakeBackend();
     server.backend = backend;
     const acpSid = seedSession(server, "zc-mem-1");
-    server.modelAvailability.set("zc-mem-1", [{ providerId: "fixture", modelId: "GLM-5.2", levels: [] }]);
+    server.modelAvailability.set("zc-mem-1", [
+      { providerId: "fixture", modelId: "GLM-5.2", levels: [] },
+    ]);
     const { cx, updates } = recordingCx();
 
     const resp = await handleSlashCommand(server, cx, acpSid, "zc-mem-1", "/model GLM-5.2");
 
     expect(resp).toEqual({ stopReason: "end_turn" });
     expect(calls).toContain("session/setModel");
-    // In-memory: the post-resume re-assert reads this map.
-    expect(server.sessionModelChoices.get("zc-mem-1")).toMatchObject({ model: "GLM-5.2" });
+    // In-memory: the post-resume re-assert reads this map. The recorded value
+    // is the registry-dialect identity the switch landed on (#403): the bare
+    // "GLM-5.2" resolved to the snapshot's `fixture` provider.
+    expect(server.sessionModelChoices.get("zc-mem-1")).toMatchObject({
+      model: "fixture\\GLM-5.2",
+    });
     // Durable: a bridge restart recovers it through the alias record.
-    expect(lookupLazySession(acpSid)?.modelChoice).toMatchObject({ model: "GLM-5.2" });
+    expect(lookupLazySession(acpSid)?.modelChoice).toMatchObject({
+      model: "fixture\\GLM-5.2",
+    });
     // The editor UI still learns about the switch.
     expect(updates.some((u) => u.sessionUpdate === "config_option_update")).toBe(true);
   });
@@ -113,7 +121,9 @@ describe("slash switches remember the model choice", () => {
     });
     server.backend = backend;
     const acpSid = seedSession(server, "zc-mem-3");
-    server.modelAvailability.set("zc-mem-3", [{ providerId: "fixture", modelId: "GLM-5.2", levels: [] }]);
+    server.modelAvailability.set("zc-mem-3", [
+      { providerId: "fixture", modelId: "GLM-5.2", levels: [] },
+    ]);
     const { cx } = recordingCx();
 
     await expect(

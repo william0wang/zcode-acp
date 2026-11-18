@@ -42,10 +42,19 @@ function makeBackend(overrides: Record<string, () => ZcodeResponse> = {}): {
       switch (method) {
         case "workspace/updateProviderRegistry":
         case "session/resume":
-          return { id, result: { settings: { model: { available: [
-            { ref: { providerId: "fixture", modelId: "GLM-5.2" } },
-            { ref: { providerId: "fixture", modelId: "GLM-5.3" } },
-          ] } } } } as ZcodeResponse;
+          return {
+            id,
+            result: {
+              settings: {
+                model: {
+                  available: [
+                    { ref: { providerId: "fixture", modelId: "GLM-5.2" } },
+                    { ref: { providerId: "fixture", modelId: "GLM-5.3" } },
+                  ],
+                },
+              },
+            },
+          } as ZcodeResponse;
         case "session/setModel":
         case "session/setThoughtLevel":
           return { id, result: {} } as ZcodeResponse;
@@ -103,12 +112,20 @@ describe("model choice stickiness", () => {
       kind: "thought",
     });
 
+    // The remembered model is the registry-dialect identity the switch LANDED
+    // on (#403) — not the bare typed value. Its exact provider spelling is
+    // table-dependent (accountProviderIdFor folds when zcode-builtin.json is
+    // present), so assert against the identity itself.
+    const { lastSwitchedModelValue } = await import("../src/config/runtime-model.js");
+    const landed = lastSwitchedModelValue(server, SID_Z);
+    expect(landed).toBeDefined();
+    expect(landed).toMatch(/\\GLM-5.3$/);
     expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
-      model: "GLM-5.3",
+      model: landed,
       thought: "high",
     });
     expect(lookupLazySession(SID_A)?.modelChoice).toMatchObject({
-      model: "GLM-5.3",
+      model: landed,
       thought: "high",
     });
   });
@@ -209,7 +226,11 @@ describe("model choice stickiness", () => {
     await ensureRealSession(server, SID_A2); // fresher alias recovered first
     await ensureRealSession(server, SID_A); // stale alias re-seeds second
 
-    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({ model: "GLM-5.3" });
+    // The re-assert re-records the choice in the landed registry dialect
+    // (#403): the resume snapshot's `fixture` provider + bare "GLM-5.3".
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
+      model: "fixture\\GLM-5.3",
+    });
   });
 
   it("bridge restart: ensureRealSession recovers the choice from the store and re-applies it", async () => {
@@ -221,7 +242,7 @@ describe("model choice stickiness", () => {
 
     expect(zcodeSid).toBe(SID_Z);
     expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
-      model: "GLM-5.3",
+      model: "fixture\\GLM-5.3",
       thought: "high",
     });
     // The recovery's eviction guard reloads the session — the re-assert must
@@ -248,7 +269,9 @@ describe("model choice stickiness", () => {
 
     await ensureRealSession(server, SID_A); // the STALE alias recovers first
 
-    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({ model: "GLM-5.2" });
+    expect(server.sessionModelChoices.get(SID_Z)).toMatchObject({
+      model: "fixture\\GLM-5.2",
+    });
     // The re-assert rides the recovery's eviction-guard resume with the
     // fresher choice, not the stale alias's own.
     expect(calls).toContain("session/setModel");
