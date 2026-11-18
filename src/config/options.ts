@@ -1070,11 +1070,16 @@ export async function setConfigOption(
   acpSid?: string,
 ): Promise<{ kind: "model" | "mode" | "thought"; currentValue: string } | null> {
   if (configId === "model") {
-    const { applyModelSwitch } = await import("./runtime-model.js");
+    const { applyModelSwitch, lastSwitchedModelValue } = await import("./runtime-model.js");
     const ok = await applyModelSwitch(server, zcodeSid, value);
     if (!ok) return null;
-    rememberModelChoice(server, acpSid, zcodeSid, { model: value });
-    return { kind: "model", currentValue: value };
+    // Remember the registry-dialect identity the switch LANDED on (#403) —
+    // the inbound value may be a stale-dialect ref that only resolved via
+    // model-resolution, and the post-resume re-assert replays this record.
+    rememberModelChoice(server, acpSid, zcodeSid, {
+      model: lastSwitchedModelValue(server, zcodeSid) ?? value,
+    });
+    return { kind: "model", currentValue: lastSwitchedModelValue(server, zcodeSid) ?? value };
   }
   const dispatch = CONFIG_DISPATCH[configId];
   if (!dispatch) return null;

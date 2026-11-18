@@ -25,7 +25,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 
 import { emitInitialUsage } from "../config/model-cache.js";
-import { applyModelSwitch } from "../config/runtime-model.js";
+import { applyModelSwitch, lastSwitchedModelValue } from "../config/runtime-model.js";
 import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
 import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
@@ -299,11 +299,15 @@ export async function setModel(
   const modelId = params.modelId as string;
   if (!modelId) throw new Error("setModel requires modelId");
   const ok = await applyModelSwitch(server, zcodeSid, modelId);
-  if (!ok) throw new Error("setModel failed (model switch rejected)");
-  log(`session/setModel → ${modelId} (applyModelSwitch)`);
+  if (!ok) throw new Error(`setModel failed (model switch rejected: ${modelId})`);
+  // Record the registry-dialect identity the switch landed on (#403) — the
+  // inbound value may be a stale-dialect ref that only resolved via
+  // model-resolution.
+  const switched = lastSwitchedModelValue(server, zcodeSid) ?? modelId;
+  log(`session/setModel → ${switched} (from ${modelId})`);
   // Remember for the post-resume re-assert (see reassertModelChoice in
   // session.ts — the backend's own selection persistence can be lost).
-  rememberModelChoice(server, params.sessionId, zcodeSid, { model: modelId });
+  rememberModelChoice(server, params.sessionId, zcodeSid, { model: switched });
   // Broadcast so the other attached clients' dropdowns follow the switch.
   await emitConfigOptionUpdate(server, cx, params.sessionId, zcodeSid, "model");
   return {};

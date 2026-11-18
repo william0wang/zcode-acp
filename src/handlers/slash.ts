@@ -43,7 +43,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { RequestError } from "@agentclientprotocol/sdk";
 import { backendCapabilities } from "../backend/adapter.js";
-import { applyModelSwitch } from "../config/runtime-model.js";
+import { applyModelSwitch, lastSwitchedModelValue } from "../config/runtime-model.js";
+import { parseModelRefValue } from "../config/model-resolution.js";
 import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
 import {
   formatMcpServerHealth,
@@ -571,9 +572,15 @@ export async function handleSlashCommand(
         // without it a switch made here is invisible to the post-resume
         // re-assert, which would roll the session back to an older remembered
         // model — and the TUI's ONLY switch path would have no stickiness.
-        rememberModelChoice(server, acpSid, zcodeSid, { model: arg });
+        // Record the registry-dialect identity the switch landed on (#403) —
+        // the typed arg may be a stale-dialect spelling that only resolved
+        // via model-resolution.
+        const landed = lastSwitchedModelValue(server, zcodeSid) ?? arg;
+        rememberModelChoice(server, acpSid, zcodeSid, { model: landed });
         await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "model");
-        return ok(messages().slashModelSet(arg));
+        // Ack with the landed MODEL id — the user typed a short form, and the
+        // full `provider\model` encoding reads as noise in the TUI.
+        return ok(messages().slashModelSet(parseModelRefValue(landed).modelId));
       }
       case "mode":
       case "thought": {
