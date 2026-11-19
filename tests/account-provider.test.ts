@@ -68,6 +68,10 @@ import {
 } from "../src/config/account-provider.js";
 import { saveBridgeAccount } from "../src/config/bridge-accounts.js";
 import {} from "../src/config/options.js";
+import {
+  resetStartPlanVerdictForTests,
+  setStartPlanVerdict,
+} from "../src/config/start-plan-verdict.js";
 import { authenticate } from "../src/handlers/authenticate.js";
 /** Minimal bundled table with two coding-plan providers (one zai, one bigmodel). */
 const TABLE = {
@@ -118,6 +122,7 @@ function writePersonalRules(rules: unknown[]): void {
 }
 
 beforeEach(() => {
+  resetStartPlanVerdictForTests();
   root = mkdtempSync(path.join(tmpdir(), "acct-provider-"));
   const v2 = path.join(root, ".zcode", "v2");
   mkdirSync(v2, { recursive: true });
@@ -615,5 +620,92 @@ describe("3.15+ desktop layout — OAuth sign-in + providerFamilyConnectionSelec
         modelId: "GLM-5-Turbo",
       },
     ]);
+  });
+
+  /** Table fixture with a zai start-plan rule (the #406 overlay layout). */
+  function writeStartPlanTable(): void {
+    writeFileSync(
+      tablePath,
+      JSON.stringify({
+        ...TABLE,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              ...TABLE.config.providerConfigRules.providerRules,
+              {
+                providerId: "account:zai-start-plan",
+                providerName: "Start Plan",
+                config: {
+                  access: { type: "zhipu-account", mode: "start-plan", accountType: "zai" },
+                  builtinModelIds: ["GLM-5.3-Flash", "GLM-5.2", "GLM-5-Turbo"],
+                },
+              },
+            ],
+          },
+        },
+      }),
+    );
+  }
+
+  it("entitles Start Plan from the billing verdict without a start-plan selection (#406)", () => {
+    // Observed on 3.17.2+/3.18 macOS: Start Plan rides as an OVERLAY on the
+    // zai OAuth family — providerFamilyConnectionSelections stays
+    // `individual-coding-plan` forever while billing reports the plan active
+    // (~294M tokens billed, flag never flipped). Flipping the flag by hand
+    // breaks the desktop's own credential resolution, so the billing verdict
+    // is the only safe gate.
+    writeStartPlanTable();
+    writeCredentialStore({
+      "oauth:zai:access_token": "login-jwt",
+      zcodejwttoken: "start-plan-jwt-token",
+    });
+    writeSetting({ zai: { kind: "individual-coding-plan" } });
+    setStartPlanVerdict({ status: "entitled", modelIds: ["glm-5.3-flash"] });
+
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(true);
+    // The push carries ONLY the grant's capability model — the table's
+    // GLM-5.2 / GLM-5-Turbo would fail billing (#406 minor).
+    expect(payload.providers["account:zai-start-plan"]!.builtinModelIds).toEqual(["GLM-5.3-Flash"]);
+    expect(startPlanRequestAuthFor("account:zai-start-plan")).toEqual({
+      apiKey: "start-plan-jwt-token",
+    });
+    expect(entitledCodingPlanModels()).toEqual([
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3",
+      },
+      {
+        providerId: "builtin:zai-coding-plan",
+        providerName: "builtin:zai-coding-plan",
+        modelId: "GLM-5.3-Flash",
+      },
+      {
+        providerId: "builtin:zai-start-plan",
+        providerName: "Start Plan",
+        modelId: "GLM-5.3-Flash",
+      },
+    ]);
+  });
+
+  it("billing `none` suppresses even a start-plan connection selection", () => {
+    // Billing wins in both directions: a query that succeeded and found no
+    // active start plan is authoritative over the on-disk flag.
+    writeStartPlanTable();
+    writeCredentialStore({
+      "oauth:zai:access_token": "login-jwt",
+      zcodejwttoken: "start-plan-jwt-token",
+    });
+    writeSetting({ zai: { kind: "start-plan" } });
+    setStartPlanVerdict({ status: "none" });
+
+    const payload = buildAccountProviderConfig()!;
+    expect(payload.providers["account:zai-start-plan"]!.access.entitled).toBe(false);
+    expect(startPlanRequestAuthFor("account:zai-start-plan")).toBeNull();
+    // The individual plan is off too — its gate is the (different)
+    // `individual-coding-plan` selection, which this fixture's setting does
+    // not carry. Billing `none` speaks only for Start Plan.
+    expect(payload.providers["account:zai-individual-coding-plan"]!.access.entitled).toBe(false);
   });
 });

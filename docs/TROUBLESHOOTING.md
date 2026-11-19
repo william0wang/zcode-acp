@@ -116,14 +116,20 @@ the desktop's Settings → Model Provider ("Use API key") counts too (#344): it
 lands in `~/.zcode/v2/provider_config.json` as a
 `zhipu-coding-plan-api-key` rule and the bridge reads it as an entitlement +
 request-key source. On 3.15+ / 3.17.x OAuth installs, Start Plan
-(`account:<family>-start-plan`) is entitled ONLY when `~/.zcode/v2/setting.json`
-records that family's connection as `kind: "start-plan"` AND the store holds
-`zcodejwttoken` (0.17.x backends answer Start Plan without interaction — the
-request-security edition disables per-request verification outright); a plain
-OAuth login leaves `zcodejwttoken` in the store but is NOT a Start Plan
-holding — upstream decides entitlement from the billing/balance plans
-(observed 2026-11-10: a Coding Plan login lit up Start Plan models
-GLM-5.2/GLM-5-Turbo for an account that never activated it). Keyless Start
+(`account:<family>-start-plan`) entitlement is BILLING-AUTHORITATIVE
+(#406): the bridge queries `billing/balance` with the store's
+`zcodejwttoken` (warmed at session create, bounded 2s) — an active plan
+entitles the family's Start Plan even though the desktop's
+`providerFamilyConnectionSelections` never flips past
+`individual-coding-plan` (3.17+ serves Start Plan as an overlay; do NOT
+hand-edit that flag — the desktop's own credential resolution reads it and
+breaks). The grant's capability list also filters the advertised models
+(e.g. only `GLM-5.3-Flash` under a glm-5.3-flash-only grant). When the
+billing query cannot run (offline, no `zcodejwttoken`, rate-limited), the
+legacy gate decides: entitled ONLY when `setting.json` records the family's
+connection as `kind: "start-plan"` (a plain OAuth login is not a holding —
+observed 2026-11-10: a Coding Plan login lit up GLM-5.2/GLM-5-Turbo for an
+account that never activated Start Plan). Keyless Start
 Plan requests stay declined (issue #123).
 
 **Desktop 3.15+ after an OAuth sign-in:** the store holds no plan key at all,
@@ -561,9 +567,12 @@ edition level; the interactive branch is unreachable), the bridge
 serves `zcodejwttoken` over `interaction/requestProviderRuntimeHeaders`
 (`startPlanRequestAuthFor`) and injects `ZCODE_APP_VERSION` from the desktop
 bundle (`builtinProviderEnv`), matching the desktop host's own
-`AccountProviderRequestAuthService`. A plain OAuth login (Coding Plan) is not
-enough — it leaves the JWT in the store but no start-plan selection, and the
-bridge correctly keeps Start Plan unentitled. If no Start Plan credential is
+`AccountProviderRequestAuthService`. Entitlement no longer requires that
+selection: the billing verdict (see above, #406) entitles the family while
+billing reports an active plan, and a plain OAuth login (Coding Plan) only
+counts when billing says so — when the billing query cannot run, the
+`kind: "start-plan"` selection is the fallback gate. If no Start Plan
+credential is
 present on
 disk (or if a future edition re-enables browser captcha), switch the session's
 provider to a GLM Coding Plan one; the bridge answers with

@@ -46,7 +46,9 @@ export type ZcodeWindowEntry = Omit<StartPlanWindow, "plan" | "model">;
 
 /** ZCode Start Plan section (promo plans on `zcode.z.ai`) — `windows` only on success. */
 export interface ZcodeUsageStats {
-  kind: StartPlanResult["kind"];
+  /** Wire vocabulary only — the internal `none` verdict kind never leaves
+   *  the bridge (toZcodeStats maps it to `unavailable`). */
+  kind: Exclude<StartPlanResult["kind"], "none">;
   planId?: string;
   planName?: string;
   windows?: ZcodeWindowEntry[];
@@ -195,7 +197,12 @@ function toOcStats(result: OcQueryResult): OcUsageStats {
 
 /** ZCode Start Plan windows pass through with their absolute counters. */
 function toZcodeStats(result: StartPlanResult): ZcodeUsageStats {
-  if (result.kind !== "success") return { kind: result.kind };
+  // `none` (billing queried, no active plan) is an internal verdict signal —
+  // the wire keeps proposal 0002's kind vocabulary, so it reads as the same
+  // status line as any other non-success.
+  if (result.kind !== "success") {
+    return { kind: result.kind === "none" ? "unavailable" : result.kind };
+  }
   const toWindow = (w: StartPlanWindow): ZcodeWindowEntry => {
     const { plan: _plan, model: _model, ...window } = w;
     return window;
@@ -210,10 +217,7 @@ function toZcodeStats(result: StartPlanResult): ZcodeUsageStats {
 
 /** `account/usage_stats` handler — all providers, queried in parallel. */
 export async function accountUsageStats(): Promise<UsageStatsResult> {
-  const [{ glm, go, oc }, zcode] = await Promise.all([
-    queryCombined("all"),
-    queryStartPlan(),
-  ]);
+  const [{ glm, go, oc }, zcode] = await Promise.all([queryCombined("all"), queryStartPlan()]);
   return {
     glm: toGlmStats(glm),
     opencode: toGoStats(go),

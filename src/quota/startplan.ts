@@ -23,6 +23,15 @@
  * `one_time` grants, so `expires_at` / `period_end` is the grant's deadline,
  * not a recurring reset — callers must not present it as a guaranteed refill.
  *
+ * Besides the stats role, every COMPLETED query also writes the
+ * billing-authoritative Start Plan verdict (`config/start-plan-verdict.ts`,
+ * issue #406): `success` → `entitled` (with the grants' capability model ids),
+ * `none` → `none`. `none` is distinct from `unavailable`: the query succeeded
+ * and billing holds no active start plan — an authoritative negative the
+ * sync entitlement ladder reads, while `unavailable`/`auth_error`/
+ * `rate_limited` leave the verdict untouched (never flap entitlement on a
+ * blip). Thrown failures are NOT verdicts.
+ *
  * Results are cached process-wide for 10s like every other quota reader
  * (`quota/cache.ts`, `opencode-go/cache.ts`): repeated `account/usage_stats`
  * calls — ACP, CLI, hub fallback — collapse to at most one gateway hit per
@@ -35,6 +44,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { storeStartPlanJwt } from "../config/account-provider.js";
+import { setStartPlanVerdict } from "../config/start-plan-verdict.js";
 import { log, zcodeHomeDir } from "../utils.js";
 
 /** Request timeout (ms). The endpoint is fast; keep this tight. */
@@ -121,6 +131,11 @@ export type StartPlanResult =
       /** Active plan name verbatim, e.g. "ZCODE GLOBAL BUILD". */
       planName: string;
       windows: StartPlanWindow[];
+    }
+  | {
+      /** Query succeeded; billing holds NO active start plan (authoritative
+       * negative — feeds the entitlement verdict, see the header). */
+      kind: "none";
     }
   | {
       kind: "auth_error";
@@ -211,7 +226,7 @@ export function parseStartPlanBalance(payload: BalanceEnvelope): StartPlanResult
     ? (payload.data!.balances as RawBalance[])
     : [];
   const startPlan = pickActiveStartPlan(plans);
-  if (!startPlan) return { kind: "unavailable" };
+  if (!startPlan) return { kind: "none" };
   const planName = asString(startPlan.name) ?? asString(startPlan.plan_id) ?? "ZCODE plan";
   const planId = asString(startPlan.plan_id) ?? "";
   const windows = balances
@@ -304,7 +319,9 @@ export function resetStartPlanCacheForTests(): void {
 
 /**
  * Query the active Start Plan's usage. Never throws: every failure mode maps
- * to a `kind` so the stats handler can report per-section status.
+ * to a `kind` so the stats handler can report per-section status. A COMPLETED
+ * query also refreshes the billing-authoritative entitlement verdict (header
+ * doc); failures leave any earlier verdict standing.
  */
 export async function queryStartPlan(
   fetchImpl: typeof fetch = globalThis.fetch,
@@ -313,10 +330,14 @@ export async function queryStartPlan(
   const auth = readZcodeAccountAuth();
   if (!auth) return { kind: "unavailable" };
   try {
-    const result = parseStartPlanBalance(
-      await fetchStartPlanBalance(auth, fetchImpl, process.env),
-    );
+    const result = parseStartPlanBalance(await fetchStartPlanBalance(auth, fetchImpl, process.env));
     cache = { at: Date.now(), result };
+    if (result.kind === "success") {
+      const modelIds = [...new Set(result.windows.flatMap((w) => w.modelIds))];
+      setStartPlanVerdict({ status: "entitled", modelIds });
+    } else if (result.kind === "none") {
+      setStartPlanVerdict({ status: "none" });
+    }
     return result;
   } catch (error) {
     if (error instanceof StartPlanStatusError) return { kind: error.kind };
@@ -324,5 +345,24 @@ export async function queryStartPlan(
       `startplan: balance query failed: ${error instanceof Error ? error.message : String(error)}`,
     );
     return { kind: "unavailable" };
+  }
+}
+
+/**
+ * Bounded warm of the entitlement verdict before the account snapshot /
+ * dropdown read it (`syncProviderRegistry`). Never throws and never blocks
+ * past `budgetMs`: an offline or slow gateway leaves the verdict `unknown`
+ * and the legacy connection-selection gate decides; a query that finishes
+ * after the budget still writes its verdict for the next sync read.
+ */
+export async function warmStartPlanVerdict(budgetMs = 2_000): Promise<void> {
+  const timer = new Promise<void>((resolve) => {
+    const t = setTimeout(() => resolve(), budgetMs);
+    t.unref?.();
+  });
+  try {
+    await Promise.race([queryStartPlan(), timer]);
+  } catch {
+    // queryStartPlan never throws — belt for future edits only.
   }
 }
