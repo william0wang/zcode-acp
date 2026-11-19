@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.88.2](https://github.com/william0wang/zcode-acp/compare/v0.88.1...v0.88.2) (2026-11-19)
+
+
+### Bug Fixes
+
+* make Start Plan entitlement billing-authoritative ([#406](https://github.com/william0wang/zcode-acp/issues/406)) ([#407](https://github.com/william0wang/zcode-acp/issues/407)) ([7ab2d6e](https://github.com/william0wang/zcode-acp/commit/7ab2d6efcab3be12d0b80fea11e87e5eea679785))
+
 ## [0.88.1](https://github.com/william0wang/zcode-acp/compare/v0.88.0...v0.88.1) (2026-11-18)
 
 
