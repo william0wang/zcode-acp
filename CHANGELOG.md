@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.89.0](https://github.com/william0wang/zcode-acp/compare/v0.88.2...v0.89.0) (2026-11-19)
+
+
+### Features
+
+* expose edit-and-resend and regenerate over v4 rewind commands ([#409](https://github.com/william0wang/zcode-acp/issues/409)) ([7b3ea56](https://github.com/william0wang/zcode-acp/commit/7b3ea567c731a2379749d00c66c2a9310e4a1f95))
+
 ## [0.88.2](https://github.com/william0wang/zcode-acp/compare/v0.88.1...v0.88.2) (2026-11-19)
 
 
