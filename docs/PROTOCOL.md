@@ -747,16 +747,67 @@ Fork a new session from a checkpoint.
 }
 ```
 
-### `session/rewind` — removed in 0.16+
+### `session/edit_user_message` / `session/retry_turn` — rewind extensions
 
-`session/rewind` (and `session/rewindCascade`) existed up to app-server
-0.15.x. The 0.16 app-server removed them from its RPC dispatch (verified
-against 0.16.3: `-32601 Method not found`) — rewind moved to the v4
-conversation API (`v4/conversation/fileRewindPreview` and friends), which the
-bridge does not speak. The bridge's `session/rewind` /
-`session/rewindCascade` ACP extensions and the `/rewind` slash command were
-removed accordingly. `session/fork` (branch from checkpoint) remains the
-bridge-side alternative.
+Edit-and-resend of the latest user message, and regenerate of the latest
+turn, mapped onto the v4 conversation commands `editUserQuery` / `retryTurn`.
+The old v3 `session/rewind` (and `session/rewindCascade`) existed up to
+app-server 0.15.x; the 0.16 app-server removed them in favor of the v4
+conversation API, and these two methods are that API's ACP surface.
+
+**Capability:** `initialize` advertises `agentCapabilities._meta.zcode.rewind:
+true` when the desktop bundle is at/above the source-verified floor (3.14.3 —
+the v4 rewind command set and `v4/conversation/rowsRange` predate that tag).
+Below the floor the key is ABSENT (not `false`); the methods then answer a
+clean error. Clients should hide edit/regenerate when the flag is missing and
+degrade to quote-to-composer.
+
+**Request (`edit`):**
+
+```json
+{
+  "id": 8,
+  "method": "session/edit_user_message",
+  "params": {
+    "sessionId": "sess_abc123",
+    "messageId": "<_meta.zcode.mid of the user message>",
+    "newText": "replacement text"
+  }
+}
+```
+
+**Request (`retry`; `messageId` optional — omitted retries the latest turn):**
+
+```json
+{
+  "id": 9,
+  "method": "session/retry_turn",
+  "params": { "sessionId": "sess_abc123", "messageId": "<_meta.zcode.mid of the assistant message>" }
+}
+```
+
+**Result** (both): `{ "ok": true, "rewoundMessageId": "<the mid that was rewound>" }`
+
+Semantics:
+
+- Only the latest turn is addressable (upstream guards `latestQueryEditOnly`
+  / `latestAssistantRetryOnly`); a stale/non-matching `messageId` answers
+  `-32602` before any backend round trip. Workspace files are never touched
+  (`workspaceMode: "preserve"` always — file rewind stays a desktop-app concern).
+- The ack returns at ADMISSION: the rewound history is already committed, and
+  the replacement turn runs next. Clients should refetch history
+  (`session/load`) on the ack; the replacement turn itself streams to every
+  attached client as `agent_message_chunk` updates, and the session reports
+  busy (`$/zcode/turnState`) until it terminates.
+- Other clients' cached tails are stale until their next replay (v1: single
+  user, edit happens on the viewed client).
+
+**`_meta.zcode.mid`:** every REPLAYED update that renders as a message
+(`user_message_chunk`, `agent_message_chunk`, `agent_thought_chunk`, and
+replayed `tool_call`s) carries `_meta: { zcode: { mid: "<store message id>" } }`
+on both `session/load` and `session/load_earlier` pages — the value the
+rewind methods address (it equals the store row's v4 `entityId`). Live echo
+chunks (`uprompt_`/`chunk_` ids) deliberately do NOT carry it.
 
 ### `session/goal`
 

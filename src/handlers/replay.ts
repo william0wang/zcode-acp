@@ -589,6 +589,24 @@ export async function replayMessages(
     // random ids could never match — and re-attach what the client already
     // holds, duplicating it instead of replacing.
     const mid = info.id ?? `hist_${mi}`;
+    // Rewind addressing (session/edit_user_message · session/retry_turn):
+    // `_meta.zcode.mid` is a stable handle equal to the store row's entityId
+    // (source-verified: the v4 row projection derives entityId from the
+    // message id). Attached only when the row carries a REAL id — the
+    // `hist_<index>` fallback is positional and could never address a rewind
+    // target. Live echoes (`uprompt_`/`chunk_` ids) never carry it: only
+    // replayed store rows are rewind targets.
+    const realMid = typeof info.id === "string" && info.id ? info.id : null;
+    const markMid = (update: acp.SessionUpdate): acp.SessionUpdate => {
+      if (realMid === null) return update;
+      const meta = (update._meta ?? {}) as { zcode?: Record<string, unknown> };
+      return {
+        ...update,
+        _meta: { ...meta, zcode: { ...(meta.zcode ?? {}), mid: realMid } },
+      };
+    };
+    const decorate = (update: acp.SessionUpdate): acp.SessionUpdate =>
+      markEarlierPage(markMid(update));
     // Only a message that also emits a text chunk under `mid` should key its
     // tool cards to that id (see the tool branch below).
     const carriesText = (m.parts ?? []).some(
@@ -610,7 +628,7 @@ export async function replayMessages(
           if (collapse.kind === "tool-transcript" && !toolsKept(mi)) continue;
           await cx.notify("session/update", {
             sessionId: acpSid,
-            update: markEarlierPage({
+            update: decorate({
               sessionUpdate: "tool_call",
               toolCallId: `histfold_${mid}`,
               title: collapse.title,
@@ -629,7 +647,7 @@ export async function replayMessages(
         } else {
           await cx.notify("session/update", {
             sessionId: acpSid,
-            update: markEarlierPage({
+            update: decorate({
               sessionUpdate: role === "user" ? "user_message_chunk" : "agent_message_chunk",
               content: { type: "text", text },
               messageId: mid,
@@ -642,7 +660,7 @@ export async function replayMessages(
         if (text) {
           await cx.notify("session/update", {
             sessionId: acpSid,
-            update: markEarlierPage({
+            update: decorate({
               sessionUpdate: "agent_thought_chunk",
               content: { type: "text", text },
               messageId: `thought_${mid}`,
@@ -687,7 +705,7 @@ export async function replayMessages(
         }
         await cx.notify("session/update", {
           sessionId: acpSid,
-          update: markEarlierPage({
+          update: decorate({
             sessionUpdate: "tool_call",
             // The store's call id is the ONLY identity later live
             // tool_call_update events address a card by. A card replayed

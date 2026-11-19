@@ -40,6 +40,7 @@ import {
 } from "./handlers/extensions.js";
 import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
 import { loadEarlier } from "./handlers/replay.js";
+import { editUserMessage, retryTurn } from "./handlers/rewind.js";
 import { steering } from "./handlers/steering.js";
 import { resendPendingInteractions } from "./handlers/server-requests.js";
 import { loadPluginCommands } from "./config/plugin-commands.js";
@@ -265,8 +266,15 @@ export function buildAgentApp(
       // zod parser so all param fields survive into the handler.
       // session/steer, session/rewind, session/rewindCascade were removed in
       // zcode app-server 0.16+ (steer/rewind moved to the v4 conversation API);
-      // the bridge dropped its passthroughs accordingly.
+      // the bridge dropped its passthroughs accordingly. Steer came back over
+      // v4 sendText (#352, `_session/steering`); rewind comes back as
+      // edit-and-resend / regenerate over v4 editUserQuery / retryTurn
+      // (handlers/rewind.ts), capability-gated by `_meta.zcode.rewind`.
       .onRequest("session/fork", extParams, (ctx) => fork(server, ctx.params))
+      .onRequest("session/edit_user_message", extParams, (ctx) =>
+        editUserMessage(server, ctx.params),
+      )
+      .onRequest("session/retry_turn", extParams, (ctx) => retryTurn(server, ctx.params))
       .onRequest("session/goal", extParams, (ctx) => goal(server, ctx.params))
       .onRequest("session/compact", extParams, (ctx) =>
         compact(server, ctx.params, server.clients.broadcast()),
