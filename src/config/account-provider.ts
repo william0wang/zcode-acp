@@ -35,6 +35,7 @@ import { BUILTIN_PROVIDER_ENV, builtinProviderEnv } from "../backend/resolve.js"
 import { log, warn, zcodePersonalProviderPath, ZCODE_CREDS_PATH } from "../utils.js";
 import { bridgeOverlays, readCredentialConfig } from "./bridge-accounts.js";
 import { type CodingPlanFamily, hasOAuthLogin, isCodingPlanFamily } from "./project-token.js";
+import { startPlanVerdict } from "./start-plan-verdict.js";
 
 /** The bundled provider-table file the CLI boots from. */
 const PROVIDER_CONFIG_NAME = "zcode-builtin.json";
@@ -385,17 +386,29 @@ function oauthSelectedCodingPlanFamilies(
 }
 
 /**
- * Families whose 3.15+ desktop connection is Start Plan (`zcodejwttoken` in
- * the credential store + `providerFamilyConnectionSelections[family]` of kind
- * `start-plan`, not switched to `apiKey` mode, with the family's OAuth login).
+ * Families entitled for Start Plan.
  *
- * A login alone is NOT entitlement (observed 2026-11-10: an OAuth sign-in for
- * the individual Coding Plan leaves `zcodejwttoken` in the store, and the
- * bridge lit up Start Plan — GLM-5.2/GLM-5-Turbo from the bundled table's
- * start-plan rule — for a Start Plan the account never activated). Upstream
- * decides entitlement from the billing/balance plans (`hasActiveStartPlan`),
- * which no local file mirrors; the connection selection is the only on-disk
- * signal that the user actually connected via Start Plan.
+ * Authoritative source (issue #406): the billing/balance verdict warmed by
+ * `queryStartPlan` (quota/startplan.ts → config/start-plan-verdict.ts).
+ * `entitled` entitles every coding-plan family with an OAuth login — the
+ * 3.17+ desktop serves Start Plan as an OVERLAY whose
+ * `providerFamilyConnectionSelections` entry stays `individual-coding-plan`
+ * forever (observed: ~294M Start Plan tokens billed while the flag never
+ * flipped; flipping it by hand breaks the desktop's own credential
+ * resolution, so it is not a safe lever either way). `none` (billing
+ * queried, no active plan) suppresses even a start-plan flag — billing wins
+ * in both directions, mirroring upstream codingPlanProviderAvailability.ts
+ * (`hasActiveStartPlan`).
+ *
+ * `unknown` (never queried / query failed — offline bridge, rate limit)
+ * keeps the legacy on-disk gate: ONLY a `start-plan` connection selection
+ * entitles (observed 2026-11-10: an OAuth sign-in for the individual Coding
+ * Plan leaves `zcodejwttoken` in the store without a Start Plan holding — a
+ * login alone must not light up GLM-5.2/GLM-5-Turbo from the table's
+ * start-plan rule).
+ *
+ * In every branch the family additionally needs the store's `zcodejwttoken`,
+ * the family's OAuth login, and not `apiKey` mode.
  * `providerFamilyDomain` / `oauth:active_provider` name the ACTIVE family,
  * not a plan holding — deliberately not entitlement sources.
  */
@@ -405,7 +418,7 @@ function oauthEntitledStartPlanFamilies(
   const out = new Set<CodingPlanFamily>();
   if (!storeStartPlanJwt()) return out;
   let modes: Record<string, unknown> | undefined;
-  const candidates = new Set<CodingPlanFamily>();
+  const flagFamilies = new Set<CodingPlanFamily>();
   try {
     const setting = JSON.parse(readFileSync(path.join(credsDir, "setting.json"), "utf8")) as {
       modelProviderFamilyModes?: Record<string, unknown>;
@@ -415,22 +428,45 @@ function oauthEntitledStartPlanFamilies(
     for (const [family, selection] of Object.entries(
       setting.providerFamilyConnectionSelections ?? {},
     )) {
-      // ONLY a start-plan connection speaks for Start Plan — an
-      // individual-coding-plan selection is a different plan that merely
-      // shares the OAuth login and the store's JWT.
+      // Legacy gate (verdict `unknown` only): an individual-coding-plan
+      // selection is a different plan that merely shares the OAuth login
+      // and the store's JWT.
       if (selection?.kind !== "start-plan") continue;
       if (!isCodingPlanFamily(family)) continue;
-      candidates.add(family);
+      flagFamilies.add(family);
     }
   } catch {
-    // setting.json absent (headless-only) — nothing entitles
+    // setting.json absent (headless-only) — only the billing verdict can entitle
   }
-  for (const family of candidates) {
+  const verdict = startPlanVerdict();
+  const selected: Iterable<CodingPlanFamily> =
+    verdict.status === "entitled"
+      ? // One account-level JWT serves the single start-plan gateway; entitle
+        // every family the store actually holds an OAuth login for.
+        (["zai", "bigmodel"] as const)
+      : verdict.status === "none"
+        ? []
+        : flagFamilies;
+  for (const family of selected) {
     if (modes?.[family] === "apiKey") continue;
     if (!hasOAuthLogin(family)) continue;
     out.add(family);
   }
   return out;
+}
+
+/**
+ * The billing grant's capability models (lowercased) when the verdict is
+ * `entitled` and carries any, else null — the filter that keeps unbilled
+ * bundled-table models (GLM-5.2 / GLM-5-Turbo under a glm-5.3-flash-only
+ * grant) out of the dropdown and the pushed snapshot (#406: "selecting those
+ * two likely fails billing"). Null (verdict unknown, or a grant with no
+ * capability list) keeps the table's full list.
+ */
+function startPlanBillingModelFilter(): Set<string> | null {
+  const verdict = startPlanVerdict();
+  if (verdict.status !== "entitled" || verdict.modelIds.length === 0) return null;
+  return new Set(verdict.modelIds.map((id) => id.toLowerCase()));
 }
 
 /** Sources 1-3 above, read from the raw desktop files only. */
@@ -523,11 +559,14 @@ export function entitledCodingPlanModels(): Array<{
     ) ?? [];
   if (rules.length === 0) return [];
   const entitled = entitledBuiltinProviders();
+  const billingModels = startPlanBillingModelFilter();
   const out: Array<{ providerId: string; providerName: string; modelId: string }> = [];
   for (const rule of rules) {
     const providerId = configProviderIdFor(rule.providerId);
     if (!entitled.has(providerId)) continue;
+    const startPlanFilter = rule.config?.access?.mode === "start-plan" ? billingModels : null;
     for (const modelId of rule.config?.builtinModelIds ?? []) {
+      if (startPlanFilter && !startPlanFilter.has(modelId.toLowerCase())) continue;
       out.push({ providerId, providerName: rule.providerName ?? providerId, modelId });
     }
   }
@@ -740,12 +779,21 @@ export function buildAccountProviderConfig(): AccountProviderPayload | null {
     ) ?? [];
   if (rules.length === 0) return null;
   const enabled = entitledBuiltinProviders();
+  const billingModels = startPlanBillingModelFilter();
   const providers: AccountProviderPayload["providers"] = {};
   const states: AccountProviderPayload["states"] = {};
   for (const rule of rules) {
     const entitled = enabled.has(configProviderIdFor(rule.providerId));
+    let builtinModelIds = rule.config?.builtinModelIds;
+    // Same billing filter as the dropdown (#406): a start-plan grant's
+    // capability list decides which of the table's models the backend should
+    // even register — an unfiltered push would leave dead options reachable
+    // through a manual setModel.
+    if (rule.config?.access?.mode === "start-plan" && billingModels && builtinModelIds) {
+      builtinModelIds = builtinModelIds.filter((id) => billingModels.has(id.toLowerCase()));
+    }
     providers[rule.providerId] = {
-      builtinModelIds: rule.config?.builtinModelIds,
+      builtinModelIds,
       access: { type: "zhipu-account", entitled },
     };
     states[rule.providerId] = {

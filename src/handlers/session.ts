@@ -51,6 +51,7 @@ import {
   scheduleQuotaDockBackstop,
   startQuotaRefresher,
 } from "../quota/live.js";
+import { warmStartPlanVerdict } from "../quota/startplan.js";
 import { noteUserActivity, pushSettled, pushSourceLabel } from "../push/push.js";
 import { buildProviderRegistry } from "../config/provider-registry.js";
 import { configProviderIdFor, pushAccountProviderConfig } from "../config/account-provider.js";
@@ -531,6 +532,13 @@ async function syncProviderRegistry(server: ZcodeAcpServer, cwd: string): Promis
     // models the user's config selects never reach `settings.model.available`
     // (verified 2026-09 — switches then fail with "Provider Registry 中不存在
     // Model"). Pushing the snapshot restores desktop parity. Best-effort.
+    //
+    // Warm the billing-authoritative Start Plan verdict first (#406): the
+    // snapshot, the dropdown and the runtime-headers answer all read it
+    // synchronously. Bounded — an offline/slow gateway leaves `unknown` and
+    // the legacy connection-selection gate decides (no credentials → no
+    // network at all).
+    await warmStartPlanVerdict();
     await pushAccountProviderConfig(await server.ensureBackend(), () => server.nextId());
     const registry = buildProviderRegistry();
     if (registry.providers.length === 0) {

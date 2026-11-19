@@ -42,11 +42,17 @@ import {
   readZcodeAccountAuth,
   resetStartPlanCacheForTests,
 } from "../src/quota/startplan.js";
+import {
+  resetStartPlanVerdictForTests,
+  setStartPlanVerdict,
+  startPlanVerdict,
+} from "../src/config/start-plan-verdict.js";
 
 let home: string | null = null;
 
 beforeEach(() => {
   resetStartPlanCacheForTests();
+  resetStartPlanVerdictForTests();
   storeStartPlanJwtMock.mockReset();
   queryStartPlanMock.mockReset();
   queryCombinedMock.mockReset();
@@ -154,10 +160,12 @@ describe("parseStartPlanBalance", () => {
     expect(parseStartPlanBalance({ code: 3101 })).toMatchObject({ kind: "unavailable" });
   });
 
-  it("is unavailable without an active plan", () => {
+  it("is `none` without an active plan — the authoritative negative (#406)", () => {
+    // Distinct from `unavailable` (query failed): billing answered, the
+    // account simply holds no active start plan.
     expect(
       parseStartPlanBalance({ code: 0, data: { plans: [{ status: "expired" }] } }),
-    ).toMatchObject({ kind: "unavailable" });
+    ).toMatchObject({ kind: "none" });
   });
 
   it("is success with empty windows when the plan holds no balances", () => {
@@ -240,10 +248,12 @@ describe("queryStartPlan cache", () => {
   const NOW = 1_700_000_000_000;
 
   /** The real queryStartPlan (the module mock replaces it). */
-  const realQueryStartPlan = async (...args: Parameters<typeof import("../src/quota/startplan.js").queryStartPlan>) => {
-    const { queryStartPlan } = await vi.importActual<
-      typeof import("../src/quota/startplan.js")
-    >("../src/quota/startplan.js");
+  const realQueryStartPlan = async (
+    ...args: Parameters<typeof import("../src/quota/startplan.js").queryStartPlan>
+  ) => {
+    const { queryStartPlan } = await vi.importActual<typeof import("../src/quota/startplan.js")>(
+      "../src/quota/startplan.js",
+    );
     return queryStartPlan(...args);
   };
 
@@ -298,9 +308,8 @@ describe("queryStartPlan cache", () => {
     vi.setSystemTime(NOW);
     storeStartPlanJwtMock.mockReturnValue("test-jwt");
     writeTelemetryState("device-1234");
-    const fetchMock = vi.fn(
-      (() => Promise.resolve(new Response("nope", { status: 429 }))) as unknown as typeof fetch,
-    );
+    const fetchMock = vi.fn((() =>
+      Promise.resolve(new Response("nope", { status: 429 }))) as unknown as typeof fetch);
     expect(await realQueryStartPlan(fetchMock)).toEqual({ kind: "rate_limited" });
     expect(await realQueryStartPlan(fetchMock)).toEqual({ kind: "rate_limited" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -323,6 +332,61 @@ describe("queryStartPlan cache", () => {
     expect(await realQueryStartPlan(fetchMock)).toMatchObject({ kind: "unavailable" });
     expect(await realQueryStartPlan(fetchMock)).toMatchObject({ kind: "success" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("queryStartPlan entitlement verdict (#406)", () => {
+  /** The real queryStartPlan (the module mock replaces it). */
+  const realQueryStartPlan = async (fetchImpl: typeof fetch) => {
+    const { queryStartPlan } = await vi.importActual<typeof import("../src/quota/startplan.js")>(
+      "../src/quota/startplan.js",
+    );
+    return queryStartPlan(fetchImpl);
+  };
+
+  const jsonFetch = (body: unknown, status = 200): typeof fetch =>
+    (() =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      )) as unknown as typeof fetch;
+
+  it("writes `entitled` with the grants' capability model ids on success", async () => {
+    storeStartPlanJwtMock.mockReturnValue("test-jwt");
+    writeTelemetryState("device-1234");
+    const result = await realQueryStartPlan(jsonFetch(ENVELOPE));
+    expect(result.kind).toBe("success");
+    expect(startPlanVerdict()).toEqual({ status: "entitled", modelIds: ["glm-5.3-flash"] });
+  });
+
+  it("writes `none` when billing holds no active plan", async () => {
+    storeStartPlanJwtMock.mockReturnValue("test-jwt");
+    writeTelemetryState("device-1234");
+    const result = await realQueryStartPlan(
+      jsonFetch({ code: 0, data: { plans: [{ status: "expired" }] } }),
+    );
+    expect(result).toEqual({ kind: "none" });
+    expect(startPlanVerdict()).toEqual({ status: "none" });
+  });
+
+  it("leaves an earlier verdict standing on failures — entitlement never flaps on a blip", async () => {
+    setStartPlanVerdict({ status: "entitled", modelIds: ["glm-5.3-flash"] });
+    storeStartPlanJwtMock.mockReturnValue("test-jwt");
+    writeTelemetryState("device-1234");
+    // Network failure: not a verdict.
+    await realQueryStartPlan((() =>
+      Promise.reject(new Error("network down"))) as unknown as typeof fetch);
+    expect(startPlanVerdict()).toEqual({ status: "entitled", modelIds: ["glm-5.3-flash"] });
+    // Status-line auth error: the desktop may be mid-refresh of the JWT —
+    // still not a `none` verdict.
+    const result = await realQueryStartPlan((() =>
+      Promise.resolve(
+        new Response("gateway said no", { status: 401, headers: { "content-type": "text/plain" } }),
+      )) as unknown as typeof fetch);
+    expect(result).toEqual({ kind: "auth_error" });
+    expect(startPlanVerdict()).toEqual({ status: "entitled", modelIds: ["glm-5.3-flash"] });
   });
 });
 
@@ -376,6 +440,19 @@ describe("accountUsageStats zcode section", () => {
     const stats = await accountUsageStats();
     expect(stats.zcode).toEqual({ kind: "unavailable" });
   });
+
+  it("maps the internal `none` verdict kind to `unavailable` on the wire", async () => {
+    // `none` is the entitlement signal, not a client-facing status — proposal
+    // 0002's kind vocabulary stays frozen.
+    queryCombinedMock.mockResolvedValue({
+      glm: { kind: "unavailable" },
+      go: { kind: "not_configured" },
+      oc: { kind: "not_configured" },
+    });
+    queryStartPlanMock.mockResolvedValue({ kind: "none" });
+    const stats = await accountUsageStats();
+    expect(stats.zcode).toEqual({ kind: "unavailable" });
+  });
 });
 
 describe("accountUsageStatsViaHub skew guard", () => {
@@ -415,9 +492,7 @@ describe("accountUsageStatsViaHub skew guard", () => {
 
   it("falls back to the local sweep when an older hub answers without zcode", async () => {
     remoteConfigMock.mockReturnValue({ hubHost: "hub.test", hubPort: 1, token: "t" });
-    const fetchMock = vi.fn(
-      hubFetch({ glm: { kind: "unavailable" } }),
-    );
+    const fetchMock = vi.fn(hubFetch({ glm: { kind: "unavailable" } }));
     vi.stubGlobal("fetch", fetchMock);
     queryCombinedMock.mockResolvedValue(COMBINED);
     queryStartPlanMock.mockResolvedValue(ZCODE_LOCAL);
