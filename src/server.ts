@@ -27,6 +27,7 @@ import {
 } from "./backend/sandbox.js";
 import { clearClosedSessionIds } from "./closed-sessions.js";
 import { desktopBundleAtLeast } from "./config/deferred-probe-capability.js";
+import { resolveOfficialZCodeBaseUrl } from "./config/official-mcp-auth.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -37,6 +38,7 @@ import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { emitSessionTurnState, enqueueSessionSend, TURN_STATE_METHODS } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import {
+  answerOfficialMcpAuthHeaders,
   answerProviderRuntimeHeaders,
   sweepOrphanedServerRequests,
 } from "./handlers/server-requests.js";
@@ -798,11 +800,14 @@ export class ZcodeAcpServer {
     // or the user's own tools even though they work in a terminal. The CLI
     // shells out to project tooling (npm scripts, local binaries), so a
     // completed PATH changes what a session can actually do.
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...(await envWithLoginShell()),
       ...mergeEnvWithCreds(loadZcodeCredentials()),
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
+      // 显式注入权威 ZCode 服务源，使官方插件 `.mcp.json` 中的 `${ZCODE_BASE_URL}` 正常展开
+      // （`mergeEnvWithCreds` 已清除可能被污染的外部继承值，此处只写入可信的 ZCode 服务域名）。
+      ZCODE_BASE_URL: resolveOfficialZCodeBaseUrl(),
     };
     let argv = resolveZcodeCommand({ catalogProbe: this.catalogProbe });
     if (this.catalogProbe) {
@@ -884,6 +889,30 @@ export class ZcodeAcpServer {
           );
           try {
             backend.sendReply(id, { headersApplied: false, errorMessage: "bridge error" });
+          } catch {
+            /* backend gone — nothing to answer */
+          }
+        }
+      });
+      return true;
+    };
+    // 到达即应答官方 MCP 身份头请求（如天眼查、zcode-site），避免连接/发现阶段无响应。
+    backend.officialMcpAuthHeadersResponder = (id, params) => {
+      setImmediate(() => {
+        try {
+          answerOfficialMcpAuthHeaders(
+            backend,
+            id,
+            "interaction/requestOfficialMcpAuthHeaders",
+            params,
+          );
+        } catch (e) {
+          warn(
+            `official MCP auth headers responder threw, declining: ` +
+              `${e instanceof Error ? e.message : String(e)}`,
+          );
+          try {
+            backend.sendReply(id, { ok: false, reason: "official_auth_unavailable" });
           } catch {
             /* backend gone — nothing to answer */
           }

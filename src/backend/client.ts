@@ -36,6 +36,15 @@ export class ZcodeBackend extends JsonRpcChild {
    */
   providerRuntimeHeadersResponder?: (id: number, params: Record<string, unknown>) => boolean;
   /**
+   * 到达即应答的 `interaction/requestOfficialMcpAuthHeaders` 回调。
+   * 官方云端 MCP（如天眼查、zcode-site）在连接、发现与工具调用阶段均会向宿主请求
+   * 官方 JWT 身份头，该请求可能在会话初始化或无 turn 轮询窗口时到达，因此必须在收帧时立即处理。
+   */
+  officialMcpAuthHeadersResponder?: (
+    id: number | string,
+    params: Record<string, unknown>,
+  ) => boolean;
+  /**
    * Arrival-time hook for compact terminal states. `session/compact` runs its
    * internal turn in the background and NEVER reports failure on the RPC —
    * the outcome only surfaces as a `state.updated` notification whose reason
@@ -133,6 +142,13 @@ export class ZcodeBackend extends JsonRpcChild {
     ) {
       // Answered at arrival — see providerRuntimeHeadersResponder. This is
       // what keeps compact's internal model turn alive outside any turn loop.
+      return true;
+    }
+    if (
+      req.method === "interaction/requestOfficialMcpAuthHeaders" &&
+      this.officialMcpAuthHeadersResponder?.(req.id, req.params as Record<string, unknown>)
+    ) {
+      // 在帧到达阶段立即响应官方 MCP 身份头请求，确保插件连接与工具发现不阻塞。
       return true;
     }
     return false;
