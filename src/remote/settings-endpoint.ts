@@ -37,7 +37,9 @@ import {
 import { testModelConnectivity } from "../settings/model-connectivity.js";
 import {
   readCliConfig,
+  addHookEntry,
   readHooks,
+  removeHookEntry,
   removeMcpServer,
   setHooksEnabled,
   setMcpServerEnabled,
@@ -59,8 +61,10 @@ import {
   copySkillToUser,
   deleteSkill,
   listSkills,
+  readSkillDetail,
   setSkillEnabledByPath,
 } from "../settings/skills.js";
+import { fetchMcpHealth } from "../settings/mcp-status.js";
 import { listBackups, readJsonDocument, writeJsonAtomic } from "../settings/atomic-write.js";
 import { BrokenConfigError, UpstreamError } from "../settings/errors.js";
 import {
@@ -329,7 +333,14 @@ async function route(
     if (path === "/settings/all") return void (await handleAll(res, server));
     if (path === "/settings/models") return void (await handleModels(res));
     if (path === "/settings/skills") return void (await handleSkills(res));
+    if (path.startsWith("/settings/skills/")) {
+      // Skills parity: row → detail. The segment is the percent-encoded
+      // absolute SKILL.md path (slashes ride inside one segment() call).
+      const skillPath = segment(path.slice("/settings/skills/".length));
+      return void (await handleSkillDetail(res, skillPath));
+    }
     if (path === "/settings/mcp") return void (await handleMcp(res));
+    if (path === "/settings/mcp-status") return void (await handleMcpStatus(res, server));
     if (path === "/settings/hooks") return void (await handleHooks(res));
     if (path === "/settings/agents") return void (await handleAgents(res));
     if (path === "/settings/backups") return void (await handleBackups(res));
@@ -451,6 +462,14 @@ async function route(
         await setHooksEnabled(enabled);
         return { ok: true as const, effect: "needs-restart" as Effect };
       }));
+    }
+    if (method === "POST" && path.startsWith("/settings/hooks/") && path.endsWith("/remove")) {
+      const event = segment(path.slice("/settings/hooks/".length, -"/remove".length));
+      return void (await handleHookRemove(res, event, body));
+    }
+    if (method === "POST" && path.startsWith("/settings/hooks/")) {
+      const event = segment(path.slice("/settings/hooks/".length));
+      return void (await handleHookAdd(res, event, body));
     }
     if (
       (method === "POST" || method === "PUT") &&
@@ -1062,15 +1081,111 @@ async function handleHookUpdate(
     sendError(res, 400, "matcherIndex (path) and hookIndex (body) must be integers");
     return;
   }
+    await guard(res, async () => {
+      await updateHookEntry(event, matcherIndex, hookIndex, {
+        ...(str(body, "command") !== undefined ? { command: str(body, "command") } : {}),
+        ...(bool(body, "enabled") !== undefined ? { enabled: bool(body, "enabled") } : {}),
+        ...(num(body, "timeoutMs") !== undefined ? { timeoutMs: num(body, "timeoutMs") } : {}),
+        ...(num(body, "timeout") !== undefined ? { timeout: num(body, "timeout") } : {}),
+      });
+      return { ok: true as const, effect: "needs-restart" as Effect };
+    });
+  }
+
+/**
+ * Settings parity: hooks create. The matcher STRING locates the group (no
+ * index races — see addHookEntry); `hook` carries the entry itself.
+ */
+async function handleHookAdd(
+  res: ServerResponse,
+  event: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const rawHook = body["hook"];
+  if (!rawHook || typeof rawHook !== "object" || Array.isArray(rawHook)) {
+    sendError(res, 400, "hook (object) is required");
+    return;
+  }
+  const hook = rawHook as Record<string, unknown>;
+  const type = hook["type"];
+  const command = hook["command"];
+  if (type !== "command" && type !== "process") {
+    sendError(res, 400, "hook.type must be 'command' or 'process'");
+    return;
+  }
+  if (typeof command !== "string" || !command) {
+    sendError(res, 400, "hook.command must be a non-empty string");
+    return;
+  }
   await guard(res, async () => {
-    await updateHookEntry(event, matcherIndex, hookIndex, {
-      ...(str(body, "command") !== undefined ? { command: str(body, "command") } : {}),
-      ...(bool(body, "enabled") !== undefined ? { enabled: bool(body, "enabled") } : {}),
-      ...(num(body, "timeoutMs") !== undefined ? { timeoutMs: num(body, "timeoutMs") } : {}),
-      ...(num(body, "timeout") !== undefined ? { timeout: num(body, "timeout") } : {}),
+    await addHookEntry(event as HookEventName, str(body, "matcher"), {
+      type,
+      command,
+      ...(bool(hook, "enabled") !== undefined ? { enabled: bool(hook, "enabled") } : {}),
+      ...(bool(hook, "async") !== undefined ? { async: bool(hook, "async") } : {}),
+      ...(num(hook, "timeout") !== undefined ? { timeout: num(hook, "timeout") } : {}),
+      ...(num(hook, "timeoutMs") !== undefined ? { timeoutMs: num(hook, "timeoutMs") } : {}),
+      ...(str(hook, "statusMessage") !== undefined
+        ? { statusMessage: str(hook, "statusMessage") }
+        : {}),
+      ...(Array.isArray(hook["args"]) && hook["args"].every((a) => typeof a === "string")
+        ? { args: hook["args"] as string[] }
+        : {}),
     });
     return { ok: true as const, effect: "needs-restart" as Effect };
   });
+}
+
+/**
+ * Settings parity: hooks delete. The body's `command` is the FINGERPRINT of
+ * the entry the client meant — a stale index whose entry changed is refused
+ * instead of deleting the wrong hook (see removeHookEntry).
+ */
+async function handleHookRemove(
+  res: ServerResponse,
+  event: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const matcherIndex = num(body, "matcherIndex");
+  const hookIndex = num(body, "hookIndex");
+  const command = str(body, "command");
+  if (matcherIndex === undefined || hookIndex === undefined || !command) {
+    sendError(res, 400, "matcherIndex, hookIndex and command are required");
+    return;
+  }
+  await guard(res, async () => {
+    await removeHookEntry(event as HookEventName, matcherIndex, hookIndex, command);
+    return { ok: true as const, effect: "needs-restart" as Effect };
+  });
+}
+
+/** Settings parity: skill detail (row → detail view). */
+async function handleSkillDetail(res: ServerResponse, skillPath: string): Promise<void> {
+  await guard(res, async () => ({ ok: true as const, skill: await readSkillDetail(skillPath) }));
+}
+
+/**
+ * Settings parity: per-server MCP health, from the same `mcp/list`
+ * mode:"status" RPC the /mcp slash card uses. Per-instance only — the
+ * backend belongs to a bridge (the machine-level mount has none), same
+ * shape as pending-restart's 409 pointer.
+ */
+async function handleMcpStatus(
+  res: ServerResponse,
+  server: ZcodeAcpServer | null,
+): Promise<void> {
+  if (!server) {
+    sendError(
+      res,
+      409,
+      "mcp-status is per-bridge — use /api/instances/{id}/settings/mcp-status",
+    );
+    return;
+  }
+  const statuses = await fetchMcpHealth(server, server.projectCwd());
+  // `available:false` is not an error: an older backend or a timeout means
+  // "status unknown", and the client renders that instead of failing.
+  sendJson(res, 200, { ok: true, available: statuses !== null, statuses: statuses ?? {} });
 }
 
 async function handleAgentUpsert(

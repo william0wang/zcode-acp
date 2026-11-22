@@ -227,6 +227,63 @@ export async function deleteSkill(skillPath: string): Promise<void> {
 }
 
 /**
+ * One skill's full detail (settings parity: row → detail view).
+ *
+ * Reads the whole SKILL.md — every frontmatter key plus the body after the
+ * block — with the same containment rules as the other actions: the path is
+ * resolved and checked against EVERY root (plugin skills are viewable like
+ * any other; only their delete is refused). Reading is side-effect-free.
+ */
+export interface SkillDetail {
+  name: string;
+  description: string;
+  /** Every frontmatter key as written (values are strings, as parsed). */
+  metadata: Record<string, string>;
+  /** The SKILL.md body after the frontmatter block; "" when none. */
+  body: string;
+  path: string;
+  dir: string;
+  scope: SkillEntry["scope"];
+  enabled: boolean;
+  /** Plugin skills belong to the plugin install — the detail says so. */
+  deletable: boolean;
+}
+
+export async function readSkillDetail(skillPath: string): Promise<SkillDetail> {
+  assertSkillPath(skillPath);
+  const absPath = path.resolve(skillPath);
+  const dir = path.dirname(absPath);
+  let scope: SkillEntry["scope"] | undefined;
+  let deletable = false;
+  for (const root of skillRoots()) {
+    if (await isInside(dir, root.dir)) {
+      scope = root.scope;
+      deletable = root.deletable;
+      break;
+    }
+  }
+  if (!scope) throw new Error("skill path is outside the known skill roots");
+  const content = await readFile(absPath, "utf8");
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  const metadata = match ? parseSkillFrontmatter(content) : {};
+  const body = match ? content.slice(match[0].length).replace(/^\r?\n/, "") : content;
+  const name = metadata["name"] ?? path.basename(dir);
+  const description = metadata["description"] ?? "";
+  const disabled = await disabledSkillPaths();
+  return {
+    name,
+    description,
+    metadata,
+    body,
+    path: absPath,
+    dir,
+    scope,
+    enabled: !disabled.has(absPath.replace(/\\/gu, "/")),
+    deletable,
+  };
+}
+
+/**
  * Copy a skill into the user root.
  *
  * A name collision is refused rather than merged: silently merging two skill

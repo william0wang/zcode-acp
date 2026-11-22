@@ -411,6 +411,106 @@ export async function updateHookEntry(
 
 // ---------- plugins ----------
 
+/**
+ * Append one hook entry under an event (settings parity: hooks CRUD).
+ *
+ * Two index-race rules from updateHookEntry's comment still hold: inserts
+ * never happen at an arbitrary position (append-only, so concurrent edits of
+ * EXISTING entries by (matcherIndex, hookIndex) stay valid), and the target
+ * group is located by its matcher STRING, not an index. No matching group →
+ * a new one is appended at the end. `enabled: true` is normalized away
+ * (enabled is the default; a stored true is a pin).
+ */
+export async function addHookEntry(
+  event: HookEventName,
+  matcher: string | undefined,
+  entry: HookEntry,
+): Promise<CliConfigFile> {
+  if (!HOOK_EVENT_NAMES.includes(event)) {
+    throw new Error(`unknown hook event '${event}'`);
+  }
+  if (entry.type !== "command" && entry.type !== "process") {
+    throw new Error("a hook entry needs type 'command' or 'process'");
+  }
+  if (typeof entry.command !== "string" || !entry.command) {
+    throw new Error("a hook entry needs a non-empty command");
+  }
+  if (entry.timeoutMs !== undefined && (!Number.isFinite(entry.timeoutMs) || entry.timeoutMs <= 0)) {
+    throw new Error("timeoutMs must be a positive number");
+  }
+  if (entry.timeout !== undefined && (!Number.isFinite(entry.timeout) || entry.timeout <= 0)) {
+    throw new Error("timeout must be a positive number of seconds");
+  }
+  return saveCliConfig((doc) => {
+    const hooks: HooksConfig = { ...(doc.hooks ?? {}) };
+    const events = { ...(hooks.events ?? {}) };
+    const matchers = [...(events[event] ?? [])];
+    const normalized: HookEntry = { ...entry };
+    if (normalized.enabled === true) delete normalized.enabled;
+    // The empty-string matcher and the absent matcher are the same group.
+    const want = matcher || undefined;
+    const at = matchers.findIndex((m) => (m.matcher || undefined) === want);
+    if (at >= 0) matchers[at] = { ...matchers[at]!, hooks: [...matchers[at]!.hooks, normalized] };
+    else matchers.push({ ...(want ? { matcher: want } : {}), hooks: [normalized] });
+    events[event] = matchers;
+    hooks.events = events;
+    return { ...doc, hooks };
+  });
+}
+
+/**
+ * Remove one hook entry (settings parity: hooks CRUD).
+ *
+ * Deletion by array index is unavoidable (entries carry no identity key), so
+ * the caller must pass the entry's CURRENT command as a fingerprint: if the
+ * entry at that index changed since the client read it, the delete is
+ * refused instead of silently removing the wrong hook. Empty matcher groups
+ * (and empty event arrays) are dropped so the tree never grows tombstones.
+ */
+export async function removeHookEntry(
+  event: HookEventName,
+  matcherIndex: number,
+  hookIndex: number,
+  expectCommand: string,
+): Promise<CliConfigFile> {
+  if (!HOOK_EVENT_NAMES.includes(event)) {
+    throw new Error(`unknown hook event '${event}'`);
+  }
+  if (!Number.isInteger(matcherIndex) || matcherIndex < 0) {
+    throw new Error("matcherIndex must be a non-negative integer");
+  }
+  if (!Number.isInteger(hookIndex) || hookIndex < 0) {
+    throw new Error("hookIndex must be a non-negative integer");
+  }
+  if (!expectCommand) throw new Error("command (the entry's current command) is required");
+  return saveCliConfig((doc) => {
+    const hooks: HooksConfig = { ...(doc.hooks ?? {}) };
+    const events = { ...(hooks.events ?? {}) };
+    const matchers = [...(events[event] ?? [])];
+    const matcher = matchers[matcherIndex];
+    if (!matcher) throw new Error(`no matcher at index ${matcherIndex} for ${event}`);
+    const entries = [...matcher.hooks];
+    const entry = entries[hookIndex];
+    if (!entry)
+      throw new Error(`no hook at index ${hookIndex} in ${event} matcher ${matcherIndex}`);
+    if (entry.command !== expectCommand) {
+      throw new Error(
+        `the hook at that position changed (expected '${expectCommand}', found '${entry.command}') — reload and retry`,
+      );
+    }
+    entries.splice(hookIndex, 1);
+    if (entries.length === 0) matchers.splice(matcherIndex, 1);
+    else matchers[matcherIndex] = { ...matcher, hooks: entries };
+    if (matchers.length === 0) delete events[event];
+    else events[event] = matchers;
+    if (Object.keys(events).length === 0) delete hooks.events;
+    else hooks.events = events;
+    return { ...doc, hooks };
+  });
+}
+
+// ---------- plugins ----------
+
 /** Enable or disable a plugin by its `<name>@<marketplace>` key. */
 export async function setPluginEnabled(
   pluginKey: string,
