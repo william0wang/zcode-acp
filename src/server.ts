@@ -27,6 +27,7 @@ import {
 } from "./backend/sandbox.js";
 import { clearClosedSessionIds } from "./closed-sessions.js";
 import { desktopBundleAtLeast } from "./config/deferred-probe-capability.js";
+import { resolveOfficialZCodeBaseUrl } from "./config/official-mcp-auth.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -37,6 +38,7 @@ import { BackgroundTaskListener } from "./handlers/background-tasks.js";
 import { emitSessionTurnState, enqueueSessionSend, TURN_STATE_METHODS } from "./handlers/io.js";
 import { SandboxRestartBatcher, flushSandboxGrants } from "./handlers/sandbox-allow.js";
 import {
+  answerOfficialMcpAuthHeaders,
   answerProviderRuntimeHeaders,
   sweepOrphanedServerRequests,
 } from "./handlers/server-requests.js";
@@ -798,11 +800,16 @@ export class ZcodeAcpServer {
     // or the user's own tools even though they work in a terminal. The CLI
     // shells out to project tooling (npm scripts, local binaries), so a
     // completed PATH changes what a session can actually do.
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...(await envWithLoginShell()),
       ...mergeEnvWithCreds(loadZcodeCredentials()),
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
+      // Inject the authoritative ZCode service origin so official plugin
+      // `.mcp.json` `${ZCODE_BASE_URL}` URLs expand correctly
+      // (`mergeEnvWithCreds` has already stripped the possibly-polluted
+      // inherited value; this writes only the trusted ZCode domain).
+      ZCODE_BASE_URL: resolveOfficialZCodeBaseUrl(),
     };
     let argv = resolveZcodeCommand({ catalogProbe: this.catalogProbe });
     if (this.catalogProbe) {
@@ -884,6 +891,31 @@ export class ZcodeAcpServer {
           );
           try {
             backend.sendReply(id, { headersApplied: false, errorMessage: "bridge error" });
+          } catch {
+            /* backend gone — nothing to answer */
+          }
+        }
+      });
+      return true;
+    };
+    // Answer official MCP identity-header requests at arrival (tianyancha,
+    // zcode-site, ...) so connect/discovery never goes unanswered.
+    backend.officialMcpAuthHeadersResponder = (id, params) => {
+      setImmediate(() => {
+        try {
+          answerOfficialMcpAuthHeaders(
+            backend,
+            id,
+            "interaction/requestOfficialMcpAuthHeaders",
+            params,
+          );
+        } catch (e) {
+          warn(
+            `official MCP auth headers responder threw, declining: ` +
+              `${e instanceof Error ? e.message : String(e)}`,
+          );
+          try {
+            backend.sendReply(id, { ok: false, reason: "official_auth_unavailable" });
           } catch {
             /* backend gone — nothing to answer */
           }

@@ -54,6 +54,7 @@ import {
   storeStartPlanJwt,
 } from "../config/account-provider.js";
 import { credentialCipherOp } from "../backend/credential-store.js";
+import { resolveOfficialMcpAuthHeaders } from "../config/official-mcp-auth.js";
 import { ProjectTokenError, resolveOAuthProjectToken } from "../config/project-token.js";
 import { buildConfigOptions, buildModes } from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
@@ -397,6 +398,11 @@ async function handleOne(
     return;
   }
 
+  if (isOfficialMcpAuthHeadersRequest(method)) {
+    answerOfficialMcpAuthHeaders(backend, zcodeReqId, method, params as Record<string, unknown>);
+    return;
+  }
+
   if (method === "interaction/requestCredentialCipher") {
     // The CLI delegates credential encrypt/decrypt to its host when the store
     // is v2 (OS keyring, unreadable without the keyring key) — serve both ops
@@ -573,6 +579,10 @@ async function settleOrphan(
     }
     if (isProviderRuntimeHeadersRequest(req.method)) {
       answerProviderRuntimeHeaders(backend, req.id, req.method, params);
+      return;
+    }
+    if (isOfficialMcpAuthHeadersRequest(req.method)) {
+      answerOfficialMcpAuthHeaders(backend, req.id, req.method, params);
       return;
     }
     if (req.method === "interaction/requestCredentialCipher") {
@@ -1391,6 +1401,36 @@ function isUserInputRequestUnchecked(method: string): boolean {
 /** @see handleOne — the Start Plan captcha-session request (issue #123). */
 function isProviderRuntimeHeadersRequest(method: string): boolean {
   return method === "interaction/requestProviderRuntimeHeaders";
+}
+
+/** Whether `method` is the official plugin MCP identity-headers request. */
+function isOfficialMcpAuthHeadersRequest(method: string): boolean {
+  return method === "interaction/requestOfficialMcpAuthHeaders";
+}
+
+/**
+ * Answer an `interaction/requestOfficialMcpAuthHeaders` request.
+ * Logs carry only non-sensitive metadata (plugin name, key, status) — never
+ * any token value.
+ */
+export function answerOfficialMcpAuthHeaders(
+  backend: ZcodeBackend,
+  reqId: number | string,
+  method: string,
+  params: Record<string, unknown>,
+): boolean {
+  if (!isOfficialMcpAuthHeadersRequest(method)) return false;
+  const outcome = resolveOfficialMcpAuthHeaders(params);
+  const pluginId = typeof params.pluginId === "string" ? params.pluginId : "unknown";
+  const mcpKey = typeof params.mcpKey === "string" ? params.mcpKey : "plugin-command";
+  if (outcome.ok) {
+    const headerNames = Object.keys(outcome.headers).sort().join(", ");
+    log(`  official MCP auth headers: served [${headerNames}] for ${pluginId}:${mcpKey}`);
+  } else {
+    warn(`  ⚠ official MCP auth headers unavailable for ${pluginId}:${mcpKey} (${outcome.reason})`);
+  }
+  sendZcodeReply(backend, reqId, outcome);
+  return true;
 }
 
 /**

@@ -36,6 +36,17 @@ export class ZcodeBackend extends JsonRpcChild {
    */
   providerRuntimeHeadersResponder?: (id: number, params: Record<string, unknown>) => boolean;
   /**
+   * Arrival-time responder for `interaction/requestOfficialMcpAuthHeaders`.
+   * Official cloud MCP servers (e.g. tianyancha, zcode-site) ask the host for
+   * the official JWT identity headers at connect, discovery, and tool-call
+   * time — the request can arrive during session init or outside any turn
+   * poll window, so it must be answered the moment the frame lands.
+   */
+  officialMcpAuthHeadersResponder?: (
+    id: number | string,
+    params: Record<string, unknown>,
+  ) => boolean;
+  /**
    * Arrival-time hook for compact terminal states. `session/compact` runs its
    * internal turn in the background and NEVER reports failure on the RPC —
    * the outcome only surfaces as a `state.updated` notification whose reason
@@ -133,6 +144,14 @@ export class ZcodeBackend extends JsonRpcChild {
     ) {
       // Answered at arrival — see providerRuntimeHeadersResponder. This is
       // what keeps compact's internal model turn alive outside any turn loop.
+      return true;
+    }
+    if (
+      req.method === "interaction/requestOfficialMcpAuthHeaders" &&
+      this.officialMcpAuthHeadersResponder?.(req.id, req.params as Record<string, unknown>)
+    ) {
+      // Answer official MCP identity-header requests at frame arrival so
+      // plugin connect and tool discovery never stall.
       return true;
     }
     return false;
