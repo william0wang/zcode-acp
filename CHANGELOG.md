@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.0](https://github.com/william0wang/zcode-acp/compare/v0.89.0...v0.90.0) (2026-11-23)
+
+
+### Features
+
+* add provider create, delete, and reorder settings routes ([6ca300f](https://github.com/william0wang/zcode-acp/commit/6ca300f613ab901a213afabcde1694c6e8320d4e))
+* add skill detail, hooks add/remove, and mcp-status settings routes ([61b2281](https://github.com/william0wang/zcode-acp/commit/61b228142d5b126d6af6bee32f20780e7152cc66))
+* support ZCode official MCP auth headers and ZCODE_BASE_URL injection ([#411](https://github.com/william0wang/zcode-acp/issues/411)) ([af6cda8](https://github.com/william0wang/zcode-acp/commit/af6cda883ba9637c47ff377d6062842156ad8ec2))
+
 ## [0.89.0](https://github.com/william0wang/zcode-acp/compare/v0.88.2...v0.89.0) (2026-11-19)
 
 
