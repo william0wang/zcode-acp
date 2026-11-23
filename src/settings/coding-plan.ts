@@ -7,8 +7,11 @@
  * so a client that cannot open the app still gets the feature.
  *
  * Credentials are the hard part. They live in `~/.zcode/v2/credentials.json`,
- * AES-256-GCM encrypted, keyed by `ZCODE_CREDENTIAL_SECRET` or a machine-bound
- * fallback string. Two tokens are needed and they are NOT interchangeable:
+ * AES-256-GCM encrypted — legacy `enc:v1:` under `ZCODE_CREDENTIAL_SECRET` or
+ * a machine-bound fallback, current `enc:v2:os:` under the OS-keyring key.
+ * Decryption is delegated to the shared v2-aware reader in
+ * `backend/credential-store.ts`. Two tokens are needed and they are NOT
+ * interchangeable:
  *
  *  - `zcodejwttoken` → `Authorization: Bearer …`
  *  - the OAuth access token for the CURRENT provider family → `X-Bigmodel-Authorization`
@@ -32,8 +35,8 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-import { decryptCredential, resolveCredentialSecret } from "../backend/credential-store.js";
-import { log, zcodeCredentialsPath } from "../utils.js";
+import { readCredentialStoreSync } from "../backend/credential-store.js";
+import { zcodeCredentialsPath } from "../utils.js";
 import { UpstreamError } from "./errors.js";
 
 /** The only provider ids that own a coding plan. */
@@ -79,7 +82,13 @@ export interface ResetAuthorization {
 }
 
 /**
- * Read and decrypt the credential store. Throws `credentials_unavailable`. */
+ * Read and decrypt the credential store. Throws `credentials_unavailable`.
+ *
+ * Decryption is delegated to the shared v2-aware reader: the store migrated
+ * to keyring-keyed `enc:v2:os:` values with desktop 3.18.0, and the v1-only
+ * path here passed those through as "plaintext" — the reset flow then sent
+ * ciphertext upstream and every call answered HTTP 401.
+ */
 async function loadCredentials(env: NodeJS.ProcessEnv): Promise<Record<string, string>> {
   let raw: string;
   try {
@@ -87,30 +96,12 @@ async function loadCredentials(env: NodeJS.ProcessEnv): Promise<Record<string, s
   } catch {
     throw new Error("credentials_unavailable");
   }
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    JSON.parse(raw);
   } catch {
     throw new Error("credentials_unavailable");
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("credentials_unavailable");
-  }
-  const secret = resolveCredentialSecret(env);
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-    if (typeof value !== "string") continue;
-    try {
-      out[key] = decryptCredential(value, secret);
-    } catch (error) {
-      // One undecryptable entry must not sink the rest — the store holds OAuth
-      // discovery state and other unrelated secrets.
-      log(
-        `coding-plan: credential '${key}' could not be read (${error instanceof Error ? error.message : String(error)})`,
-      );
-    }
-  }
-  return out;
+  return readCredentialStoreSync(env);
 }
 
 /** Which family a provider id belongs to. */
