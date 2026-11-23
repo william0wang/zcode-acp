@@ -35,6 +35,7 @@ import {
 } from "./account-provider.js";
 import { readCredentialConfig } from "./bridge-accounts.js";
 import { parseModelRefValue } from "./model-resolution.js";
+import { registryContextWindow } from "./registry-context-window.js";
 import { initialSessionMode } from "./settings.js";
 import { loadUserConfig } from "./user-config.js";
 
@@ -816,9 +817,20 @@ export function findProviderConfig(providerId: string): ProviderEntry | null {
   }
 }
 
-/** Read the context-window size for a provider+model: config.json first, then
- *  the desktop's provider_config.json (models added there carry
- *  `config.properties.contextWindow` and never reach config.json). */
+/**
+ * The context-window size for a provider+model, 0 when no local source knows
+ * it. One ladder, most explicit first:
+ *
+ *  1. `config.json` `limit.context` — the user's per-model limit;
+ *  2. the desktop's `provider_config.json` rule (models added there carry
+ *     `config.properties.contextWindow` and never reach config.json);
+ *  3. the registry's own answer (`registryContextWindow`) — the rule walk the
+ *     backend resolves every table model through, and the only local source
+ *     for a model that arrives through the provider table alone (GLM-5.4).
+ *
+ * An explicit value always wins, whichever is larger. Either provider dialect
+ * is accepted.
+ */
 export function modelContextWindow(providerId: string, modelId: string): number {
   const pid = configProviderIdFor(providerId);
   try {
@@ -829,7 +841,26 @@ export function modelContextWindow(providerId: string, modelId: string): number 
   } catch {
     // fall through to the personal config
   }
-  return personalModelSpec(pid, modelId)?.contextWindow ?? 0;
+  return (
+    personalModelSpec(pid, modelId)?.contextWindow ??
+    registryContextWindow(providerId, modelId) ??
+    0
+  );
+}
+
+/**
+ * The context-gauge denominator (`usage_update.size`): the local ladder above,
+ * else the size the backend reported (the CLI's projection seeds a hardcoded
+ * 200K until its first usage event). Every emission site goes through here —
+ * initial usage, turn-time deltas, the post-switch refresh, the TUI's boot
+ * reading — so the gauge cannot flip-flop between sources.
+ */
+export function usageWindowSize(
+  providerId: string,
+  modelId: string,
+  backendSize: number | null | undefined,
+): number {
+  return modelContextWindow(providerId, modelId) || backendSize || 0;
 }
 
 /** Builtin providerIds are prefixed with `builtin:` (e.g. `builtin:bigmodel`). */
@@ -1437,8 +1468,9 @@ export function rememberModelChoice(
  *  broadcast or fail the handler — the switch already succeeded backend-side.
  *
  *  For model switches, also emit a usage_update with the NEW model's context
- *  window (from config.json) so the editor's context bar refreshes immediately
- *  instead of waiting for the next turn's UsageDelta. */
+ *  window (the context-window ladder, `usageWindowSize`) so the editor's
+ *  context bar refreshes immediately instead of waiting for the next turn's
+ *  UsageDelta. */
 export async function emitConfigOptionUpdate(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
@@ -1478,10 +1510,11 @@ export async function emitConfigOptionUpdate(
   }
   if (kind === "model") {
     // Refresh the context bar: the backend's projection.contextWindow lags
-    // behind a model switch, so read the new model's limit from config.json.
+    // behind a model switch, so the new model's window comes from the local
+    // ladder first.
     try {
       const read = await sessionRead(server, zcodeSid);
-      const proj = (read.projection ?? {}) as { contextUsed?: number };
+      const proj = (read.projection ?? {}) as { contextUsed?: number; contextWindow?: number };
       // Occupancy only (#228): totalTokenCount is lifetime consumption, never
       // a meter. This refresh exists to re-show SIZE after the switch; used
       // reads 0 until the backend reports real occupancy.
@@ -1489,7 +1522,9 @@ export async function emitConfigOptionUpdate(
       // The rebuilt options[0] (model) currentValue is the just-switched value.
       const modelOpt = options.find((o) => o.id === "model");
       const { providerId, modelId } = parseModelValue(String(modelOpt?.currentValue ?? ""));
-      const size = modelContextWindow(providerId, modelId);
+      // The projection's contextWindow still names the PREVIOUS model here, so
+      // it is only the last resort — for a model no local source knows.
+      const size = usageWindowSize(providerId, modelId, proj.contextWindow);
       await send({
         sessionUpdate: "usage_update",
         used,

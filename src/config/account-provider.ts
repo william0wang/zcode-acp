@@ -43,18 +43,53 @@ const PROVIDER_CONFIG_NAME = "zcode-builtin.json";
 /** One provider rule in the bundled table. */
 export interface BuiltinProviderRule {
   providerId: string;
+  templateId?: string | null;
   providerName?: string;
   config?: {
     group?: string;
     builtinModelIds?: string[];
     access?: { type?: string; mode?: string; accountType?: string };
-    api?: { type?: string; baseUrl?: string };
+    api?: { type?: string; baseUrl?: string } | null;
   };
+}
+
+/** One rule of `providerConfigRules.templateRules` — what a rule's `templateId` names. */
+export interface BuiltinTemplateRule {
+  templateId: string;
+  config?: { api?: { type?: string; baseUrl?: string } | null } | null;
+}
+
+/**
+ * One rule of `modelConfigRules`. Every group carries the same `config`; the
+ * matcher belongs to one group each — `modelMatch` (plus `apiTypeMatch` /
+ * `baseUrlMatch` on the guarded groups), or the exact `providerId` + `modelId`
+ * / `templateId` + `modelId` pair.
+ */
+export interface BuiltinModelRule {
+  modelMatch?: string;
+  apiTypeMatch?: string;
+  baseUrlMatch?: string;
+  providerId?: string;
+  templateId?: string;
+  modelId?: string;
+  config?: { enabled?: boolean; properties?: { contextWindow?: number } | null } | null;
 }
 
 export interface BuiltinTable {
   revision?: number;
-  config?: { providerConfigRules?: { providerRules?: BuiltinProviderRule[] } };
+  config?: {
+    providerConfigRules?: {
+      providerRules?: BuiltinProviderRule[];
+      templateRules?: BuiltinTemplateRule[];
+    };
+    modelConfigRules?: {
+      modelRules?: BuiltinModelRule[];
+      modelApiRules?: BuiltinModelRule[];
+      providerSiteRules?: BuiltinModelRule[];
+      templateModelRules?: BuiltinModelRule[];
+      builtinProviderModelRules?: BuiltinModelRule[];
+    };
+  };
 }
 
 /**
@@ -96,9 +131,10 @@ let tableCache: { key: string; table: BuiltinTable } | null = null;
  * The parsed table, memoized by path, inode, size, mtime, and ctime. The
  * runtime-headers path reads it several times before every model request, and
  * the file is ~180 KB. Inode and ctime catch a same-size rewrite or rename
- * that keeps the mtime, because utimes cannot set ctime.
+ * that keeps the mtime, because utimes cannot set ctime. `key` is that stat
+ * identity, for derived caches that must live exactly as long as this parse.
  */
-export function readBuiltinTable(): { table: BuiltinTable; file: string } | null {
+export function readBuiltinTable(): { table: BuiltinTable; file: string; key: string } | null {
   const file = builtinTablePath();
   if (!file) return null;
   try {
@@ -108,7 +144,7 @@ export function readBuiltinTable(): { table: BuiltinTable; file: string } | null
       const table = JSON.parse(readFileSync(file, "utf8")) as BuiltinTable;
       tableCache = { key, table };
     }
-    return { table: tableCache.table, file };
+    return { table: tableCache.table, file, key };
   } catch (e) {
     warn(
       `account-provider: unreadable provider table (${e instanceof Error ? e.message : String(e)})`,
@@ -295,12 +331,13 @@ function manualCodingPlanKeys(): Map<string, string> {
 }
 
 /** A provider rule in the desktop's personal provider_config.json (3.12+). */
-interface PersonalProviderRule {
+export interface PersonalProviderRule {
   providerId?: string;
+  templateId?: string | null;
   enabled?: boolean;
   config?: {
     access?: { type?: string; apiKey?: string };
-    api?: { baseUrl?: string };
+    api?: { type?: string; baseUrl?: string } | null;
   };
 }
 
@@ -310,16 +347,21 @@ let personalRulesCache: { key: string; rules: PersonalProviderRule[] } | null = 
  * Personal provider rules, memoized by the same stat key as the builtin table
  * — the runtime-headers path re-reads these before every model request.
  */
-function readPersonalProviderRules(): PersonalProviderRule[] {
+export function readPersonalProviderRules(): PersonalProviderRule[] {
   const file = zcodePersonalProviderPath();
   try {
     const { ino, size, mtimeMs, ctimeMs } = statSync(file);
     const key = `${file}\0${ino}:${size}:${mtimeMs}:${ctimeMs}`;
     if (personalRulesCache?.key !== key) {
       const parsed = JSON.parse(readFileSync(file, "utf8")) as {
-        config?: { providerConfigRules?: { providerRules?: PersonalProviderRule[] } };
+        config?: { providerConfigRules?: { providerRules?: unknown } };
       };
-      personalRulesCache = { key, rules: parsed.config?.providerConfigRules?.providerRules ?? [] };
+      const rules = parsed.config?.providerConfigRules?.providerRules;
+      personalRulesCache = {
+        key,
+        // A hand-edited file can carry any shape; only a list is usable.
+        rules: Array.isArray(rules) ? (rules as PersonalProviderRule[]) : [],
+      };
     }
     return personalRulesCache.rules;
   } catch {
