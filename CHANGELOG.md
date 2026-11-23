@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.92.0](https://github.com/william0wang/zcode-acp/compare/v0.91.0...v0.92.0) (2026-11-23)
+
+
+### Features
+
+* resolve model context windows through the provider table's rule walk ([#416](https://github.com/william0wang/zcode-acp/issues/416)) ([ce6aef9](https://github.com/william0wang/zcode-acp/commit/ce6aef9caa945391d918470a37930e6e888f256a))
+
 ## [0.91.0](https://github.com/william0wang/zcode-acp/compare/v0.90.1...v0.91.0) (2026-11-23)
 
 
