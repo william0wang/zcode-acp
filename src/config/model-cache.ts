@@ -10,12 +10,7 @@
 import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
-import {
-  defaultModelRef,
-  formatModelValue,
-  modelContextWindow,
-  parseModelValue,
-} from "./options.js";
+import { defaultModelRef, formatModelValue, parseModelValue, usageWindowSize } from "./options.js";
 import { log } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "../handlers/dispatch.js";
@@ -82,12 +77,11 @@ export async function emitInitialUsage(
     // yet; the completion diff reports real occupancy once turns run.
     const used = proj.contextUsed ?? 0;
     if (!used) return; // resume before any turn: skip to avoid showing 0.
-    // Configured limit wins over the projection's contextWindow — the
-    // projection seeds a hardcoded 200K default for models without registry
-    // metadata, config.json is the explicit per-model truth (same precedence
-    // as dispatchUsageDelta, so the gauge never flip-flops between sources).
+    // The context-window ladder (`usageWindowSize`) wins over the projection's
+    // contextWindow — the same ladder as dispatchUsageDelta and the
+    // post-switch refresh, so the gauge never flip-flops between sources.
     const { providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid));
-    const size = modelContextWindow(providerId, modelId) || (proj.contextWindow ?? 0);
+    const size = usageWindowSize(providerId, modelId, proj.contextWindow);
     await dispatchEvent(
       server,
       cx,

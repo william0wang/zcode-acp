@@ -15,8 +15,8 @@ import { currentModelCached } from "../config/model-cache.js";
 import {
   buildConfigOptions,
   formatModelValue,
-  modelContextWindow,
   parseModelValue,
+  usageWindowSize,
 } from "../config/options.js";
 import { showCompletionStatus } from "../config/settings.js";
 import {
@@ -429,20 +429,19 @@ async function dispatchUsageDelta(
   acpSid: string,
   ev: Extract<InternalEvent, { kind: "UsageDelta" }>,
 ): Promise<void> {
-  // `size` precedence: the user's explicit config.json `limit.context` for the
-  // session's model FIRST, the backend event's contextWindow as fallback. The
-  // CLI's projection seeds contextWindow with a hardcoded 200K default and
-  // account-provider models carry no registry metadata (our account snapshot
-  // pushes model ids only), so the event value can be a placeholder — while
-  // config.json is the explicit per-model truth, and it is already what the
-  // boot/switch-time emissions use. Config-first keeps the gauge from
-  // flip-flopping between the two values across a session.
+  // `size` precedence: the context-window ladder (`usageWindowSize`) FIRST —
+  // config.json `limit.context`, the personal rule, then the registry's own
+  // rule walk — and the backend event's contextWindow only for a model no
+  // local source knows. The CLI's projection seeds contextWindow with a
+  // hardcoded 200K default, so the event value can be a placeholder; the
+  // ladder is also what the boot/switch-time emissions use, and one ladder
+  // everywhere keeps the gauge from flip-flopping between the two.
   // Resolve to the real backend session id — `acpSid` may be a lazy
   // session/new placeholder that the backend rejects with "Session is not
   // active", wasting a 5s request timeout on every usage_update.
   const zcodeSid = server.resolveSid(acpSid) ?? acpSid;
   const { providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid));
-  const size = modelContextWindow(providerId, modelId) || ev.size;
+  const size = usageWindowSize(providerId, modelId, ev.size);
   await sendSessionUpdate(cx, acpSid, {
     sessionUpdate: "usage_update",
     used: ev.used,

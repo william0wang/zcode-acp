@@ -42,10 +42,10 @@ import {
   formatModelValue,
   isModelUsable,
   loadAllModels,
-  modelContextWindow,
   modelRetired,
   parseModelValue,
   rememberModelChoice,
+  usageWindowSize,
 } from "../config/options.js";
 import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
 import {
@@ -882,6 +882,7 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
       try {
         const zcodeSid = server.resolveSid(acpSid);
         let used = 0;
+        let backendSize: number | undefined;
         if (zcodeSid) {
           const backend = await server.ensureBackend();
           const resp = await backend.request(
@@ -897,6 +898,7 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
           // consumption) for the meter — boot shows size first, used stays 0
           // until the backend reports real occupancy.
           used = proj?.contextUsed ?? 0;
+          backendSize = proj?.contextWindow;
         }
         const fallback = defaultModelRef();
         let providerId = fallback.providerId;
@@ -904,10 +906,11 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
         if (zcodeSid) {
           ({ providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid)));
         }
+        // The same context-window ladder as every other usage_update.
         await sendSessionUpdate(cx, acpSid, {
           sessionUpdate: "usage_update",
           used,
-          size: modelContextWindow(providerId, modelId),
+          size: usageWindowSize(providerId, modelId, backendSize),
         });
       } catch (e) {
         log(

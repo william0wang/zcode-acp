@@ -25,7 +25,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { backendCapabilities } from "../backend/adapter.js";
-import { loadAllModels } from "../config/options.js";
+import { loadAllModels, modelContextWindow } from "../config/options.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { warn } from "../utils.js";
 import {
@@ -828,10 +828,81 @@ async function resetCardEligibility(): Promise<{
   }
 }
 
+/**
+ * The provider id as the clients' join key (TS `matchProviderId`, Rust
+ * `match_provider_id`): coding-plan ids fold to the legacy `builtin:` spelling
+ * and everything else compares verbatim. `modelRules` must be shaped against
+ * THIS fold — the bridge's own `configProviderIdFor` also folds team and
+ * start-plan ids, which the clients compare as they are, so a rule it calls
+ * "found" can be one the join never reaches.
+ */
+function clientProviderKey(providerId: string | undefined): string {
+  const m = /^account:([a-z0-9]+)-(?:(?:individual|team|start)-)?coding-plan$/.exec(
+    providerId ?? "",
+  );
+  return m ? `builtin:${m[1]}-coding-plan` : (providerId ?? "");
+}
+
+/**
+ * The models payload of `GET /settings/all` and `GET /settings/models`.
+ *
+ * `modelRules` is what the clients join `available` against for a model's
+ * context window (`ruleFor`: the FIRST rule whose provider id folds equal and
+ * whose model id matches). The stored rules alone leave gaps — a coding-plan
+ * model arrives only through the provider table and has no rule, and the
+ * desktop writes coding-plan rules without a window — so every selectable
+ * model is made to resolve here, with no client change:
+ *
+ *   - a stored rule that states no window is filled in with the context-window
+ *     ladder's answer (an explicit window is never replaced);
+ *   - a selectable model with no rule the join can reach gets a row appended
+ *     AFTER the stored ones, so a stored rule still wins the prefill for the
+ *     models that have one.
+ *
+ * Appended rows are display-only: they carry the window alone (no reasoning
+ * levels), spell the provider exactly as `available` does, and are never
+ * written back — the write routes read `provider_config.json`, not this
+ * payload. A model the user switched off is not in `available`, so nothing
+ * here can resurrect it.
+ */
 async function handleModelsPayload(): Promise<unknown> {
   const available = loadAllModels();
   const personal = await readProviderConfig();
   const rules = personal.config.providerConfigRules.providerRules;
+  const stored = [
+    ...personal.config.modelConfigRules.providerModelRules,
+    ...personal.config.modelConfigRules.manualProviderModelRules,
+  ];
+  const joinKey = (providerId: string | undefined, modelId: string | undefined): string =>
+    `${clientProviderKey(providerId)}\0${modelId}`;
+  const joinable = new Set(stored.map((rule) => joinKey(rule.providerId, rule.modelId)));
+  const modelRules: Array<{
+    providerId: string;
+    modelId: string;
+    enabled: boolean;
+    contextWindow?: number;
+    reasoningLevels?: string[];
+  }> = stored.map((rule) => ({
+    providerId: rule.providerId,
+    modelId: rule.modelId,
+    enabled: rule.config.enabled !== false,
+    contextWindow:
+      rule.config.properties?.contextWindow ??
+      (modelContextWindow(rule.providerId, rule.modelId) || undefined),
+    reasoningLevels: rule.config.optionSpecs?.reasoningLevel?.values,
+  }));
+  for (const model of available) {
+    if (!model.modelId || joinable.has(joinKey(model.providerId, model.modelId))) continue;
+    const contextWindow = modelContextWindow(model.providerId, model.modelId);
+    if (!contextWindow) continue;
+    joinable.add(joinKey(model.providerId, model.modelId));
+    modelRules.push({
+      providerId: model.providerId,
+      modelId: model.modelId,
+      enabled: true,
+      contextWindow,
+    });
+  }
   return {
     available,
     // The display order the settings surfaces sort by (absent = file rule
@@ -852,16 +923,7 @@ async function handleModelsPayload(): Promise<unknown> {
       // Whether this provider can be edited at all (see updateProvider).
       editable: true,
     })),
-    modelRules: [
-      ...personal.config.modelConfigRules.providerModelRules,
-      ...personal.config.modelConfigRules.manualProviderModelRules,
-    ].map((rule) => ({
-      providerId: rule.providerId,
-      modelId: rule.modelId,
-      enabled: rule.config.enabled !== false,
-      contextWindow: rule.config.properties?.contextWindow,
-      reasoningLevels: rule.config.optionSpecs?.reasoningLevel?.values,
-    })),
+    modelRules,
   };
 }
 
