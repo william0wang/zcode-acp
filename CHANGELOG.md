@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.90.1](https://github.com/william0wang/zcode-acp/compare/v0.90.0...v0.90.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* read coding-plan credentials through the shared v2-aware store reader ([c2db592](https://github.com/william0wang/zcode-acp/commit/c2db592c5b0a4a9a6ca96523973077e6652d56bf))
+
 ## [0.90.0](https://github.com/william0wang/zcode-acp/compare/v0.89.0...v0.90.0) (2026-11-23)
 
 
