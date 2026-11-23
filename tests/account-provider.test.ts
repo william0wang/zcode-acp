@@ -247,6 +247,54 @@ describe("buildAccountProviderConfig", () => {
     expect(payload!.basedOnZCodeBuiltinRevision).toBe(expected);
   });
 
+  it("follows the derived value onto the host's refreshed runtime copy", () => {
+    // The bundled baseline (revision 28 above) lacks GLM-5.4; the host's
+    // refreshed runtime copy (revision 47) carries it. `builtinProviderEnv`
+    // selects the newer file, and BOTH the pushed snapshot and the dropdown
+    // must read that same file — hashing the stale bundle's path here is
+    // exactly what makes the backend accept the push and then ignore it.
+    const active = path.join(
+      dataRoot.value,
+      "runtime",
+      "provider",
+      "3.18.2",
+      "endpoint-x",
+      "zcode-builtin.json",
+    );
+    mkdirSync(path.dirname(active), { recursive: true });
+    writeFileSync(
+      active,
+      JSON.stringify({
+        ...TABLE,
+        revision: 47,
+        config: {
+          providerConfigRules: {
+            providerRules: TABLE.config.providerConfigRules.providerRules.map((rule) => ({
+              ...rule,
+              config: { ...rule.config, builtinModelIds: [...rule.config.builtinModelIds, "GLM-5.4"] },
+            })),
+          },
+        },
+      }),
+    );
+    writeFileSync(
+      zcodeCfgPath.value,
+      JSON.stringify({
+        provider: { "builtin:bigmodel-coding-plan": { enabled: true, options: { apiKey: "k" } } },
+      }),
+    );
+    builtinProviderEnv.mockReturnValue({ ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: active });
+
+    const payload = buildAccountProviderConfig();
+    expect(payload!.basedOnZCodeBuiltinRevision).toBe(
+      `zcode-builtin:47:${createHash("sha256").update(path.resolve(active)).digest("hex")}`,
+    );
+    expect(payload!.providers["account:bigmodel-individual-coding-plan"]!.builtinModelIds).toContain(
+      "GLM-5.4",
+    );
+    expect(entitledCodingPlanModels().map((m) => m.modelId)).toContain("GLM-5.4");
+  });
+
   it("falls back to config.json enablement when the availability cache is absent", () => {
     writeFileSync(
       zcodeCfgPath.value,

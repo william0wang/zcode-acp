@@ -11,11 +11,18 @@
  * the host's injection so bundled CLIs boot the same way they do under the
  * app.
  *
+ * The bundled file is only a frozen baseline: the host refreshes the table
+ * from the CDN into a runtime copy and boots its own agent on that copy, so
+ * the bridge must pick the newer release of the two (observed 2026-11-23: the
+ * 3.18.2 bundle is revision 44 while the runtime copy already carried revision
+ * 47 with GLM-5.4 — the desktop listed the model, the bridge could not).
+ *
  * Fixtures are real files under hermetic temp trees; nothing writes outside
  * tmpdir.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -32,6 +39,7 @@ const SAVED = {
   ZCODE_APP_VERSION: process.env.ZCODE_APP_VERSION,
   ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE,
   ZCODE_BIN: process.env.ZCODE_BIN,
+  ZCODE_ENDPOINT_ORIGIN: process.env.ZCODE_ENDPOINT_ORIGIN,
   ZCODE_HOME: process.env.ZCODE_HOME,
   ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE,
 };
@@ -43,6 +51,8 @@ beforeEach(() => {
   scratch = mkdtempSync(path.join(tmpdir(), "zcode-bundle-"));
   process.env.ZCODE_HOME = path.join(scratch, "data");
   delete process.env.ZCODE_APP_VERSION;
+  // The runtime copy's endpoint key derives from the trusted origin; pin the default.
+  delete process.env.ZCODE_ENDPOINT_ORIGIN;
   personal = path.join(process.env.ZCODE_HOME, "v2", "provider_config.json");
 });
 
@@ -63,6 +73,71 @@ function makeAppBundle(root: string): string {
   mkdirSync(providerDir, { recursive: true });
   writeFileSync(path.join(providerDir, "zcode-builtin.json"), "{}");
   return path.join(glm, "zcode.cjs");
+}
+
+/** A valid release envelope — the shape upstream's `decodeZCodeBuiltinRelease` accepts. */
+function releaseJson(revision: number): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    revision,
+    config: {
+      providerConfigRules: { templateRules: [], providerRules: [] },
+      modelConfigRules: {},
+    },
+  });
+}
+
+function writeRelease(file: string, revision: number): void {
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, releaseJson(revision));
+}
+
+/**
+ * The host's runtime copy path, derived INDEPENDENTLY the way upstream's
+ * `resolveZCodeBuiltinCachePaths` does — a drift in the bridge's derivation
+ * (platform spelling, key length, segment order) fails here instead of
+ * silently never finding the refreshed table.
+ */
+function activeTablePath(appVersion: string, origin = "https://zcode.z.ai"): string {
+  const target = process.platform === "win32" ? "windows" : process.platform;
+  const arch =
+    process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
+  const endpointKey = createHash("sha256").update(origin).digest("hex").slice(0, 32);
+  return path.join(
+    process.env.ZCODE_HOME!,
+    "v2",
+    "runtime",
+    "provider",
+    `${target}-${arch}`,
+    appVersion,
+    `endpoint-${endpointKey}`,
+    "zcode-builtin.json",
+  );
+}
+
+function writeInfoPlist(contents: string, version: string): void {
+  mkdirSync(contents, { recursive: true });
+  writeFileSync(
+    path.join(contents, "Info.plist"),
+    [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      '<plist version="1.0"><dict>',
+      "  <key>CFBundleShortVersionString</key>",
+      `  <string>${version}</string>`,
+      "</dict></plist>",
+    ].join("\n"),
+  );
+}
+
+/** .app fixture for `version` whose bundled table is release `revision`. */
+function makeVersionedAppBundle(root: string, version: string, revision: number) {
+  const contents = path.join(root, "ZCode.app", "Contents");
+  const resources = path.join(contents, "Resources");
+  const entry = makeAppBundle(resources);
+  writeInfoPlist(contents, version);
+  const bundled = path.join(resources, "config", "provider", "zcode-builtin.json");
+  writeRelease(bundled, revision);
+  return { bundled, entry };
 }
 
 describe("builtinProviderEnv", () => {
@@ -145,16 +220,7 @@ describe("builtinProviderEnv", () => {
     const contents = path.join(scratch, "ZCode.app", "Contents");
     const resources = path.join(contents, "Resources");
     const entry = makeAppBundle(resources);
-    writeFileSync(
-      path.join(contents, "Info.plist"),
-      [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<plist version="1.0"><dict>',
-        "  <key>CFBundleShortVersionString</key>",
-        "  <string>3.17.2</string>",
-        "</dict></plist>",
-      ].join("\n"),
-    );
+    writeInfoPlist(contents, "3.17.2");
 
     expect(builtinProviderEnv(entry)).toEqual({
       [BUILTIN_PROVIDER_ENV]: path.join(resources, "config", "provider", "zcode-builtin.json"),
@@ -193,14 +259,127 @@ describe("builtinProviderEnv", () => {
     const contents = path.join(scratch, "ZCode.app", "Contents");
     const resources = path.join(contents, "Resources");
     const entry = makeAppBundle(resources);
-    writeFileSync(
-      path.join(contents, "Info.plist"),
-      "<plist><dict><key>CFBundleShortVersionString</key><string>3.17.2</string></dict></plist>",
-    );
+    writeInfoPlist(contents, "3.17.2");
     process.env.ZCODE_APP_VERSION = "9.9.9";
 
     expect(builtinProviderEnv(entry)).toEqual({
       [BUILTIN_PROVIDER_ENV]: path.join(resources, "config", "provider", "zcode-builtin.json"),
+      [PERSONAL_PROVIDER_ENV]: personal,
+    });
+  });
+});
+
+describe("builtinProviderEnv — the host's refreshed runtime copy", () => {
+  it("boots on the runtime copy when it carries a newer release than the bundle", () => {
+    const { entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    const active = activeTablePath("3.18.2");
+    writeRelease(active, 47);
+
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: active,
+      [PERSONAL_PROVIDER_ENV]: personal,
+      [APP_VERSION_ENV]: "3.18.2",
+    });
+  });
+
+  it("keeps the bundle when the runtime copy carries the same release", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    writeRelease(activeTablePath("3.18.2"), 44);
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+  });
+
+  it("keeps the bundle when the runtime copy is older (a leftover before an app update)", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 47);
+    writeRelease(activeTablePath("3.18.2"), 44);
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+  });
+
+  it("ignores a runtime copy that is not a valid release", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    const active = activeTablePath("3.18.2");
+    mkdirSync(path.dirname(active), { recursive: true });
+    writeFileSync(active, '{"schemaVersion":1,"revision":47,"config":{"pro');
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+  });
+
+  it("ignores a runtime copy whose envelope upstream's decoder would reject", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    const active = activeTablePath("3.18.2");
+    mkdirSync(path.dirname(active), { recursive: true });
+    // A strict envelope: modelConfigRules is required, an extra key is fatal.
+    writeFileSync(
+      active,
+      JSON.stringify({ schemaVersion: 1, revision: 47, config: { providerConfigRules: {} } }),
+    );
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+  });
+
+  it("ignores the runtime copies of another app version", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    writeRelease(activeTablePath("3.17.2"), 47);
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+  });
+
+  it("scopes the runtime copy to the trusted endpoint origin", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    writeRelease(activeTablePath("3.18.2"), 47);
+    process.env.ZCODE_ENDPOINT_ORIGIN = "https://zcode.example.com";
+
+    // The default endpoint's copy belongs to another control plane.
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+
+    const scoped = activeTablePath("3.18.2", "https://zcode.example.com");
+    writeRelease(scoped, 45);
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(scoped);
+  });
+
+  it("follows a refresh that lands after the first lookup (memoized on file identity)", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 50);
+    const active = activeTablePath("3.18.2");
+    writeRelease(active, 47);
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+
+    writeRelease(active, 51);
+    // Same byte length as before: move the clock so the stat identity changes.
+    utimesSync(active, new Date("2030-01-01T00:00:01Z"), new Date("2030-01-01T00:00:01Z"));
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(active);
+  });
+
+  it("yields to a valid runtime copy when the bundle itself is unreadable", () => {
+    const { entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    const active = activeTablePath("3.18.2");
+    writeRelease(active, 44);
+    writeFileSync(
+      path.join(
+        scratch,
+        "ZCode.app",
+        "Contents",
+        "Resources",
+        "config",
+        "provider",
+        "zcode-builtin.json",
+      ),
+      "not json",
+    );
+
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(active);
+  });
+
+  it("takes an explicit ZCODE_APP_VERSION as the version segment", () => {
+    const { bundled, entry } = makeVersionedAppBundle(scratch, "3.18.2", 44);
+    process.env.ZCODE_APP_VERSION = "9.9.9";
+    writeRelease(activeTablePath("3.18.2"), 47);
+    expect(builtinProviderEnv(entry)[BUILTIN_PROVIDER_ENV]).toBe(bundled);
+
+    const active = activeTablePath("9.9.9");
+    writeRelease(active, 45);
+    expect(builtinProviderEnv(entry)).toEqual({
+      [BUILTIN_PROVIDER_ENV]: active,
       [PERSONAL_PROVIDER_ENV]: personal,
     });
   });

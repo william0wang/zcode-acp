@@ -30,6 +30,7 @@ import { accountProviderIdFor } from "./account-provider.js";
 import { parseModelRefValue, resolveModelTarget } from "./model-resolution.js";
 import { buildModelElement, type ModelEntry } from "./provider-registry.js";
 import {
+  defaultModelRef,
   findProviderConfig,
   formatModelValue,
   isBuiltinProvider,
@@ -102,7 +103,7 @@ export function buildRuntimeModel(ref: ModelRef, revision = "bridge"): unknown |
  * resume fails; see resumePreservingModel in handlers/session.ts.
  */
 export function buildResumeRuntimeModel(): unknown | null {
-  const first = loadAllModels()[0];
+  const first = defaultModelRef();
   if (!first) {
     log("runtime-model: no enabled provider in config.json (resume overlay skipped)");
     return null;

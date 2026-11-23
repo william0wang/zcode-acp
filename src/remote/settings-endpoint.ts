@@ -31,10 +31,10 @@ import { warn } from "../utils.js";
 import {
   removeModel,
   readProviderConfig,
-   createProvider,
-   deleteProvider,
-   reorderProviders,
-   updateProvider,
+  createProvider,
+  deleteProvider,
+  reorderProviders,
+  updateProvider,
   upsertModel,
 } from "../settings/provider-config.js";
 import { testModelConnectivity } from "../settings/model-connectivity.js";
@@ -114,6 +114,7 @@ import {
   type WorkflowScope,
 } from "../settings/workflow.js";
 import { workflowOverrideNow } from "../config/workflow-gate.js";
+import { defaultModelSetting, setDefaultModel } from "../settings/default-model.js";
 import {
   codingPlanProviderIds,
   isCodingPlanProvider,
@@ -335,6 +336,7 @@ async function route(
   if (method === "GET") {
     if (path === "/settings/all") return void (await handleAll(res, server));
     if (path === "/settings/models") return void (await handleModels(res));
+    if (path === "/settings/default-model") return void (await handleDefaultModel(res));
     if (path === "/settings/skills") return void (await handleSkills(res));
     if (path.startsWith("/settings/skills/")) {
       // Skills parity: row → detail. The segment is the percent-encoded
@@ -436,6 +438,9 @@ async function route(
     }
     if (method === "POST" && path === "/settings/models/test") {
       return void (await handleModelTest(res, body));
+    }
+    if (method === "PUT" && path === "/settings/default-model") {
+      return void (await handleDefaultModelSet(res, body));
     }
     if (method === "DELETE" && path.startsWith("/settings/models/")) {
       const rest = path.slice("/settings/models/".length);
@@ -864,6 +869,31 @@ async function handleModels(res: ServerResponse): Promise<void> {
   await guard(res, async () => ({ ok: true as const, models: await handleModelsPayload() }));
 }
 
+/** GET /settings/default-model — the manual choice and what it resolves to right now. */
+async function handleDefaultModel(res: ServerResponse): Promise<void> {
+  await guard(res, async () => ({ ok: true as const, ...defaultModelSetting() }));
+}
+
+/**
+ * PUT /settings/default-model `{defaultModel: string | null}` — store (null:
+ * clear) the manual default in the user config and answer the same payload as
+ * the GET. The value is stored as written; one naming a model that is switched
+ * off or unknown is reported with `source: "auto"` instead of being forced.
+ */
+async function handleDefaultModelSet(
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  await guard(res, async () => {
+    const raw = body["defaultModel"];
+    if (raw !== null && !(typeof raw === "string" && raw.trim())) {
+      throw new Error("defaultModel must be a model reference string or null");
+    }
+    await setDefaultModel(typeof raw === "string" ? raw.trim() : null);
+    return { ok: true as const, ...defaultModelSetting() };
+  });
+}
+
 async function handleSkills(res: ServerResponse): Promise<void> {
   await guard(res, async () => ({ ok: true as const, skills: await listSkills() }));
 }
@@ -951,17 +981,17 @@ async function handleUpdateProvider(
     );
     return;
   }
-    await guard(res, async () => {
-      await updateProvider(providerId, {
-        ...(enabled !== undefined ? { enabled } : {}),
-        ...(providerName !== undefined ? { providerName } : {}),
-        ...(hasBaseUrl ? { baseUrl: nullable("baseUrl") } : {}),
-        ...(hasApiType ? { apiType: nullable("apiType") } : {}),
-        ...(hasApiKey ? { apiKey: nullable("apiKey") } : {}),
-      });
-      return { ok: true as const, effect: "immediate" as Effect };
+  await guard(res, async () => {
+    await updateProvider(providerId, {
+      ...(enabled !== undefined ? { enabled } : {}),
+      ...(providerName !== undefined ? { providerName } : {}),
+      ...(hasBaseUrl ? { baseUrl: nullable("baseUrl") } : {}),
+      ...(hasApiType ? { apiType: nullable("apiType") } : {}),
+      ...(hasApiKey ? { apiKey: nullable("apiKey") } : {}),
     });
-  }
+    return { ok: true as const, effect: "immediate" as Effect };
+  });
+}
 
 /**
  * Settings parity: provider create. The id is DERIVED from the provider
@@ -1158,16 +1188,16 @@ async function handleHookUpdate(
     sendError(res, 400, "matcherIndex (path) and hookIndex (body) must be integers");
     return;
   }
-    await guard(res, async () => {
-      await updateHookEntry(event, matcherIndex, hookIndex, {
-        ...(str(body, "command") !== undefined ? { command: str(body, "command") } : {}),
-        ...(bool(body, "enabled") !== undefined ? { enabled: bool(body, "enabled") } : {}),
-        ...(num(body, "timeoutMs") !== undefined ? { timeoutMs: num(body, "timeoutMs") } : {}),
-        ...(num(body, "timeout") !== undefined ? { timeout: num(body, "timeout") } : {}),
-      });
-      return { ok: true as const, effect: "needs-restart" as Effect };
+  await guard(res, async () => {
+    await updateHookEntry(event, matcherIndex, hookIndex, {
+      ...(str(body, "command") !== undefined ? { command: str(body, "command") } : {}),
+      ...(bool(body, "enabled") !== undefined ? { enabled: bool(body, "enabled") } : {}),
+      ...(num(body, "timeoutMs") !== undefined ? { timeoutMs: num(body, "timeoutMs") } : {}),
+      ...(num(body, "timeout") !== undefined ? { timeout: num(body, "timeout") } : {}),
     });
-  }
+    return { ok: true as const, effect: "needs-restart" as Effect };
+  });
+}
 
 /**
  * Settings parity: hooks create. The matcher STRING locates the group (no
@@ -1247,16 +1277,9 @@ async function handleSkillDetail(res: ServerResponse, skillPath: string): Promis
  * backend belongs to a bridge (the machine-level mount has none), same
  * shape as pending-restart's 409 pointer.
  */
-async function handleMcpStatus(
-  res: ServerResponse,
-  server: ZcodeAcpServer | null,
-): Promise<void> {
+async function handleMcpStatus(res: ServerResponse, server: ZcodeAcpServer | null): Promise<void> {
   if (!server) {
-    sendError(
-      res,
-      409,
-      "mcp-status is per-bridge — use /api/instances/{id}/settings/mcp-status",
-    );
+    sendError(res, 409, "mcp-status is per-bridge — use /api/instances/{id}/settings/mcp-status");
     return;
   }
   const statuses = await fetchMcpHealth(server, server.projectCwd());

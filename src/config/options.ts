@@ -34,7 +34,9 @@ import {
   readBuiltinTable,
 } from "./account-provider.js";
 import { readCredentialConfig } from "./bridge-accounts.js";
+import { parseModelRefValue } from "./model-resolution.js";
 import { initialSessionMode } from "./settings.js";
+import { loadUserConfig } from "./user-config.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -111,6 +113,12 @@ interface PersonalModels {
   contextByModel: Map<string, number>;
   /** reasoning level values per `providerId\modelId`, file order. */
   reasoningByModel: Map<string, string[]>;
+  /**
+   * Model ids the user switched OFF in the desktop (`config.enabled:false`),
+   * per NORMALIZED provider id. The registry drops them; legacy config.json
+   * still lists them.
+   */
+  disabledByProvider: Map<string, Set<string>>;
   /** every provider rule, normalized id attached, file order. */
   providers: Array<{ pid: string; rule: PersonalProviderRule }>;
 }
@@ -135,12 +143,18 @@ function loadPersonalModels(): PersonalModels | null {
     modelsByProvider: new Map(),
     contextByModel: new Map(),
     reasoningByModel: new Map(),
+    disabledByProvider: new Map(),
     providers: [],
   };
   for (const rule of modelRules) {
     if (!rule.providerId || !rule.modelId) continue;
-    if (rule.config?.enabled === false) continue;
     const pid = configProviderIdFor(rule.providerId);
+    if (rule.config?.enabled === false) {
+      const disabled = out.disabledByProvider.get(pid) ?? new Set<string>();
+      disabled.add(rule.modelId);
+      out.disabledByProvider.set(pid, disabled);
+      continue;
+    }
     const ids = out.modelsByProvider.get(pid) ?? [];
     if (!ids.includes(rule.modelId)) ids.push(rule.modelId);
     out.modelsByProvider.set(pid, ids);
@@ -155,6 +169,32 @@ function loadPersonalModels(): PersonalModels | null {
     out.providers.push({ pid: configProviderIdFor(rule.providerId), rule });
   }
   return out;
+}
+
+/** True when the desktop's provider_config.json explicitly switches this model off. */
+function personallyDisabled(
+  personal: PersonalModels | null,
+  providerId: string,
+  modelId: string,
+): boolean {
+  return personal?.disabledByProvider.get(configProviderIdFor(providerId))?.has(modelId) ?? false;
+}
+
+/**
+ * Positive evidence that a model is really gone — as opposed to merely absent
+ * from a registry list that may still be loading: the user switched it off in
+ * the desktop, or no local source (legacy config.json, the personal provider
+ * config, the provider table) knows it any more. A model that is merely
+ * missing from the backend's list is left alone until the backend itself
+ * refuses it (see repairUnavailableModel).
+ */
+export function modelRetired(providerId: string, modelId: string): boolean {
+  const personal = loadPersonalModels();
+  if (personallyDisabled(personal, providerId, modelId)) return true;
+  const model = modelId.toLowerCase();
+  return !loadAllModels().some(
+    (m) => sameProvider(m.providerId, providerId) && m.modelId.toLowerCase() === model,
+  );
 }
 
 /**
@@ -312,37 +352,49 @@ function appendPersonalOnlyProviders(
 }
 
 /**
- * Append entitled coding-plan models (from the bundled table via the account
- * entitlement ladder) for any coding-plan provider not already added from
- * config.json. On 3.12+/3.15+ layouts where entitlement comes from OAuth
- * (`setting.json` + `credentials.json`), the encrypted store (#320), or a
- * manual coding-plan key in `provider_config.json` (#344), the plan's models
- * do not live in `config.json` — appending them here keeps them selectable
- * even when `config.json` still holds legacy entries or `provider_config.json`
- * also defines custom providers.
+ * Merge the entitled coding-plan models (the provider table's catalog, via the
+ * account entitlement ladder) into the dropdown.
+ *
+ * For a provider config.json already lists, the table's models are UNIONED in:
+ * config.json is a legacy file that stopped syncing, while the table is the
+ * catalog the backend registry builds from — and the desktop host refreshes it
+ * from the CDN independently of app updates (observed 2026-11-23: revision 47
+ * added GLM-5.4; a config.json still naming only GLM-5.3/5.3-Flash kept the
+ * new model out of the dropdown while the backend already served it).
+ *
+ * On 3.12+/3.15+ layouts where entitlement comes from OAuth (`setting.json` +
+ * `credentials.json`), the encrypted store (#320), or a manual coding-plan key
+ * in `provider_config.json` (#344), the plan's models do not live in
+ * `config.json` at all — the table is then the ONLY source that keeps them
+ * selectable even when `config.json` still holds legacy entries or
+ * `provider_config.json` also defines custom providers.
  */
 function appendEntitledCodingPlanModels(
   out: ModelRef[],
   personal: PersonalModels | null,
   pinned: string | undefined,
 ): void {
-  const known = new Set(out.map((m) => m.providerId));
+  const listed = new Set(out.map((m) => `${m.providerId}\0${m.modelId}`));
+  const names = new Map<string, string>();
+  for (const m of out) if (!names.has(m.providerId)) names.set(m.providerId, m.providerName);
   const byProvider = new Map<string, { providerName: string; models: Set<string> }>();
   for (const m of entitledCodingPlanModels()) {
-    if (known.has(m.providerId)) continue;
     if (pinned && m.providerId !== pinned) continue;
+    if (personallyDisabled(personal, m.providerId, m.modelId)) continue;
     let group = byProvider.get(m.providerId);
     if (!group) {
-      group = { providerName: m.providerName, models: new Set() };
+      // A provider config.json already lists keeps ITS display name.
+      group = { providerName: names.get(m.providerId) ?? m.providerName, models: new Set() };
       byProvider.set(m.providerId, group);
     }
     group.models.add(m.modelId);
   }
   for (const [pid, group] of byProvider) {
-    for (const extra of personal?.modelsByProvider.get(pid) ?? []) {
-      group.models.add(extra);
-    }
+    for (const extra of personal?.modelsByProvider.get(pid) ?? []) group.models.add(extra);
     for (const modelId of group.models) {
+      const key = `${pid}\0${modelId}`;
+      if (listed.has(key)) continue;
+      listed.add(key);
       out.push({ providerId: pid, providerName: group.providerName, modelId });
     }
   }
@@ -383,6 +435,10 @@ export function loadAllModels(): ModelRef[] {
           ? new Set(personalIds)
           : new Set([...Object.keys(p.models ?? {}), ...(personalIds ?? [])]);
       for (const modelId of ids) {
+        // A model the user switched off in the desktop is gone from the
+        // backend registry; legacy config.json keeps naming it, and listing
+        // it offered a choice every switch to which failed.
+        if (personallyDisabled(personal, pid, modelId)) continue;
         out.push({ providerId: pid, providerName, modelId });
       }
     }
@@ -423,6 +479,228 @@ function entitledOrDefaultModels(pinned: string | undefined): ModelRef[] {
       modelId: DEFAULT_MODEL_ID,
     },
   ];
+}
+
+// ---------- default model ----------
+
+/** A model the backend registry can run right now (`server.modelAvailability` entry). */
+export interface UsableModel {
+  providerId?: string;
+  modelId?: string;
+}
+
+function sameProvider(a: string, b: string): boolean {
+  return a === b || configProviderIdFor(a) === configProviderIdFor(b);
+}
+
+/** True when a provider-qualified model is in the usable set (dialect and case folded). */
+export function isModelUsable(
+  usable: readonly UsableModel[],
+  providerId: string,
+  modelId: string,
+): boolean {
+  const model = modelId.toLowerCase();
+  return usable.some(
+    (e) =>
+      e.providerId !== undefined &&
+      e.modelId?.toLowerCase() === model &&
+      sameProvider(e.providerId, providerId),
+  );
+}
+
+/** Whether two `providerId\modelId` values name the same model (dialect and case folded). */
+export function sameModelValue(a: string, b: string): boolean {
+  const pa = parseModelRefValue(a);
+  const pb = parseModelRefValue(b);
+  return (
+    pa.modelId.toLowerCase() === pb.modelId.toLowerCase() &&
+    (!pa.providerId || !pb.providerId || sameProvider(pa.providerId, pb.providerId))
+  );
+}
+
+/**
+ * An official ZCode plan (`builtin:` / `account:` provider ids) — a lineup in
+ * which "the newest model" is a real successor relation (GLM-5.4 follows
+ * GLM-5.3). A third-party provider may mix families in one list, so its
+ * version numbers are not comparable and the user's own order stays the rule.
+ */
+function isOfficialPlan(providerId: string): boolean {
+  const id = configProviderIdFor(providerId);
+  return isBuiltinProvider(id) || id.startsWith("account:");
+}
+
+/**
+ * The version a model id advertises, as a numeric chain: "GLM-5.4" → [5, 4],
+ * "glm-5-3-flash" → [5, 3], "GLM-5-Turbo" → [5]. The chain stops at the first
+ * non-numeric segment and before a date stamp ("GLM-4-Flash-250414" → [4]), so
+ * an id without a version ranks below every versioned one.
+ */
+function modelVersion(modelId: string): number[] {
+  const start = modelId.search(/\d/u);
+  if (start < 0) return [];
+  const chain = /^v?\d+(?:[._-]\d+)*/iu.exec(modelId.slice(start))?.[0];
+  if (!chain) return [];
+  const out: number[] = [];
+  for (const part of chain.split(/[._-]/u)) {
+    if (part.length >= 5) break; // a date stamp, not a version
+    out.push(Number(part));
+  }
+  return out;
+}
+
+/** Sort order: the newer official model first — version, then fewer variant suffixes. */
+function compareLatest(a: ModelRef, b: ModelRef): number {
+  const va = modelVersion(a.modelId);
+  const vb = modelVersion(b.modelId);
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    if (va[i] !== vb[i]) return (vb[i] ?? -1) - (va[i] ?? -1);
+  }
+  const variantSuffixes = (id: string): number => {
+    const start = id.search(/\d/u);
+    const rest = start < 0 ? id : id.slice(start).replace(/^v?\d+(?:[._-]\d+)*/iu, "");
+    return rest.split(/[^a-z]+/iu).filter(Boolean).length;
+  };
+  return variantSuffixes(a.modelId) - variantSuffixes(b.modelId);
+}
+
+/**
+ * One provider's default model: the newest for an official plan, the
+ * first-listed everywhere else. `models` must all belong to that provider.
+ */
+function providerDefault(models: readonly ModelRef[]): ModelRef | undefined {
+  const first = models[0];
+  if (!first) return undefined;
+  return isOfficialPlan(first.providerId) ? [...models].sort(compareLatest)[0] : first;
+}
+
+/** The user's manual default (`session.defaultModel` in the user config), when set. */
+function configuredDefaultModel(): string | undefined {
+  return loadUserConfig().session?.defaultModel?.trim() || undefined;
+}
+
+/**
+ * The models to try, best first, when a session needs a default — the model a
+ * NEW session starts on, and the fallback when a session's own model is no
+ * longer runnable. Never a hardcoded id: a new upstream release is the default
+ * from the day it is usable, with nothing to change here (observed 2026-11-23:
+ * the hardcoded GLM-5.3 was switched off in the desktop on the day GLM-5.4
+ * shipped, and every new session tried to start on a model that no longer
+ * existed).
+ *
+ *   1. `ZCODE_PROVIDER` + `ZCODE_MODEL` — the per-process pin.
+ *   2. `session.defaultModel` in the user config — the manual choice, in any
+ *      spelling `parseModelRefValue` reads (`providerId\modelId`,
+ *      `providerId/modelId`, a bare modelId naming exactly one model).
+ *   3. `preferProviderId`'s newest model — a session keeps its own plan while
+ *      that plan still runs anything (a coding-plan session is never moved to
+ *      another plan while its own works).
+ *   4. The first provider in the user's own model-list order (the configured
+ *      leader — what new sessions always started on), then the registry's
+ *      first when no locally-known provider is runnable.
+ *
+ * The two explicit choices are tried even when the registry list lacks them:
+ * that list only names ENABLED models and may be stale (captured at resume) —
+ * the backend is the final authority, and a refusal falls through to the next
+ * candidate. The automatic choices only ever name models the list vouches for
+ * (without a list, the local model list stands in), so a fallback never lands
+ * on a model that was switched off.
+ */
+export function defaultModelCandidates(
+  usable?: readonly UsableModel[] | null,
+  preferProviderId?: string,
+): ModelRef[] {
+  const local = loadAllModels();
+  const names = providerDisplayNames(local);
+  const nameOf = (providerId: string): string =>
+    names.get(configProviderIdFor(providerId)) ?? names.get(providerId) ?? providerId;
+  const registryListed = Boolean(usable && usable.length > 0);
+  const listed: ModelRef[] = registryListed
+    ? usable!
+        .filter((m) => m.providerId && m.modelId)
+        .map((m) => ({
+          providerId: m.providerId!,
+          providerName: nameOf(m.providerId!),
+          modelId: m.modelId!,
+        }))
+    : local;
+  /** Every model of one provider (any dialect) inside a pool. */
+  const inPool = (pool: ModelRef[], providerId: string): ModelRef[] =>
+    pool.filter((m) => sameProvider(m.providerId, providerId));
+  /** An explicit pick as the list spells it, else as the local files do, else as written. */
+  const explicit = (providerId: string, modelId: string): ModelRef => {
+    const model = modelId.toLowerCase();
+    const hit = (pool: ModelRef[]): ModelRef | undefined =>
+      pool.find((m) => sameProvider(m.providerId, providerId) && m.modelId.toLowerCase() === model);
+    return hit(listed) ?? hit(local) ?? { providerId, providerName: nameOf(providerId), modelId };
+  };
+  const out: ModelRef[] = [];
+  const seen = new Set<string>();
+  const push = (ref: ModelRef | undefined): void => {
+    if (!ref) return;
+    const key = `${configProviderIdFor(ref.providerId)}\0${ref.modelId.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(ref);
+  };
+
+  const pinnedProvider = process.env.ZCODE_PROVIDER?.trim();
+  const pinnedModel = process.env.ZCODE_MODEL?.trim();
+  if (pinnedProvider && pinnedModel) push(explicit(pinnedProvider, pinnedModel));
+
+  const configured = configuredDefaultModel();
+  if (configured) {
+    const parsed = parseModelRefValue(configured);
+    if (parsed.providerId) {
+      push(explicit(parsed.providerId, parsed.modelId));
+    } else {
+      // A bare id must name exactly one model — never guess between providers.
+      const model = parsed.modelId.toLowerCase();
+      const hits = listed.filter((c) => c.modelId.toLowerCase() === model);
+      const providers = new Set(hits.map((h) => configProviderIdFor(h.providerId)));
+      if (providers.size === 1) push(hits[0]);
+    }
+  }
+
+  if (preferProviderId) push(providerDefault(inPool(listed, preferProviderId)));
+  if (registryListed) {
+    // The user's own provider order decides which plan a default comes from;
+    // the registry list decides which of its models can run.
+    for (const m of local) {
+      const runnable = inPool(listed, m.providerId);
+      if (runnable.length > 0) {
+        push(providerDefault(runnable));
+        break;
+      }
+    }
+    // No locally-known provider runs anything: the registry's first one.
+    if (listed.length > 0) push(providerDefault(inPool(listed, listed[0]!.providerId)));
+  } else if (local.length > 0) {
+    push(providerDefault(inPool(local, local[0]!.providerId)));
+  }
+  return out;
+}
+
+/** The first (best) entry of {@link defaultModelCandidates}. */
+export function defaultModelRef(
+  usable?: readonly UsableModel[] | null,
+  preferProviderId?: string,
+): ModelRef {
+  return (
+    defaultModelCandidates(usable, preferProviderId)[0] ?? {
+      providerId: DEFAULT_PROVIDER_ID,
+      providerName: DEFAULT_PROVIDER_NAME,
+      modelId: DEFAULT_MODEL_ID,
+    }
+  );
+}
+
+/** `defaultModelRef` as the `providerId\modelId` value the switch handler takes. */
+export function defaultModelValue(
+  usable?: readonly UsableModel[] | null,
+  preferProviderId?: string,
+): string {
+  const ref = defaultModelRef(usable, preferProviderId);
+  return formatModelValue(ref.providerId, ref.modelId);
 }
 
 // ---------- ACP provider metadata (`_meta.zcode`, #400) ----------
@@ -739,7 +1017,10 @@ export async function buildConfigOptions(
     // relays the options into a picker (Multica's effort selector) would
     // otherwise offer tokens the runtime rejects ("nothink" was fiction,
     // "low" was missing).
-    const cur = loadAllModels()[0];
+    // The advertised current model is the DEFAULT a new session starts on
+    // (defaultModelRef: the manual choice, else the newest usable model) —
+    // the one the runtime is pinned to at materialization.
+    const cur = defaultModelRef();
     if (cur) {
       // The advertised current model follows the dropdown's leading entry
       // (the enabled provider's first model — what the runtime actually
@@ -923,8 +1204,24 @@ export async function buildConfigOptions(
     },
   ];
 
-  // Do not invent a provider/model pair when a materialized read lacks identity.
-  if (zcodeSid !== null && !currentProviderId) options.shift();
+  // Do not invent a provider/model pair when a materialized read lacks
+  // identity. An UNBOUND restore (a persisted selection the registry could
+  // not bind — e.g. the model was switched off in the desktop) also reports
+  // no current model, and hiding the model option there left the user with
+  // no picker to switch back with (observed 2026-11-23): advertise the
+  // default-model choice as the pending current instead, so the dropdown
+  // exists and the repair/fallback path has a concrete value to apply.
+  if (zcodeSid !== null && !currentProviderId && options[0]?.id === "model") {
+    const modelOption = options[0] as Extract<
+      acp.SessionConfigOption,
+      { type: "select"; id: string }
+    >;
+    const fallback = defaultModelRef(snapshot);
+    options[0] = {
+      ...modelOption,
+      currentValue: formatModelValue(fallback.providerId, fallback.modelId),
+    };
+  }
 
   // Read-only quota pseudo-option (ADR-0021): martty-only, no category (never
   // lands in a settings menu), string type per the probe-verified shape — the

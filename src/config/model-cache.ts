@@ -11,10 +11,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import type { ZcodeReadResult } from "../backend/types.js";
 import {
-  DEFAULT_MODEL_ID,
-  DEFAULT_PROVIDER_ID,
+  defaultModelRef,
   formatModelValue,
-  loadAllModels,
   modelContextWindow,
   parseModelValue,
 } from "./options.js";
@@ -35,7 +33,7 @@ export async function currentModelCached(
   const cached = server.modelCache.get(zcodeSid);
   if (cached) return cached;
   let providerId = "";
-  let modelId = DEFAULT_MODEL_ID;
+  let modelId = "";
   try {
     const read = await sessionRead(server, zcodeSid);
     const settings = (read.settings ?? {}) as Record<string, unknown>;
@@ -46,9 +44,11 @@ export async function currentModelCached(
   } catch (e) {
     log(`model-cache: session/read failed (${e instanceof Error ? e.message : String(e)})`);
   }
-  if (!providerId) {
-    // Legacy session without a providerId — resolve to the first enabled provider.
-    providerId = loadAllModels()[0]?.providerId ?? DEFAULT_PROVIDER_ID;
+  if (!providerId || !modelId) {
+    // A session without a complete identity reports the default model's.
+    const fallback = defaultModelRef();
+    providerId ||= fallback.providerId;
+    modelId ||= fallback.modelId;
   }
   const encoded = formatModelValue(providerId, modelId);
   server.modelCache.set(zcodeSid, encoded);
