@@ -1,13 +1,18 @@
 /**
- * ZCode 官方插件 MCP（`auth: { type: "zcode_official", provider: "jwt_token" }`）
- * 的鉴权头构造与可信 Origin 校验。
+ * Auth-header construction and trusted-origin validation for ZCode official
+ * plugin MCP servers (`auth: { type: "zcode_official", provider: "jwt_token" }`).
  *
- * 与 ZCode 桌面端 `officialMcpCredentials.ts` 保持协议对齐：
- * - 校验 `targetOrigin` 必须匹配当前权威的 ZCode API Origin（避免向不可信域名泄漏凭证）；
- * - 从本机加密凭据库读取 `zcodejwttoken`（填入 `Authorization: Bearer ...`）与当前启用
- *   Coding Plan 家族的 MaaS 登录 JWT `oauth:<family>:access_token`（填入
- *   `X-Bigmodel-Authorization: Bearer ...` 及 `Bigmodel-Target-Type: PERSONAL`）；
- * - 严禁在日志中打印任何 Token 原文。
+ * Protocol-aligned with the ZCode desktop's `officialMcpCredentials.ts`:
+ * - `targetOrigin` must match the authoritative ZCode API origin (credentials
+ *   must never leak to an untrusted domain);
+ * - reads `zcodejwttoken` (-> `Authorization: Bearer ...`) and the active
+ *   Coding Plan family's MaaS login JWT `oauth:<family>:access_token`
+ *   (-> `X-Bigmodel-Authorization: Bearer ...` plus scope headers) from the
+ *   local encrypted credential store;
+ * - team plans follow the upstream wire rules: a bigmodel team sends
+ *   `Bigmodel-Target-Type: TEAM` with organization/project as an atomic pair,
+ *   a zai team sends the plan token with NO scope headers;
+ * - token values must NEVER appear in logs.
  */
 
 import { readFileSync } from "node:fs";
@@ -18,24 +23,39 @@ import { readCredentialStoreSync } from "../backend/credential-store.js";
 import { ZCODE_CREDS_PATH } from "../utils.js";
 import { isCodingPlanFamily, type CodingPlanFamily } from "./project-token.js";
 
-/** ZCode 生产环境默认服务源，供插件 `${ZCODE_BASE_URL}` 展开与可信 Origin 校验使用。 */
+/** Default production ZCode service origin, used for plugin `${ZCODE_BASE_URL}` expansion and origin trust. */
 export const DEFAULT_ZCODE_BASE_URL = "https://zcode.z.ai";
 
-/** 官方 MCP 鉴权头名称（与 ZCode `OFFICIAL_MCP_AUTH_HEADER_NAMES` 对齐）。 */
+/** Official MCP auth header names (aligned with ZCode `OFFICIAL_MCP_AUTH_HEADER_NAMES`). */
 export const OFFICIAL_MCP_AUTH_HEADER_NAMES = {
   authorization: "Authorization",
   codingPlanAuthorization: "X-Bigmodel-Authorization",
   targetType: "Bigmodel-Target-Type",
+  organization: "Bigmodel-Organization",
+  project: "Bigmodel-Project",
 } as const;
 
-/** 官方 MCP 鉴权失败原因枚举（与 `zcode.cjs` 的 `interaction/requestOfficialMcpAuthHeaders` 返回 schema 对齐）。 */
+/** Official MCP auth failure reasons (aligned with the `interaction/requestOfficialMcpAuthHeaders` reply schema in `zcode.cjs`). */
 export type OfficialMcpAuthFailureReason =
-  "official_auth_unavailable" | "official_auth_plan_required" | "official_mcp_origin_untrusted";
+  | "official_auth_unavailable"
+  | "official_auth_plan_required"
+  | "official_mcp_origin_untrusted";
 
-/** `interaction/requestOfficialMcpAuthHeaders` 的标准返回结构。 */
+/** The reply shape for `interaction/requestOfficialMcpAuthHeaders`. */
 export type OfficialMcpAuthHeadersOutcome =
   | { ok: true; headers: Record<string, string> }
   | { ok: false; reason: OfficialMcpAuthFailureReason };
+
+/**
+ * The scope headers a coding plan adds on the wire (mirrors upstream
+ * `OfficialMcpWireScope`): an individual plan sends only the target type, a
+ * bigmodel team adds organization/project as an atomic pair, and a zai team
+ * sends no scope headers at all (plan token only, `null` here).
+ */
+type OfficialMcpWireScope =
+  | { targetType: "PERSONAL" }
+  | { targetType: "TEAM"; organizationId: string; projectId: string }
+  | null;
 
 const ZCODE_JWT_CREDENTIAL_KEY = "zcodejwttoken";
 const OAUTH_ACTIVE_PROVIDER_KEY = "oauth:active_provider";
@@ -43,11 +63,14 @@ const DEV_TRUSTED_ORIGINS_ENV = "ZCODE_OFFICIAL_MCP_DEV_TRUSTED_ORIGINS";
 
 interface DesktopSettingSnapshot {
   modelProviderFamilyModes?: Record<string, unknown>;
-  providerFamilyConnectionSelections?: Record<string, { kind?: unknown } | null>;
+  providerFamilyConnectionSelections?: Record<
+    string,
+    { kind?: unknown; organizationId?: unknown; projectId?: unknown } | null
+  >;
   providerFamilyDomain?: unknown;
 }
 
-/** 去除字符串首尾空白与可选的 `Bearer ` 前缀，返回裸 Token。 */
+/** Trim a string and strip an optional `Bearer ` prefix; returns the bare token or null. */
 function stripBearerPrefix(raw: string | undefined): string | null {
   const trimmed = raw?.trim();
   if (!trimmed) return null;
@@ -55,7 +78,12 @@ function stripBearerPrefix(raw: string | undefined): string | null {
   return bare || null;
 }
 
-/** 规范化 HTTPS Origin；非法 URL 或非 https 协议返回 null。 */
+/** A trimmed non-empty string, or null for anything else. */
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Normalize an HTTPS origin; returns null for invalid URLs or non-https protocols. */
 function normalizeHttpsOrigin(raw: string): string | null {
   try {
     const url = new URL(raw.trim());
@@ -67,7 +95,7 @@ function normalizeHttpsOrigin(raw: string): string | null {
   }
 }
 
-/** 规范化本地开发回环 HTTP Origin（仅 localhost / 127.0.0.1 / [::1]）。 */
+/** Normalize a local-development loopback HTTP origin (localhost / 127.0.0.1 / [::1] only). */
 function normalizeLoopbackOrigin(raw: string): string | null {
   try {
     const url = new URL(raw.trim());
@@ -82,10 +110,12 @@ function normalizeLoopbackOrigin(raw: string): string | null {
 }
 
 /**
- * 解析注入给 `zcode app-server` 的权威 ZCode 服务源（用于 `ZCODE_BASE_URL`）。
+ * Resolve the authoritative ZCode service origin injected into the
+ * `zcode app-server` environment (for `ZCODE_BASE_URL`).
  *
- * 刻意不读取进程继承的 `ZCODE_BASE_URL`（该变量可能被外部环境误设为模型推理 API 地址），
- * 仅接受显式 `ZCODE_ENDPOINT_ORIGIN` 或默认生产域名 `https://zcode.z.ai`。
+ * Deliberately ignores an inherited `ZCODE_BASE_URL` (the ambient value may be
+ * a provider model API URL set by an external environment); only an explicit
+ * `ZCODE_ENDPOINT_ORIGIN` or the default production domain is accepted.
  */
 export function resolveOfficialZCodeBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   const explicit = env.ZCODE_ENDPOINT_ORIGIN?.trim();
@@ -97,7 +127,8 @@ export function resolveOfficialZCodeBaseUrl(env: NodeJS.ProcessEnv = process.env
 }
 
 /**
- * 校验官方 MCP 请求的 `targetOrigin` 是否可信，防止凭证被发送到非 ZCode 域名。
+ * Validate that an official MCP request's `targetOrigin` is trusted, so
+ * credentials are never sent to a non-ZCode domain.
  */
 export function isTrustedOfficialMcpOrigin(
   targetOrigin: string | undefined,
@@ -106,7 +137,8 @@ export function isTrustedOfficialMcpOrigin(
   const trimmed = targetOrigin?.trim();
   if (!trimmed) return false;
 
-  // 允许通过 ZCODE_OFFICIAL_MCP_DEV_TRUSTED_ORIGINS 显式信任本地回环调试地址
+  // ZCODE_OFFICIAL_MCP_DEV_TRUSTED_ORIGINS may explicitly trust loopback
+  // debug origins (local dev gateways only — never arbitrary https origins).
   const loopbackTarget = normalizeLoopbackOrigin(trimmed);
   if (loopbackTarget) {
     const devRaw = env[DEV_TRUSTED_ORIGINS_ENV]?.trim();
@@ -134,7 +166,7 @@ export function isTrustedOfficialMcpOrigin(
   return false;
 }
 
-/** 读取桌面端 `setting.json` 中的连接选择与当前家族（失败时静默返回 null）。 */
+/** Read the desktop's `setting.json` connection selections and active family (null on any failure). */
 function readDesktopSetting(credsDir: string): DesktopSettingSnapshot | null {
   try {
     return JSON.parse(
@@ -145,7 +177,7 @@ function readDesktopSetting(credsDir: string): DesktopSettingSnapshot | null {
   }
 }
 
-/** 从凭据库中读取指定家族的 MaaS OAuth 登录 Token（裸值）。 */
+/** Read a family's MaaS OAuth login token (bare value) from the credential store. */
 function readFamilyOAuthToken(
   store: Record<string, string>,
   family: CodingPlanFamily,
@@ -154,16 +186,40 @@ function readFamilyOAuthToken(
 }
 
 /**
- * 解析当前生效的个人 Coding Plan 家族及其 MaaS JWT。
- *
- * 优先级：
- * 1. `setting.json` 中显式选中的 `individual-coding-plan`（且非 `apiKey` 模式）并持有 OAuth Token；
- * 2. 若 `setting.json` 缺失，则回退到凭据库中的 `oauth:active_provider` 或任一已登录的个人家族。
+ * Map a connection selection to its wire scope, mirroring upstream
+ * `resolveSelectedPlan`: PERSONAL for individual plans, a TEAM
+ * organization/project pair for bigmodel teams (upstream sends the pair
+ * atomically — either id missing means the selection is unusable), and
+ * token-only (`null`) for zai teams. Returns `undefined` when the selection
+ * is not a usable coding-plan selection at all.
  */
-function resolveActiveCodingPlanToken(
+function wireScopeForSelection(
+  family: CodingPlanFamily,
+  selection: { kind?: unknown; organizationId?: unknown; projectId?: unknown },
+): OfficialMcpWireScope | undefined {
+  if (selection.kind === "individual-coding-plan") return { targetType: "PERSONAL" };
+  if (selection.kind !== "team-coding-plan") return undefined;
+  if (family !== "bigmodel") return null;
+  const organizationId = nonEmptyString(selection.organizationId);
+  const projectId = nonEmptyString(selection.projectId);
+  if (!organizationId || !projectId) return undefined;
+  return { targetType: "TEAM", organizationId, projectId };
+}
+
+/**
+ * Resolve the active Coding Plan family, its MaaS JWT, and the wire scope.
+ *
+ * Priority:
+ * 1. an explicitly selected coding plan in `setting.json` (`individual-` or
+ *    `team-coding-plan`, not in `apiKey` mode) that holds an OAuth token;
+ * 2. with `setting.json` absent, fall back to the store's
+ *    `oauth:active_provider` or any logged-in family (scope unknowable
+ *    without a selection record — PERSONAL, the desktop's default).
+ */
+function resolveActiveCodingPlan(
   store: Record<string, string>,
   credsDir: string,
-): { family: CodingPlanFamily; token: string } | null {
+): { family: CodingPlanFamily; token: string; wireScope: OfficialMcpWireScope } | null {
   const setting = readDesktopSetting(credsDir);
   const preferredRaw =
     (typeof setting?.providerFamilyDomain === "string"
@@ -173,13 +229,18 @@ function resolveActiveCodingPlanToken(
     preferredRaw && isCodingPlanFamily(preferredRaw) ? preferredRaw : undefined;
 
   if (setting?.providerFamilyConnectionSelections) {
-    const candidates: Array<{ family: CodingPlanFamily; token: string }> = [];
+    const candidates: Array<{
+      family: CodingPlanFamily;
+      token: string;
+      wireScope: OfficialMcpWireScope;
+    }> = [];
     for (const [family, selection] of Object.entries(setting.providerFamilyConnectionSelections)) {
-      if (selection?.kind !== "individual-coding-plan") continue;
-      if (setting.modelProviderFamilyModes?.[family] === "apiKey") continue;
       if (!isCodingPlanFamily(family)) continue;
+      if (setting.modelProviderFamilyModes?.[family] === "apiKey") continue;
+      const wireScope = wireScopeForSelection(family, selection ?? {});
+      if (wireScope === undefined) continue;
       const token = readFamilyOAuthToken(store, family);
-      if (token) candidates.push({ family, token });
+      if (token) candidates.push({ family, token, wireScope });
     }
     if (candidates.length === 1) return candidates[0]!;
     if (candidates.length > 1 && preferredFamily) {
@@ -187,11 +248,12 @@ function resolveActiveCodingPlanToken(
       if (hit) return hit;
     }
     if (candidates.length > 0) return candidates[0]!;
-    // setting.json 存在但未选中任何个人 Coding Plan，不盲目注入其他家族的 MaaS JWT
+    // setting.json exists but selects no coding plan: do not blindly inject
+    // another family's MaaS JWT.
     return null;
   }
 
-  // 无 setting.json 时的回退逻辑（纯 CLI / 无头环境）
+  // Fallback when setting.json is absent (pure CLI / headless environments).
   const order: CodingPlanFamily[] = preferredFamily
     ? [
         preferredFamily,
@@ -200,13 +262,14 @@ function resolveActiveCodingPlanToken(
     : ["bigmodel", "zai"];
   for (const family of order) {
     const token = readFamilyOAuthToken(store, family);
-    if (token) return { family, token };
+    if (token) return { family, token, wireScope: { targetType: "PERSONAL" } };
   }
   return null;
 }
 
 /**
- * 响应 `interaction/requestOfficialMcpAuthHeaders` 请求，构造本次官方 MCP 调用所需的身份头。
+ * Answer an `interaction/requestOfficialMcpAuthHeaders` request by building
+ * the identity headers for this official MCP call.
  */
 export function resolveOfficialMcpAuthHeaders(
   params: Record<string, unknown>,
@@ -233,10 +296,19 @@ export function resolveOfficialMcpAuthHeaders(
   };
 
   const credsDir = options?.credsDir ?? path.dirname(ZCODE_CREDS_PATH);
-  const codingPlan = resolveActiveCodingPlanToken(store, credsDir);
+  const codingPlan = resolveActiveCodingPlan(store, credsDir);
   if (codingPlan) {
     headers[OFFICIAL_MCP_AUTH_HEADER_NAMES.codingPlanAuthorization] = `Bearer ${codingPlan.token}`;
-    headers[OFFICIAL_MCP_AUTH_HEADER_NAMES.targetType] = "PERSONAL";
+    const scope = codingPlan.wireScope;
+    if (scope) {
+      headers[OFFICIAL_MCP_AUTH_HEADER_NAMES.targetType] = scope.targetType;
+      if (scope.targetType === "TEAM") {
+        // Team identity is an atomic pair upstream: organization and project
+        // go together or not at all.
+        headers[OFFICIAL_MCP_AUTH_HEADER_NAMES.organization] = scope.organizationId;
+        headers[OFFICIAL_MCP_AUTH_HEADER_NAMES.project] = scope.projectId;
+      }
+    }
   }
 
   return { ok: true, headers };

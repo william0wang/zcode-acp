@@ -805,8 +805,10 @@ export class ZcodeAcpServer {
       ...mergeEnvWithCreds(loadZcodeCredentials()),
       ...builtinProviderEnv(),
       ...zcodeDataBaseDirEnv(),
-      // 显式注入权威 ZCode 服务源，使官方插件 `.mcp.json` 中的 `${ZCODE_BASE_URL}` 正常展开
-      // （`mergeEnvWithCreds` 已清除可能被污染的外部继承值，此处只写入可信的 ZCode 服务域名）。
+      // Inject the authoritative ZCode service origin so official plugin
+      // `.mcp.json` `${ZCODE_BASE_URL}` URLs expand correctly
+      // (`mergeEnvWithCreds` has already stripped the possibly-polluted
+      // inherited value; this writes only the trusted ZCode domain).
       ZCODE_BASE_URL: resolveOfficialZCodeBaseUrl(),
     };
     let argv = resolveZcodeCommand({ catalogProbe: this.catalogProbe });
@@ -896,7 +898,8 @@ export class ZcodeAcpServer {
       });
       return true;
     };
-    // 到达即应答官方 MCP 身份头请求（如天眼查、zcode-site），避免连接/发现阶段无响应。
+    // Answer official MCP identity-header requests at arrival (tianyancha,
+    // zcode-site, ...) so connect/discovery never goes unanswered.
     backend.officialMcpAuthHeadersResponder = (id, params) => {
       setImmediate(() => {
         try {

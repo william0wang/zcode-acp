@@ -1403,14 +1403,15 @@ function isProviderRuntimeHeadersRequest(method: string): boolean {
   return method === "interaction/requestProviderRuntimeHeaders";
 }
 
-/** 判断是否为官方插件 MCP 身份头反向请求。 */
+/** Whether `method` is the official plugin MCP identity-headers request. */
 function isOfficialMcpAuthHeadersRequest(method: string): boolean {
   return method === "interaction/requestOfficialMcpAuthHeaders";
 }
 
 /**
- * 响应 `interaction/requestOfficialMcpAuthHeaders` 请求。
- * 日志仅输出非敏感元数据（插件名、键名与状态），绝不记录任何 Token。
+ * Answer an `interaction/requestOfficialMcpAuthHeaders` request.
+ * Logs carry only non-sensitive metadata (plugin name, key, status) — never
+ * any token value.
  */
 export function answerOfficialMcpAuthHeaders(
   backend: ZcodeBackend,

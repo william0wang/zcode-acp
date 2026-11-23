@@ -36,9 +36,11 @@ export class ZcodeBackend extends JsonRpcChild {
    */
   providerRuntimeHeadersResponder?: (id: number, params: Record<string, unknown>) => boolean;
   /**
-   * 到达即应答的 `interaction/requestOfficialMcpAuthHeaders` 回调。
-   * 官方云端 MCP（如天眼查、zcode-site）在连接、发现与工具调用阶段均会向宿主请求
-   * 官方 JWT 身份头，该请求可能在会话初始化或无 turn 轮询窗口时到达，因此必须在收帧时立即处理。
+   * Arrival-time responder for `interaction/requestOfficialMcpAuthHeaders`.
+   * Official cloud MCP servers (e.g. tianyancha, zcode-site) ask the host for
+   * the official JWT identity headers at connect, discovery, and tool-call
+   * time — the request can arrive during session init or outside any turn
+   * poll window, so it must be answered the moment the frame lands.
    */
   officialMcpAuthHeadersResponder?: (
     id: number | string,
@@ -148,7 +150,8 @@ export class ZcodeBackend extends JsonRpcChild {
       req.method === "interaction/requestOfficialMcpAuthHeaders" &&
       this.officialMcpAuthHeadersResponder?.(req.id, req.params as Record<string, unknown>)
     ) {
-      // 在帧到达阶段立即响应官方 MCP 身份头请求，确保插件连接与工具发现不阻塞。
+      // Answer official MCP identity-header requests at frame arrival so
+      // plugin connect and tool discovery never stall.
       return true;
     }
     return false;
