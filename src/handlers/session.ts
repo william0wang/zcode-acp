@@ -37,9 +37,10 @@ import {
   buildModes,
   buildConfigOptions,
   buildInitialConfigOptions,
-  DEFAULT_MODEL_ID,
-  DEFAULT_PROVIDER_ID,
+  defaultModelRef,
+  defaultModelValue,
   formatModelValue,
+  isModelUsable,
   loadAllModels,
   modelContextWindow,
   parseModelValue,
@@ -896,8 +897,9 @@ function emitBootUsageUpdate(server: ZcodeAcpServer, acpSid: string): void {
           // until the backend reports real occupancy.
           used = proj?.contextUsed ?? 0;
         }
-        let providerId = loadAllModels()[0]?.providerId ?? DEFAULT_PROVIDER_ID;
-        let modelId = loadAllModels()[0]?.modelId ?? DEFAULT_MODEL_ID;
+        const fallback = defaultModelRef();
+        let providerId = fallback.providerId;
+        let modelId = fallback.modelId;
         if (zcodeSid) {
           ({ providerId, modelId } = parseModelValue(await currentModelCached(server, zcodeSid)));
         }
@@ -1268,10 +1270,26 @@ export async function ensureRealSession(
         });
         log(`session/new ${acpSid}: pinned the advertised model ${advertised}`);
       } else {
-        warn(
-          `session/new ${acpSid}: could not pin the advertised model ${advertised}` +
-            " — keeping the backend default",
-        );
+        // The advertised model is not runnable in the live registry (switched
+        // off in the desktop since the menu was built, removed upstream): land
+        // the session on the default resolved against the registry snapshot
+        // — the user picks another model by hand if they want one. Keeping
+        // "the backend default" here is what left new sessions on a model
+        // nobody selected (observed 2026-11-23).
+        const fallback = defaultModelValue(server.modelAvailability.get(sid));
+        if (fallback !== advertised && (await applyModelSwitch(server, sid, fallback))) {
+          rememberModelChoice(server, acpSid, sid, {
+            model: lastSwitchedModelValue(server, sid) ?? fallback,
+          });
+          warn(
+            `session/new ${acpSid}: the advertised model ${advertised} is not available — pinned the default ${fallback} instead`,
+          );
+        } else {
+          warn(
+            `session/new ${acpSid}: could not pin the advertised model ${advertised}` +
+              " — keeping the backend default",
+          );
+        }
       }
     }
     // session/create loads the session into this backend process.
@@ -4137,11 +4155,26 @@ async function fetchMessagesForReplay(
 
 /**
  * After a faithful resume the session keeps its own last model; when that
- * model no longer belongs to an enabled provider in config.json (deleted or
- * revoked elsewhere), the first send would fail with the backend's
- * stale-history-model error. Repair proactively: switch to the configured
- * pin (ZCODE_PROVIDER/ZCODE_MODEL) or the first enabled model. Best-effort —
- * a failed check leaves the model untouched.
+ * model is no longer runnable, switch the session to a usable one so the user
+ * can keep working and pick a model by hand afterwards.
+ *
+ * The authority is the backend's own registry snapshot for the session
+ * (`server.modelAvailability`, captured at create/resume) — the only list that
+ * knows what the desktop switched off. Reading the legacy config.json list
+ * instead was the bug observed 2026-11-23: the user switched the default
+ * GLM-5.3 off in the desktop on the day GLM-5.4 shipped, the backend resumed
+ * every GLM-5.3 session UNBOUND ("Session model selection restored but not
+ * bound to the runtime", validationCode model-not-found), and this check —
+ * config.json still named GLM-5.3 — decided the model was fine and did
+ * nothing. Without a snapshot (older backends) the local list decides, as
+ * before.
+ *
+ * The replacement comes from `defaultModelRef` with the session's own
+ * provider as the preference: the newest model of the session's plan while
+ * that plan has any, else the configured/automatic default — a session is
+ * never moved to another plan while its own still works.
+ *
+ * Best-effort — a failed switch leaves the model untouched.
  */
 export async function repairUnavailableModel(
   server: ZcodeAcpServer,
@@ -4164,28 +4197,31 @@ export async function repairUnavailableModel(
       }
     ).settings;
     const cur = settings?.model?.current;
-    if (!cur?.providerId || !cur.modelId) return;
-    const available = loadAllModels();
-    // The backend persists the current model under the registry's `account:*`
-    // spelling while loadAllModels() speaks config.json's `builtin:*` —
-    // normalize before comparing, or every resume misreads an enabled model
-    // as gone and silently switches (#270).
-    const curPid = configProviderIdFor(cur.providerId);
-    if (available.some((m) => m.providerId === curPid && m.modelId === cur.modelId)) return;
-    // Genuine repair: fall back to the configured pin, not list order —
-    // available[0] is config-file order, not the user's choice (#270).
-    const pinnedProvider = process.env.ZCODE_PROVIDER;
-    const pinnedModel = process.env.ZCODE_MODEL;
-    const fallback =
-      pinnedProvider && pinnedModel
-        ? (available.find(
-            (m) =>
-              m.providerId === configProviderIdFor(pinnedProvider) && m.modelId === pinnedModel,
-          ) ?? available[0])
-        : available[0];
-    if (!fallback) return;
+    const snapshot = server.modelAvailability.get(zcodeSid);
+    const usable = snapshot && snapshot.length > 0 ? snapshot : undefined;
+    if (cur?.providerId && cur.modelId) {
+      if (usable) {
+        if (isModelUsable(usable, cur.providerId, cur.modelId)) return;
+      } else {
+        // The backend persists the current model under the registry's
+        // `account:*` spelling while loadAllModels() speaks config.json's
+        // `builtin:*` — normalize before comparing, or every resume misreads
+        // an enabled model as gone and silently switches (#270).
+        const curPid = configProviderIdFor(cur.providerId);
+        if (loadAllModels().some((m) => m.providerId === curPid && m.modelId === cur.modelId)) {
+          return;
+        }
+      }
+    } else if (!usable) {
+      // No current model reported and no registry list to judge by — unknown
+      // state, leave it alone.
+      return;
+    }
+    // "No model at all" (an unbound restore) and "no longer in the registry"
+    // both land on the session's own plan first, then the default.
+    const fallback = defaultModelRef(usable, cur?.providerId);
     warn(
-      `session ${zcodeSid} model ${cur.providerId}/${cur.modelId} is no longer enabled; switching to ${fallback.providerId}/${fallback.modelId}`,
+      `session ${zcodeSid} model ${cur?.providerId ? `${cur.providerId}/${cur.modelId}` : "(none)"} is no longer available; switching to ${fallback.providerId}/${fallback.modelId}`,
     );
     const { applyModelSwitch } = await import("../config/runtime-model.js");
     await applyModelSwitch(

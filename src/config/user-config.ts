@@ -141,6 +141,15 @@ export interface SessionUserConfig {
    * model. Set false to restore the inherit-the-backend-default behavior.
    */
   pinDefaultModel?: boolean;
+  /**
+   * The model new sessions start on, and the fallback when a session's own
+   * model is no longer usable. Any spelling the model switch accepts:
+   * `providerId\modelId`, `providerId/modelId`, or a bare modelId when it
+   * names exactly one model. Unset = the newest model of the first official
+   * plan. A value naming a model that is switched off or unknown is ignored
+   * (never forced), so the automatic choice applies instead.
+   */
+  defaultModel?: string;
 }
 
 /** The `autoCompact` section: threshold-based context compaction. */
@@ -408,6 +417,15 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     if (pinDefaultModel !== undefined) {
       if (typeof pinDefaultModel === "boolean") s.pinDefaultModel = pinDefaultModel;
       else warn(`config: ${label}.pinDefaultModel is not a boolean — ignoring`);
+    }
+    const defaultModel = body["defaultModel"];
+    if (defaultModel !== undefined) {
+      if (typeof defaultModel === "string" && defaultModel.trim())
+        s.defaultModel = defaultModel.trim();
+      else
+        warn(
+          `config: ${label}.defaultModel=${JSON.stringify(defaultModel)} in ${file} is not a model reference — ignoring`,
+        );
     }
     return s;
   });

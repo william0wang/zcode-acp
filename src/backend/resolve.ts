@@ -7,13 +7,24 @@
  * "app-server", "--stdio"]` with an explicit, sqlite-capable Node binary.
  */
 
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+  type Stats,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 
-import { log, warn, zcodePersonalProviderPath } from "../utils.js";
+import { resolveOfficialZCodeBaseUrl } from "../config/official-mcp-auth.js";
+import { log, warn, zcodeHomeDir, zcodePersonalProviderPath } from "../utils.js";
 
 /**
  * `which bin` — resolve a binary on PATH without external deps.
@@ -120,6 +131,8 @@ let probeResolutionMemo: { key: string; argv: string[] } | null = null;
 export function resetResolveMemosForTests(): void {
   sqliteSupportMemo.clear();
   probeResolutionMemo = null;
+  releaseStamps.clear();
+  newestTablePick = null;
 }
 
 function nodeSupportsSqlite(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
@@ -333,6 +346,144 @@ function readDesktopAppVersion(dir: string): string | null {
 }
 
 /**
+ * The runtime "active" copy of the built-in table — upstream's own cache path
+ * (`resolveZCodeBuiltinCachePaths`, zcode-builtin-cache-paths.ts):
+ * `<config>/runtime/provider/<platform>/<appVersion>/endpoint-<key>/zcode-builtin.json`.
+ *
+ * The desktop HOST owns the CDN refresh (services/node.ts `createProviderConfigRuntime`:
+ * a check every minute, a 1h TTL after success) and writes the newer release
+ * here; a hosted app-server never downloads on its own
+ * (`provider-config-runtime.ts`: "Managed Worker 无下载配置"). The same
+ * segment rules apply: platform/arch in release spelling, the endpoint key is
+ * sha256(origin)[:32], and the app version is the one the host runs under.
+ */
+function runtimeActiveTablePath(appVersion: string | null): string | null {
+  // A version segment must be exactly one path segment (upstream normalizeSegment).
+  if (!appVersion || appVersion === "." || appVersion === ".." || /[\\/]/u.test(appVersion)) {
+    return null;
+  }
+  const target = process.platform === "win32" ? "windows" : process.platform;
+  const arch =
+    process.arch === "arm64" ? "aarch64" : process.arch === "x64" ? "x86_64" : process.arch;
+  const endpointKey = createHash("sha256")
+    .update(resolveOfficialZCodeBaseUrl())
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(
+    zcodeHomeDir(),
+    "v2",
+    "runtime",
+    "provider",
+    `${target}-${arch}`,
+    appVersion,
+    `endpoint-${endpointKey}`,
+    PROVIDER_CONFIG_NAME,
+  );
+}
+
+/**
+ * The envelope upstream's `decodeZCodeBuiltinRelease` accepts (zod, strict):
+ * exactly `{schemaVersion: 1, revision, config:{providerConfigRules,
+ * modelConfigRules}}`. The rules inside are left to the backend to validate.
+ */
+function readReleaseRevision(file: string): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const release = parsed as Record<string, unknown>;
+    if (Object.keys(release).some((k) => !RELEASE_KEYS.has(k))) return null;
+    const config = release.config;
+    if (
+      release.schemaVersion !== 1 ||
+      typeof config !== "object" ||
+      config === null ||
+      Array.isArray(config)
+    ) {
+      return null;
+    }
+    if (Object.keys(config).some((k) => !RELEASE_CONFIG_KEYS.has(k))) return null;
+    for (const key of RELEASE_CONFIG_KEYS) {
+      if (!Object.hasOwn(config, key)) return null;
+    }
+    const revision = release.revision;
+    return Number.isSafeInteger(revision) && (revision as number) >= 0
+      ? (revision as number)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+const RELEASE_KEYS = new Set(["schemaVersion", "revision", "config"]);
+const RELEASE_CONFIG_KEYS = new Set(["providerConfigRules", "modelConfigRules"]);
+
+interface ReleaseStamp {
+  /** ino:size:mtime:ctime — the same identity `readBuiltinTable` memoizes on. */
+  statKey: string;
+  /** null when the file is missing or is not a valid release envelope. */
+  revision: number | null;
+}
+
+const releaseStamps = new Map<string, ReleaseStamp>();
+
+function releaseStamp(file: string): ReleaseStamp | null {
+  let st: Stats;
+  try {
+    st = statSync(file);
+  } catch {
+    releaseStamps.delete(file);
+    return null;
+  }
+  const statKey = `${st.ino}:${st.size}:${st.mtimeMs}:${st.ctimeMs}`;
+  const cached = releaseStamps.get(file);
+  if (cached?.statKey === statKey) return cached;
+  const stamp = { statKey, revision: readReleaseRevision(file) };
+  releaseStamps.set(file, stamp);
+  return stamp;
+}
+
+let newestTablePick: { key: string; file: string } | null = null;
+
+/**
+ * The table the backend boots from: the NEWER release of the bundled baseline
+ * and the runtime active copy — the rule the desktop host applies before every
+ * agent spawn (`selectReleaseCandidate`, zcode-builtin-provider-config-source.ts;
+ * node.ts hands the agent `resolveZCodeBuiltinActiveFilePath()`).
+ *
+ * Why it matters: the bundle ships a frozen baseline (3.18.2 = revision 44)
+ * while the CDN keeps publishing new models into the active copy (revision 47
+ * added GLM-5.4 — observed 2026-11-23). Pinning the bundle alone kept every
+ * bridge-spawned backend on the stale list while the desktop app, which boots
+ * its agent on the active copy, listed the new model. A tie keeps the bundle
+ * (same revision with different bytes is an invalid cache upstream too), an
+ * invalid or missing active copy is ignored, and an unreadable bundle yields
+ * to a valid active copy — the backend would otherwise fail to boot at all.
+ *
+ * Memoized on both files' stat identities: `readBuiltinTable` reaches this on
+ * every model request (the runtime-headers path), and the account snapshot's
+ * `basedOnZCodeBuiltinRevision` must hash exactly the path returned here.
+ */
+function newestBuiltinTable(bundled: string, appVersion: string | null): string {
+  const active = runtimeActiveTablePath(appVersion);
+  if (!active || active === bundled) return bundled;
+  const bundledStamp = releaseStamp(bundled);
+  const activeStamp = releaseStamp(active);
+  const key = `${bundled}\0${bundledStamp?.statKey}\0${active}\0${activeStamp?.statKey}`;
+  if (newestTablePick?.key === key) return newestTablePick.file;
+  const activeRevision = activeStamp?.revision ?? null;
+  const bundledRevision = bundledStamp?.revision ?? null;
+  const useActive =
+    activeRevision !== null && (bundledRevision === null || activeRevision > bundledRevision);
+  const file = useActive ? active : bundled;
+  newestTablePick = { key, file };
+  log(
+    `builtin provider table: ${useActive ? "runtime active copy" : "bundled"} ` +
+      `(active revision ${activeRevision ?? "none"} vs bundled revision ${bundledRevision ?? "none"}): ${file}`,
+  );
+  return file;
+}
+
+/**
  * Env vars pointing the CLI at its provider tables, mirroring the desktop
  * host's own injection. Locates the builtin file next to the resolved CLI
  * entry (sibling `provider/` — npm/dev layout — or `../config/provider/` —
@@ -341,13 +492,16 @@ function readDesktopAppVersion(dir: string): string | null {
  * `{}` when the entry is not a JS file, is missing, or carries no provider
  * config anywhere (old CLIs, PATH installs) — those boot without one.
  *
+ * The builtin value is the bundled file OR the host's refreshed runtime copy,
+ * whichever release is newer (`newestBuiltinTable`).
+ *
  * BOTH vars are required: the CLI's provider bootstrap uses the injected
  * builtin path VERBATIM only when the personal var is set too — with the
  * builtin alone it re-syncs the table into a version-keyed runtime copy
  * (`~/.zcode/v2/runtime/provider/<plat>/<version>/<endpoint dir>/zcode-builtin.json`)
  * and rewires
  * its configRevision to THAT copy's path. The account-config push's
- * `basedOnZcodeBuiltinRevision` hashes the injected path, so any rewire
+ * `basedOnZCodeBuiltinRevision` hashes the injected path, so any rewire
  * silently voids the push and every account model answers "Provider
  * Registry 中不存在 Model" (observed 2026-09: one terminal env took the
  * re-sync path deterministically while another never did). The personal
@@ -377,13 +531,13 @@ export function builtinProviderEnv(entryArg?: string): NodeJS.ProcessEnv {
   const personal = zcodePersonalProviderPath();
   // A missing personal table is valid: the backend reads it as an empty layer.
   // Both paths must still be explicit to keep the builtin revision path stable.
+  const appVersion = process.env[APP_VERSION_ENV]?.trim() || readDesktopAppVersion(dir);
   const env: NodeJS.ProcessEnv = {
-    [BUILTIN_PROVIDER_ENV]: found,
+    [BUILTIN_PROVIDER_ENV]: newestBuiltinTable(found, appVersion),
     [PERSONAL_PROVIDER_ENV]: personal,
   };
-  if (!process.env[APP_VERSION_ENV]?.trim()) {
-    const appVersion = readDesktopAppVersion(dir);
-    if (appVersion) env[APP_VERSION_ENV] = appVersion;
+  if (appVersion && !process.env[APP_VERSION_ENV]?.trim()) {
+    env[APP_VERSION_ENV] = appVersion;
   }
   return env;
 }
