@@ -322,6 +322,142 @@ function validateBaseUrl(value: string): void {
   }
 }
 
+// ---------- provider create / delete / reorder (settings parity) ----------
+
+/** The next free id from a display name, upstream's nextPersonalProviderId
+ * seed style: lowercase, non-alphanumerics folded to hyphens, `-2` suffixes
+ * on collision (`My API` → `my-api`, then `my-api-2`). */
+function nextProviderId(occupied: ReadonlySet<string>, providerName: string): string {
+  const base =
+    providerName
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "new-provider";
+  if (!occupied.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+}
+
+/**
+ * Create a personal provider rule (settings parity: provider create).
+ *
+ * The id is DERIVED from the display name (never client-chosen): ids are the
+ * file's identity keys, and two clients racing a hand-picked id would
+ * silently merge into one rule. The new rule starts with no models — the
+ * models page's add-model flow fills `personalModelIds` — and the id is
+ * appended to `providerOrder` so it lands last in every list.
+ */
+export async function createProvider(input: {
+  providerName: string;
+  apiType?: string;
+  baseUrl?: string;
+  apiKey?: string;
+}): Promise<string> {
+  const providerName = input.providerName.trim();
+  if (!providerName) throw new Error("providerName is required");
+  if (input.apiType !== undefined && !PROVIDER_API_TYPES.includes(input.apiType as never)) {
+    throw new Error(`apiType must be one of ${PROVIDER_API_TYPES.join(", ")}`);
+  }
+  if (input.baseUrl) validateBaseUrl(input.baseUrl);
+  let createdProviderId = "";
+  await saveProviderConfig((doc) => {
+    const occupied = new Set(
+      doc.config.providerConfigRules.providerRules.map((r) => r.providerId),
+    );
+    const providerId = nextProviderId(occupied, providerName);
+    createdProviderId = providerId;
+    const config: ProviderRule["config"] = {
+      personalModelIds: [],
+      modelOrder: [],
+    };
+    if (input.apiType || input.baseUrl) {
+      config.api = {
+        ...(input.apiType ? { type: input.apiType } : {}),
+        ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}),
+      };
+    }
+    if (input.apiKey) config.access = { type: "api-key", apiKey: input.apiKey };
+    doc.config.providerConfigRules.providerRules.push({ providerId, providerName, config });
+    doc.config.providerOrder = [
+      ...(doc.config.providerOrder ?? []).filter((id) => id !== providerId),
+      providerId,
+    ];
+  });
+  if (!createdProviderId) throw new Error("provider creation failed");
+  return createdProviderId;
+}
+
+/**
+ * Delete a personal provider rule (settings parity: provider delete).
+ *
+ * Only rules THIS file declares can go: the id addresses a bundled or
+ * account-managed provider elsewhere, and deleting here would only hide the
+ * rule while the real provider keeps running. The provider's model rules go
+ * with it (an orphaned rule addresses a ghost), and its `providerOrder`
+ * entry is dropped.
+ */
+export async function deleteProvider(providerId: string): Promise<ProviderConfigFile> {
+  assertNotAccountProvider(providerId);
+  return saveProviderConfig((doc) => {
+    const rules = doc.config.providerConfigRules.providerRules;
+    const at = rules.findIndex((r) => r.providerId === providerId);
+    if (at < 0) {
+      throw new Error(
+        `provider ${providerId} has no rule in provider_config.json — only providers declared here can be deleted`,
+      );
+    }
+    rules.splice(at, 1);
+    doc.config.modelConfigRules.providerModelRules =
+      doc.config.modelConfigRules.providerModelRules.filter((r) => r.providerId !== providerId);
+    doc.config.modelConfigRules.manualProviderModelRules =
+      doc.config.modelConfigRules.manualProviderModelRules.filter(
+        (r) => r.providerId !== providerId,
+      );
+    if (doc.config.providerOrder !== undefined) {
+      const order = doc.config.providerOrder.filter((id) => id !== providerId);
+      if (order.length > 0) doc.config.providerOrder = order;
+      else delete doc.config.providerOrder;
+    }
+  });
+}
+
+/**
+ * Rewrite `providerOrder` (settings parity: provider reorder).
+ *
+ * The request names the desired order for the rules this file declares;
+ * unknown ids are ignored (they address providers that live elsewhere) and
+ * any rule the request did not mention keeps its file order AFTER the
+ * mentioned ones — a reorder must never drop a provider from the list.
+ */
+export async function reorderProviders(
+  providerIds: readonly string[],
+): Promise<ProviderConfigFile> {
+  if (providerIds.some((id) => id.startsWith(ACCOUNT_PROVIDER_PREFIX))) {
+    throw new Error("account-managed providers cannot be reordered here");
+  }
+  return saveProviderConfig((doc) => {
+    const known = doc.config.providerConfigRules.providerRules.map((r) => r.providerId);
+    const seen = new Set<string>();
+    const next: string[] = [];
+    for (const id of providerIds) {
+      if (known.includes(id) && !seen.has(id)) {
+        seen.add(id);
+        next.push(id);
+      }
+    }
+    for (const id of known) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        next.push(id);
+      }
+    }
+    doc.config.providerOrder = next;
+  });
+}
+
 /**
  * Add a model to an existing provider, or update an existing rule.
  *

@@ -31,7 +31,10 @@ import { warn } from "../utils.js";
 import {
   removeModel,
   readProviderConfig,
-  updateProvider,
+   createProvider,
+   deleteProvider,
+   reorderProviders,
+   updateProvider,
   upsertModel,
 } from "../settings/provider-config.js";
 import { testModelConnectivity } from "../settings/model-connectivity.js";
@@ -413,6 +416,20 @@ async function route(
     if (method === "PUT" && path.startsWith("/settings/providers/")) {
       const id = segment(path.slice("/settings/providers/".length));
       return void (await handleUpdateProvider(res, id, body));
+    }
+    // Provider create/delete/reorder ride exact-match POSTs/DELETE — the
+    // PUT prefix branch above keeps the edit route, and reorder must be
+    // matched before a hypothetical /settings/providers/{id} POST could
+    // swallow it.
+    if (method === "POST" && path === "/settings/providers/reorder") {
+      return void (await handleReorderProviders(res, body));
+    }
+    if (method === "POST" && path === "/settings/providers") {
+      return void (await handleCreateProvider(res, body));
+    }
+    if (method === "DELETE" && path.startsWith("/settings/providers/")) {
+      const id = segment(path.slice("/settings/providers/".length));
+      return void (await handleDeleteProvider(res, id));
     }
     if (method === "POST" && path === "/settings/models") {
       return void (await handleUpsertModel(res, body));
@@ -812,6 +829,9 @@ async function handleModelsPayload(): Promise<unknown> {
   const rules = personal.config.providerConfigRules.providerRules;
   return {
     available,
+    // The display order the settings surfaces sort by (absent = file rule
+    // order; the reorder write keeps it total).
+    providerOrder: personal.config.providerOrder ?? [],
     providers: rules.map((rule) => ({
       providerId: rule.providerId,
       providerName: rule.providerName,
@@ -931,14 +951,71 @@ async function handleUpdateProvider(
     );
     return;
   }
-  await guard(res, async () => {
-    await updateProvider(providerId, {
-      ...(enabled !== undefined ? { enabled } : {}),
-      ...(providerName !== undefined ? { providerName } : {}),
-      ...(hasBaseUrl ? { baseUrl: nullable("baseUrl") } : {}),
-      ...(hasApiType ? { apiType: nullable("apiType") } : {}),
-      ...(hasApiKey ? { apiKey: nullable("apiKey") } : {}),
+    await guard(res, async () => {
+      await updateProvider(providerId, {
+        ...(enabled !== undefined ? { enabled } : {}),
+        ...(providerName !== undefined ? { providerName } : {}),
+        ...(hasBaseUrl ? { baseUrl: nullable("baseUrl") } : {}),
+        ...(hasApiType ? { apiType: nullable("apiType") } : {}),
+        ...(hasApiKey ? { apiKey: nullable("apiKey") } : {}),
+      });
+      return { ok: true as const, effect: "immediate" as Effect };
     });
+  }
+
+/**
+ * Settings parity: provider create. The id is DERIVED from the provider
+ * name server-side (see createProvider) and returned — two clients racing
+ * a hand-picked id would silently merge into one rule.
+ */
+async function handleCreateProvider(
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const providerName = str(body, "providerName");
+  if (!providerName) {
+    sendError(res, 400, "providerName is required");
+    return;
+  }
+  const apiType = str(body, "apiType");
+  const baseUrl = str(body, "baseUrl");
+  const apiKey = str(body, "apiKey");
+  await guard(res, async () => ({
+    ok: true as const,
+    providerId: await createProvider({
+      providerName,
+      ...(apiType !== undefined ? { apiType } : {}),
+      ...(baseUrl !== undefined ? { baseUrl } : {}),
+      ...(apiKey !== undefined ? { apiKey } : {}),
+    }),
+    effect: "immediate" as Effect,
+  }));
+}
+
+/** Settings parity: provider delete — only rules this file declares. */
+async function handleDeleteProvider(res: ServerResponse, providerId: string): Promise<void> {
+  await guard(res, async () => {
+    await deleteProvider(providerId);
+    return { ok: true as const, effect: "immediate" as Effect };
+  });
+}
+
+/**
+ * Settings parity: provider reorder. The body names the desired order;
+ * unknown ids are ignored and unmentioned ones keep their file order after
+ * the mentioned ones (see reorderProviders).
+ */
+async function handleReorderProviders(
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const raw = body["providerIds"];
+  if (!Array.isArray(raw) || raw.some((id) => typeof id !== "string")) {
+    sendError(res, 400, "providerIds (array of strings) is required");
+    return;
+  }
+  await guard(res, async () => {
+    await reorderProviders(raw as string[]);
     return { ok: true as const, effect: "immediate" as Effect };
   });
 }

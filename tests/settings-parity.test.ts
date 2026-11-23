@@ -231,3 +231,164 @@ describe("settings skill detail", () => {
     expect(json.error).toContain("outside");
   });
 });
+
+// ---- POST /settings/providers (+ DELETE, + /reorder) ----
+
+/** Seed provider_config.json with two personal providers and one model rule. */
+async function seedProviderConfig(): Promise<void> {
+  await mkdir(path.join(home, ".zcode", "v2"), { recursive: true });
+  await writeFile(
+    path.join(home, ".zcode", "v2", "provider_config.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      config: {
+        providerOrder: ["alpha", "beta"],
+        providerConfigRules: {
+          providerRules: [
+            {
+              providerId: "alpha",
+              providerName: "Alpha",
+              config: { personalModelIds: ["a1"], modelOrder: ["a1"] },
+            },
+            { providerId: "beta", providerName: "Beta", config: {} },
+          ],
+        },
+        modelConfigRules: {
+          providerModelRules: [
+            { providerId: "alpha", modelId: "a1", config: { enabled: true } },
+          ],
+          manualProviderModelRules: [
+            { providerId: "alpha", modelId: "a2", config: {} },
+          ],
+        },
+      },
+    }),
+    "utf8",
+  );
+}
+
+async function readProviderFile(): Promise<Record<string, any>> {
+  const raw = await readFile(
+    path.join(home, ".zcode", "v2", "provider_config.json"),
+    "utf8",
+  );
+  return JSON.parse(raw) as Record<string, any>;
+}
+
+describe("settings provider create/delete/reorder", () => {
+  it("creates a provider with a name-derived id and appends it to the order", async () => {
+    const base = await serveSettings(makeBridge().server);
+    const created = await call(base, "POST", "/settings/providers", {
+      providerName: "My API",
+      apiType: "openai-chat-completions",
+      baseUrl: "https://api.example.com/v1",
+      apiKey: "sk-new",
+    });
+    expect(created.status).toBe(200);
+    expect(created.json).toMatchObject({
+      ok: true,
+      providerId: "my-api",
+      effect: "immediate",
+    });
+    const cfg = await readProviderFile();
+    const rule = cfg.config.providerConfigRules.providerRules.find(
+      (r: any) => r.providerId === "my-api",
+    );
+    expect(rule).toMatchObject({
+      providerId: "my-api",
+      providerName: "My API",
+      config: {
+        personalModelIds: [],
+        modelOrder: [],
+        api: { type: "openai-chat-completions", baseUrl: "https://api.example.com/v1" },
+        access: { type: "api-key", apiKey: "sk-new" },
+      },
+    });
+    expect(cfg.config.providerOrder).toEqual(["my-api"]);
+
+    // A second create with the same name derives the -2 id, not a merge.
+    const again = await call(base, "POST", "/settings/providers", {
+      providerName: "My API",
+    });
+    expect(again.json.providerId).toBe("my-api-2");
+    expect(cfg.config.providerOrder).toEqual(["my-api"]); // re-read below
+    const cfg2 = await readProviderFile();
+    expect(cfg2.config.providerOrder).toEqual(["my-api", "my-api-2"]);
+  });
+
+  it("rejects a malformed create (no name / bad apiType / bad baseUrl)", async () => {
+    const base = await serveSettings(makeBridge().server);
+    expect(
+      (await call(base, "POST", "/settings/providers", {})).status,
+    ).toBe(400);
+    expect(
+      (
+        await call(base, "POST", "/settings/providers", {
+          providerName: "X",
+          apiType: "bogus",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await call(base, "POST", "/settings/providers", {
+          providerName: "X",
+          baseUrl: "not a url",
+        })
+      ).status,
+    ).toBe(400);
+  });
+
+  it("deletes a provider with its model rules and order entry; unknown ids refuse", async () => {
+    await seedProviderConfig();
+    const base = await serveSettings(makeBridge().server);
+    const gone = await call(base, "DELETE", "/settings/providers/alpha");
+    expect(gone.json).toMatchObject({ ok: true, effect: "immediate" });
+    const cfg = await readProviderFile();
+    expect(
+      cfg.config.providerConfigRules.providerRules.map((r: any) => r.providerId),
+    ).toEqual(["beta"]);
+    // The provider's model rules went with it (both lists).
+    expect(cfg.config.modelConfigRules.providerModelRules).toEqual([]);
+    expect(cfg.config.modelConfigRules.manualProviderModelRules).toEqual([]);
+    expect(cfg.config.providerOrder).toEqual(["beta"]);
+
+    const unknown = await call(base, "DELETE", "/settings/providers/never-declared");
+    expect(unknown.status).toBe(400);
+    expect(unknown.json.error).toContain("no rule");
+  });
+
+  it("reorders: requested order first, unmentioned ids keep file order, unknown ids ignored", async () => {
+    await seedProviderConfig();
+    const base = await serveSettings(makeBridge().server);
+    const res = await call(base, "POST", "/settings/providers/reorder", {
+      providerIds: ["beta", "ghost", "alpha"],
+    });
+    expect(res.json).toMatchObject({ ok: true, effect: "immediate" });
+    expect((await readProviderFile()).config.providerOrder).toEqual(["beta", "alpha"]);
+
+    // Dropping an id from the request never drops the provider.
+    const res2 = await call(base, "POST", "/settings/providers/reorder", {
+      providerIds: ["alpha"],
+    });
+    expect(res2.json.ok).toBe(true);
+    expect((await readProviderFile()).config.providerOrder).toEqual(["alpha", "beta"]);
+
+    // A malformed body is a 400 before anything is written.
+    expect(
+      (await call(base, "POST", "/settings/providers/reorder", { providerIds: "alpha" }))
+        .status,
+    ).toBe(400);
+  });
+
+  it("the models payload carries the order it sorts by", async () => {
+    await seedProviderConfig();
+    const base = await serveSettings(makeBridge().server);
+    const { status, json } = await call(base, "GET", "/settings/models");
+    expect(status).toBe(200);
+    expect(json.models.providerOrder).toEqual(["alpha", "beta"]);
+    expect(
+      json.models.providers.map((p: any) => p.providerId),
+    ).toEqual(["alpha", "beta"]);
+  });
+});
