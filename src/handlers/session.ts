@@ -37,12 +37,13 @@ import {
   buildModes,
   buildConfigOptions,
   buildInitialConfigOptions,
+  defaultModelCandidates,
   defaultModelRef,
-  defaultModelValue,
   formatModelValue,
   isModelUsable,
   loadAllModels,
   modelContextWindow,
+  modelRetired,
   parseModelValue,
   rememberModelChoice,
 } from "../config/options.js";
@@ -1271,20 +1272,28 @@ export async function ensureRealSession(
         log(`session/new ${acpSid}: pinned the advertised model ${advertised}`);
       } else {
         // The advertised model is not runnable in the live registry (switched
-        // off in the desktop since the menu was built, removed upstream): land
-        // the session on the default resolved against the registry snapshot
-        // — the user picks another model by hand if they want one. Keeping
-        // "the backend default" here is what left new sessions on a model
-        // nobody selected (observed 2026-11-23).
-        const fallback = defaultModelValue(server.modelAvailability.get(sid));
-        if (fallback !== advertised && (await applyModelSwitch(server, sid, fallback))) {
-          rememberModelChoice(server, acpSid, sid, {
-            model: lastSwitchedModelValue(server, sid) ?? fallback,
-          });
-          warn(
-            `session/new ${acpSid}: the advertised model ${advertised} is not available — pinned the default ${fallback} instead`,
-          );
-        } else {
+        // off in the desktop since the menu was built, removed upstream): try
+        // the default-model candidates IN ORDER so the session still lands on
+        // a usable model — the user picks another one by hand if they want a
+        // different one. Keeping "the backend default" here is what left new
+        // sessions on a model nobody selected (observed 2026-11-23).
+        const candidates = defaultModelCandidates(server.modelAvailability.get(sid));
+        let landed = false;
+        for (const fallback of candidates) {
+          const value = formatModelValue(fallback.providerId, fallback.modelId);
+          if (value === advertised) continue;
+          if (await applyModelSwitch(server, sid, value)) {
+            rememberModelChoice(server, acpSid, sid, {
+              model: lastSwitchedModelValue(server, sid) ?? value,
+            });
+            warn(
+              `session/new ${acpSid}: the advertised model ${advertised} is not available — pinned the default ${value} instead`,
+            );
+            landed = true;
+            break;
+          }
+        }
+        if (!landed) {
           warn(
             `session/new ${acpSid}: could not pin the advertised model ${advertised}` +
               " — keeping the backend default",
@@ -2527,6 +2536,13 @@ export async function runOneTurn(
       // Cold-start rejections recover in seconds (observed); a longer budget
       // would spin pointlessly when the model is PERMANENTLY unavailable.
       const WARMUP_RETRY_TIMEOUT_MS = 10_000;
+      // After the warmup budget, a send the backend still refuses with the
+      // stale-history-model wording gets ONE model repair + resend: the
+      // pre-send repair deliberately spares a merely-unlisted model (the
+      // registry may still be loading), so the backend's own refusal is the
+      // confirmation that the model is really gone.
+      const SEND_MODEL_REPAIRS = 1;
+      let sendRepairs = 0;
       const sendParams =
         attachments.length > 0
           ? { sessionId: zcodeSid, content: sendText, attachments }
@@ -2606,10 +2622,20 @@ export async function runOneTurn(
         }
         const isWarming = isTransientSendError(sendResp.error.message ?? "");
         if (!isBusy && !isWarming) {
-          // Permanent error (auth, malformed, a truly removed model, …) —
-          // don't retry, surface it. The stale-history-model case is
-          // repaired before the send (repairUnavailableModel on every
-          // resume path); the cold-start form is transient and retries below.
+          // Permanent error (auth, malformed, …) — don't retry, surface it.
+          // The stale-history-model form is repaired BEFORE the send when the
+          // evidence was conclusive (repairUnavailableModel on every resume
+          // path); reaching here means it was not, so repair now — once — and
+          // resend. A repaired session must not exhaust the warmup budget
+          // spinning on the same refusal.
+          if (sendRepairs < SEND_MODEL_REPAIRS && sendErrMsg.includes("模型已不可用")) {
+            sendRepairs++;
+            warn(
+              `  [send] backend refused the session's model (${sendResp.error.message ?? ""}) — repairing`,
+            );
+            await repairUnavailableModel(server, zcodeSid);
+            continue;
+          }
           throw new Error(`zcode send failed: ${sendResp.error.message ?? ""}`);
         }
         // A background NOTIFICATION turn (the model summarising a finished
@@ -4202,6 +4228,11 @@ export async function repairUnavailableModel(
     if (cur?.providerId && cur.modelId) {
       if (usable) {
         if (isModelUsable(usable, cur.providerId, cur.modelId)) return;
+        // The list only names models that are currently enabled; a model that
+        // is still KNOWN somewhere (the registry was mid-refresh at capture
+        // time, the account entitlement had not resolved yet — upstream's
+        // 600ms window) must not be switched away from on a guess.
+        if (!modelRetired(cur.providerId, cur.modelId)) return;
       } else {
         // The backend persists the current model under the registry's
         // `account:*` spelling while loadAllModels() speaks config.json's
@@ -4212,22 +4243,30 @@ export async function repairUnavailableModel(
           return;
         }
       }
-    } else if (!usable) {
-      // No current model reported and no registry list to judge by — unknown
-      // state, leave it alone.
-      return;
     }
     // "No model at all" (an unbound restore) and "no longer in the registry"
-    // both land on the session's own plan first, then the default.
-    const fallback = defaultModelRef(usable, cur?.providerId);
-    warn(
-      `session ${zcodeSid} model ${cur?.providerId ? `${cur.providerId}/${cur.modelId}` : "(none)"} is no longer available; switching to ${fallback.providerId}/${fallback.modelId}`,
-    );
+    // both land on the session's own plan first, then the default. The
+    // candidates are tried IN ORDER — an explicit pin/default is sent even
+    // when the snapshot does not name it (that list may be stale), and the
+    // backend's refusal falls through to the next candidate.
     const { applyModelSwitch } = await import("../config/runtime-model.js");
-    await applyModelSwitch(
-      server,
-      zcodeSid,
-      formatModelValue(fallback.providerId, fallback.modelId),
+    const candidates = defaultModelCandidates(usable, cur?.providerId);
+    for (const fallback of candidates) {
+      warn(
+        `session ${zcodeSid} model ${cur?.providerId ? `${cur.providerId}/${cur.modelId}` : "(none)"} is no longer available; trying ${fallback.providerId}/${fallback.modelId}`,
+      );
+      if (
+        await applyModelSwitch(
+          server,
+          zcodeSid,
+          formatModelValue(fallback.providerId, fallback.modelId),
+        )
+      ) {
+        return;
+      }
+    }
+    warn(
+      `session ${zcodeSid}: no usable replacement model found — leaving the selection untouched`,
     );
   } catch (e) {
     warn(`model repair check failed: ${e instanceof Error ? e.message : String(e)}`);

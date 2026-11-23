@@ -66,9 +66,18 @@ function makeBackend(overrides: Record<string, () => ZcodeResponse> = {}): {
           } as ZcodeResponse;
         }
         case "session/read":
+          // A healthy session reports a current model. An empty one reads as
+          // an UNBOUND restore, which repairUnavailableModel now repairs
+          // (that is the 2026-11-23 fix this file sits next to) — these
+          // stickiness cases are about the re-assert, not the repair.
           return {
             id,
-            result: { settings: {}, projection: { contextUsed: 1, contextWindow: 100 } },
+            result: {
+              settings: {
+                model: { current: { providerId: "fixture", modelId: "GLM-5.3" } },
+              },
+              projection: { contextUsed: 1, contextWindow: 100 },
+            },
           } as ZcodeResponse;
         default:
           return { id, result: {} } as ZcodeResponse;
