@@ -494,11 +494,12 @@ export async function scheduleQuotaResume(
 /**
  * Failures the watchdog classifies as permanent (message patterns for
  * transport-wrapped rejections). `workflow_disabled` is EXEMPT when the
- * rejection is the fail-closed face of an UNRESOLVED gate fetch
- * (`gate mode=unknown …`): the remote verdict is fetched once per backend
- * generation and cached, so a transient network blip must back off and retry,
- * not retire a pending resume machine-wide. A real disabled verdict (the
- * server pulled the flag, or the local switch) stays permanent.
+ * rejection is the no-verdict face (`gate mode=unknown …` — no gate fetch has
+ * settled for this process): the verdict is fetched once per backend
+ * generation and cached, so a missing verdict must back off and retry, not
+ * retire a pending resume machine-wide. A real disabled verdict (the server
+ * pulled the flag, or the local switch) — and a failed fetch's onDemand fold —
+ * are not workflow_disabled, so this exemption is only about the null face.
  */
 function isPermanentWorkflowError(e: unknown): boolean {
   if (e instanceof WorkflowApiError) {

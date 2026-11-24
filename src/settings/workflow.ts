@@ -92,10 +92,11 @@ function messageOf(error: unknown): string {
  * remote verdict means NO backend was ever spawned (an App-only flow that
  * never chatted): spawn one — ensureBackend starts the gate fetch — and await
  * the fresh verdict, so a cold bridge reports the real answer instead of a
- * false 403. An actual fetch failure still settles disabled (fail-closed,
- * like the gate itself). The 403 message carries mode+source so a client can
- * tell "server pulled the flag" (disabled/default) from "the fetch is broken"
- * (unknown/default) without probing /settings/all.
+ * false 403. A failed fetch settles onDemand (enabled — upstream parity), so
+ * it never produces workflow_disabled here. A null verdict (no fetch started)
+ * is the only "no verdict yet" face; the 403 message carries mode+source so a
+ * client can tell "server pulled the flag" (disabled/default) from "no verdict
+ * yet" (unknown/default) without probing /settings/all.
  */
 export async function requireWorkflowEnabled(server: ZcodeAcpServer): Promise<WorkflowGate> {
   const override = workflowOverrideNow();

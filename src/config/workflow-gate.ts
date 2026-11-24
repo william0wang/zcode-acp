@@ -19,17 +19,23 @@
  * settings toggle writes it via PUT /settings/workflow-gate) with the repo's
  * usual precedence: config file > env > remote verdict.
  *
- * Fail-closed everywhere: a missing key, an unknown value, an HTTP error, a
- * fetch throw, or the 6s timeout all read as disabled — a gray-flag read must
- * never block ordinary chat (upstream returns the default verdict on failure
- * for the same reason). "Key absent" and "fetch failed" stay distinguishable
- * for observability (mode "disabled" vs "unknown", both source "default") —
- * the upstream contract folds both to disabled, the split only feeds logs and
- * the 403 error body. The REMOTE verdict is resolved ONCE per backend spawn
- * (server.backendWorkflowGate, src/server.ts ensureBackend) and pinned to
- * that backend's lifetime; the override is re-read LIVE on every consumption
- * (the user-config convention), so an App toggle flip takes effect on the
- * next gate read without restarting the bridge.
+ * Two distinct failure folds (upstream parity, packages/services/src/zcode-agent/
+ * zcodeAgentService.ts:4466-4492):
+ *   - 200 without a valid key → disabled ("服务端撤掉 key 等于关闭"): the server
+ *     pulled the flag. Key absent and invalid value both read disabled.
+ *   - Fetch failure (HTTP error, throw, 6s timeout, invalid envelope) → onDemand
+ *     with source "default": a failed read says nothing about SERVER intent, so
+ *     falling back to disabled would shut workflow entry/tools off for every
+ *     offline-started host until restart. onDemand (not alwaysOn) because
+ *     alwaysOn registers ten workflow tools in every new session's first turn.
+ *     Both shapes are still distinguishable in logs/403 bodies by mode
+ *     ("disabled" vs "onDemand") with source "default".
+ *
+ * The REMOTE verdict is resolved ONCE per backend spawn
+ * (server.backendWorkflowGate, src/server.ts ensureBackend) and pinned to that
+ * backend's lifetime; the override is re-read LIVE on every consumption (the
+ * user-config convention), so an App toggle flip takes effect on the next gate
+ * read without restarting the bridge.
  */
 
 import { arch, platform } from "node:os";
@@ -59,7 +65,8 @@ export interface WorkflowGate {
   enabled: boolean;
   /**
    * Observability only (upstream vocabulary): "override" (local switch) vs
-   * "remote" verdict vs the fail-closed "default".
+   * "remote" verdict vs "default" (key absent → disabled, fetch failed →
+   * onDemand).
    */
   source: "remote" | "override" | "default";
 }
@@ -72,12 +79,22 @@ export interface WorkflowGate {
 const GATE_KEY_ABSENT: WorkflowGate = { mode: "disabled", enabled: false, source: "default" };
 
 /**
- * Bridge-only split: a fetch that never produced a verdict (HTTP error, throw,
- * timeout, invalid envelope) is UNRESOLVED, not "server said off" — the 403
- * body and /settings/all can tell "the feature was pulled" from "the config
- * fetch is broken" (bug doc 2026-09-29 §5).
+ * Upstream fold for a failed client-config fetch: onDemand with source
+ * "default" ("读取抛错说明不了服务端意图… 过去返回 undefined 再在 gate 回落
+ * disabled，离线启动的 Host 会关掉工作流入口和工具"; onDemand rather than
+ * alwaysOn because the latter registers ten workflow tools on every first
+ * turn). Comparable by fields, not object identity, via isWorkflowGateFetchFailed.
  */
-const GATE_UNRESOLVED: WorkflowGate = { mode: "unknown", enabled: false, source: "default" };
+export const GATE_FETCH_FAILED: WorkflowGate = {
+  mode: "onDemand",
+  enabled: true,
+  source: "default",
+};
+
+/** True for the upstream failed-fetch fold (compared by fields, not identity). */
+export function isWorkflowGateFetchFailed(gate: WorkflowGate): boolean {
+  return gate.mode === "onDemand" && gate.source === "default";
+}
 
 /** API origin; overridable for testing and for a self-hosted gateway. */
 function apiOrigin(env: NodeJS.ProcessEnv = process.env): string {
@@ -89,9 +106,10 @@ const GATE_TIMEOUT_MS = 6000;
 
 /**
  * Resolve the REMOTE verdict from the anonymous client-config endpoint. NEVER
- * throws — every failure shape returns a disabled verdict. `fetchImpl` is
- * injectable so tests run without network. The LOCAL override is layered on
- * top by {@link workflowOverrideNow} / the effective-* folds, not here.
+ * throws — a key-absent read folds to disabled, a failed fetch to onDemand
+ * (see the module header). `fetchImpl` is injectable so tests run without
+ * network. The LOCAL override is layered on top by {@link workflowOverrideNow}
+ * / the effective-* folds, not here.
  */
 export async function resolveWorkflowGate(
   fetchImpl: typeof fetch = globalThis.fetch,
@@ -107,7 +125,7 @@ export async function resolveWorkflowGate(
       method: "GET",
       signal: AbortSignal.timeout(GATE_TIMEOUT_MS),
     });
-    if (!resp.ok) return GATE_UNRESOLVED;
+    if (!resp.ok) return GATE_FETCH_FAILED;
     const body = (await resp.json()) as {
       data?: { configs?: { dynamicWorkflow?: { mode?: unknown } | null } };
     } | null;
@@ -117,7 +135,7 @@ export async function resolveWorkflowGate(
     if (!mode) return GATE_KEY_ABSENT;
     return { mode, enabled: mode !== "disabled", source: "remote" };
   } catch {
-    return GATE_UNRESOLVED;
+    return GATE_FETCH_FAILED;
   }
 }
 
@@ -172,7 +190,7 @@ export interface WorkflowGateHolder {
 export function captureGate(promise: Promise<WorkflowGate>): Promise<WorkflowGate> {
   void promise.then(
     (gate) => settledGates.set(promise, gate),
-    () => settledGates.set(promise, GATE_UNRESOLVED),
+    () => settledGates.set(promise, GATE_FETCH_FAILED),
   );
   return promise;
 }
@@ -189,11 +207,11 @@ export function rememberGate(promise: Promise<WorkflowGate>, value: WorkflowGate
 
 /**
  * Synchronously read the SETTLED gate verdict for the current backend
- * generation: null while the promise is pending or absent (fail-closed —
- * callers treat null as disabled), otherwise the resolved value. The
- * creation-time collector (`captureGate`) keeps this immediate for settled
- * promises; the read-time attach below only covers exotic promises that never
- * went through it.
+ * generation: null while the promise is pending or absent (no verdict yet —
+ * callers treat null as disabled), otherwise the resolved value (which may be
+ * the onDemand failed-fetch fold). The creation-time collector (`captureGate`)
+ * keeps this immediate for settled promises; the read-time attach below only
+ * covers exotic promises that never went through it.
  */
 export function workflowGateNow(server: WorkflowGateHolder): WorkflowGate | null {
   const promise = server.backendWorkflowGate;
@@ -202,7 +220,7 @@ export function workflowGateNow(server: WorkflowGateHolder): WorkflowGate | null
   if (settled) return settled;
   void promise.then(
     (gate) => settledGates.set(promise, gate),
-    () => settledGates.set(promise, GATE_UNRESOLVED),
+    () => settledGates.set(promise, GATE_FETCH_FAILED),
   );
   return null;
 }
@@ -210,7 +228,7 @@ export function workflowGateNow(server: WorkflowGateHolder): WorkflowGate | null
 /**
  * Synchronous EFFECTIVE verdict: local override (live) first, else the pinned
  * remote verdict. null while the remote fetch is pending and no override is
- * set (callers treat null as disabled — fail-closed).
+ * set (no verdict yet — callers treat null as disabled).
  */
 export function effectiveWorkflowGateNow(server: WorkflowGateHolder): WorkflowGate | null {
   return workflowOverrideNow() ?? workflowGateNow(server);

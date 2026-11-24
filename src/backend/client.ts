@@ -11,6 +11,7 @@
  * supplies the zcode dialect.
  */
 
+import { readReplyLanguage } from "../config/reply-language.js";
 import { log } from "../utils.js";
 import { backendCapabilities, type BackendCapabilities, type ServerRequest } from "./adapter.js";
 import { JsonRpcChild } from "./jsonrpc-child.js";
@@ -65,6 +66,16 @@ export class ZcodeBackend extends JsonRpcChild {
    * next TTL boundary.
    */
   onLifecycleChanged?: (snapshot: ZcodeLifecycleSnapshot) => void;
+
+  /**
+   * Value for `agentAlwaysBackgroundEnabled` in the runtime-preferences reply;
+   * undefined = omit the key. 4.0 defaults an OMITTED key to true (every Agent
+   * call goes background; the result arrives in a backend-owned follow-up
+   * turn), but the bridge cannot yet run follow-up turns inside a prompt, so
+   * 4.0 bundles pin this to false. Pre-4.0 schemas are `.strict()` with NO such
+   * key — sending it there fails session create with "Unrecognized key".
+   */
+  agentAlwaysBackgroundEnabled?: boolean;
 
   constructor(argv: string[], env: NodeJS.ProcessEnv, sanitizeWatchdog = false) {
     super({
@@ -132,6 +143,26 @@ export class ZcodeBackend extends JsonRpcChild {
         nativeSearchEnhancementsEnabled: false,
         memoryEnabled: false,
         askUserQuestionAutoResolutionEnabled: false,
+        ...(this.agentAlwaysBackgroundEnabled !== undefined
+          ? { agentAlwaysBackgroundEnabled: this.agentAlwaysBackgroundEnabled }
+          : {}),
+      });
+      return true;
+    }
+    if (req.method === "session/readReplyLanguage") {
+      // The CLI asks before EVERY input-attachment collection on main turns;
+      // the desktop host answers from memory. Read + reply off the shared
+      // reader loop so disk IO never blocks it (same reasoning as the
+      // providerRuntimeHeadersResponder wiring in server.ts). A failed read
+      // only skips one announcement upstream — never affects the turn.
+      log(`backend: auto-replying ${req.method} (id=${String(req.id)})`);
+      setImmediate(() => {
+        const language = readReplyLanguage();
+        try {
+          this.sendReply(req.id, { language });
+        } catch {
+          /* backend gone — nothing to answer */
+        }
       });
       return true;
     }

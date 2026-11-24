@@ -273,11 +273,11 @@ describe("fire", () => {
     expect(entry.resumeAt).toBeLessThanOrEqual(Date.now() + 5 * 60_000 + 1);
   });
 
-  it("retries (never retires) when the gate verdict is unresolved", async () => {
+  it("retries (never retires) when no gate verdict has settled yet", async () => {
     const { server, backend } = makeServer();
     await armed(server, backend);
-    // Fail-closed gate fetch: mode=unknown is cached for the process
-    // generation — a transient network blip must not retire the resume.
+    // No verdict yet (mode=unknown is only the "no fetch settled" face now):
+    // a transient missing verdict must not retire the resume.
     server.backendWorkflowGate = Promise.resolve({
       mode: "unknown",
       enabled: false,

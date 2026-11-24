@@ -11,10 +11,63 @@
  * against the real zcode binary in CI.
  */
 
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { describe, expect, it, vi } from "vitest";
 
 import { ZcodeBackend, type EventListener } from "../src/backend/client.js";
 import type { ZcodeEvent, ZcodeInbound } from "../src/backend/types.js";
+
+/**
+ * Capture every frame written back to the backend stdin, then parse the one
+ * carrying `id` (frames are newline-delimited JSON). Parsing the frame — not a
+ * substring — keeps the assertions honest about the reply shape.
+ */
+function captureWrites(b: ZcodeBackend): { frames: () => Array<Record<string, unknown>> } {
+  const chunks: string[] = [];
+  const stdin = b.proc.stdin;
+  if (!stdin) throw new Error("test backend has no stdin");
+  const origWrite: typeof stdin.write = stdin.write.bind(stdin);
+  stdin.write = ((chunk: unknown, ...args: unknown[]) => {
+    chunks.push(String(chunk));
+    return origWrite(chunk as never, ...(args as never[]));
+  }) as typeof stdin.write;
+  return {
+    frames: () =>
+      chunks
+        .join("")
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
+}
+
+/** Point `ZCODE_HOME` at a scratch dir with an optional v2/setting.json. */
+async function withReplyLanguage(
+  value: string | null,
+  fn: () => Promise<void> | void,
+): Promise<void> {
+  const home = mkdtempSync(path.join(tmpdir(), "backend-reply-language-"));
+  try {
+    if (value !== null) {
+      const v2 = path.join(home, "v2");
+      mkdirSync(v2, { recursive: true });
+      writeFileSync(path.join(v2, "setting.json"), JSON.stringify({ replyLanguage: value }));
+    }
+    vi.stubEnv("ZCODE_HOME", home);
+    await fn();
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/** Wait a macrotick so a setImmediate-scheduled reply is written. */
+function macrotick(): Promise<void> {
+  return new Promise((r) => setTimeout(r, 0));
+}
 
 /**
  * Test-only constructor: build a ZcodeBackend without spawning anything.
@@ -210,6 +263,68 @@ describe("ZcodeBackend reader routing (unit)", () => {
     // Must stay false so AskUserQuestion keeps flowing through the bridge's
     // interaction path instead of being auto-resolved by the app-server.
     expect(written).toContain('"askUserQuestionAutoResolutionEnabled":false');
+    b.close();
+  });
+
+  it("auto-replies session/readReplyLanguage with the live setting value", async () => {
+    await withReplyLanguage("日本語", async () => {
+      const b = makeRoutingSubject();
+      const writes = captureWrites(b);
+      b.route({
+        id: "lang-1",
+        method: "session/readReplyLanguage",
+        params: { sessionId: "sess_x" },
+      });
+      expect(b.pollServerRequests()).toHaveLength(0);
+      await macrotick(); // read + reply are deferred off the reader loop
+      const reply = writes.frames().find((f) => f["id"] === "lang-1");
+      expect(reply?.["result"]).toEqual({ language: "日本語" });
+      b.close();
+    });
+  });
+
+  it("auto-replies session/readReplyLanguage with null when unset", async () => {
+    await withReplyLanguage(null, async () => {
+      const b = makeRoutingSubject();
+      const writes = captureWrites(b);
+      b.route({
+        id: "lang-2",
+        method: "session/readReplyLanguage",
+        params: { sessionId: "sess_x" },
+      });
+      expect(b.pollServerRequests()).toHaveLength(0);
+      await macrotick();
+      const reply = writes.frames().find((f) => f["id"] === "lang-2");
+      expect(reply?.["result"]).toEqual({ language: null });
+      b.close();
+    });
+  });
+
+  it("includes agentAlwaysBackgroundEnabled in the preferences reply when set", async () => {
+    const b = makeRoutingSubject();
+    b.agentAlwaysBackgroundEnabled = false;
+    const writes = captureWrites(b);
+    b.route({
+      id: "server-2",
+      method: "session/requestRuntimePreferences",
+      params: { sessionId: "sess_x" },
+    });
+    const reply = writes.frames().find((f) => f["id"] === "server-2");
+    expect(reply?.["result"]).toMatchObject({ agentAlwaysBackgroundEnabled: false });
+    b.close();
+  });
+
+  it("omits agentAlwaysBackgroundEnabled from the preferences reply when unset", async () => {
+    const b = makeRoutingSubject();
+    expect(b.agentAlwaysBackgroundEnabled).toBeUndefined();
+    const writes = captureWrites(b);
+    b.route({
+      id: "server-3",
+      method: "session/requestRuntimePreferences",
+      params: { sessionId: "sess_x" },
+    });
+    const reply = writes.frames().find((f) => f["id"] === "server-3");
+    expect(reply?.["result"]).not.toHaveProperty("agentAlwaysBackgroundEnabled");
     b.close();
   });
 

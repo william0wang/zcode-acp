@@ -282,6 +282,99 @@ ladder is unaffected; at most a model-list divergence on
 CN-unlinked-Start machines (host lists Start models the bridge's snapshot
 does not). The CLI still self-reports `0.17.1` (apps/zcode-cli/package.json).
 
+**4.0.0 audit (2026-11-24, commit `a4b44451` — source root 4.0.0, CLI 0.18.0;
+checkout synced, protocol purely additive, ONE default behavior change; three
+small bridge items shipped; the desktop on this machine is still 3.18.2)**:
+2,209 files, mostly desktop/UI, MCP and tool-search work. The shared protocol
+schema (`packages/shared/src/zcode-protocol/index.ts`) is +76/−1 — purely
+additive: (1) a new server→client ask `session/readReplyLanguage` (params
+`{sessionId}`, strict result `{language: string | null}`, 2s CLI-side cap,
+index.ts:2175-2183); (2) two defaulted keys on the
+`session/requestRuntimePreferences` RESULT — `totalTokensReminderEnabled`
+(default `false`) and `agentAlwaysBackgroundEnabled` (default `true`,
+index.ts:2206-2226); (3) an optional `turn.started` payload field
+`isFirstMessage` (the mapper strips it for legacy clients,
+`session-mapper.ts:396-402`); (4) the workspace-hook trust reason code
+`workspace_hook_script_unavailable`; (5) `ZCODE_PROVIDER_PROJECT_TOKEN_NETWORK_ERROR`
+= -32033 (a host answer code for the interactive-account token refresh); (6)
+plugin `workspaceTrust` + the `plugins/workspaceTrust` method; (7) the plugin
+store listing's `regions`. No method or field was removed.
+
+The ONE behavior change: **Agent calls default to the background**
+(`AgentRuntimeConfig.subagents.alwaysBackground`, `07-subagent.md:638-639`).
+Every Agent call returns `async_launched` at once, the parent turn ends, and
+the result comes back through a backend-owned follow-up turn
+(`inputSource:"background_task"`). The bridge's follow-up turns are text-only
+today (the BackgroundTaskListener forwards deltas; no tool cards, permission
+or sandbox asks, and nothing for `session/cancel` to find), so `ensureBackend`
+pins `agentAlwaysBackgroundEnabled:false` on >= 4.0.0 desktop bundles and omits
+the key on <= 3.18.2 (strict schema there — "Unrecognized key"). Running
+follow-up turns inside the still-open prompt is the agreed next step. Related
+wire fact: a background subagent's own tool calls are mirrored onto the parent
+session's stream with `source:"subagent"`
+(`core/src/subagent/tool-event-mirror.ts:38-83`); the bridge does not
+distinguish them yet, so they render as ordinary tool cards — decide after
+live testing whether to fold them.
+
+Bridge items shipped with this audit:
+
+1. **ALIGNED — `session/readReplyLanguage` is answered at frame arrival.** The
+   CLI reads the Agent reply-language setting from its host before EVERY
+   input-attachment collection on a main turn and never caches it
+   (`core/src/runtime/methods/context-refresh.ts:140-165`); unanswered it only
+   skipped that announcement, but the bridge warned on every ask.
+   `readReplyLanguage` (src/config/reply-language.ts) reads `replyLanguage`
+   from `~/.zcode/v2/setting.json` live — the same setting the desktop host
+   answers from (`desktop/src/main/index.ts:1323,2368`) — pass-through, `null`
+   when unset. No bridge-side validation.
+2. **ALIGNED (interim) — the runtime-preferences reply carries
+   `agentAlwaysBackgroundEnabled:false` on >= 4.0.0 bundles only**
+   (`ZcodeBackend.agentAlwaysBackgroundEnabled`, set in `ensureBackend` through
+   `desktopBundleAtLeast("4.0.0")`). Without a readable desktop bundle the key
+   is omitted and a 4.0 backend there runs always-background.
+3. **ALIGNED — a failed client-config fetch reads
+   `{mode:"onDemand", enabled:true, source:"default"}`.** Upstream's own fold
+   (`zcodeAgentService.ts:4466-4492`: "读取抛错说明不了服务端意图", latched for
+   the host process; `alwaysOn` is rejected there because it registers ten
+   workflow tools in every new session's first turn). The bridge used to read
+   that failure `{mode:"unknown", enabled:false}`, which closed the workflow
+   entry points on every offline boot. A 200 without the key still reads
+   disabled; `mode:"unknown"` remains only the no-verdict face. ADR-0029
+   revised.
+
+Verified unchanged against the bridge's dependencies (zero diff):
+`provider-runtime-env.ts`, `runtime-paths.ts`,
+`zcode-builtin-provider-config-source.ts`, `registry-service.ts`,
+`model-catalog-port.ts`, `session-mode-port.ts`, `execution-state.ts`,
+`verification-policy.ts`, `session-flow.ts` (the v4/command stop), and
+`credential-security/bridge.ts` + `credentialCipherReplySchema`
+(`validation.ts:51-55` — the host-delegation reply the bridge answers).
+Small diffs with no hunk on a bridge wire: `server-operations.ts` (+48/−12 —
+the two new preference keys threaded to `createRecord`, the `session/read`
+`contentProfile` pass-through, `listSessionSubagents includeAllEnded`, an async
+bash-shell resolver; stop's `activeAbortController`, compact, setModel and the
+-32010 send-busy path are untouched), `turn-stop.ts` (+3/−1),
+`session-mapper.ts` (+7), `cli/src/run.ts` (+80/−4 — new launch-only flags
+`--agent-always-background` / `--total-tokens-reminder`; `toolDisallowlist`
+still reaches only prompt/target/tui, never the app-server command),
+`skills/roots.ts` (+2/−1, an `export`), the Edit/Write/Read/Bash handlers
+(failure wording, read-state freshness, input validation order — the success
+output shapes the bridge renders are untouched), and the `enc:v2:os` seal/open
+path of `systemCredentialCipher.ts` (its +230/−78 is the Desktop auto-reset
+and failure diagnostics — Gotcha in AGENTS.md). Two model-facing texts changed
+and the bridge matches neither: the denylist denial in `permission/service.ts`
+("Tool X is explicitly disallowed" → "Permission to use X has been denied.")
+and the no-client denial reason in `permission/broker.ts`. Deferred: the
+preinstalled document-tools PATH mirror (waits until that directory exists on
+a real install), reading `enc:v2:env` credentials, and the v4 additive fields.
+
+Live verification on a 4.0.0 bundle is PENDING (desktop not upgraded yet):
+the catalog-probe pin (an `AUDITED` row from the installed `zcode.cjs`
+sha256), no `session/readReplyLanguage` warn in the bridge log, one guarded
+turn with a tool call, `/compact`, a `/model` switch, one TUI and one App
+attach, and the always-background pin holding (Agent calls still return their
+result inline).
+
 **3.17.2 + 3.18.0 audit (2026-11-11, commits `a9fe401e`/`b95ebaff` — checkout
 synced, purely additive protocol, ONE follow-up = #371)**: the machine's
 desktop auto-updated 3.17.1 → 3.17.2 (runtime provider sync already ran; its

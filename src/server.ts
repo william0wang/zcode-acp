@@ -31,6 +31,8 @@ import { resolveOfficialZCodeBaseUrl } from "./config/official-mcp-auth.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
+  GATE_FETCH_FAILED,
+  isWorkflowGateFetchFailed,
   resolveWorkflowGate,
   type WorkflowGate,
 } from "./config/workflow-gate.js";
@@ -767,18 +769,15 @@ export class ZcodeAcpServer {
     // verdict is pinned to THIS backend generation. The assignment happens
     // only in this spawn branch (re-entry on a live backend returns above),
     // so exactly one gate resolution — and one policy push (below) — exists
-    // per backend instance. resolveWorkflowGate is fail-closed by design; the
-    // catch is belt-and-braces so the field can never hold a rejected
-    // promise (create/resume params await it). captureGate attaches the
-    // settled-value collector AT CREATION so the first workflowGateNow read
-    // after settlement sees the verdict (a read-time collector would be one
-    // microtask late — enough to filter the first `/` menu of a session).
+    // per backend instance. resolveWorkflowGate never rejects (a failed fetch
+    // folds to onDemand); the catch is belt-and-braces so the field can never
+    // hold a rejected promise (create/resume params await it). captureGate
+    // attaches the settled-value collector AT CREATION so the first
+    // workflowGateNow read after settlement sees the verdict (a read-time
+    // collector would be one microtask late — enough to filter the first `/`
+    // menu of a session).
     const workflowGate = captureGate(
-      resolveWorkflowGate().catch((): WorkflowGate => ({
-        mode: "unknown",
-        enabled: false,
-        source: "default",
-      })),
+      resolveWorkflowGate().catch((): WorkflowGate => GATE_FETCH_FAILED),
     );
     this.backendWorkflowGate = workflowGate;
     // Fresh backend generation: the policy-push marker from the previous
@@ -860,11 +859,19 @@ export class ZcodeAcpServer {
     // best-effort inside the helper.
     void workflowGate.then((gate) => {
       log(`workflow-gate: remote verdict mode=${gate.mode} source=${gate.source}`);
-      if (gate.mode === "unknown") {
-        warn("workflow-gate: client-config fetch failed — gate reads disabled (fail-closed)");
+      if (isWorkflowGateFetchFailed(gate)) {
+        warn("workflow-gate: client-config fetch failed — gate reads onDemand (upstream parity)");
       }
       ensureWorkflowPolicyPushed(this);
     });
+    // 4.0 defaults an omitted `agentAlwaysBackgroundEnabled` to true (Agent
+    // calls return at once and their results arrive in a backend-owned
+    // follow-up turn), which the bridge cannot yet run inside a prompt — pin
+    // the pre-4.0 foreground posture on 4.0 bundles. Pre-4.0 schemas are
+    // strict with no such key, so omit it there. A bridge with no readable
+    // desktop bundle cannot tell the version and omits the field (accepted
+    // limitation — same posture as an unknown/pre-4.0 backend).
+    backend.agentAlwaysBackgroundEnabled = desktopBundleAtLeast("4.0.0") ? false : undefined;
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the

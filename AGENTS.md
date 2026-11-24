@@ -20,14 +20,15 @@ methods and streams events back as ACP `session/update` notifications.
 
 ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
-to source root 3.18.2 via the 3.18.1 sync — the CLI still self-reports 0.17.1
-across desktop versions — commits `c5904686`/`fec97590`, audited 2026-11-14 —
+to source root **4.0.0** — commit `a4b44451`, CLI 0.18.0, audited 2026-11-24 —
 see docs/BACKLOG.md). The bridge runs desktop **3.18.2** (auto-updated from
-3.18.0, observed 2026-11-14; same CLI string; `zcode.cjs` sha256 `08726b5e…`,
-matching the catalog-probe pin in `src/config/deferred-probe-capability.ts`).
-Its audit found the protocol surface purely additive EXCEPT that ADR-0031's
-"no physical delete path" premise is gone: upstream added a v4-only
-permanent-deletion face
+3.18.0, observed 2026-11-14; the CLI there self-reports 0.17.1; `zcode.cjs`
+sha256 `08726b5e…`, matching the catalog-probe pin in
+`src/config/deferred-probe-capability.ts`); the 4.0.0 audit covers the NEXT
+desktop update, and its catalog-probe pin is added once that bundle is on this
+machine. The 3.18.x audit found the protocol surface purely additive EXCEPT
+that ADR-0031's "no physical delete path" premise is gone: upstream added a
+v4-only permanent-deletion face
 (`storage/sessionData/*`, `bootstrap/src/zcode-protocol/session-data/
 permanent-deletion.ts`; follow-up in #371), AND its credential store
 migrated to `enc:v2:os` OS-keyring encryption (the 2026-11-12 outage — see
@@ -39,7 +40,10 @@ bridge fix: `CronPauseSelf` joined the default tool denylist), the
 3.18.0 credential-migration incident (2026-11-12), and the 3.18.1/3.18.2
 audit (2026-11-14 — protocol schema byte-identical both hops; 3.18.1 is
 telemetry-only, 3.18.2 adds host-only credential features and a Start-Plan
-identity split, neither touches the bridge's wires); the bundle
+identity split, neither touches the bridge's wires), and the 4.0.0 audit
+(2026-11-24 — protocol purely additive again; ONE default behavior change,
+Agent calls always in the background, plus two new host handshakes — see the
+two 4.0 Gotchas below); the bundle
 recipe in docs/BACKLOG.md "Verification method" remains the way to re-prove a
 note against the binary. The agent runtime is under `apps/zcode-cli/packages/core/`;
 `packages/zcode-server-cli` is only a thin CLI shell. **Read the source BEFORE
@@ -559,10 +563,12 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   or a live /auto loop exists (`server.goalLoops.size` — its quota wait
   registers no turn either) — exiting would kill the only actor able to
   continue while the app is asleep. `workflow_disabled` retires only for a
-  REAL verdict: the fail-closed gate fetch rejection (`gate mode=unknown …`)
-  backs off and retries instead of retiring the entry machine-wide off one
-  network blip. Cross-process single-flight: the side-effecting tail of a fire
-  runs only under a lock-protected `firing:{pid}` claim on the store entry
+  REAL verdict: the no-verdict rejection (`gate mode=unknown …` — no backend
+  verdict yet) backs off and retries instead of retiring the entry machine-wide
+  off one network blip (until 2026-11-24 that face also covered a failed
+  client-config fetch; a fetch failure now reads onDemand and never produces
+  `workflow_disabled`). Cross-process single-flight: the side-effecting tail of
+  a fire runs only under a lock-protected `firing:{pid}` claim on the store entry
   (`claimFire` via the shared settings file lock) — and ALL store mutations
   (schedule merge / reschedule / retire) serialize on that same lock, because
   an unlocked whole-table write could erase a sibling's live claim; a claim
@@ -1180,7 +1186,84 @@ systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
   (Linux desktop without a keyring) Start-Plan credential reads degrade
   gracefully; pre-3.18.2 those machines could not save logins at all, so this
   is a new population, not a regression. Mirroring the sibling-file read is an
-  optional follow-up, not owed today.
+  optional follow-up, not owed today. **4.0.0 amendment (audited
+  2026-11-24)**: the `enc:v2:os` seal/open path is unchanged in
+  `systemCredentialCipher.ts` (+230/−78 is all AROUND it — failure
+  diagnostics, a generation-scoped key cache, a Desktop auto-reset), and
+  `credentialCipherReplySchema` + `credential-security/bridge.ts` (the
+  host-delegation reply the bridge answers) are untouched. What moved: (a) the
+  private-file fallback is now Desktop Main on ALL platforms, not Linux only
+  (`enablePrivateFileKeyFallback` — "Desktop Main 专用（全平台）"), so
+  `enc:v2:env` values can appear on a macOS/Windows desktop whose system
+  keyring was unavailable at first credential access; the bridge's reader still
+  declines them and does not read the sibling `credential-secret` (graceful
+  Start-Plan degradation on that population — the 3.18.2 stance, wider). (b)
+  NEW Desktop auto-reset (`boundStoreReset.ts`): when the system key is
+  unrecoverable (stages read/missing/invalid/managed), the desktop backs the
+  store up to `credentials.json.key-unavailable-<uuid>.bak`, writes an empty
+  store, deletes `credential-source` and bumps
+  `<credentials.json>.recovery-generation` — after such a reset the bridge sees
+  an EMPTY store until the user signs in again; do not chase "Start Plan
+  credential vanished" past that `.bak`. (c)
+  `CREDENTIAL_SECURE_STORAGE_UNAVAILABLE` errors now carry a controlled
+  `diagnostic {stage, errorCode?, osCode?}` (never key material or paths). (d)
+  `ZCODE_CREDENTIALS_FILE` (`credentialFile.ts`) selects a Source-Server-owned
+  credential file — only the Source Server Core sets it ("Desktop Main 启动时
+  删除继承的该变量"); the bridge plays the desktop host and neither sets nor
+  reads it. New `enc:v2:os` writes now require `credential-source` = os
+  (`writeCredentialRecordLocked`).
+- **4.0 asks the host `session/readReplyLanguage` before every input-attachment
+  collection — answer it at frame ARRIVAL** (source 2026-11-24, 4.0.0
+  `a4b44451`): the CLI reads the Agent reply-language setting from its host
+  each time it gathers a main turn's input attachments and never caches it
+  (`core/src/runtime/methods/context-refresh.ts:140-165` — "每次收集都向 Host
+  读当前设置"; a failed read only logs at debug and skips that ONE language
+  announcement, the turn is untouched; 2s cap at the CLI end,
+  `zcode-protocol/index.ts:2175-2183` — params `{sessionId}`, strict result
+  `{language: string | null}`). The desktop host answers from memory, fed by
+  `replyLanguage` in `~/.zcode/v2/setting.json` (Settings write at
+  `desktop/src/main/index.ts:1323`, boot read `:2368`; clearing the field
+  removes the key). The bridge has no host process, so `readReplyLanguage`
+  (src/config/reply-language.ts) re-reads that file LIVE on every ask and
+  `ZcodeBackend.handleServerRequest` replies at arrival — same placement as the
+  runtime-headers answer, because the ask lands while no turn loop drains the
+  queue; unanswered it fell into the unsupported-request branch's one `warn`
+  per ask. NO validation on purpose: a non-empty string is passed through
+  verbatim, anything else (missing key, non-string, empty, absent/unreadable/
+  malformed file) answers `null` = "not set". The backend's own schema
+  (`replyLanguageSchema`) is the only validator — a hand-edited out-of-range
+  value costs exactly one skipped announcement. Pre-4.0 backends never ask (no
+  such method), so nothing here is version-gated.
+- **4.0 defaults Agent calls to the BACKGROUND (`agentAlwaysBackgroundEnabled`)
+  — the bridge pins the pre-4.0 posture on >= 4.0.0 bundles until follow-up
+  turns run inside a prompt** (source 2026-11-24, 4.0.0 `a4b44451`): the
+  runtime-preferences RESULT schema gained
+  `agentAlwaysBackgroundEnabled: z.boolean().default(true)` with "旧 Host 缺席
+  即按产品缺省开启" (`zcode-protocol/index.ts:2206-2226`; the app-server's
+  host-less default is the same value, `server-operations.ts:3713`), fixed at
+  runtime creation or cold recovery — a hot runtime keeps its value, forks and
+  side sessions inherit the parent record (`07-subagent.md:638`). With it ON
+  the model-visible Agent input has no `run_in_background`, every call returns
+  `async_launched` at once, the parent turn ENDS, and the result comes back
+  through a backend-owned follow-up turn ("结果经完成通知在之后的回合送回",
+  `07-subagent.md:639` — reason: "父回合不被子代理阻塞，用户可以在子代理运行时
+  继续交代别的工作"). The bridge's follow-up turns are still TEXT-ONLY (the
+  session-scoped BackgroundTaskListener forwards deltas; no tool cards, no
+  permission or sandbox asks, nothing for `session/cancel` to find), so
+  `ensureBackend` sets `ZcodeBackend.agentAlwaysBackgroundEnabled` to `false`
+  when `desktopBundleAtLeast("4.0.0")`, and the handshake reply carries the key
+  only then (src/backend/client.ts) — on <= 3.18.2 the same schema is
+  `.strict()` WITHOUT the key (`fec97590`, index.ts:2189-2205) and sending it
+  fails session create ("Unrecognized key"). Known gap: an environment with no
+  readable desktop bundle cannot version-gate and omits the key, so a 4.0
+  backend there runs always-background. Remove the pin together with the
+  held-prompt work; do NOT send `true` by hand before then. Related, same
+  release: a background subagent's own tool calls are mirrored onto the parent
+  session's event stream with `source:"subagent"`, envelope `turnId` = the
+  launching turn and `toolCallId = tool_subagent_<agentId>_<childToolCallId>`
+  (`core/src/subagent/tool-event-mirror.ts:38-83`) — the bridge does not
+  distinguish them, so they render as ordinary tool cards whenever a turn loop
+  is active.
 - **3.18.0 changed the `session/messages` wire shape from Core rows
   (`info.id`) to the legacy-protocol mapper (`info.messageId`) — the bridge
   normalizes in `fetchMessages`, and the completion replay additionally
@@ -1222,9 +1305,9 @@ suppressed` warn — treat that line as "the id bridge failed again". Do not
   requests; the SDK types also require the `toolCall` field on permission
   requests (Zed renders the popup against it).
 - **Dynamic workflow availability = LOCAL override > remote verdict** (ADR-0029,
-  revised 2026-09-29): the REMOTE half mirrors the desktop host by anonymously
-  fetching `/api/v1/client/configs` (`dynamicWorkflow.mode`, fail-closed) once
-  per backend spawn (`server.backendWorkflowGate`,
+  revised 2026-09-29 and 2026-11-24): the REMOTE half mirrors the desktop host
+  by anonymously fetching `/api/v1/client/configs` (`dynamicWorkflow.mode`)
+  once per backend spawn (`server.backendWorkflowGate`,
   `src/config/workflow-gate.ts`). On top sits a LOCAL override read LIVE per
   consumption — config-file `workflow.mode`
   (~/.config/zcode-acp/config.json, written by the App settings toggle via
@@ -1238,13 +1321,23 @@ suppressed` warn — treat that line as "the id bridge failed again". Do not
   the packaged desktop production tier strips it. Do NOT "fix away" the
   switch (the pre-2026-09-29 "no bridge-side switch" stance is superseded);
   equally do NOT make the override the default — unset means the remote
-  verdict stays the whole story. Fail-closed observability split: 200 without
-  the key = `{mode:"disabled", source:"default"}` (upstream: pulling the key
-  IS off), fetch failure = `{mode:"unknown", source:"default"}`; the 403 body
-  carries `gate mode=… source=…` in its message. Enabling still goes through
-  the dual channel (policy push + `dynamicWorkflowEnabled` on every
-  create/resume — the `session/requestRuntimePreferences` schema still cannot
-  carry the flag). Wire facts that bite: v3 STRIPS
+  verdict stays the whole story. Observability split: 200 without the key =
+  `{mode:"disabled", source:"default"}` (upstream: pulling the key IS off); a
+  fetch that never produced a verdict (HTTP error, throw, 6s timeout, invalid
+  envelope) = `{mode:"onDemand", enabled:true, source:"default"}` — upstream's
+  own fold, mirrored since the 4.0.0 audit (2026-11-24,
+  `zcodeAgentService.ts:4466-4492`: a failed read "说明不了服务端意图", so the
+  host serves on-demand and latches it for the process; `alwaysOn` is rejected
+  there because it registers ten workflow tools in every new session's first
+  turn). Until then the bridge read that failure `unknown`/disabled and every
+  offline boot closed the workflow entry points. `mode:"unknown"` survives only
+  as the no-verdict face (no backend yet, or the fetch still pending) — do not
+  reinstate fail-closed on fetch failure, and do not "simplify" the latch into
+  a per-create retry (upstream: "避免离线时每条 create 都赔上一次请求超时").
+  The 403 body carries `gate mode=… source=…` in its message. Enabling still
+  goes through the dual channel (policy push + `dynamicWorkflowEnabled` on
+  every create/resume — the `session/requestRuntimePreferences` schema still
+  cannot carry the flag). Wire facts that bite: v3 STRIPS
   `dynamic_workflow_run_progress` (`session-mapper.ts:366-373`) — per-actor
   progress only exists via `v4/conversation/workflowRunEvents` (the poller,
   `src/workflow/poller.ts`, armed by `taskKind:"workflow"` background tasks;

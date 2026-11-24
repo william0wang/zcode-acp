@@ -2,14 +2,16 @@
  * Dynamic-workflow gate resolution tests (desktop-host parity).
  *
  * resolveWorkflowGate reads the anonymous /api/v1/client/configs endpoint and
- * folds data.configs.dynamicWorkflow.mode into {mode, enabled, source}. Every
- * failure shape collapses to a fail-closed disabled verdict and never throws —
- * split into two observability shapes since 2026-09-29: "server answered but
- * the key is absent/invalid" reads mode "disabled" (upstream contract: pulling
- * the key IS the off signal), while a fetch that never produced a verdict
- * (HTTP error, throw, timeout, invalid JSON) reads mode "unknown" (unresolved).
- * The local override (workflowOverrideNow) and the effective folds are covered
- * too. All fetches are injected fakes; no network.
+ * folds data.configs.dynamicWorkflow.mode into {mode, enabled, source}. Two
+ * failure shapes, per upstream (zcodeAgentService.ts:4466-4492): "server
+ * answered but the key is absent/invalid" reads disabled (pulling the key IS
+ * the off signal), while a fetch that never produced a verdict (HTTP error,
+ * throw, timeout, invalid JSON) folds to onDemand/enabled with source
+ * "default" — a failed read says nothing about server intent, so it must not
+ * shut workflow entry off for offline-started hosts. "unknown" remains only
+ * the no-verdict-yet face (no fetch has settled). The local override
+ * (workflowOverrideNow) and the effective folds are covered too. All fetches
+ * are injected fakes; no network.
  */
 
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -47,8 +49,8 @@ function fakeFetch(impl: () => Promise<Response>): typeof fetch {
 
 /** Server answered but the key is absent/invalid — OFF, not broken (upstream fold). */
 const KEY_ABSENT_VERDICT = { mode: "disabled", enabled: false, source: "default" };
-/** The fetch never produced a verdict — UNRESOLVED (bridge-only observability split). */
-const UNRESOLVED_VERDICT = { mode: "unknown", enabled: false, source: "default" };
+/** The fetch never produced a verdict — onDemand (upstream failed-read fold). */
+const FETCH_FAILED_VERDICT = { mode: "onDemand", enabled: true, source: "default" };
 
 describe("resolveWorkflowGate mode mapping", () => {
   it("disabled maps to enabled:false with source remote (server-said-off, not failed)", async () => {
@@ -58,7 +60,7 @@ describe("resolveWorkflowGate mode mapping", () => {
   });
 });
 
-describe("resolveWorkflowGate fail-closed", () => {
+describe("resolveWorkflowGate failed-read fold", () => {
   // 200-without-key family: the upstream contract reads this as the server
   // pulling the flag — a plain disabled verdict, mode "disabled".
   it("missing dynamicWorkflow key collapses to disabled", async () => {
@@ -66,18 +68,18 @@ describe("resolveWorkflowGate fail-closed", () => {
     await expect(resolveWorkflowGate(fetchImpl)).resolves.toEqual(KEY_ABSENT_VERDICT);
   });
 
-  // Fetch-failure family: no verdict arrived — mode "unknown" so clients can
-  // tell "the feature was pulled" from "the config fetch is broken".
-  it("HTTP error status collapses to unresolved", async () => {
+  // Fetch-failure family: no verdict arrived — the upstream fold is onDemand
+  // (enabled), so an offline start keeps the workflow entry/tools available.
+  it("HTTP error status folds to onDemand", async () => {
     const fetchImpl = fakeFetch(async () => jsonResponse({ error: "boom" }, 503));
-    await expect(resolveWorkflowGate(fetchImpl)).resolves.toEqual(UNRESOLVED_VERDICT);
+    await expect(resolveWorkflowGate(fetchImpl)).resolves.toEqual(FETCH_FAILED_VERDICT);
   });
 
-  it("fetch rejection collapses to unresolved", async () => {
+  it("fetch rejection folds to onDemand", async () => {
     const fetchImpl = fakeFetch(async () => {
       throw new Error("network down");
     });
-    await expect(resolveWorkflowGate(fetchImpl)).resolves.toEqual(UNRESOLVED_VERDICT);
+    await expect(resolveWorkflowGate(fetchImpl)).resolves.toEqual(FETCH_FAILED_VERDICT);
   });
 });
 
@@ -92,10 +94,10 @@ describe("workflowGateNow creation-time cache (captureGate)", () => {
     return { backendWorkflowGate: promise };
   }
 
-  it("captureGate folds a rejected promise to the unresolved verdict", async () => {
+  it("captureGate folds a rejected promise to the failed-fetch verdict", async () => {
     const promise = captureGate(Promise.reject(new Error("spawn-side catch missing")));
     await promise.catch(() => undefined); // settle; captureGate handled the rejection
-    expect(workflowGateNow(holderWith(promise))).toEqual(UNRESOLVED_VERDICT);
+    expect(workflowGateNow(holderWith(promise))).toEqual(FETCH_FAILED_VERDICT);
   });
 
   it("a pending promise still reads null (fail-closed while unsettled)", () => {
