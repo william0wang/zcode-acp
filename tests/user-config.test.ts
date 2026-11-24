@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { hardDeleteArmed, loadUserConfig} from "../src/config/user-config.js";
+import { hardDeleteArmed, loadUserConfig } from "../src/config/user-config.js";
 
 let scratch: string;
 
@@ -61,6 +61,15 @@ describe("loadUserConfig", () => {
   it("unknown keys are ignored (forward compatible)", () => {
     writeConfig(JSON.stringify({ remote: { enabled: true, futureField: "x" }, other: 1 }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({ remote: { enabled: true } });
+  });
+
+  it("validates the subagents background posture (boolean only)", () => {
+    writeConfig(JSON.stringify({ subagents: { alwaysBackground: false } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      subagents: { alwaysBackground: false },
+    });
+    writeConfig(JSON.stringify({ subagents: { alwaysBackground: "true" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });
 });
 

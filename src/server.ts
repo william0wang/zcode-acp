@@ -28,6 +28,7 @@ import {
 import { clearClosedSessionIds } from "./closed-sessions.js";
 import { desktopBundleAtLeast } from "./config/deferred-probe-capability.js";
 import { resolveOfficialZCodeBaseUrl } from "./config/official-mcp-auth.js";
+import { loadUserConfig } from "./config/user-config.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -883,13 +884,22 @@ export class ZcodeAcpServer {
       ensureWorkflowPolicyPushed(this);
     });
     // 4.0 defaults an omitted `agentAlwaysBackgroundEnabled` to true (Agent
-    // calls return at once and their results arrive in a backend-owned
-    // follow-up turn), which the bridge cannot yet run inside a prompt — pin
-    // the pre-4.0 foreground posture on 4.0 bundles. Pre-4.0 schemas are
-    // strict with no such key, so omit it there. A bridge with no readable
-    // desktop bundle cannot tell the version and omits the field (accepted
-    // limitation — same posture as an unknown/pre-4.0 backend).
-    backend.agentAlwaysBackgroundEnabled = desktopBundleAtLeast("4.0.0") ? false : undefined;
+    // calls return at once, the parent turn ends, and each finished subagent
+    // triggers a backend-owned follow-up turn) — the posture the held-prompt
+    // chain now supports, so >= 4.0.0 bundles FOLLOW the upstream default
+    // unless the user config opts out (`subagents.alwaysBackground`, read
+    // live at spawn: the preferences answer is fixed per runtime anyway).
+    // Pre-4.0 schemas are strict with no such key, so it is omitted there —
+    // an explicit config value on an older bundle cannot be honored and warns
+    // once per spawn. A bridge with no readable desktop bundle cannot tell
+    // the version and omits the field (same posture as an unknown backend).
+    const configuredAlwaysBackground = loadUserConfig().subagents?.alwaysBackground;
+    if (configuredAlwaysBackground !== undefined && !desktopBundleAtLeast("4.0.0")) {
+      warn("config: subagents.alwaysBackground needs a >= 4.0.0 backend — ignoring the value");
+    }
+    backend.agentAlwaysBackgroundEnabled = desktopBundleAtLeast("4.0.0")
+      ? (configuredAlwaysBackground ?? true)
+      : undefined;
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the

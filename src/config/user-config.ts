@@ -255,6 +255,19 @@ export interface WorkflowUserConfig {
   mode?: "disabled" | "onDemand" | "alwaysOn";
 }
 
+/** The `subagents` section: Agent-tool background posture (4.0+ backends). */
+export interface SubagentsUserConfig {
+  /**
+   * Whether Agent calls put subagents in the background by default (4.0's
+   * own default — results arrive via follow-up turns the bridge now runs
+   * inside the still-open prompt). Absent = follow the backend generation's
+   * default (true on >= 4.0.0 bundles). Only sendable on >= 4.0.0: older
+   * strict schemas reject the preferences key, so an explicit value on an
+   * older bundle is warned about and ignored.
+   */
+  alwaysBackground?: boolean;
+}
+
 /** The `delete` section: destructive-delete opt-ins. */
 export interface DeleteUserConfig {
   /**
@@ -283,6 +296,7 @@ export interface UserConfig {
   tui?: TuiUserConfig;
   push?: PushUserConfig;
   workflow?: WorkflowUserConfig;
+  subagents?: SubagentsUserConfig;
   delete?: DeleteUserConfig;
 }
 
@@ -493,6 +507,19 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
       else warn(`config: ${label}.mode=${JSON.stringify(mode)} is not a workflow mode — ignoring`);
     }
     return w;
+  });
+
+  result.subagents = parseSection(parsed, "subagents", file, (body, label) => {
+    const s: SubagentsUserConfig = {};
+    const alwaysBackground = body["alwaysBackground"];
+    if (alwaysBackground !== undefined) {
+      if (typeof alwaysBackground === "boolean") s.alwaysBackground = alwaysBackground;
+      else
+        warn(
+          `config: ${label}.alwaysBackground=${JSON.stringify(alwaysBackground)} is not a boolean — ignoring`,
+        );
+    }
+    return s;
   });
 
   result.delete = parseSection(parsed, "delete", file, (body, label) => {

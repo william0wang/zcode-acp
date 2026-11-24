@@ -327,11 +327,18 @@ Bridge items shipped with this audit:
    from `~/.zcode/v2/setting.json` live — the same setting the desktop host
    answers from (`desktop/src/main/index.ts:1323,2368`) — pass-through, `null`
    when unset. No bridge-side validation.
-2. **ALIGNED (interim) — the runtime-preferences reply carries
-   `agentAlwaysBackgroundEnabled:false` on >= 4.0.0 bundles only**
+2. **ALIGNED — the runtime-preferences reply carries
+   `agentAlwaysBackgroundEnabled` on >= 4.0.0 bundles only, following the
+   upstream default (true) with a user-config opt-out**
    (`ZcodeBackend.agentAlwaysBackgroundEnabled`, set in `ensureBackend` through
-   `desktopBundleAtLeast("4.0.0")`). Without a readable desktop bundle the key
-   is omitted and a 4.0 backend there runs always-background.
+   `desktopBundleAtLeast("4.0.0")`; `subagents.alwaysBackground` in the user
+   config overrides — an explicit value on an older bundle warns once and is
+   ignored, its strict schema cannot carry the key). The follow-up turns this
+   posture produces are covered by the held-prompt chain shipped with this
+   audit (`runEventTurn` holds the open prompt for outstanding subagent work
+   and adopts each follow-up turn into it — ADR-0034); without a readable
+   desktop bundle the key is omitted and a 4.0 backend there runs
+   always-background.
 3. **ALIGNED — a failed client-config fetch reads
    `{mode:"onDemand", enabled:true, source:"default"}`.** Upstream's own fold
    (`zcodeAgentService.ts:4466-4492`: "读取抛错说明不了服务端意图", latched for

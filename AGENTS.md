@@ -1235,8 +1235,9 @@ systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
   value costs exactly one skipped announcement. Pre-4.0 backends never ask (no
   such method), so nothing here is version-gated.
 - **4.0 defaults Agent calls to the BACKGROUND (`agentAlwaysBackgroundEnabled`)
-  — the bridge pins the pre-4.0 posture on >= 4.0.0 bundles until follow-up
-  turns run inside a prompt** (source 2026-11-24, 4.0.0 `a4b44451`): the
+  — the bridge follows the default on >= 4.0.0 bundles and covers the
+  follow-up turns with a HELD PROMPT TURN** (source 2026-11-24, 4.0.0
+  `a4b44451`; held-prompt chain + config shipped same day, ADR-0034): the
   runtime-preferences RESULT schema gained
   `agentAlwaysBackgroundEnabled: z.boolean().default(true)` with "旧 Host 缺席
   即按产品缺省开启" (`zcode-protocol/index.ts:2206-2226`; the app-server's
@@ -1247,23 +1248,43 @@ systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
   `async_launched` at once, the parent turn ENDS, and the result comes back
   through a backend-owned follow-up turn ("结果经完成通知在之后的回合送回",
   `07-subagent.md:639` — reason: "父回合不被子代理阻塞，用户可以在子代理运行时
-  继续交代别的工作"). The bridge's follow-up turns are still TEXT-ONLY (the
-  session-scoped BackgroundTaskListener forwards deltas; no tool cards, no
-  permission or sandbox asks, nothing for `session/cancel` to find), so
-  `ensureBackend` sets `ZcodeBackend.agentAlwaysBackgroundEnabled` to `false`
-  when `desktopBundleAtLeast("4.0.0")`, and the handshake reply carries the key
-  only then (src/backend/client.ts) — on <= 3.18.2 the same schema is
-  `.strict()` WITHOUT the key (`fec97590`, index.ts:2189-2205) and sending it
-  fails session create ("Unrecognized key"). Known gap: an environment with no
+  继续交代别的工作"). The bridge's `session/prompt` now STAYS OPEN while
+  subagent-kind background tasks are outstanding (`PendingTurn.holding`):
+  `runEventTurn` keeps reading events, adopts each follow-up turn into the
+  same prompt (translator `beginChainedTurn` re-arm — full path: text, tool
+  cards, diffs, asks, precise cancel via the adopted turn's
+  `foregroundExecutionId`), and settles once for the whole chain when the
+  work drains (2s grace; usage summed across turns). Invariants: only
+  SUBAGENT tasks hold (bash/workflow never — a service process would never
+  end); the BackgroundTaskListener suppresses its text forwarding while a
+  held prompt is registered (the busy window `notifyTurnActiveSince` still
+  opens and closes on every follow-up turn — send budget, load/resume wait,
+  steering liveness read it); the original prompt is NEVER re-sent after the
+  first backend turn (`PendingTurn.primaryDone` — a failed adopted turn ends
+  with one notice + `end_turn`, goal rounds keep throwing); control-only,
+  manual-`/compact`-internal, and rewind-claimed turns are skipped, never
+  adopted; cancel ends the PROMPT, not the subagents (their later follow-up
+  falls back to the no-prompt text forwarding); a dropped task-terminal is
+  backstopped by the heartbeat's `session/subagents` roster read (two empty
+  rosters while tracked state says outstanding → tasks flipped terminal,
+  one warn). Companions: `compact()` holds `running:false` while a bridge
+  turn is registered; the serve bridge's idle exit counts outstanding
+  subagent work as busy. `ensureBackend` sends the key ONLY on
+  `desktopBundleAtLeast("4.0.0")` (value: `subagents.alwaysBackground` from
+  the user config, default true — the upstream default; on <= 3.18.2 the
+  schema is `.strict()` WITHOUT the key (`fec97590`, index.ts:2189-2205) and
+  sending it fails session create ("Unrecognized key"), so an explicit config
+  value there warns once and is ignored). Known gap: an environment with no
   readable desktop bundle cannot version-gate and omits the key, so a 4.0
-  backend there runs always-background. Remove the pin together with the
-  held-prompt work; do NOT send `true` by hand before then. Related, same
-  release: a background subagent's own tool calls are mirrored onto the parent
-  session's event stream with `source:"subagent"`, envelope `turnId` = the
-  launching turn and `toolCallId = tool_subagent_<agentId>_<childToolCallId>`
-  (`core/src/subagent/tool-event-mirror.ts:38-83`) — the bridge does not
-  distinguish them, so they render as ordinary tool cards whenever a turn loop
-  is active.
+  backend there runs always-background. Related, same release: a background
+  subagent's own tool calls are mirrored onto the parent session's event
+  stream with `source:"subagent"`, envelope `turnId` = the launching turn and
+  `toolCallId = tool_subagent_<agentId>_<childToolCallId>`
+  (`core/src/subagent/tool-event-mirror.ts:38-83`) — the bridge drops them
+  while a prompt is HOLDING between turns (the outstanding `bg_*` cards are
+  the visible surface); whenever a turn loop is actively translating they
+  still render as ordinary tool cards. Folding them into one card is a
+  later, live-testing-first decision.
 - **3.18.0 changed the `session/messages` wire shape from Core rows
   (`info.id`) to the legacy-protocol mapper (`info.messageId`) — the bridge
   normalizes in `fetchMessages`, and the completion replay additionally
