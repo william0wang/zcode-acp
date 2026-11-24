@@ -119,37 +119,47 @@ export function candidateNodeBinaries(): string[] {
 
 /**
  * Verify a Node binary can load `node:sqlite` (ZCode depends on it; Node < 22
- * lacks the module and would crash). Uses `new DatabaseSync(...)` because a
- * bare reference would mis-detect support. Memoized per binary: a binary's
- * sqlite support cannot change within one bridge process, and the catalog
- * probe re-resolves its command on every session/new flight.
+ * lacks the module and would crash) AND `node:sea` (the 4.0 CLI statically
+ * imports it in core — apps/zcode-cli/packages/core/src/environment.ts:1 — so
+ * non-Node runtimes die at module load with "No such built-in module";
+ * bun 1.4.3/1.4.5 implement node:sqlite but not node:sea, observed 2026-11-24,
+ * and bun's node shim sits first on PATH under mise). Uses
+ * `new DatabaseSync(...)` because a bare reference would mis-detect support.
+ * Memoized per binary: a binary's module set cannot change within one bridge
+ * process, and the catalog probe re-resolves its command on every session/new
+ * flight.
  */
-const sqliteSupportMemo = new Map<string, boolean>();
+const backendRuntimeSupportMemo = new Map<string, boolean>();
 let probeResolutionMemo: { key: string; argv: string[] } | null = null;
 
 /** Test hook — clear the per-process resolve memos between cases. */
 export function resetResolveMemosForTests(): void {
-  sqliteSupportMemo.clear();
+  backendRuntimeSupportMemo.clear();
   probeResolutionMemo = null;
   releaseStamps.clear();
   newestTablePick = null;
 }
 
-function nodeSupportsSqlite(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
+/** Exported for testing. */
+export function nodeSupportsBackendRuntime(nodeBin: string, env?: NodeJS.ProcessEnv): boolean {
   if (!nodeBin || !existsSync(nodeBin)) return false;
   const memoKey = `${nodeBin}\0${env ? "sanitized" : "inherit"}`;
-  const memo = sqliteSupportMemo.get(memoKey);
+  const memo = backendRuntimeSupportMemo.get(memoKey);
   if (memo !== undefined) return memo;
   try {
-    execFileSync(nodeBin, ["-e", "new (require('node:sqlite').DatabaseSync)(':memory:')"], {
-      stdio: ["ignore", "ignore", "ignore"],
-      timeout: 5000,
-      env,
-    });
-    sqliteSupportMemo.set(memoKey, true);
+    execFileSync(
+      nodeBin,
+      ["-e", "new (require('node:sqlite').DatabaseSync)(':memory:'); require('node:sea')"],
+      {
+        stdio: ["ignore", "ignore", "ignore"],
+        timeout: 5000,
+        env,
+      },
+    );
+    backendRuntimeSupportMemo.set(memoKey, true);
     return true;
   } catch {
-    sqliteSupportMemo.set(memoKey, false);
+    backendRuntimeSupportMemo.set(memoKey, false);
     return false;
   }
 }
@@ -694,7 +704,7 @@ function resolveZcodeCommandOnce(
       ? [process.execPath, ...candidateNodeBinaries()]
       : candidateNodeBinaries();
   for (const nodeBin of candidates) {
-    if (nodeSupportsSqlite(nodeBin, probeEnv)) {
+    if (nodeSupportsBackendRuntime(nodeBin, probeEnv)) {
       let ver = "?";
       try {
         // argv form (no shell, space-safe); capture stderr so it doesn't leak.

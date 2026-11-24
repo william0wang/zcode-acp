@@ -1283,7 +1283,15 @@ systemCredentialCipher.ts` in the open-source tree. Wire facts that bite:
   while a prompt is HOLDING between turns (the outstanding `bg_*` cards are
   the visible surface); whenever a turn loop is actively translating they
   still render as ordinary tool cards. Folding them into one card is a
-  later, live-testing-first decision.
+  later, live-testing-first decision. Also 4.0-scoped: the CLI core now
+  STATICALLY imports `node:sea` (`core/src/environment.ts:1` — every other
+  node:sea use upstream is the guarded `process.getBuiltinModule` form), so
+  the interpreter ladder's module probe requires BOTH `node:sqlite` AND
+  `node:sea` (`nodeSupportsBackendRuntime`, resolve.ts): bun's node shim
+  (first on PATH under mise) implements sqlite but not sea and dies at module
+  load ("No such built-in module", exit 1 — verified bun 1.4.3 AND 1.4.5,
+  2026-11-24); without the probe the ladder burned one dead bun spawn per
+  boot on 4.0.
 - **3.18.0 changed the `session/messages` wire shape from Core rows
   (`info.id`) to the legacy-protocol mapper (`info.messageId`) — the bridge
   normalizes in `fetchMessages`, and the completion replay additionally

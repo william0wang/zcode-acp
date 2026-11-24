@@ -394,11 +394,17 @@ subagent kept running and its follow-up fell back to the no-prompt
 notification path (ADR-0034 rule 5 exercised live), but the
 adopt-into-held-prompt path itself did not get its end-to-end pass. Still
 open for a manual run: the held chain end-to-end, a `/model` switch, and
-one TUI + one App attach. Observation, not fixed: 4.0.0's `zcode.cjs`
-dies instantly under the bun interpreter the resolve ladder tries first
-(reader exited on pid 1; the node fallback spawn succeeded) — every
-bridge boot on 4.0 pays one dead bun spawn; consider demoting bun for
-4.0+ entries.
+one TUI + one App attach. The bun-boot observation was followed up the
+same day: retested after the bun upgrade (1.4.5) — still deterministic,
+root cause pinned. The 4.0 core STATICALLY imports `node:sea`
+(`apps/zcode-cli/packages/core/src/environment.ts:1`; every other
+node:sea use upstream is the guarded `process.getBuiltinModule` form) and
+bun implements `node:sqlite` but not `node:sea` ("No such built-in
+module", exit 1). The interpreter ladder's module probe now requires BOTH
+modules (`nodeSupportsBackendRuntime`, resolve.ts), so bun's node shim —
+first on PATH under mise — is skipped upfront instead of costing one dead
+spawn per boot; a future bun that implements node:sea passes the probe
+again.
 
 **3.17.2 + 3.18.0 audit (2026-11-11, commits `a9fe401e`/`b95ebaff` — checkout
 synced, purely additive protocol, ONE follow-up = #371)**: the machine's

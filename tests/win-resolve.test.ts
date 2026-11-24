@@ -15,7 +15,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   bundledZcodeCandidates,
   candidateNodeBinaries,
+  nodeSupportsBackendRuntime,
   parseRegUninstallLocations,
+  resetResolveMemosForTests,
   resolveZcodeCommand,
   windowsPathWhich,
 } from "../src/backend/resolve.js";
@@ -67,6 +69,32 @@ describe("candidateNodeBinaries", () => {
   it("never repeats a candidate", () => {
     const seen = new Set(candidateNodeBinaries());
     expect(seen.size).toBe(candidateNodeBinaries().length);
+  });
+});
+
+describe("nodeSupportsBackendRuntime", () => {
+  it("accepts the running node (sqlite + sea both load)", () => {
+    expect(nodeSupportsBackendRuntime(process.execPath)).toBe(true);
+  });
+
+  // A fake interpreter that exits 1 on the -e probe stands in for bun's node
+  // shim: it answers --version but dies on `require('node:sea')` ("No such
+  // built-in module", observed bun 1.4.3/1.4.5 against the 4.0 CLI).
+  it.skipIf(isWin)("rejects an interpreter that fails the module probe", () => {
+    const tmp = mkdtempSync(path.join(os.tmpdir(), "sea-probe-"));
+    const fake = path.join(tmp, "fake-node");
+    writeFileSync(fake, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    try {
+      resetResolveMemosForTests();
+      expect(nodeSupportsBackendRuntime(fake)).toBe(false);
+    } finally {
+      resetResolveMemosForTests();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a missing binary path", () => {
+    expect(nodeSupportsBackendRuntime("/nonexistent/node-xyz")).toBe(false);
   });
 });
 
