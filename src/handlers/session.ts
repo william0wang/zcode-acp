@@ -2597,6 +2597,19 @@ export async function runOneTurn(
                 await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor),
               );
             }
+            // A backend-owned follow-up turn (a finished background task's
+            // notification turn) can END while this send was busy-retrying:
+            // with no preempt/cancel the attribution gate below is unarmed,
+            // so the finished turn's queued tail would be translated as THIS
+            // prompt's output (its turn.completed flipping turnDone). Cut the
+            // queue through that turn's terminal. Self-limiting, hence run on
+            // EVERY accepted send — it also closes the narrow window where a
+            // follow-up turn ends between the subscribe and a first-attempt
+            // accept.
+            const droppedBacklog = listener.dropBacklogBeforeOwnTurn();
+            if (droppedBacklog > 0) {
+              log(`  [send] dropped ${droppedBacklog} backlog events of a finished follow-up turn`);
+            }
             // From this moment the turn may own a running generation —
             // stopBackendTurn's compaction guard no longer spares it.
             turn.sendAccepted = true;
@@ -4848,7 +4861,11 @@ export async function runEventTurn(
     // a send is accepted only after the prior turn released the lock, so the
     // residue can only arrive BEFORE this turn's turn.started. (A send that
     // lands mid-generation instead is a steer whose input is dropped — the
-    // turn.steerQueued guard above reports that at once.)
+    // turn.steerQueued guard above reports that at once.) A follow-up turn
+    // that already ENDED while the send was busy-retrying leaves no residue
+    // for this gate — the send-accept path cuts its backlog through the
+    // terminal (EventStreamListener.dropBacklogBeforeOwnTurn) — which is one
+    // reason the gate stays unarmed without a preempt/cancel.
     if (shouldDropEventForTurnAttribution(ev, translator.turnStarted, gateArmed)) {
       continue;
     }
@@ -5129,6 +5146,9 @@ export async function runEventTurn(
  * time — e.g. the main-branch turn auto-resumed after a compaction — which
  * this send was steered into and which emits no new `turn.started`; dropping
  * those events would silently swallow the whole turn's output in the UI.
+ * A follow-up turn that already ENDED before the subscribe is handled
+ * earlier instead: the send-accept path cuts its queued backlog through the
+ * terminal (EventStreamListener.dropBacklogBeforeOwnTurn).
  */
 export function shouldDropEventForTurnAttribution(
   ev: { type: string },

@@ -170,6 +170,62 @@ export class EventStreamListener {
   }
 
   /**
+   * Cut the backlog a backend-owned follow-up turn left in the queue: such a
+   * turn (a finished background task's `inputSource:"background_task"` turn)
+   * announces itself BEFORE we subscribe, so only its tail — deltas plus its
+   * `turn.completed`/`turn.failed` — lands here while the send busy-retries,
+   * and with the attribution gate unarmed a fresh translator would play it as
+   * THIS prompt's output. Remove everything up to and including the LAST
+   * terminal whose turn has NO `turn.started` inside the queue (that turn
+   * started pre-subscribe and is already over); a terminal whose turn DID
+   * announce itself here is never cut — it may be our own turn (already
+   * started, or even finished if the loop resumed late) or a follow-up turn
+   * the translator defers by its `inputSource`. A terminal with no resolvable
+   * turn id is left alone: legacy backends accept a mid-generation send as
+   * steer input and emit no new `turn.started`, so that running turn's
+   * terminal IS the prompt's terminal (see
+   * shouldDropEventForTurnAttribution). `turn.steerDrained` /
+   * `turn.steerQueued` inside the cut range SURVIVE (head of the queue,
+   * original relative order): the turn loop handles both AHEAD of the
+   * attribution gate — a drained steer injected a real user message into the
+   * session history (its echo must go out even when the surrounding turn is
+   * residue), and steerQueued reports a swallowed steer at once. Returns the
+   * number of events actually removed (0 = nothing cut).
+   * Non-destructive apart from the cut; `lastSeq` is not touched — the
+   * watermark still covers everything the backend pushed.
+   */
+  dropBacklogBeforeOwnTurn(): number {
+    const turnIdOf = (ev: ZcodeEvent): string | null =>
+      ev.turnId ??
+      ((ev.payload as { turnId?: unknown } | undefined)?.turnId as string | undefined) ??
+      null;
+    const announced = new Set<string>();
+    for (const ev of this.queue) {
+      if (ev.type !== "turn.started") continue;
+      const id = turnIdOf(ev);
+      if (id) announced.add(id);
+    }
+    let cutAt = -1;
+    for (let i = 0; i < this.queue.length; i++) {
+      const ev = this.queue[i];
+      if (ev.type !== "turn.completed" && ev.type !== "turn.failed") continue;
+      const id = turnIdOf(ev);
+      if (!id || announced.has(id)) continue;
+      cutAt = i; // keep scanning: the LAST such terminal wins
+    }
+    if (cutAt < 0) return 0;
+    const kept: ZcodeEvent[] = [];
+    let removed = 0;
+    for (let i = 0; i <= cutAt; i++) {
+      const ev = this.queue[i];
+      if (ev.type === "turn.steerDrained" || ev.type === "turn.steerQueued") kept.push(ev);
+      else removed++;
+    }
+    this.queue.splice(0, cutAt + 1, ...kept);
+    return removed;
+  }
+
+  /**
    * Stall recovery: resubscribe from `lastSeq` so the server replays missed
    * events — the missed window arrives IN the response (`events`, source:
    * subscribeSession returns every event with seq > afterSeq) and is queued
