@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.93.0](https://github.com/william0wang/zcode-acp/compare/v0.92.0...v0.93.0) (2026-11-24)
+
+
+### Features
+
+* cut finished follow-up turn backlog at send-accept so a new prompt never replays it as its own output ([26a8299](https://github.com/william0wang/zcode-acp/commit/26a8299476a7c1f7baf72835f7eb4b8b9ec81c6d))
+* follow the upstream 4.0 subagent background default with a subagents.alwaysBackground config opt-out ([abe8061](https://github.com/william0wang/zcode-acp/commit/abe8061eaa2e3c68986f1c6adbf3b08bbdd8c1e7))
+* hold session/prompt open for background subagent work and adopt follow-up turns into it ([b943f57](https://github.com/william0wang/zcode-acp/commit/b943f57ac38aca709d58b710805cc4fbca7e3154))
+* sync with upstream ZCode 4.0.0 - reply-language arrival reply, subagent posture pin, onDemand gate fallback ([43db2a2](https://github.com/william0wang/zcode-acp/commit/43db2a23f7becdb1aa8010916d343faa6734118c))
+
 ## [0.92.0](https://github.com/william0wang/zcode-acp/compare/v0.91.0...v0.92.0) (2026-11-23)
 
 
