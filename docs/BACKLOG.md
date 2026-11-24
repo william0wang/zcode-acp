@@ -375,12 +375,30 @@ and the no-client denial reason in `permission/broker.ts`. Deferred: the
 preinstalled document-tools PATH mirror (waits until that directory exists on
 a real install), reading `enc:v2:env` credentials, and the v4 additive fields.
 
-Live verification on a 4.0.0 bundle is PENDING (desktop not upgraded yet):
-the catalog-probe pin (an `AUDITED` row from the installed `zcode.cjs`
-sha256), no `session/readReplyLanguage` warn in the bridge log, one guarded
-turn with a tool call, `/compact`, a `/model` switch, one TUI and one App
-attach, and the always-background pin holding (Agent calls still return their
-result inline).
+Live verification on the 4.0.0 bundle (desktop auto-upgraded 2026-11-24
+same day; `zcode.cjs` sha256 `0de95ddd…` — the `AUDITED` row is added,
+deferred-probe-capability.ts): VERIFIED LIVE over one stdio-ACP probe
+session — the catalog-probe pin holds (no mismatch warn; the
+`deferredProbeCapabilityVerified` tests pass against the installed bundle),
+`session/readReplyLanguage` answered at arrival on every input gather (no
+unsupported-request warn), one guarded turn with a Bash tool call ran
+end-to-end (tool card, output in the reply, end_turn), `/compact`
+succeeded ("✓ compacted conversation context"), the provider registry
+built its 6 providers, the runtime-preferences host-less default engaged
+(always-background ON), and the Agent call demonstrably went BACKGROUND
+(`async_launched` → `bg_*` task card → task completed). PARTIALLY verified:
+the full held-prompt chain — the probe run's prompt was stopped from the
+App (the probe inherited the remote env and a remote-desktop client
+attached mid-run), the cancel correctly ended the PROMPT while the
+subagent kept running and its follow-up fell back to the no-prompt
+notification path (ADR-0034 rule 5 exercised live), but the
+adopt-into-held-prompt path itself did not get its end-to-end pass. Still
+open for a manual run: the held chain end-to-end, a `/model` switch, and
+one TUI + one App attach. Observation, not fixed: 4.0.0's `zcode.cjs`
+dies instantly under the bun interpreter the resolve ladder tries first
+(reader exited on pid 1; the node fallback spawn succeeded) — every
+bridge boot on 4.0 pays one dead bun spawn; consider demoting bun for
+4.0+ entries.
 
 **3.17.2 + 3.18.0 audit (2026-11-11, commits `a9fe401e`/`b95ebaff` — checkout
 synced, purely additive protocol, ONE follow-up = #371)**: the machine's

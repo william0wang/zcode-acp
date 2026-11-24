@@ -30,10 +30,12 @@ import {
 const entry = desktopBundleEntryPath();
 const oldDigest = "26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d";
 const newDigest = "08726b5ef69e1e9072828baa4656713cb3aac93bb096938681278c5600312b2c";
+const fourDigest = "0de95ddd65d7712a3beeccc8ee6de53ea0ce96338eb427e52b2717ba2f3afe19";
 const installedDigest = existsSync(entry)
   ? createHash("sha256").update(readFileSync(entry)).digest("hex")
   : "";
-const installed = installedDigest === oldDigest || installedDigest === newDigest;
+const installed =
+  installedDigest === oldDigest || installedDigest === newDigest || installedDigest === fourDigest;
 
 describe("deferred capability identity", () => {
   it("reports bundle diagnostics without starting a backend", () => {
@@ -44,13 +46,15 @@ describe("deferred capability identity", () => {
   it("only trusts audited version and digest pairs", () => {
     expect(auditedBundleMatches("3.18.0", oldDigest)).toBe(true);
     expect(auditedBundleMatches("3.18.2", newDigest)).toBe(true);
+    expect(auditedBundleMatches("4.0.0", fourDigest)).toBe(true);
     expect(auditedBundleMatches("3.18.2", oldDigest)).toBe(false);
     expect(auditedBundleMatches("3.18.0", newDigest)).toBe(false);
+    expect(auditedBundleMatches("4.0.0", newDigest)).toBe(false);
     expect(auditedBundleMatches("3.18.3", newDigest)).toBe(false);
     expect(auditedBundleMatches("__proto__", newDigest)).toBe(false);
   });
   it.runIf(installed)(
-    "accepts only the exact audited 3.18 bundle selected by the launch argv",
+    "accepts only the exact audited desktop bundle selected by the launch argv",
     () => {
       expect(
         deferredProbeCapabilityVerified([process.execPath, entry, "app-server", "--stdio"]),

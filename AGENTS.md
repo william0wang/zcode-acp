@@ -21,12 +21,11 @@ methods and streams events back as ACP `session/update` notifications.
 ZCode went open source (Apache-2.0): a local checkout lives at
 `~/Develop/NoBackup/ZCode` (remote `github.com/zai-org/ZCode`; checkout synced
 to source root **4.0.0** — commit `a4b44451`, CLI 0.18.0, audited 2026-11-24 —
-see docs/BACKLOG.md). The bridge runs desktop **3.18.2** (auto-updated from
-3.18.0, observed 2026-11-14; the CLI there self-reports 0.17.1; `zcode.cjs`
-sha256 `08726b5e…`, matching the catalog-probe pin in
-`src/config/deferred-probe-capability.ts`); the 4.0.0 audit covers the NEXT
-desktop update, and its catalog-probe pin is added once that bundle is on this
-machine. The 3.18.x audit found the protocol surface purely additive EXCEPT
+see docs/BACKLOG.md). The bridge runs desktop **4.0.0** (auto-updated
+2026-11-24, observed same day; the CLI self-reports 0.18.0; `zcode.cjs`
+sha256 `0de95ddd…`, matching the catalog-probe pin in
+`src/config/deferred-probe-capability.ts`; the 3.18.2 pin `08726b5e…` stays
+for rollbacks). The 3.18.x audit found the protocol surface purely additive EXCEPT
 that ADR-0031's "no physical delete path" premise is gone: upstream added a
 v4-only permanent-deletion face
 (`storage/sessionData/*`, `bootstrap/src/zcode-protocol/session-data/
@@ -1062,7 +1061,7 @@ payload}` for years and the translator read `payload["turnId"]`, which on
     them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
     the same reason). Arming is the GLOBAL switch only
     (`ZCODE_ACP_SANDBOX=1` or `sandbox.enabled` in the user config;
-  `sandboxActive()` takes no roots anymore — the project opt-in is gone
+    `sandboxActive()` takes no roots anymore — the project opt-in is gone
     with the file). `server.backendSandboxed` is the process
     fact the EPERM flow gates on — not `sandboxActive()`, which is the config
     wish re-checked per call (a mid-run flip to `true` is applied by

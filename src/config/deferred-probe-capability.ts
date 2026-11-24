@@ -11,6 +11,7 @@ const MACOS_ENTRY = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
 const AUDITED: Readonly<Record<string, string>> = {
   "3.18.0": "26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d",
   "3.18.2": "08726b5ef69e1e9072828baa4656713cb3aac93bb096938681278c5600312b2c",
+  "4.0.0": "0de95ddd65d7712a3beeccc8ee6de53ea0ce96338eb427e52b2717ba2f3afe19",
 };
 
 /** Desktop-bundled zcode.cjs path for the active platform. */
