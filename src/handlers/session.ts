@@ -2768,6 +2768,24 @@ export async function runOneTurn(
 
         return result;
       } catch (e) {
+        // Held prompt chain: the ORIGINAL prompt was already delivered and
+        // its reply is in the context (primaryDone = the first backend turn
+        // of this prompt reached its terminal). A failure of an ADOPTED
+        // follow-up turn — or a backend loss while holding — must NOT
+        // respawn+resend and must NOT re-enter the send ladder: upstream
+        // does not re-deliver a failed follow-up either. One notice, then a
+        // normal end_turn. Goal-loop rounds keep throwing so the driver
+        // pauses as today; a cancelled turn keeps propagating as today.
+        if (turn.primaryDone && !turn.cancelled && e instanceof TurnFailedError) {
+          if (turn.goalLoop) throw turnFailureRequestError(e);
+          warn(
+            `held prompt: adopted follow-up turn failed (${formatTurnError(
+              e.turnError,
+            )}); keeping the session usable`,
+          );
+          await sendTextChunk(cx, acpSid, messages().heldFollowUpFailed, randomUUID());
+          return { stopReason: "end_turn" };
+        }
         // Backend lost (process died / storage closed mid-turn): recover by
         // respawning the backend and reloading the session, then retry the
         // turn. The session file is intact — only the process is gone.
@@ -4394,6 +4412,29 @@ export function turnResult(
 }
 
 /**
+ * Quiet grace after the last outstanding subagent work cleared before a held
+ * prompt turn ends its chain: a follow-up backend turn starting inside the
+ * window is still adopted; past it the prompt completes normally. Exported
+ * for tests (the chain tests assert against it).
+ */
+export const HELD_PROMPT_GRACE_MS = 2_000;
+
+/**
+ * Hold-window heartbeat cadence: re-emits `in_progress` for the outstanding
+ * `bg_*` cards and polls the subagent roster (the stale-outstanding safety
+ * net ticks on the same beat). Clients enforce ~300s idle deadlines, so 60s
+ * keeps them alive. Module-level so tests can shorten it — the safety net
+ * needs two beats and no chain test can wait 2 minutes. Test-only mutation
+ * via {@link setHeldPromptHeartbeatMsForTests}.
+ */
+let heldPromptHeartbeatMs = 60_000;
+
+/** @internal Test seam — hermetic hold timing without fake timers. */
+export function setHeldPromptHeartbeatMsForTests(ms: number | null): void {
+  heldPromptHeartbeatMs = ms ?? 60_000;
+}
+
+/**
  * Event-driven turn loop: translate zcode events via EventTranslator and
  * dispatch each internal event to the ACP client. No-progress timeout is 120s
  * (refreshed by any event). Cancel is honoured on each iteration.
@@ -4471,6 +4512,41 @@ export async function runEventTurn(
   let turnStartedAt: number | null = null;
   let thinkingHintSent = false;
   const THINKING_HINT_DELAY_MS = 1200;
+  // messageId base for the thinking hint — extended per chain turn so a
+  // re-armed hint in an adopted turn never reuses the previous turn's id.
+  let hintIdBase = chunkMsgId;
+
+  // Held prompt chain: while `turn.holding`, this loop stays open BETWEEN
+  // backend turns so the next one (the backend's follow-up for a finished
+  // background subagent task) is ADOPTED into this same prompt turn. bgTasks
+  // is the session-scoped BackgroundTaskListener — may be missing on partial
+  // test fakes, which reads as "no outstanding work" (chain never holds).
+  const bgTasks = server.backgroundListeners?.get(turn.zcodeSid);
+  const skippedTurnIds = new Set<string>();
+  // When the last outstanding subagent work cleared (grace window open).
+  let outstandingClearedAt: number | null = null;
+  // Consecutive heartbeat rosters reporting ZERO running subagents while the
+  // tracked state still says outstanding — two in a row trips the safety net.
+  let emptyRosterStreak = 0;
+  let lastHoldHeartbeatAt = Date.now();
+  // Chain member index (0 = the primary turn) — drives per-turn message ids.
+  let chainTurnSeq = 0;
+  // Per-chain-member reset: the same per-turn counters a fresh loop start
+  // would have, so an adopted turn behaves like a first turn (its own
+  // thinking-hint window, its own no-progress clocks, fresh emitted flags).
+  const chainResetCounters = (): void => {
+    turnStartedAt = Date.now();
+    thinkingHintSent = false;
+    emittedText = false;
+    emittedOutput = false;
+    lastProtocolProgressAt = Date.now();
+    nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
+    lastWatermarkAdvanceAt = Date.now();
+    lastUpstreamProgressAt = lastProtocolProgressAt;
+    lastStallCheck = Date.now();
+    chainTurnSeq++;
+    hintIdBase = `${chunkMsgId}_c${chainTurnSeq}`;
+  };
 
   // Sub-agent visibility (session/subagents RPC, 0.16.9): the model can run
   // sub-agents for minutes behind a silent stream — the watermark keeps
@@ -4484,8 +4560,14 @@ export async function runEventTurn(
   let subagentEndedBaseline: number | null = null;
   let subagentEndedLineSent = false;
   const turnEpoch = Date.now();
-  const pollSubagentsOnce = async (): Promise<void> => {
-    if (turn.cancelled) return;
+  /**
+   * Poll the backend's sub-agent roster once. Returns the RUNNING count, or
+   * null when the probe is unavailable (old backend answers -32601, request
+   * failure) — the held-loop safety net keys off the count and must never
+   * fire on a broken probe.
+   */
+  const pollSubagentsOnce = async (): Promise<number | null> => {
+    if (turn.cancelled) return null;
     let result: unknown;
     try {
       const resp = await backend.request(
@@ -4498,10 +4580,10 @@ export async function runEventTurn(
         { sessionId: turn.zcodeSid, endedLimit: 100 },
         8000,
       );
-      if (resp.error || resp.result === undefined) return;
+      if (resp.error || resp.result === undefined) return null;
       result = resp.result;
     } catch {
-      return;
+      return null;
     }
     const roster = result as {
       running?: Array<{ status?: string }>;
@@ -4553,6 +4635,7 @@ export async function runEventTurn(
         }
       }
     }
+    return running.length;
   };
 
   const recordProtocolProgress = (): void => {
@@ -4627,82 +4710,139 @@ export async function runEventTurn(
   };
 
   while (true) {
-    if (Date.now() >= nextNoProgressDecisionAt) {
-      if (listener.hasQueuedEvents()) {
-        // An event that arrived exactly at the deadline is real protocol
-        // progress. Consume it below before making any terminal decision.
-        recordProtocolProgress();
-      } else if (turn.cancelled) {
-        // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
-        // lock after stop must not keep a user-cancelled turn alive forever.
-        void stopBackendTurn(server, turn.zcodeSid, turn);
-        return turnResult(translator, "max_turn_requests");
-      } else {
-        const frozenMs = Date.now() - lastWatermarkAdvanceAt;
-        const activeTools = [...translator.seenToolIds].filter(
-          (toolId) => !translator.finalToolIds.has(toolId),
-        ).length;
-        if (activeTools > 0) {
-          // A nonterminal foreground tool is direct evidence that the turn is
-          // not complete, even when token/turn counters are quiet. In
-          // particular, TaskOutput can legitimately span the generic stale
-          // budget while the backend still owns the prompt. Keep forwarding
-          // its state-bearing refreshes instead of inventing end_turn.
-          log(
-            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with ${activeTools} active tool(s); deferring terminal decision`,
-          );
-          nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
-        } else if (frozenMs < STALE_FREEZE_MS) {
-          // The read watermark moved recently — direct evidence the backend is
-          // still making progress (typically a sub-agent or slow tool working
-          // behind a silent stream). Keep waiting; the 15s stall-reconcile
-          // below keeps refreshing the watermark via session/read.
-          log(
-            `  [stall] watermark advanced within the last ${Math.round(frozenMs / 1000)}s (activeTools=${activeTools}); deferring terminal decision`,
-          );
-          nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
-        } else if (emittedText || emittedOutput) {
-          // Watermark frozen past the budget and something was already
-          // delivered — treat as a completed-but-terminal-event-lost turn
-          // (never compress its context; the completion is inferred).
-          turn.stallRecovered = true;
-          log(
-            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; ending turn after delivered output`,
-          );
+    if (turn.holding) {
+      // HELD PROMPT: the last backend turn finished; the prompt stays open
+      // for outstanding subagent work. No no-progress/stall decision may
+      // fire here (the backend owns no turn of ours between chain turns).
+      const outstanding = bgTasks?.subagentWorkOutstanding() ?? false;
+      if (!outstanding) {
+        if (outstandingClearedAt === null) {
+          outstandingClearedAt = Date.now();
+          log("  [hold] no outstanding subagent work; grace window open");
+        }
+        if (Date.now() - outstandingClearedAt >= HELD_PROMPT_GRACE_MS) {
+          // Chain end: nothing adopted within the grace — the normal
+          // completion path (mode emit + end_turn) runs exactly once here.
+          log("  [hold] chain settled after grace; ending prompt turn");
+          turn.primaryDone = true;
+          await emitModeIfChanged(server, cx, acpSid, turn.zcodeSid);
           return turnResult(translator, "end_turn");
-        } else {
-          const reply = await fetchLastReply(server, turn.zcodeSid, differ);
-          if (reply) {
-            registerFetchedReply(translator, differ, reply);
-            await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
-            turn.stallRecovered = true;
-            log(
-              `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; recovered reply via session/messages`,
-            );
-            return turnResult(translator, "end_turn");
+        }
+      } else {
+        outstandingClearedAt = null;
+        if (Date.now() - lastHoldHeartbeatAt >= heldPromptHeartbeatMs) {
+          lastHoldHeartbeatAt = Date.now();
+          // Keep clients' ~300s idle deadlines fed: refresh the outstanding
+          // bg_* cards, then poll the roster for the stale-outstanding net.
+          for (const cardId of bgTasks?.outstandingSubagentCallIds() ?? []) {
+            try {
+              await sendSessionUpdate(cx, acpSid, {
+                sessionUpdate: "tool_call_update",
+                toolCallId: cardId,
+                status: "in_progress",
+              });
+            } catch (e) {
+              warn(
+                `hold heartbeat card refresh failed: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
           }
-          log(
-            `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with no output; stopping backend turn`,
-          );
-          void stopBackendTurn(server, turn.zcodeSid, turn);
-          return turnResult(translator, "max_turn_requests");
+          const roster = await pollSubagentsOnce();
+          if (roster === 0) {
+            emptyRosterStreak++;
+            if (emptyRosterStreak >= 2 && bgTasks?.subagentWorkOutstanding()) {
+              // A dropped task-terminal would otherwise hold forever; the
+              // listener's warn line is the audit trail.
+              bgTasks.markOutstandingSubagentsTerminal();
+              emptyRosterStreak = 0;
+            }
+          } else if (roster !== null) {
+            // Live work or a recovered probe — the streak only counts
+            // consecutive empty rosters; a broken probe never trips the net.
+            emptyRosterStreak = 0;
+          }
+          if (!bgTasks?.subagentWorkOutstanding()) outstandingClearedAt = Date.now();
         }
       }
     }
+    if (!turn.holding) {
+      if (Date.now() >= nextNoProgressDecisionAt) {
+        if (listener.hasQueuedEvents()) {
+          // An event that arrived exactly at the deadline is real protocol
+          // progress. Consume it below before making any terminal decision.
+          recordProtocolProgress();
+        } else if (turn.cancelled) {
+          // Preserve the pre-existing bounded cancel behaviour. A stuck prompt
+          // lock after stop must not keep a user-cancelled turn alive forever.
+          void stopBackendTurn(server, turn.zcodeSid, turn);
+          return turnResult(translator, "max_turn_requests");
+        } else {
+          const frozenMs = Date.now() - lastWatermarkAdvanceAt;
+          const activeTools = [...translator.seenToolIds].filter(
+            (toolId) => !translator.finalToolIds.has(toolId),
+          ).length;
+          if (activeTools > 0) {
+            // A nonterminal foreground tool is direct evidence that the turn is
+            // not complete, even when token/turn counters are quiet. In
+            // particular, TaskOutput can legitimately span the generic stale
+            // budget while the backend still owns the prompt. Keep forwarding
+            // its state-bearing refreshes instead of inventing end_turn.
+            log(
+              `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with ${activeTools} active tool(s); deferring terminal decision`,
+            );
+            nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
+          } else if (frozenMs < STALE_FREEZE_MS) {
+            // The read watermark moved recently — direct evidence the backend is
+            // still making progress (typically a sub-agent or slow tool working
+            // behind a silent stream). Keep waiting; the 15s stall-reconcile
+            // below keeps refreshing the watermark via session/read.
+            log(
+              `  [stall] watermark advanced within the last ${Math.round(frozenMs / 1000)}s (activeTools=${activeTools}); deferring terminal decision`,
+            );
+            nextNoProgressDecisionAt = Date.now() + NO_PROGRESS_MS;
+          } else if (emittedText || emittedOutput) {
+            // Watermark frozen past the budget and something was already
+            // delivered — treat as a completed-but-terminal-event-lost turn
+            // (never compress its context; the completion is inferred).
+            turn.stallRecovered = true;
+            log(
+              `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; ending turn after delivered output`,
+            );
+            return turnResult(translator, "end_turn");
+          } else {
+            const reply = await fetchLastReply(server, turn.zcodeSid, differ);
+            if (reply) {
+              registerFetchedReply(translator, differ, reply);
+              await sendTextChunk(cx, acpSid, reply.text, chunkMsgId);
+              turn.stallRecovered = true;
+              log(
+                `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s; recovered reply via session/messages`,
+              );
+              return turnResult(translator, "end_turn");
+            }
+            log(
+              `  [stall] watermark frozen ${Math.round(frozenMs / 1000)}s with no output; stopping backend turn`,
+            );
+            void stopBackendTurn(server, turn.zcodeSid, turn);
+            return turnResult(translator, "max_turn_requests");
+          }
+        }
+      }
 
-    // Drain + handle server→client requests (interaction/*). Refreshes the
-    // no-progress timer when any are handled. Pass `turn` so interaction
-    // requests become turn-cancel aware (user stop aborts pending popups).
-    // Best-effort containment: a throw here would kill the turn loop (and the
-    // prompt response with it); warn and keep draining instead.
-    let handled = false;
-    try {
-      handled = await handleServerRequests(server, backend, cx, acpSid, turn);
-    } catch (e) {
-      warn(`handleServerRequests threw: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    if (handled) {
-      recordProtocolProgress();
+      // Drain + handle server→client requests (interaction/*). Refreshes the
+      // no-progress timer when any are handled. Pass `turn` so interaction
+      // requests become turn-cancel aware (user stop aborts pending popups).
+      // Best-effort containment: a throw here would kill the turn loop (and the
+      // prompt response with it); warn and keep draining instead.
+      let handled = false;
+      try {
+        handled = await handleServerRequests(server, backend, cx, acpSid, turn);
+      } catch (e) {
+        warn(`handleServerRequests threw: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (handled) {
+        recordProtocolProgress();
+      }
     }
 
     if (turn.cancelled) {
@@ -4738,6 +4878,12 @@ export async function runEventTurn(
           cause: { code: "ERR_INVALID_STATE", message: "reader dead" },
         });
       }
+      if (turn.holding) {
+        // Held prompt: no thinking hint, no stall reconciliation — the
+        // backend owns no turn of ours between chain turns, so silence here
+        // is just the wait for the next turn.started (or the grace expiry).
+        continue;
+      }
       // Thinking-phase hint: if the turn has started but produced no output
       // yet (no text/reasoning/tool streamed), and we've been silent longer
       // than the threshold, emit a single "thinking" thought chunk so the
@@ -4755,7 +4901,7 @@ export async function runEventTurn(
         await sendSessionUpdate(cx, acpSid, {
           sessionUpdate: "agent_thought_chunk",
           content: { type: "text", text: messages().thinkingPlaceholder },
-          messageId: `thinking_${chunkMsgId}`,
+          messageId: `thinking_${hintIdBase}`,
         });
       }
       // Stall reconciliation: probe authoritative status after 15s of silence.
@@ -4841,6 +4987,63 @@ export async function runEventTurn(
     // injected a real user message into the session's history.
     if (ev.type === "turn.steerDrained") {
       echoSteeredInputs(server, acpSid, ev.payload);
+    }
+    if (turn.holding) {
+      if (turn.cancelled) {
+        // Cancelled while holding: drain without adopting — the head check
+        // above ends the turn as cancelled on the next pass, and a turn
+        // arriving after the user's stop must not re-arm this prompt.
+        continue;
+      }
+      // HELD PROMPT event filter. Between chain turns the loop owns nothing,
+      // so almost everything is drained and dropped WITHOUT translation
+      // (mirrored subagent tool events included — the session-scoped
+      // BackgroundTaskListener handles the task cards). Only a turn.started
+      // can change the state: adopt it into this prompt, or skip it.
+      const evTurnId =
+        (ev.turnId as string | undefined) ?? (ev.payload?.["turnId"] as string | undefined) ?? "";
+      if (ev.type === "turn.started") {
+        const payload = ev.payload as { inputSource?: string; executionKind?: string } | undefined;
+        const skip =
+          payload?.executionKind === "controlOnly" ||
+          // The manual /compact internal turn: a NON-background turn starting
+          // while the compaction flag is set. Its id is remembered so it stays
+          // skipped even after the flag clears mid-run.
+          (!!evTurnId &&
+            payload?.inputSource !== "background_task" &&
+            server.autoCompactInFlight.has(turn.zcodeSid)) ||
+          // A rewind-claimed replacement turn: the notification-forwarding
+          // path owns its text; adopting it would render it twice.
+          (!!evTurnId && bgTasks?.isForwardingTurn(evTurnId) === true);
+        if (skip) {
+          if (evTurnId) skippedTurnIds.add(evTurnId);
+          log(`  [hold] turn.started (${evTurnId.slice(-8) || "?"}) skipped while holding`);
+          continue;
+        }
+        // ADOPT: this backend turn (background follow-up or a user-steered
+        // turn) joins the prompt. The translator's armed adopt consumes the
+        // turn.started; per-turn counters reset for the new chain member.
+        turn.holding = false;
+        skippedTurnIds.clear();
+        outstandingClearedAt = null;
+        emptyRosterStreak = 0;
+        chainResetCounters();
+        log(`  [hold] adopted turn ${evTurnId.slice(-8) || "?"} into held prompt`);
+        // Fall through: the turn.started capture below takes
+        // foregroundExecutionId, translate() consumes the adopt, and the
+        // turn runs the full existing path.
+      } else if (ev.type === "turn.completed" || ev.type === "turn.failed") {
+        if (evTurnId && skippedTurnIds.has(evTurnId)) {
+          // Terminal of a skipped turn: drop it and prune the skip set.
+          skippedTurnIds.delete(evTurnId);
+          log(`  [hold] skipped turn ${evTurnId.slice(-8)} terminal dropped`);
+        }
+        continue;
+      } else if (evTurnId && skippedTurnIds.has(evTurnId)) {
+        continue; // event of a skipped turn
+      } else {
+        continue; // everything else drains without translation
+      }
     }
     // Turn-attribution gate: before this turn's own turn.started arrives, any
     // event is leftover from a prior turn (cancelled/preempted but still
@@ -5124,6 +5327,34 @@ export async function runEventTurn(
         }
         await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
       }
+      // Held prompt chain: advance the differ anchor past this turn's
+      // messages so the NEXT chain member's completion diff (scoped
+      // afterMessageId: anchor) cannot replay them — the same re-baseline
+      // the send-accept path performs across turns.
+      differ.markSeen(snapshot.messages ?? []);
+      if (bgTasks?.subagentWorkOutstanding()) {
+        // HOLD: subagent-kind background work is outstanding — keep
+        // session/prompt open for the backend's follow-up turn. Per-chain
+        // resets + translator re-arm; emitModeIfChanged / turnResult wait
+        // for the chain end (loop-top hold block, grace expiry) — an
+        // adopted turn re-enters this block at ITS terminal instead.
+        turn.primaryDone = true;
+        turn.holding = true;
+        differ.resetTurn();
+        emittedText = false;
+        emittedOutput = false;
+        thinkingHintSent = false;
+        turnStartedAt = null;
+        lastProtocolProgressAt = Date.now();
+        nextNoProgressDecisionAt = lastProtocolProgressAt + NO_PROGRESS_MS;
+        lastWatermarkAdvanceAt = Date.now();
+        lastUpstreamProgressAt = lastProtocolProgressAt;
+        lastStallCheck = Date.now();
+        translator.beginChainedTurn();
+        log("  [hold] backend turn done; holding prompt for outstanding subagent work");
+        continue;
+      }
+      turn.primaryDone = true;
       // Mode reconciliation: an in-turn tool (EnterPlanMode/ExitPlanMode) can
       // switch the session mode without the bridge intermediating, so no
       // session/setMode notification fires. Re-read the authoritative mode and

@@ -129,6 +129,9 @@ export interface Messages {
   goalBackendRecovered: string;
   /** Prompt queued behind a still-generating turn (drain gate). */
   promptQueuedBehindTurn: string;
+  /** Held prompt chain: an adopted follow-up turn failed after the original
+   *  reply completed — the original result stays, the user can just continue. */
+  heldFollowUpFailed: string;
   /** Live sub-agent roster line during silent phases (session/subagents). */
   subagentStatusLine: (running: number, waiting: number, blocked: number) => string;
   /** One-shot terminal summary for sub-agents that ended during the turn. */
@@ -319,6 +322,7 @@ const zh: Messages = {
     `[后端进程异常中断，已重启并恢复会话，自动继续刚才的任务 (${attempt}/${total})…]`,
   goalBackendRecovered: "[后端进程异常中断，auto 任务已自动恢复并继续…]",
   promptQueuedBehindTurn: "[上一个回复仍在生成，等待结束后发送…]",
+  heldFollowUpFailed: "[后台跟进回合失败；已完成的结果仍保留在对话中——发送一条消息即可继续。]",
   subagentStatusLine: (running, waiting, blocked) =>
     `[子代理] ${running} 运行中${waiting ? ` · ${waiting} 等待` : ""}${blocked ? ` · ${blocked} 阻塞` : ""}`,
   subagentEndedLine: (ended, failed, cancelled) =>
@@ -489,6 +493,8 @@ const en: Messages = {
   goalBackendRecovered:
     "[Backend process was interrupted; the auto task recovered automatically and is continuing…]",
   promptQueuedBehindTurn: "[The previous reply is still generating; sending once it finishes…]",
+  heldFollowUpFailed:
+    "[A background follow-up turn failed; its partial result stays in the conversation — send a message to continue.]",
   subagentStatusLine: (running, waiting, blocked) =>
     `[subagents] ${running} running${waiting ? ` · ${waiting} waiting` : ""}${blocked ? ` · ${blocked} blocked` : ""}`,
   subagentEndedLine: (ended, failed, cancelled) =>

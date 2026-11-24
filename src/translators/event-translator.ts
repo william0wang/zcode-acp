@@ -46,6 +46,44 @@ function isBackgroundInput(inp: unknown): boolean {
   return (inp as Record<string, unknown>)["run_in_background"] === true;
 }
 
+/**
+ * Numeric token fields of the backend's merged usage block — the only fields
+ * SUMMED across a held-prompt chain. Everything else (source,
+ * modelRequestCount, web request counts) is per-turn metadata and comes from
+ * the LAST turn of the chain.
+ */
+const USAGE_TOKEN_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "reasoningTokens",
+];
+
+/**
+ * Fold a finished turn's usage into the chain accumulator. `acc` carries the
+ * chain's prior turns (null before the first), `last` the freshly-completed
+ * turn (null when the backend sent no usage — the accumulator survives).
+ */
+function mergeChainUsage(
+  acc: Record<string, unknown> | null,
+  last: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  if (!last) return acc;
+  if (!acc) return { ...last };
+  const merged: Record<string, unknown> = { ...acc };
+  for (const [k, v] of Object.entries(last)) {
+    if (USAGE_TOKEN_FIELDS.includes(k)) {
+      const prev = typeof acc[k] === "number" ? (acc[k] as number) : 0;
+      merged[k] = prev + (typeof v === "number" ? v : 0);
+    } else {
+      merged[k] = v;
+    }
+  }
+  return merged;
+}
+
 export class EventTranslator {
   turnStarted = false;
   turnDone = false;
@@ -94,6 +132,21 @@ export class EventTranslator {
    * drops all events — that turn is owned by BackgroundTaskListener.
    */
   private skippingBackgroundTurn = false;
+  /**
+   * Armed by {@link beginChainedTurn} (held prompt turn): the NEXT
+   * `turn.started` — normally a follow-up with `inputSource:"background_task"`
+   * — is adopted as THIS translator's own turn instead of being deferred to
+   * the session-scoped BackgroundTaskListener. Disarms on the first adopted
+   * turn; a later background turn is skipped again unless the loop re-arms.
+   */
+  private adoptNextTurn = false;
+  /**
+   * Usage accumulated over the chain's ALREADY-COMPLETED backend turns (held
+   * prompt). Each `turn.completed` merges it into `turnUsage`, so the final
+   * PromptResponse.usage sums the whole chain; string extras (source,
+   * modelRequestCount, …) come from the LAST turn.
+   */
+  private chainUsage: Record<string, unknown> | null = null;
   /**
    * turnId of the user turn this translator owns (from its `turn.started`).
    * Backend-internal turns (`session/goal` set, `session/compact`) emit their
@@ -148,6 +201,33 @@ export class EventTranslator {
    */
   readonly backgroundCallIds = new Set<string>();
 
+  /**
+   * Arm chained-turn adoption (held prompt turn): the prompt loop keeps this
+   * translator alive across consecutive backend turns while background
+   * subagent work is outstanding, and the next `turn.started` is adopted as
+   * this translator's own turn. Clears the sticky PER-TURN state and folds
+   * the finished turn's usage into the chain accumulator; KEEPS every dedup
+   * set/map — the completion-replay dedup must survive across the chain so
+   * content streamed by an earlier chain turn is never re-emitted.
+   */
+  beginChainedTurn(): void {
+    this.chainUsage = mergeChainUsage(this.chainUsage, this.turnUsage);
+    this.turnStarted = false;
+    this.turnDone = false;
+    this.turnFailed = false;
+    this.turnResultType = null;
+    this.turnError = null;
+    this.turnUsage = null;
+    this.turnCacheStats = null;
+    this.sawPromptCompleted = false;
+    this.sawPromptFailed = false;
+    this.skippingBackgroundTurn = false;
+    this.skippingForeignTurn = false;
+    this.activeTurnId = null;
+    this.adoptNextTurn = true;
+    log("  [event] chained-turn adopt armed (held prompt waiting for subagent work)");
+  }
+
   /** Translate one zcode event into 0..n internal events. */
   translate(event: ZcodeEventPayload): InternalEvent[] {
     const etype = event.type ?? "";
@@ -162,11 +242,22 @@ export class EventTranslator {
       // the result and (b) mis-set turnDone and exit the user's real turn loop.
       // So we skip every event of a background_task turn until the next
       // user-initiated turn.started clears the flag.
+      //
+      // EXCEPT when chained-turn adoption is armed (held prompt): the prompt
+      // loop deliberately keeps itself open across the chain and hands the
+      // follow-up turn to THIS translator — the adopt below falls through to
+      // the normal handling (activeTurnId + turnStarted), arming once.
       const inputSource = payload["inputSource"];
+      // Any adoption disarms: one beginChainedTurn arms exactly ONE turn.
+      const adopting = this.adoptNextTurn;
+      this.adoptNextTurn = false;
       if (inputSource === "background_task") {
-        this.skippingBackgroundTurn = true;
-        log("  [event] turn.started (background_task) → deferring to bg listener");
-        return results;
+        if (!adopting) {
+          this.skippingBackgroundTurn = true;
+          log("  [event] turn.started (background_task) → deferring to bg listener");
+          return results;
+        }
+        log("  [event] turn.started (background_task) → adopted into held prompt");
       }
       this.skippingBackgroundTurn = false;
       // Envelope-first (0.16.9 shape); a payload-carried turnId stays valid
@@ -211,7 +302,13 @@ export class EventTranslator {
       if (etype === "turn.completed") {
         this.turnDone = true;
         this.turnResultType = (payload["resultType"] as string) ?? "success";
-        this.turnUsage = (payload["usage"] as Record<string, unknown>) ?? null;
+        // Merge with the chain accumulator: for a held-prompt chain the final
+        // PromptResponse.usage must SUM the chain's backend turns (numeric
+        // token fields); single-turn prompts merge over null = verbatim.
+        this.turnUsage = mergeChainUsage(
+          this.chainUsage,
+          (payload["usage"] as Record<string, unknown>) ?? null,
+        );
         this.turnCacheStats = parseCacheStats(payload["cacheStats"]);
         results.push(...this.translateTurnDone());
         log(`  [event] turn.completed (resultType=${this.turnResultType})`);

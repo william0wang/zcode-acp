@@ -93,6 +93,13 @@ interface TrackedTask {
    */
   sourceToolCallId?: string;
   /**
+   * Backend task kind from the first `session.updated` sighting
+   * (`taskKind`), verbatim: "subagent" (Agent/Task runs — the held-prompt
+   * chain waits on these), "workflow", "bash", … Undefined on entries
+   * created before the field existed.
+   */
+  taskKind?: string;
+  /**
    * True when acpCallId === sourceToolCallId (background Bash reusing the
    * launch terminal card). Drives the terminal_exit + terminalSentData cleanup
    * on completion so Zed's terminal UI closes cleanly.
@@ -153,6 +160,17 @@ export class BackgroundTaskListener implements EventListener {
    * to the client as `agent_message_chunk`.
    */
   private activeNotifyTurnId: string | null = null;
+  /**
+   * The turnId that opened the notification busy window
+   * (`server.notifyTurnActiveSince`). Tracked SEPARATELY from
+   * `activeNotifyTurnId` because the two arms split (held prompt turn): the
+   * window is published on EVERY notification turn (the prompt path's send
+   * busy budget, the load/resume wait and steering liveness depend on it),
+   * while the text-forwarding arm (`activeNotifyTurnId`) is suppressed when a
+   * held prompt turn owns the session — the loop dispatches that turn itself.
+   * The window's turn terminal settles it even when forwarding never armed.
+   */
+  private windowTurnId: string | null = null;
   /**
    * Rewind claim (rewind.ts): a bridge-sent v4 editUserQuery/retryTurn admits
    * its replacement turn through the command channel — no turn loop ever owns
@@ -227,6 +245,66 @@ export class BackgroundTaskListener implements EventListener {
     }
   }
 
+  /**
+   * True while at least one SUBAGENT-kind background task is still running:
+   * the held-prompt turn loop keeps `session/prompt` open for exactly this
+   * work (the backend auto-triggers a result turn per finished task). Terminal
+   * states are the ACP spellings `lastStatus` stores ("completed"/"failed");
+   * a fresh card with no status yet ("") counts as running.
+   */
+  subagentWorkOutstanding(): boolean {
+    for (const task of this.tasks.values()) {
+      if (task.taskKind !== "subagent") continue;
+      if (task.lastStatus !== "completed" && task.lastStatus !== "failed") return true;
+    }
+    return false;
+  }
+
+  /** acpCallIds of the outstanding subagent tasks — the held loop's heartbeat
+   * re-emits `in_progress` for these cards so client idle deadlines stay fed. */
+  outstandingSubagentCallIds(): string[] {
+    const ids: string[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.taskKind !== "subagent") continue;
+      if (task.lastStatus === "completed" || task.lastStatus === "failed") continue;
+      ids.push(task.acpCallId);
+    }
+    return ids;
+  }
+
+  /**
+   * Safety-net writer for a DROPPED task-terminal event (one that would
+   * otherwise hold a prompt open for the rest of the process): flips every
+   * running subagent-kind task to a terminal tracked state and returns how
+   * many were flipped. "failed" mirrors the other bridge-side inferred
+   * terminals (markCancelled / shutdown records); the warn line is the audit
+   * trail. Called only after the subagent roster twice reported empty while
+   * the tracked state still said outstanding.
+   */
+  markOutstandingSubagentsTerminal(): number {
+    let flipped = 0;
+    for (const task of this.tasks.values()) {
+      if (task.taskKind !== "subagent") continue;
+      if (task.lastStatus === "completed" || task.lastStatus === "failed") continue;
+      task.lastStatus = "failed";
+      flipped++;
+    }
+    if (flipped > 0) {
+      warn(
+        `  [bg] ${flipped} outstanding subagent task(s) marked terminal without a status event ` +
+          `(dropped terminal suspected; roster twice reported empty)`,
+      );
+    }
+    return flipped;
+  }
+
+  /** Read-only forwarding probe for the held loop: true while `turnId` is the
+   * turn the notification-forwarding path currently owns (a rewind-claimed
+   * replacement turn) — such a turn must NOT be adopted into the chain. */
+  isForwardingTurn(turnId: string): boolean {
+    return this.activeNotifyTurnId === turnId;
+  }
+
   handleEvent(event: ZcodeEvent): void {
     try {
       if (event.type === "session.updated") {
@@ -259,19 +337,39 @@ export class BackgroundTaskListener implements EventListener {
           (event.payload?.["turnId"] as string | undefined) ??
           "";
         if (inputSource === "background_task") {
-          if (this.activeNotifyTurnId !== (turnId || null)) {
-            // A replacement notification started without the previous one's
-            // terminal ever arriving: drop the unfinished turn's generated
-            // message id so the new turn's text does not append to it.
-            this.firstMessageId = null;
-            this.activeNotifyTurnId = turnId || null;
-          }
-          // Publish the window: the prompt path extends its send busy-retry
-          // budget while a notification turn (a real model turn) holds the
-          // prompt lock (server.notifyTurnActiveSince, see session.ts).
-          if (this.activeNotifyTurnId) {
-            this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
-            log(`  [bg] background notification turn started (${turnId.slice(-8)})`);
+          // Busy window: publish on EVERY notification turn — the prompt path
+          // extends its send busy-retry budget while a notification turn (a
+          // real model turn) holds the prompt lock, and the load/resume wait
+          // + steering liveness read the same map.
+          this.windowTurnId = turnId || null;
+          this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
+          // Text forwarding arms ONLY when no held prompt turn is registered:
+          // the held loop adopts that turn and dispatches it through the full
+          // prompt path — forwarding here would render it twice.
+          const heldPrompt = [...this.server.pendingTurns.values()].some(
+            (t) => t.zcodeSid === this.zcodeSid && t.holding,
+          );
+          if (heldPrompt) {
+            if (this.activeNotifyTurnId) {
+              // The held prompt adopted the chain: drop any forwarding state
+              // so the loop's dispatch is the only path to the client.
+              this.activeNotifyTurnId = null;
+              this.firstMessageId = null;
+            }
+            log(
+              `  [bg] background notification turn started (${turnId.slice(-8)}); forwarding held by prompt loop`,
+            );
+          } else {
+            if (this.activeNotifyTurnId !== (turnId || null)) {
+              // A replacement notification started without the previous one's
+              // terminal ever arriving: drop the unfinished turn's generated
+              // message id so the new turn's text does not append to it.
+              this.firstMessageId = null;
+              this.activeNotifyTurnId = turnId || null;
+            }
+            if (this.activeNotifyTurnId) {
+              log(`  [bg] background notification turn started (${turnId.slice(-8)})`);
+            }
           }
         } else if (this.rewindClaimAt !== null && !this.activeNotifyTurnId) {
           // The replacement turn of a bridge-sent v4 editUserQuery/retryTurn:
@@ -290,6 +388,9 @@ export class BackgroundTaskListener implements EventListener {
           // backstop misfires its busy settle.
           this.activeNotifyTurnId = turnId || null;
           this.firstMessageId = null;
+          // The rewind claim arms BOTH arms (window + forwarding) for a
+          // non-background turn — unchanged by the held-prompt split.
+          this.windowTurnId = turnId || null;
           this.server.notifyTurnActiveSince.set(this.zcodeSid, Date.now());
           this.releaseRewindClaim(this.rewindClaimToken!);
           log(`  [bg] rewind replacement turn claimed (${(turnId || "?").slice(-8)})`);
@@ -328,6 +429,30 @@ export class BackgroundTaskListener implements EventListener {
           if (acpSid) echoSteeredInputs(this.server, acpSid, event.payload);
         }
         return;
+      }
+      // Terminal: settle the busy WINDOW for the turn that opened it, even
+      // when text forwarding was never armed (held prompt turn suppressed it)
+      // — the window turn's terminal is what releases the prompt path's
+      // extended busy budget. When forwarding IS armed, the block below owns
+      // the whole settlement (foreign-turn guard + firstMessageId reset tied
+      // to the forwarding path, exactly as before the held-prompt split).
+      if (
+        (event.type === "turn.completed" || event.type === "turn.failed") &&
+        this.activeNotifyTurnId === null
+      ) {
+        const settleTurnId =
+          (event.turnId as string | undefined) ??
+          (event.payload?.["turnId"] as string | undefined) ??
+          "";
+        if (
+          this.windowTurnId !== null &&
+          this.server.notifyTurnActiveSince.has(this.zcodeSid) &&
+          (!settleTurnId || settleTurnId === this.windowTurnId)
+        ) {
+          this.server.notifyTurnActiveSince.delete(this.zcodeSid);
+          this.windowTurnId = null;
+          log(`  [bg] notification busy window settled (${event.type})`);
+        }
       }
       // Inside an active background notification turn → forward its text.
       if (this.activeNotifyTurnId) {
@@ -464,6 +589,7 @@ export class BackgroundTaskListener implements EventListener {
             reusesLaunchCard: false,
             description: p.description ?? "",
             lastStatus: "",
+            taskKind: p.taskKind,
           });
           if (acpStatus !== "in_progress") stopWorkflowRunPoller(taskId);
           else {
@@ -502,6 +628,7 @@ export class BackgroundTaskListener implements EventListener {
           reusesLaunchCard: true,
           description: p.description ?? "",
           lastStatus: "",
+          taskKind: p.taskKind,
         };
         this.tasks.set(taskId, task);
         // The launch card already exists (dispatch created it in the main
@@ -519,6 +646,7 @@ export class BackgroundTaskListener implements EventListener {
         reusesLaunchCard: false,
         description: p.description ?? "",
         lastStatus: "",
+        taskKind: p.taskKind,
       };
       this.tasks.set(taskId, task);
       const meta: Record<string, unknown> = {

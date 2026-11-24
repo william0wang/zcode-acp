@@ -409,11 +409,15 @@ export async function runHeadless(): Promise<void> {
     // A live /auto loop counts as busy even between rounds: a quota wait
     // sleeps for the window reset while registering neither a client nor a
     // turn — exiting here would kill the wait the bridge exists to serve
-    // (same rationale as the pending quota resume below).
+    // (same rationale as the pending quota resume below). Outstanding
+    // background subagent work counts too: after the user stopped waiting or
+    // closed the app, this serve bridge is the only actor able to push the
+    // completion turn.
     if (
       server.clients.size > 0 ||
       server.pendingTurns.size > 0 ||
-      (server.goalLoops?.size ?? 0) > 0
+      (server.goalLoops?.size ?? 0) > 0 ||
+      [...server.backgroundListeners.values()].some((l) => l.subagentWorkOutstanding())
     ) {
       lastBusy = Date.now();
       return;

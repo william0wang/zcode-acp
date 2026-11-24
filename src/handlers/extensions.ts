@@ -152,9 +152,17 @@ export async function compact(
     // held is gone by the time we get here, and an auto-compact caller that
     // raised its own flag settles again in its own finally (idempotent
     // running:false; a prompt held at the gate follows with its own
-    // running:true within one UI frame).
+    // running:true within one UI frame). EXCEPT when a bridge prompt turn is
+    // still registered for the session (a held/running prompt turn — its own
+    // finally owns the running indicator): emitting running:false here would
+    // drop the client's spinner mid-prompt.
     server.autoCompactInFlight.delete(zcodeSid);
-    await emitSessionTurnState(server, acpSid, false);
+    const promptTurnRegistered = [...server.pendingTurns.values()].some(
+      (t) => t.zcodeSid === zcodeSid,
+    );
+    if (!promptTurnRegistered) {
+      await emitSessionTurnState(server, acpSid, false);
+    }
   }
 }
 

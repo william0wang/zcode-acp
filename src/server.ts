@@ -121,6 +121,24 @@ export interface PendingTurn {
    * internal-turn stream as residue).
    */
   compactRejected?: boolean;
+  /**
+   * True while this prompt turn waits (inside runEventTurn) for outstanding
+   * subagent-kind background work BETWEEN backend turns: the loop stays open
+   * and adopts the next backend turn into this same prompt instead of
+   * returning. Read by BackgroundTaskListener at event ARRIVAL (the loop sets
+   * it synchronously before returning to pollEvent, so no ordering gap) to
+   * suppress its own text forwarding for the adopted turn — the turn loop is
+   * the only dispatch path while a chain runs.
+   */
+  holding?: boolean;
+  /**
+   * Set once the FIRST backend turn of this prompt reached its terminal: the
+   * original prompt was delivered and its reply is in the context.
+   * runOneTurn's catch blocks consult it to skip the resend ladder and the
+   * respawn+resend recovery — re-sending the original prompt after a chain
+   * follow-up failed would duplicate work upstream never re-delivers.
+   */
+  primaryDone?: boolean;
 }
 
 /**
