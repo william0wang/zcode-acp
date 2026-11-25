@@ -156,6 +156,7 @@ at bridge start just like its env var.
     "mode": "yolo", // initial mode: plan|build|edit|guarded|yolo|auto (guarded: 3.15.1+, falls back on older backends)
     "showCompletionStatus": true, // successful turn-end assistant status (default true)
     "pinDefaultModel": true, // pin a new session to the model its session/new menu advertised (default true)
+    "defaultThoughtLevel": "high", // thought level new sessions start on (unset = each model's own default; ignored when the model lacks it)
   },
   "autoCompact": { "threshold": 240000 }, // compact once N tokens are used (unset = off)
   "goal": {

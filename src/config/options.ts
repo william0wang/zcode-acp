@@ -1019,6 +1019,74 @@ export function orderThoughtVariants(variants: string[]): Array<{ value: string;
   return [...known, ...extra].map((t) => ({ value: t, name: t }));
 }
 
+/** The user's default thought level (`session.defaultThoughtLevel` in the user config), when set. */
+export function configuredDefaultThoughtLevel(): string | undefined {
+  return loadUserConfig().session?.defaultThoughtLevel?.trim() || undefined;
+}
+
+/**
+ * The model's own spelling of a wanted thought level: the exact token, else
+ * the level that differs only by case, else undefined (the model does not
+ * offer it).
+ */
+export function matchThoughtLevel(levels: readonly string[], wanted: string): string | undefined {
+  return levels.includes(wanted)
+    ? wanted
+    : levels.find((level) => level.toLowerCase() === wanted.toLowerCase());
+}
+
+/**
+ * The thought dropdown a PENDING session advertises. No backend session
+ * exists yet, so the vocabulary is the default model's declaration in the
+ * local config (the enabled provider's `models[].reasoning.variants`) — a
+ * client that relays the options into a picker (Multica's effort selector)
+ * must not be offered tokens the runtime rejects ("nothink" was fiction,
+ * "low" was missing) — else the static fallback.
+ *
+ * The current value is the user's default thought level when the advertised
+ * vocabulary offers it (the pin at materialization, `applyDefaultThoughtLevel`,
+ * makes the advertisement true), else the model's own default. The settings
+ * page reports the same projection, so it shows exactly what a new session
+ * starts on.
+ */
+export function pendingThoughtProjection(): {
+  current: string;
+  options: Array<{ value: string; name: string }>;
+} {
+  const cur = defaultModelRef();
+  let variants: string[] | undefined;
+  let defaultVariant: string | undefined;
+  try {
+    const cfg = readConfig() as ConfigShape;
+    const m = (
+      cfg.provider?.[cur.providerId]?.models as
+        | Record<
+            string,
+            { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
+          >
+        | undefined
+    )?.[cur.modelId];
+    const reasoning = m?.reasoning;
+    if (reasoning && reasoning.enabled !== false && reasoning.variants?.length) {
+      variants = reasoning.variants;
+      defaultVariant = reasoning.defaultVariant;
+    }
+  } catch {
+    // unreadable config — the static fallback below applies
+  }
+  const options = variants ? orderThoughtVariants(variants) : [...CONFIG_META.thought.options];
+  let current = defaultVariant ?? variants?.[0] ?? "max";
+  const level = configuredDefaultThoughtLevel();
+  const matched = level
+    ? matchThoughtLevel(
+        options.map((o) => o.value),
+        level,
+      )
+    : undefined;
+  if (matched) current = matched;
+  return { current, options };
+}
+
 /** Build the ACP configOptions array (3 items: model/mode/thought).
  *  zcodeSid null = pending session — skip the backend read and use defaults;
  *  mode defaults to the configured initial mode (initialSessionMode — what
@@ -1041,16 +1109,10 @@ export async function buildConfigOptions(
   let currentThought = "max";
   let thoughtOptions: Array<{ value: string; name: string }> | null = null;
   if (zcodeSid === null) {
-    // Pending session — no backend to read yet, but the thought vocabulary
-    // is per model and the runtime's own source of truth is the enabled
-    // provider's models[].reasoning.variants in the local config. Advertise
-    // THAT for the default model instead of a hardcoded list: a client that
-    // relays the options into a picker (Multica's effort selector) would
-    // otherwise offer tokens the runtime rejects ("nothink" was fiction,
-    // "low" was missing).
-    // The advertised current model is the DEFAULT a new session starts on
-    // (defaultModelRef: the manual choice, else the newest usable model) —
-    // the one the runtime is pinned to at materialization.
+    // Pending session — no backend to read yet. The advertised current model
+    // is the DEFAULT a new session starts on (defaultModelRef: the manual
+    // choice, else the newest usable model) — the one the runtime is pinned
+    // to at materialization.
     const cur = defaultModelRef();
     if (cur) {
       // The advertised current model follows the dropdown's leading entry
@@ -1061,26 +1123,11 @@ export async function buildConfigOptions(
       // wrong model whenever the requested id happened to match it.
       currentProviderId = cur.providerId;
       currentModelId = cur.modelId;
-      try {
-        const cfg = readConfig() as ConfigShape;
-        const m = (
-          cfg.provider?.[cur.providerId]?.models as
-            | Record<
-                string,
-                { reasoning?: { enabled?: boolean; variants?: string[]; defaultVariant?: string } }
-              >
-            | undefined
-        )?.[cur.modelId];
-        const reasoning = m?.reasoning;
-        const variants = reasoning?.variants;
-        if (reasoning?.enabled !== false && variants && variants.length > 0) {
-          thoughtOptions = orderThoughtVariants(variants);
-          currentThought = reasoning.defaultVariant ?? variants[0];
-        }
-      } catch {
-        // unreadable config — the static fallback below applies
-      }
     }
+    // The thought vocabulary is per model — projected for the default model.
+    const thought = pendingThoughtProjection();
+    currentThought = thought.current;
+    thoughtOptions = thought.options;
   }
 
   if (zcodeSid !== null) {
@@ -1447,6 +1494,105 @@ export function rememberModelChoice(
     at,
   });
   if (acpSid) recordModelChoice(acpSid, { ...patch, at });
+}
+
+/** "default level not offered" warnings — once per process per model + level. */
+const unsupportedDefaultThoughtWarned = new Set<string>();
+
+/**
+ * Start a NEW session on the user's default thought level — the thought
+ * counterpart of the advertised-model pin at materialization.
+ *
+ * The pending menu PROJECTED the level from the local config; this is the
+ * first moment the session's real vocabulary exists, so the backend decides:
+ * `session/read` lists the current model's levels, and a default the model
+ * does not offer is never forced (the model's own default stands, warned once
+ * per model and level). An applied level is remembered as the session's own
+ * choice (`setConfigOption`), so the post-resume re-assert keeps it; a choice
+ * already recorded for the session (a recovered store record) owns the
+ * selection and wins.
+ *
+ * Best-effort: a failure keeps the model default and never fails the
+ * materialization.
+ */
+export async function applyDefaultThoughtLevel(
+  server: ZcodeAcpServer,
+  acpSid: string,
+  zcodeSid: string,
+): Promise<void> {
+  const level = configuredDefaultThoughtLevel();
+  if (!level) return;
+  // `""` counts: it is a remembered RESET and owns the selection like any
+  // other recorded level.
+  if (server.sessionModelChoices.get(zcodeSid)?.thought !== undefined) return;
+  const generation = server.backendGeneration;
+  let model = "";
+  let current: string | undefined;
+  let levels: string[] | undefined;
+  try {
+    const read = await sessionRead(server, zcodeSid);
+    const settings = (read.settings ?? {}) as Record<string, unknown>;
+    const modelCur = settings.model as
+      { current?: { providerId?: string; modelId?: string } } | undefined;
+    const thought = (settings.thoughtLevel ?? {}) as {
+      current?: unknown;
+      defaultLevel?: unknown;
+      available?: Array<{ value?: unknown }>;
+    };
+    const providerId = modelCur?.current?.providerId;
+    const modelId = modelCur?.current?.modelId;
+    model = providerId && modelId ? `${providerId}\\${modelId}` : (modelId ?? "");
+    current =
+      typeof thought.current === "string"
+        ? thought.current
+        : typeof thought.defaultLevel === "string"
+          ? thought.defaultLevel
+          : undefined;
+    levels = Array.isArray(thought.available)
+      ? thought.available.map((a) => a?.value).filter((v): v is string => typeof v === "string")
+      : undefined;
+  } catch (e) {
+    log(
+      `default thought level: session/read failed (${e instanceof Error ? e.message : String(e)}) — keeping the model default`,
+    );
+    return;
+  }
+  if (generation !== server.backendGeneration) return;
+  // No vocabulary in the read (an older backend, a level-less session read):
+  // unknown is not "unsupported" — leave the session alone, without a warning.
+  if (!levels) return;
+  const matched = matchThoughtLevel(levels, level);
+  let landed: string | undefined;
+  if (matched) {
+    let refusal = "";
+    try {
+      landed = (await setConfigOption(server, zcodeSid, "thought", matched, acpSid))
+        ? matched
+        : undefined;
+      if (!landed) refusal = "the backend refused it";
+    } catch (e) {
+      refusal = e instanceof Error ? e.message : String(e);
+    }
+    if (landed) log(`session/new ${acpSid}: started on the default thought level ${landed}`);
+    else {
+      warn(
+        `session/new ${acpSid}: default thought level ${matched} not applied (${refusal}) — keeping the model default`,
+      );
+    }
+  } else if (!unsupportedDefaultThoughtWarned.has(`${model}:${level}`)) {
+    unsupportedDefaultThoughtWarned.add(`${model}:${level}`);
+    warn(
+      `default thought level "${level}" is not supported by ${model || "the session's model"} — ` +
+        "new sessions keep the model's own default",
+    );
+  }
+  // The pending menu projected this level from the local config: correct the
+  // clients when the projection was wrong — a level the projection lacked, or
+  // one it advertised that the model does not offer.
+  const effective = landed ?? current;
+  if (effective && effective !== pendingThoughtProjection().current) {
+    await emitConfigOptionUpdate(server, server.clients.broadcast(), acpSid, zcodeSid, "thought");
+  }
 }
 
 /** Emit a config_option_update (+ current_mode_update for mode) after a change.

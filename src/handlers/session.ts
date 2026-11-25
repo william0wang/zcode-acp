@@ -34,6 +34,7 @@ import type {
   ZcodeSnapshot,
 } from "../backend/types.js";
 import {
+  applyDefaultThoughtLevel,
   buildModes,
   buildConfigOptions,
   buildInitialConfigOptions,
@@ -1304,6 +1305,9 @@ export async function ensureRealSession(
         }
       }
     }
+    // The thought counterpart of the pin above: a new session starts on the
+    // user's default thought level when the model it landed on offers one.
+    await applyDefaultThoughtLevel(server, acpSid, sid);
     // session/create loads the session into this backend process.
     server.markBackendLoaded(acpSid);
     // A fresh session's store is complete (empty) by construction — seed the

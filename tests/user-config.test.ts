@@ -36,6 +36,17 @@ describe("loadUserConfig", () => {
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });
 
+  it("validates the default thought level (non-empty string only)", () => {
+    writeConfig(JSON.stringify({ session: { defaultThoughtLevel: " high " } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      session: { defaultThoughtLevel: "high" },
+    });
+    writeConfig(JSON.stringify({ session: { defaultThoughtLevel: "   " } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+    writeConfig(JSON.stringify({ session: { defaultThoughtLevel: 3 } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
+
   it("malformed JSON reads as empty", () => {
     writeConfig("{ nope");
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
