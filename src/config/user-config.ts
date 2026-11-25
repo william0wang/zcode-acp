@@ -150,6 +150,13 @@ export interface SessionUserConfig {
    * (never forced), so the automatic choice applies instead.
    */
   defaultModel?: string;
+  /**
+   * The thought level a NEW session starts on, in the model's own vocabulary
+   * (`low`/`high`/`max`, `enabled`/`off`, …). A level the session's model does
+   * not offer is ignored (never forced) — the model's own default applies
+   * instead. Unset = each model's own default.
+   */
+  defaultThoughtLevel?: string;
 }
 
 /** The `autoCompact` section: threshold-based context compaction. */
@@ -439,6 +446,15 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
       else
         warn(
           `config: ${label}.defaultModel=${JSON.stringify(defaultModel)} in ${file} is not a model reference — ignoring`,
+        );
+    }
+    const defaultThoughtLevel = body["defaultThoughtLevel"];
+    if (defaultThoughtLevel !== undefined) {
+      if (typeof defaultThoughtLevel === "string" && defaultThoughtLevel.trim())
+        s.defaultThoughtLevel = defaultThoughtLevel.trim();
+      else
+        warn(
+          `config: ${label}.defaultThoughtLevel=${JSON.stringify(defaultThoughtLevel)} in ${file} is not a thought level — ignoring`,
         );
     }
     return s;

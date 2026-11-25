@@ -116,6 +116,10 @@ import {
 import { workflowOverrideNow } from "../config/workflow-gate.js";
 import { defaultModelSetting, setDefaultModel } from "../settings/default-model.js";
 import {
+  defaultThoughtLevelSetting,
+  setDefaultThoughtLevel,
+} from "../settings/default-thought-level.js";
+import {
   codingPlanProviderIds,
   isCodingPlanProvider,
   markResetHistoryRead,
@@ -337,6 +341,9 @@ async function route(
     if (path === "/settings/all") return void (await handleAll(res, server));
     if (path === "/settings/models") return void (await handleModels(res));
     if (path === "/settings/default-model") return void (await handleDefaultModel(res));
+    if (path === "/settings/default-thought-level") {
+      return void (await handleDefaultThoughtLevel(res));
+    }
     if (path === "/settings/skills") return void (await handleSkills(res));
     if (path.startsWith("/settings/skills/")) {
       // Skills parity: row → detail. The segment is the percent-encoded
@@ -441,6 +448,9 @@ async function route(
     }
     if (method === "PUT" && path === "/settings/default-model") {
       return void (await handleDefaultModelSet(res, body));
+    }
+    if (method === "PUT" && path === "/settings/default-thought-level") {
+      return void (await handleDefaultThoughtLevelSet(res, body));
     }
     if (method === "DELETE" && path.startsWith("/settings/models/")) {
       const rest = path.slice("/settings/models/".length);
@@ -953,6 +963,32 @@ async function handleDefaultModelSet(
     }
     await setDefaultModel(typeof raw === "string" ? raw.trim() : null);
     return { ok: true as const, ...defaultModelSetting() };
+  });
+}
+
+/** GET /settings/default-thought-level — the manual choice and what a new session starts on. */
+async function handleDefaultThoughtLevel(res: ServerResponse): Promise<void> {
+  await guard(res, async () => ({ ok: true as const, ...defaultThoughtLevelSetting() }));
+}
+
+/**
+ * PUT /settings/default-thought-level `{defaultThoughtLevel: string | null}` —
+ * store (null: clear) the manual default in the user config and answer the
+ * same payload as the GET. The value is stored as written; one the default
+ * model does not offer is reported with `source: "model"` instead of being
+ * forced.
+ */
+async function handleDefaultThoughtLevelSet(
+  res: ServerResponse,
+  body: Record<string, unknown>,
+): Promise<void> {
+  await guard(res, async () => {
+    const raw = body["defaultThoughtLevel"];
+    if (raw !== null && !(typeof raw === "string" && raw.trim())) {
+      throw new Error("defaultThoughtLevel must be a thought level string or null");
+    }
+    await setDefaultThoughtLevel(typeof raw === "string" ? raw.trim() : null);
+    return { ok: true as const, ...defaultThoughtLevelSetting() };
   });
 }
 
