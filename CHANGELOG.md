@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.94.0](https://github.com/william0wang/zcode-acp/compare/v0.93.1...v0.94.0) (2026-11-25)
+
+
+### Features
+
+* add a configurable default thought level for new sessions ([#421](https://github.com/william0wang/zcode-acp/issues/421)) ([219474d](https://github.com/william0wang/zcode-acp/commit/219474d068424250a7bef8ca5f87e81c60cb71f0))
+
 ## [0.93.1](https://github.com/william0wang/zcode-acp/compare/v0.93.0...v0.93.1) (2026-11-24)
 
 
