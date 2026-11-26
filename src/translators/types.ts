@@ -144,10 +144,7 @@ export interface ConfigChangedEvent {
   /**
    * Present when this came from a SessionModeChanged event (v3 wire: generic
    * `session.updated`, raw payload): `mode` there is the UNDERLYING session
-   * mode (EnterPlanMode flips only `planEnabled`, never config.mode), so the
-   * translator already folds the effective display mode ("plan" while the
-   * flag is on) into `mode`, and the dispatcher tracks the flag itself for
-   * the read paths (buildModes/buildConfigOptions).
+   * mode. EnterPlanMode flips only this flag; the display folds it over the base.
    */
   planEnabled?: boolean;
 }

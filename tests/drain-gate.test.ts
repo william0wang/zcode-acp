@@ -16,7 +16,7 @@ const flushAsync = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 import type { TurnMonitor } from "../src/backend/listener.js";
 import { drainBackendAfterCancel } from "../src/handlers/session.js";
-import type { PendingTurn, ZcodeAcpServer } from "../src/server.js";
+import { type PendingTurn, ZcodeAcpServer } from "../src/server.js";
 
 // These tests assert the Chinese message table.
 beforeEach(() => {
@@ -51,37 +51,14 @@ interface DrainFixtures {
 
 function makeFixtures(turn: PendingTurn, escalateAfterMs = 0): DrainFixtures {
   const sent: Array<{ method: string; params: unknown }> = [];
-  const server = {
-    ensureBackend: () => ({
-      send: (method: string, params: unknown) => {
-        sent.push({ method, params });
-      },
-      request: async () => ({ result: {} }), // session/resume for the reload
-    }),
-    nextId: () => 1,
-    sessionCwds: new Map(),
-    // reloadBackendSession re-sends remembered client MCP servers (#193) —
-    // stub servers must mirror the real shape or the reload throws.
-    sessionMcpServers: new Map(),
-    modelAvailability: new Map(),
-    // cacheModelAvailability drops this with an invalidated snapshot — stub
-    // servers must mirror the real shape or the reload throws.
-    currentModelIdentity: new Map(),
-    markBackendLoaded: () => {},
-    // resumePreservingModel single-flights through this map (ADR-0017 race
-    // fix) — stub servers must mirror the real shape or the reload throws.
-    resumeInFlight: new Map(),
-    // fetchMessagesSettled maintains this marker (cap-truncation guard) —
-    // same mirroring rule as resumeInFlight above.
-    hydrationUnsettled: new Set<string>(),
-    // …and this watermark (slow-reader catch-up) — same rule.
-    hydrationWatermark: new Map<string, number>(),
-    // stopBackendTurn consults this (compaction kill guard) — same rule.
-    autoCompactInFlight: new Set<string>(),
-    // closeBackendSession drops foreign-turn tracking on runtime teardown —
-    // same rule (stub servers must mirror the real shape).
-    foreignActiveTurns: new Map<string, string>(),
-  } as unknown as ZcodeAcpServer;
+  const server = new ZcodeAcpServer();
+  server.backend = {
+    isDead: false,
+    send: (method: string, params: unknown) => {
+      sent.push({ method, params });
+    },
+    request: async () => ({ result: {} }),
+  } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
   const pollOnce = vi.fn();
   const listener = { resubscribe: vi.fn(async () => true) };
   const differ = { markSeen: vi.fn(), historyAnchor: null as string | null };

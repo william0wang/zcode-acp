@@ -110,3 +110,26 @@ imply a keyed child-process pool that does not exist today. When `ZCODE_PROVIDER
 is set, both the model dropdown and `_meta.zcode.providers` filter to that
 provider. Clients should treat provider selection as "pick a model" unless
 they also control the bridge's environment.
+
+## Mode option presence
+
+The mode indicator and the `mode` item in `configOptions` use the same effective mode.
+ZCode tracks the base permission mode and an independent Plan flag. With a base of
+`build`, the client displays `plan` when Plan is enabled and `build` when Plan is disabled.
+
+| Operation | Example backend state | ACP fields the client receives |
+| --- | --- | --- |
+| `session/new` for a pending session | The configured creation mode is `build`. | `modes.currentModeId` and the mode option's `currentValue` are both `build`. This takes zero session reads. |
+| Successful switch to `edit` | The switch response or a confirming read establishes `edit`. | `config_option_update` carries the mode option with `currentValue: "edit"`. The corresponding `current_mode_update` carries `currentModeId: "edit"`. |
+| Successful `session/load` or `session/resume` | The cold runtime returns only the base `build` and its Plan flag is unknown. | The response omits `modes` and the `mode` option. History and the remaining options are delivered normally. |
+| Successful `session/set_config_option` for mode | The switch acknowledgement is empty and the subsequent read times out. | The success response includes the required `configOptions` array, with the available options such as `model` and `thought`. Its `mode` item is absent. |
+
+If a mode-only refresh cannot establish the effective mode, the bridge skips both
+notifications. Clients can retain their last displayed value until the runtime confirms
+another observation. An independent change to a model or thought level still produces a
+`config_option_update` with those settings. A later mode confirmation restores the
+`mode` item.
+
+Mode confirmations belong to a specific backend process and session runtime. When a
+session is rebuilt, the bridge waits for the new runtime's Plan flag or an explicit
+mode switch before interpreting a base-only value like `build`.

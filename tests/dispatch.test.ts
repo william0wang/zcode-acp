@@ -211,6 +211,21 @@ describe("dispatchEvent", () => {
   });
 });
 
+/** Mock AgentContext recording the sessionId of every notify call. */
+function recordingContext(): {
+  cx: acp.AgentContext;
+  calls: Array<{ sessionId: string; update: acp.SessionUpdate }>;
+} {
+  const calls: Array<{ sessionId: string; update: acp.SessionUpdate }> = [];
+  const cx = {
+    notify(_method: string, params: { sessionId: string; update: acp.SessionUpdate }) {
+      calls.push(params);
+      return Promise.resolve();
+    },
+  } as unknown as acp.AgentContext;
+  return { cx, calls };
+}
+
 /**
  * Cross-alias fan-out (server.sessionAliases): one conversation attached
  * under several ACP ids (a local session/new placeholder AND a remote
@@ -219,21 +234,6 @@ describe("dispatchEvent", () => {
  * prompting client's id silently starves every other attached client.
  */
 describe("cross-alias fan-out", () => {
-  /** Mock AgentContext recording the sessionId of every notify call. */
-  function recordingContext(): {
-    cx: acp.AgentContext;
-    calls: Array<{ sessionId: string; update: acp.SessionUpdate }>;
-  } {
-    const calls: Array<{ sessionId: string; update: acp.SessionUpdate }> = [];
-    const cx = {
-      notify(_method: string, params: { sessionId: string; update: acp.SessionUpdate }) {
-        calls.push(params);
-        return Promise.resolve();
-      },
-    } as unknown as acp.AgentContext;
-    return { cx, calls };
-  }
-
   it("dispatchEvent emits once per attached alias", async () => {
     const { cx, calls } = recordingContext();
     const server = makeServer(false);
@@ -250,6 +250,98 @@ describe("cross-alias fan-out", () => {
     for (const c of calls) {
       expect(c.update).toMatchObject({ sessionUpdate: "agent_message_chunk", messageId: CHUNK });
     }
+  });
+});
+
+/**
+ * A confirmed mode event restores both controls for all session aliases.
+ * Model and thought changes can arrive while the mode remains unknown.
+ */
+describe("ConfigChanged mode recovery", () => {
+  /** Server whose session/read answers the given settings (empty when omitted). */
+  function serverWithRead(settings: Record<string, unknown>): ZcodeAcpServer {
+    const s = new ZcodeAcpServer();
+    s.registerSession("acp_a", "zc_1");
+    s.registerSession("acp_b", "zc_1");
+    s.backend = {
+      isDead: false,
+      request: async (_id: number, method: string) =>
+        method === "session/read" ? { result: { settings } } : { result: {} },
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+    return s;
+  }
+
+  it("a base-only event with unknown Plan state leaves both controls untouched", async () => {
+    const { cx, sent } = mockContext();
+    const server = serverWithRead({});
+    await dispatchEvent(server, cx, "acp_a", { kind: "ConfigChanged", mode: "build" }, CHUNK);
+    expect(sent).toEqual([]);
+    // The display mirror keeps its previous value — the client still shows
+    // whatever it last confirmed.
+    expect(server.lastMode.has("acp_a")).toBe(false);
+  });
+
+  it("a later trusted event (mode + planEnabled) restores the display for every alias consistently", async () => {
+    const { cx, calls } = recordingContext();
+    const server = serverWithRead({});
+    // First: a withheld sync (Plan unknown).
+    await dispatchEvent(server, cx, "acp_a", { kind: "ConfigChanged", mode: "build" }, CHUNK);
+    expect(calls.filter((c) => c.update.sessionUpdate === "current_mode_update")).toHaveLength(0);
+    // Then: the runtime confirms base build + Plan off (SessionModeChanged).
+    await dispatchEvent(
+      server,
+      cx,
+      "acp_a",
+      { kind: "ConfigChanged", mode: "build", planEnabled: false },
+      CHUNK,
+    );
+    const modeUpdates = calls.filter((c) => c.update.sessionUpdate === "current_mode_update");
+    expect(modeUpdates.map((c) => c.sessionId).sort()).toEqual(["acp_a", "acp_b"]);
+    for (const c of modeUpdates) {
+      expect(c.update).toEqual({ sessionUpdate: "current_mode_update", currentModeId: "build" });
+    }
+    expect(server.lastMode.get("acp_a")).toBe("build");
+    expect(server.planStateOf("zc_1")).toBe(false);
+  });
+
+  it("a confirmed Plan ON over base build displays plan to every alias", async () => {
+    const { cx, calls } = recordingContext();
+    const server = serverWithRead({});
+    await dispatchEvent(
+      server,
+      cx,
+      "acp_a",
+      { kind: "ConfigChanged", mode: "build", planEnabled: true },
+      CHUNK,
+    );
+    for (const c of calls.filter((c) => c.update.sessionUpdate === "current_mode_update")) {
+      expect(c.update).toEqual({ sessionUpdate: "current_mode_update", currentModeId: "plan" });
+    }
+    expect(server.lastMode.get("acp_a")).toBe("plan");
+  });
+
+  it("model/thought overlays keep their own values while the mode stays withheld", async () => {
+    const { cx, sent } = mockContext();
+    const server = serverWithRead({});
+    await dispatchEvent(
+      server,
+      cx,
+      "acp_a",
+      {
+        kind: "ConfigChanged",
+        model: { providerId: "anthropic", modelId: "GLM-5.2" },
+        thought: "high",
+      },
+      CHUNK,
+    );
+    const configUpdate = sent.find((u) => u.sessionUpdate === "config_option_update");
+    expect(configUpdate).toBeDefined();
+    const options = (
+      configUpdate as { configOptions: Array<{ id: string; currentValue?: string }> }
+    ).configOptions;
+    expect(options.find((o) => o.id === "model")?.currentValue).toBe("anthropic\\GLM-5.2");
+    expect(options.find((o) => o.id === "thought")?.currentValue).toBe("high");
+    expect(options.some((o) => o.id === "mode")).toBe(false);
   });
 });
 

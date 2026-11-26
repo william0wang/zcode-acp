@@ -68,7 +68,9 @@ const {
   buildModes,
   formatModelValue,
   loadAllModels,
+  modesFromResolution,
   parseModelValue,
+  resolveSessionMode,
 } = await import("../src/config/options.js");
 
 const tempDirs: string[] = [];
@@ -333,16 +335,16 @@ describe("thought option display clamp", () => {
 describe("plan-mode display fold", () => {
   // The runtime's EnterPlanMode flips the execution state's planEnabled
   // WITHOUT touching settings.mode — session/read keeps reporting the
-  // underlying mode (verified upstream). The tracked plan flag must force
-  // every advertised mode to "plan" while it is on.
-  function planServer(): ZcodeAcpServer {
+  // underlying mode (verified upstream). The runtime-confirmed Plan record
+  // must fold every advertised mode while it is on.
+  function planServer(mode = "yolo"): ZcodeAcpServer {
     const server = new ZcodeAcpServer();
     server.backend = {
       isDead: false,
       request: async () => ({
         result: {
           settings: {
-            mode: { current: "yolo" },
+            mode: { current: mode },
             model: { current: { providerId: "builtin:zai-coding-plan", modelId: "GLM-5.3" } },
             thoughtLevel: { current: "max" },
           },
@@ -352,19 +354,212 @@ describe("plan-mode display fold", () => {
     return server;
   }
 
-  it("buildModes advertises plan while the flag is tracked", async () => {
-    const server = planServer();
-    server.sessionPlanActive.add("zc-plan-1");
-    expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("plan");
-    server.sessionPlanActive.delete("zc-plan-1");
-    expect((await buildModes(server, "zc-plan-1")).currentModeId).toBe("yolo");
+  it("buildModes advertises plan while Plan is confirmed on", async () => {
+    const server = planServer("build");
+    server.notePlanState("zc-plan-1", true);
+    expect((await buildModes(server, "zc-plan-1"))?.currentModeId).toBe("plan");
   });
 
-  it("buildConfigOptions sets the mode dropdown to plan while the flag is tracked", async () => {
-    const server = planServer();
-    server.sessionPlanActive.add("zc-plan-2");
-    const options = await buildConfigOptions(server, "zc-plan-2");
+  it("buildModes shows the base mode when Plan is confirmed off — base build reads build", async () => {
+    const server = planServer("build");
+    server.notePlanState("zc-plan-2", false);
+    expect((await buildModes(server, "zc-plan-2"))?.currentModeId).toBe("build");
+  });
+
+  it("buildConfigOptions sets the mode dropdown to plan while Plan is confirmed on", async () => {
+    const server = planServer("yolo");
+    server.notePlanState("zc-plan-3", true);
+    const options = await buildConfigOptions(server, "zc-plan-3");
     const mode = options.find((option) => option.id === "mode");
     expect(mode?.currentValue).toBe("plan");
+  });
+
+  it("an UNKNOWN Plan switch withholds the effective mode (base build, plan never confirmed)", async () => {
+    // A cold-resumed runtime may have restored Plan independently — the
+    // bridge must not answer for it with the bare base mode.
+    const server = planServer("build");
+    expect(await buildModes(server, "zc-plan-4")).toBeNull();
+    const options = await buildConfigOptions(server, "zc-plan-4");
+    expect(options.find((option) => option.id === "mode")).toBeUndefined();
+    // The rest of the options stay presentable.
+    expect(options.some((option) => option.id === "model")).toBe(true);
+    expect(options.some((option) => option.id === "thought")).toBe(true);
+  });
+
+  it("a later runtime confirmation restores the display — off shows build, on shows plan", async () => {
+    const server = planServer("build");
+    expect(await buildModes(server, "zc-plan-5")).toBeNull(); // unknown → withheld
+    server.notePlanState("zc-plan-5", false);
+    expect((await buildModes(server, "zc-plan-5"))?.currentModeId).toBe("build");
+    server.notePlanState("zc-plan-5", true);
+    expect((await buildModes(server, "zc-plan-5"))?.currentModeId).toBe("plan");
+  });
+});
+
+/**
+ * The two ACP mode fields share a snapshot or one confirming read. A newer
+ * mode event or a runtime replacement invalidates an in-flight observation.
+ */
+describe("unified mode resolution", () => {
+  interface ReadStub {
+    result?: unknown;
+    error?: { message: string };
+    /** Runs before the stub answers — simulates mid-read races. */
+    onRead?: (server: ZcodeAcpServer) => void;
+  }
+
+  function readCountingServer(stub: ReadStub): { server: ZcodeAcpServer; reads: () => number } {
+    let count = 0;
+    const server = new ZcodeAcpServer();
+    server.backend = {
+      isDead: false,
+      request: async (_id: number, method: string) => {
+        if (method === "session/read") {
+          count++;
+          stub.onRead?.(server);
+          if (stub.error) return { error: stub.error };
+          return { result: stub.result ?? {} };
+        }
+        return { result: {} };
+      },
+    } as unknown as NonNullable<ZcodeAcpServer["backend"]>;
+    return { server, reads: () => count };
+  }
+
+  const fullSettings = {
+    mode: { current: "build" },
+    model: { current: { providerId: "builtin:zai-coding-plan", modelId: "GLM-5.3" } },
+    thoughtLevel: { current: "max", available: [{ value: "max", label: "Max" }] },
+  };
+
+  it("pending sessions resolve both representations with ZERO backend reads", async () => {
+    vi.stubEnv("ZCODE_ACP_MODE", "build");
+    const { server, reads } = readCountingServer({});
+    const modes = await buildModes(server, null);
+    const options = await buildConfigOptions(server, null);
+    expect(reads()).toBe(0);
+    expect(modes?.currentModeId).toBe("build");
+    const mode = options.find((option) => option.id === "mode");
+    expect(mode?.currentValue).toBe("build");
+    // The two representations must agree.
+    expect(mode?.currentValue).toBe(modes?.currentModeId);
+  });
+
+  it("a complete trusted snapshot decides the mode with zero re-reads; both representations agree", async () => {
+    const { server, reads } = readCountingServer({ result: { settings: fullSettings } });
+    // Plan confirmed off (a fresh create seeds it from the accepted mode).
+    server.notePlanState("zc-uni-1", false);
+    const input = {
+      snapshot: { settings: fullSettings, generation: server.backendGeneration },
+      complete: true,
+    };
+    const modes = await buildModes(server, "zc-uni-1", input);
+    const options = await buildConfigOptions(server, "zc-uni-1", undefined, input);
+    expect(reads()).toBe(0);
+    expect(modes?.currentModeId).toBe("build");
+    expect(options.find((option) => option.id === "mode")?.currentValue).toBe("build");
+  });
+
+  it("a mode-less snapshot re-reads AT MOST once and shares the result with the options build", async () => {
+    const { server, reads } = readCountingServer({ result: { settings: fullSettings } });
+    server.notePlanState("zc-uni-2", false);
+    const input = {
+      snapshot: {
+        settings: { model: fullSettings.model, thoughtLevel: fullSettings.thoughtLevel },
+        generation: server.backendGeneration,
+      },
+    };
+    const resolution = await resolveSessionMode(server, "zc-uni-2", input);
+    const modes = modesFromResolution(resolution);
+    const options = await buildConfigOptions(server, "zc-uni-2", undefined, { resolution });
+    expect(reads()).toBe(1); // the ONE re-read; the options build reused it
+    expect(modes?.currentModeId).toBe("build");
+    expect(options.find((option) => option.id === "mode")?.currentValue).toBe("build");
+  });
+
+  it.each([
+    [true, "plan"],
+    [false, "build"],
+  ])("uses planEnabled=%s from a confirming session/read", async (planEnabled, expected) => {
+    const { server, reads } = readCountingServer({
+      result: { settings: { mode: { current: "build", planEnabled } } },
+    });
+    expect((await buildModes(server, "zc-new-runtime"))?.currentModeId).toBe(expected);
+    expect(reads()).toBe(1);
+  });
+
+  it("a failed read omits the mode instead of guessing a fallback", async () => {
+    const { server } = readCountingServer({ error: { message: "session not active" } });
+    expect(await buildModes(server, "zc-uni-3")).toBeNull();
+    const options = await buildConfigOptions(server, "zc-uni-3");
+    expect(options.find((option) => option.id === "mode")).toBeUndefined();
+  });
+
+  it("a read missing settings.mode.current withholds instead of falling back", async () => {
+    const { server } = readCountingServer({
+      result: { settings: { thoughtLevel: { current: "max" } } },
+    });
+    expect(await buildModes(server, "zc-uni-4")).toBeNull();
+  });
+
+  it("keeps an earlier read out of a later response when the current read fails", async () => {
+    const stub: ReadStub = {
+      result: { settings: { mode: { current: "edit", planEnabled: false } } },
+    };
+    const { server } = readCountingServer(stub);
+    const sid = "zc-loss-of-contact";
+    expect((await buildModes(server, sid))?.currentModeId).toBe("edit");
+    stub.error = { message: "timeout" };
+    expect(await buildModes(server, sid)).toBeNull();
+    expect((await buildConfigOptions(server, sid)).some((o) => o.id === "mode")).toBe(false);
+  });
+
+  it("withholds an unrecognized base mode even when Plan is confirmed off", async () => {
+    const { server } = readCountingServer({
+      result: { settings: { mode: { current: "invalid" } } },
+    });
+    server.notePlanState("zc-invalid", false);
+    expect(await buildModes(server, "zc-invalid")).toBeNull();
+  });
+
+  it("a newer mode event landing mid-read discards the stale read", async () => {
+    const { server, reads } = readCountingServer({
+      result: { settings: { mode: { current: "edit" } } },
+      onRead: (s) => s.noteModeConfirmation("zc-uni-5"), // an event confirmed a newer update
+    });
+    const resolution = await resolveSessionMode(server, "zc-uni-5");
+    expect(reads()).toBe(1);
+    // The stale read (edit) must NOT decide the display.
+    expect(resolution.effective).toBeUndefined();
+    expect(modesFromResolution(resolution)).toBeNull();
+  });
+
+  it("a read answered by a REPLACED backend generation is discarded", async () => {
+    const { server } = readCountingServer({
+      result: { settings: { mode: { current: "edit" } } },
+      onRead: (s) => s.resetBackendGeneration(), // the backend died mid-read
+    });
+    const resolution = await resolveSessionMode(server, "zc-uni-6");
+    expect(resolution.effective).toBeUndefined();
+  });
+
+  it("same-process runtime recycling invalidates the Plan record — the old switch cannot answer for the new runtime", async () => {
+    const { server } = readCountingServer({ result: { settings: { mode: { current: "build" } } } });
+    server.notePlanState("zc-uni-7", true);
+    expect((await buildModes(server, "zc-uni-7"))?.currentModeId).toBe("plan");
+    // The resume flight rebuilds the runtime → invalidate (what
+    // resumePreservingModel does on every performed resume).
+    server.invalidatePlanState("zc-uni-7");
+    expect(server.planStateOf("zc-uni-7")).toBeUndefined();
+    // Base mode still readable, but Plan unknown → withheld.
+    expect(await buildModes(server, "zc-uni-7")).toBeNull();
+  });
+
+  it("a backend generation change invalidates the Plan record", async () => {
+    const { server } = readCountingServer({});
+    server.notePlanState("zc-uni-8", true);
+    expect(server.planStateOf("zc-uni-8")).toBe(true);
+    server.resetBackendGeneration();
+    expect(server.planStateOf("zc-uni-8")).toBeUndefined();
   });
 });

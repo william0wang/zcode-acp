@@ -120,6 +120,7 @@ function fakeBackend(
   listed: Array<{ sessionId: string; title?: string }> = [],
   messages: ZcodeMessage[] = [],
   resumeWorkspace?: string,
+  createMode?: { current: string; planEnabled?: boolean },
 ): ZcodeBackend & {
   calls: Array<{ method: string; params: unknown }>;
 } {
@@ -136,6 +137,7 @@ function fakeBackend(
             id,
             result: {
               session: { sessionId: `sess_lazy_${created}`, title: "", traceId: "trace_1" },
+              ...(createMode ? { settings: { mode: createMode } } : {}),
             },
           };
         case "session/resume":
@@ -262,6 +264,16 @@ describe("ensureRealSession", () => {
     const creates = calls.filter((c) => c.method === "session/create");
     expect(creates).toHaveLength(1);
     expect(creates[0].params).toMatchObject({ mode: "build" });
+  });
+
+  it("keeps Plan enabled when session/create echoes only the underlying build mode", async () => {
+    vi.stubEnv("ZCODE_ACP_MODE", "plan");
+    const server = new ZcodeAcpServer();
+    const resp = await newSession(server, newSessionParams("/tmp/ws"));
+    server.backend = fakeBackend([], [], undefined, { current: "build" }).backend;
+    const sid = await ensureRealSession(server, resp.sessionId);
+    expect(server.planStateOf(sid)).toBe(true);
+    expect(server.seededBaseModeOf(sid)).toBe("build");
   });
 
   it("serializes concurrent first-uses into a single session/create", async () => {

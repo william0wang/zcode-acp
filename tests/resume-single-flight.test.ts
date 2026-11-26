@@ -581,3 +581,108 @@ it("new generation must not join an old resume flight", async () => {
   expect(newResult.status).toBe("fulfilled");
   expect(server.resumeInFlight.size).toBe(0);
 });
+
+/**
+ * Load and resume return the confirmed mode with the other session options.
+ * History is still replayed when the mode is unknown.
+ */
+describe("mode recovery on load/resume", () => {
+  it("an unconfirmable mode omits `modes` and the mode item; replay and other options ship", async () => {
+    // Default backend: resume result has no settings; session/read answers
+    // settings: {} — nothing confirmable.
+    const { backend } = makeBackend({ messagesQueue: [hist(4)] });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx, updates } = collectCx();
+
+    const r = (await loadSession(server, loadParams(), cx)) as {
+      modes?: unknown;
+      configOptions?: Array<{ id: string }>;
+      replayMeta?: { totalMessages?: number };
+    };
+
+    expect(r.modes).toBeUndefined();
+    expect(r.configOptions?.some((o) => o.id === "mode")).toBe(false);
+    expect(r.configOptions?.some((o) => o.id === "model")).toBe(true);
+    expect(r.configOptions?.some((o) => o.id === "thought")).toBe(true);
+    // The replay is untouched.
+    expect(r.replayMeta?.totalMessages).toBe(4);
+    expect(chunks(updates)).toHaveLength(4);
+    // No mode notification was broadcast either.
+    expect(updates.some((u) => u.sessionUpdate === "current_mode_update")).toBe(false);
+  });
+
+  it("a resume snapshot carrying mode + planEnabled publishes modes with zero extra reads", async () => {
+    const { backend } = makeBackend({
+      messagesQueue: [hist(2)],
+      resumeResult: {
+        session: { sessionId: "sess_race" },
+        settings: { mode: { current: "build", planEnabled: false } },
+      },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx } = collectCx();
+
+    const r = (await loadSession(server, loadParams(), cx)) as {
+      modes?: { currentModeId?: string };
+      configOptions?: Array<{ id: string; currentValue?: string }>;
+    };
+
+    expect(r.modes?.currentModeId).toBe("build");
+    expect(r.configOptions?.find((o) => o.id === "mode")?.currentValue).toBe("build");
+    expect(server.lastMode.get("sess_race")).toBe("build");
+    expect(server.planStateOf("sess_race")).toBe(false);
+    // (The zero-extra-read guarantee for a deciding snapshot is asserted with
+    // an isolated counter in model-select-options.test.ts; this full-load
+    // path's session/read calls include buildSnapshot/usage consumers.)
+  });
+
+  it("a recovery never writes the previously displayed value back as session/setMode", async () => {
+    const { backend, counts } = makeBackend({
+      messagesQueue: [hist(2)],
+      resumeResult: { session: { sessionId: "sess_race" }, settings: {} },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    server.registerSession("sess_race", "sess_race");
+    server.markBackendLoaded("sess_race"); // resident reconnect (alreadyLive)
+    server.lastMode.set("sess_race", "edit"); // what the client last saw
+
+    await loadSession(server, loadParams(), collectCx().cx);
+
+    expect(counts.get("session/setMode") ?? 0).toBe(0);
+  });
+
+  it("concurrent joiners of one flight each receive exactly ONE set of updates (per-response delivery)", async () => {
+    let release!: (v: unknown) => void;
+    const gate = new Promise<unknown>((r) => (release = r));
+    const { backend, counts } = makeBackend({
+      messagesQueue: [hist(3)],
+      resumeGate: gate,
+      resumeResult: {
+        session: { sessionId: "sess_race" },
+        settings: { mode: { current: "build", planEnabled: false } },
+      },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const cx1 = collectCx();
+    const cx2 = collectCx();
+
+    const p1 = loadSession(server, loadParams(), cx1.cx);
+    await park();
+    const p2 = loadSession(server, loadParams(), cx2.cx);
+    await park();
+    release({});
+    await Promise.all([p1, p2]);
+
+    // One flight, and the mode reached each joiner through ITS OWN response —
+    // no broadcast duplicates on either connection.
+    expect(counts.get("session/resume")).toBe(1);
+    for (const cx of [cx1, cx2]) {
+      expect(cx.updates.filter((u) => u.sessionUpdate === "current_mode_update")).toHaveLength(0);
+      expect(cx.updates.filter((u) => u.sessionUpdate === "config_option_update")).toHaveLength(0);
+    }
+  });
+});

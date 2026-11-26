@@ -37,7 +37,7 @@ import { readCredentialConfig } from "./bridge-accounts.js";
 import { parseModelRefValue } from "./model-resolution.js";
 import { registryContextWindow } from "./registry-context-window.js";
 import { initialSessionMode } from "./settings.js";
-import { loadUserConfig } from "./user-config.js";
+import { isSessionMode, loadUserConfig } from "./user-config.js";
 
 interface ProviderModelsJson {
   [modelId: string]: { limit?: { context?: number } } | undefined;
@@ -950,39 +950,195 @@ export function parseModelValue(value: string): { providerId: string; modelId: s
   return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
 }
 
-/** Build the ACP SessionModeState ({currentModeId, availableModes}).
- *  zcodeSid null = pending session (session/new not yet materialized) — skip
- *  the backend read and return defaults. */
-export async function buildModes(
+// ---------- session mode resolution ----------
+
+/** The process and per-session revision that produced a mode observation. */
+interface ModeVersion {
+  generation: number;
+  seq?: number;
+}
+
+export interface TrustedSessionSettings extends ModeVersion {
+  settings: Record<string, unknown>;
+}
+
+/** A settings READ this sync performed through {@link readTrustedSettings} —
+ * the full session/read result (settings + projection) plus the generation it
+ * was confirmed on. */
+export interface TrustedSessionRead extends ModeVersion {
+  read: ZcodeReadResult;
+}
+
+/**
+ * The mode state ONE sync resolves. `effective` is the display mode the two
+ * ACP representations (mode indicator + configOptions mode item) share;
+ * undefined means UNCONFIRMABLE — the sync skips mode publication instead of
+ * advertising a guess (build/yolo fallbacks must never disagree again).
+ */
+export interface SessionModeResolution {
+  version?: ModeVersion;
+  /** Effective display mode ("plan" when Plan is confirmed on). Undefined = unconfirmable. */
+  effective?: string;
+  /** Base permission mode (settings.mode.current) when known. */
+  base?: string;
+  /** Runtime-confirmed Plan switch; undefined = unknown. */
+  plan?: boolean;
+  /** The settings read this resolution performed (undefined when a caller snapshot decided). */
+  read?: TrustedSessionRead;
+  /**
+   * True when this sync already ATTEMPTED its settings read (successfully or
+   * not) — the options build must not pay a second one when the first failed.
+   */
+  readAttempted?: boolean;
+}
+
+/** Inputs one mode sync may already hold, so builders share a single read. */
+export interface ModeSyncInput {
+  /** Trusted settings snapshot the current operation obtained (switch/resume response). */
+  snapshot?: TrustedSessionSettings;
+  /**
+   * True when the snapshot is known to carry the FULL settings (model +
+   * thoughtLevel, the same shape a session/read returns) — the model/thought
+   * read is then skipped too.
+   */
+  complete?: boolean;
+  /** A settings read this sync already paid for (mode + model/thought source). */
+  read?: TrustedSessionRead;
+  /** A resolution already computed for this sync (share it across builders). */
+  resolution?: SessionModeResolution;
+}
+
+/**
+ * Extract the trusted settings snapshot from a zcode create/resume/switch
+ * result (`result.settings`). Undefined when the result carries none — an
+ * empty success response only proves the command was accepted.
+ */
+export function settingsFromResult(result: unknown): Record<string, unknown> | undefined {
+  const settings = (result as { settings?: unknown } | null | undefined)?.settings;
+  return settings && typeof settings === "object" && !Array.isArray(settings)
+    ? (settings as Record<string, unknown>)
+    : undefined;
+}
+
+/** The base mode a settings snapshot reports (`settings.mode.current`), when valid. */
+export function baseModeFromSettings(
+  settings: Record<string, unknown> | undefined,
+): string | undefined {
+  const modeSet = settings?.mode as Record<string, unknown> | undefined;
+  const current = modeSet?.current;
+  return isSessionMode(current) ? current : undefined;
+}
+
+export function planFromSettings(
+  settings: Record<string, unknown> | undefined,
+): boolean | undefined {
+  const plan = (settings?.mode as { planEnabled?: unknown } | undefined)?.planEnabled;
+  return typeof plan === "boolean" ? plan : undefined;
+}
+
+function isCurrentModeVersion(server: ZcodeAcpServer, sid: string, version: ModeVersion): boolean {
+  return (
+    version.generation === server.backendGeneration &&
+    (version.seq === undefined || version.seq === server.modeSeqOf(sid))
+  );
+}
+
+/**
+ * Read settings once. A backend restart or a newer mode event during the
+ * read invalidates its result.
+ */
+export async function readTrustedSettings(
+  server: ZcodeAcpServer,
+  zcodeSid: string,
+): Promise<TrustedSessionRead | undefined> {
+  const version = server.modeVersionOf(zcodeSid);
+  let read: ZcodeReadResult;
+  try {
+    read = await sessionRead(server, zcodeSid);
+  } catch {
+    return undefined; // RPC error / timeout — nothing confirmable from this read
+  }
+  return isCurrentModeVersion(server, zcodeSid, version) ? { read, ...version } : undefined;
+}
+
+/**
+ * Resolve the effective mode for ONE sync — the single source both ACP mode
+ * representations share.
+ *
+ *   - Pending session (zcodeSid null): the creation params (initialSessionMode)
+ *     fill both representations with ZERO backend reads.
+ *   - Materialized: the caller's trusted snapshot decides when it carries a
+ *     valid `settings.mode.current`; otherwise one messageLimit:1 read.
+ *   - Effective = "plan" when Plan is runtime-confirmed on, else the base
+ *     mode when Plan is runtime-confirmed off, else the base mode only when
+ *     it names plan itself — an UNKNOWN Plan switch withholds the effective
+ *     mode (a cold-resumed runtime may have restored Plan independently; the
+ *     bridge must not answer for it until the new runtime confirms).
+ */
+export async function resolveSessionMode(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
-): Promise<acp.SessionModeState> {
-  // Pending sessions (and a failed session/read) fall back to the configured
-  // initial mode — the exact value session/create sends at materialization —
-  // so the indicator never shows a mode the session will not run in.
-  let currentMode = initialSessionMode();
-  if (zcodeSid !== null) {
-    try {
-      const generation = server.backendGeneration;
-      const read = await sessionRead(server, zcodeSid);
-      if (generation !== server.backendGeneration) throw new Error("backend generation changed");
-      const settings = (read.settings ?? {}) as Record<string, unknown>;
-      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-      currentMode = (modeSet.current as string) ?? currentMode;
-    } catch {
-      // keep default
-    }
-    // The runtime's plan tools (EnterPlanMode/ExitPlanMode) flip the execution
-    // state's planEnabled WITHOUT touching settings.mode — the v3 read keeps
-    // reporting the underlying mode (verified upstream: mapSessionSettings
-    // reads app.getMode()). Fold the tracked flag so the advertised mode
-    // matches what the session actually runs.
-    if (server.sessionPlanActive.has(zcodeSid) && currentMode !== "plan") {
-      currentMode = "plan";
-    }
+  input: ModeSyncInput = {},
+): Promise<SessionModeResolution> {
+  if (zcodeSid === null) {
+    // Pending: the advertised mode IS the creation mode (what session/create
+    // sends at materialization) — the exact value the session will run in.
+    const initial = initialSessionMode();
+    return { effective: initial, base: initial, plan: initial === "plan" };
   }
+  const snapshot =
+    input.snapshot && isCurrentModeVersion(server, zcodeSid, input.snapshot)
+      ? input.snapshot
+      : undefined;
+  const version = server.modeVersionOf(zcodeSid);
+  const read =
+    baseModeFromSettings(snapshot?.settings) === undefined
+      ? (input.read ?? (await readTrustedSettings(server, zcodeSid)))
+      : undefined;
+  if (
+    !isCurrentModeVersion(server, zcodeSid, version) ||
+    (read && !isCurrentModeVersion(server, zcodeSid, read))
+  ) {
+    return { readAttempted: true };
+  }
+  const settings = read?.read.settings ?? snapshot?.settings;
+  const base = baseModeFromSettings(settings);
+  if (base === undefined) return { readAttempted: true, read, version };
+  server.rememberModeSettings(zcodeSid, base, planFromSettings(settings));
+  const plan = server.planStateOf(zcodeSid);
+  return { base, plan, effective: effectiveModeFor(base, plan), read, version };
+}
+
+/** The event that overtook a switch may already have confirmed its effective mode. */
+function confirmedModeAfterEvent(server: ZcodeAcpServer, sid: string): SessionModeResolution {
+  const base = server.seededBaseModeOf(sid);
+  if (base === undefined) return { readAttempted: true };
+  const plan = server.planStateOf(sid);
   return {
-    currentModeId: currentMode,
+    base,
+    plan,
+    effective: effectiveModeFor(base, plan),
+    readAttempted: true,
+    version: server.modeVersionOf(sid),
+  };
+}
+
+/** Fold the runtime-confirmed Plan switch over the base mode (upstream's own
+ * display fold: `planEnabled ?? mode === "plan"`). Undefined when the base is
+ * known but the Plan switch is not — the caller withholds. */
+export function effectiveModeFor(base: string, plan: boolean | undefined): string | undefined {
+  if (plan === true) return "plan";
+  if (plan === false) return base;
+  return base === "plan" ? "plan" : undefined;
+}
+
+/** The ACP SessionModeState a resolution advertises, or null when unconfirmable. */
+export function modesFromResolution(
+  resolution: SessionModeResolution,
+): acp.SessionModeState | null {
+  if (resolution.effective === undefined) return null;
+  return {
+    currentModeId: resolution.effective,
     // ZCode mode enum: plan/build/edit/guarded/yolo/auto — guarded is new in
     // 3.15.1 (yolo semantics + a one-time approval on AST-recognized dangerous
     // shell commands); `auto` stays internal-only upstream, so the dropdown
@@ -994,6 +1150,31 @@ export async function buildModes(
       name: capitalize(m),
     })),
   };
+}
+
+/** Build the ACP SessionModeState ({currentModeId, availableModes}).
+ *  zcodeSid null = pending session (session/new not yet materialized) — zero
+ *  backend reads, the configured initial mode fills both representations.
+ *  Returns null when the session's mode is unconfirmable — the caller omits
+ *  the optional `modes` field (and the mode refresh) instead of guessing. */
+export async function buildModes(
+  server: ZcodeAcpServer,
+  zcodeSid: string | null,
+  input: ModeSyncInput = {},
+): Promise<acp.SessionModeState | null> {
+  const resolution = input.resolution ?? (await resolveSessionMode(server, zcodeSid, input));
+  return modesFromResolution(resolution);
+}
+
+/**
+ * The PENDING session's SessionModeState — always resolvable from the
+ * creation params (zero backend reads, asserted by tests), so callers get a
+ * non-null state without a narrowing dance.
+ */
+export async function pendingModes(server: ZcodeAcpServer): Promise<acp.SessionModeState> {
+  const modes = modesFromResolution(await resolveSessionMode(server, null));
+  if (!modes) throw new Error("pending session mode unresolvable"); // unreachable
+  return modes;
 }
 
 /**
@@ -1087,22 +1268,31 @@ export function pendingThoughtProjection(): {
   return { current, options };
 }
 
-/** Build the ACP configOptions array (3 items: model/mode/thought).
- *  zcodeSid null = pending session — skip the backend read and use defaults;
- *  mode defaults to the configured initial mode (initialSessionMode — what
- *  session/create sends at materialization) so the dropdown matches the mode
- *  indicator for a fresh session.
+/** Build the ACP configOptions array (model/mode/thought).
+ *  zcodeSid null = pending session — ZERO backend reads: the mode is the
+ *  configured initial mode (initialSessionMode — what session/create sends at
+ *  materialization) so the dropdown matches the mode indicator for a fresh
+ *  session, and the model/thought are the local-config projection.
+ *
+ *  Materialized sessions resolve the mode through {@link resolveSessionMode}
+ *  — ONE confirmed result shared with the mode indicator (buildModes /
+ *  emitConfigOptionUpdate pass the same input or resolution). When the mode
+ *  is unconfirmable (read failure, backend replaced mid-read, Plan switch
+ *  unknown after a runtime rebuild) the `mode` item is OMITTED from the array
+ *  instead of advertising a guessed fallback — the other options still carry
+ *  everything they can present.
+ *
  *  `receiverRoot` is the clientConnectionRoot of the client the array is
  *  delivered to — the quota pseudo-option is appended only for martty
- *  connections (ADR-0021); other receivers get the spec-clean 3 options. */
+ *  connections (ADR-0021). */
 export async function buildConfigOptions(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
   receiverRoot?: unknown,
+  input: ModeSyncInput = {},
 ): Promise<acp.SessionConfigOption[]> {
   let currentProviderId = "";
   let currentModelId = DEFAULT_MODEL_ID;
-  let currentMode = zcodeSid === null ? initialSessionMode() : "build";
   // Matches the enabled provider's default reasoning variants (GLM-5.3:
   // max/high/low, default max). Pending sessions show this until the real
   // session/read thoughtLevel arrives.
@@ -1130,20 +1320,54 @@ export async function buildConfigOptions(
     thoughtOptions = thought.options;
   }
 
-  if (zcodeSid !== null) {
-    try {
-      const generation = server.backendGeneration;
-      const identityBeforeRead = server.currentModelIdentity.get(zcodeSid);
-      const read = await sessionRead(server, zcodeSid);
-      if (generation !== server.backendGeneration) throw new Error("backend generation changed");
-      const settings = (read.settings ?? {}) as Record<string, unknown>;
-      const modeSet = (settings.mode as Record<string, unknown>) ?? {};
-      currentMode = (modeSet.current as string) ?? currentMode;
-      const modelSet = (settings.model as Record<string, unknown>) ?? {};
-      // settings.model.current is { providerId, modelId, variant? } — read BOTH so
-      // we can disambiguate same-named models across providers. Preserve the
-      // registry identity: legacy config aliases can collapse distinct plans.
-      const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
+  // Captured before the resolution (which may read) so the identity write
+  // below can detect a model switch that landed while the read was in flight.
+  const identityBeforeRead =
+    zcodeSid === null ? undefined : server.currentModelIdentity.get(zcodeSid);
+  const resolution = input.resolution ?? (await resolveSessionMode(server, zcodeSid, input));
+  let currentMode = resolution.effective;
+
+  // The settings source for model/thought: a read this sync already paid for
+  // (the caller's, or the resolution's own), else a complete trusted
+  // snapshot, else — materialized sessions only — one best-effort read.
+  let settings: Record<string, unknown> | undefined;
+  let settingsFromRead = false;
+  if (
+    resolution.read &&
+    zcodeSid !== null &&
+    isCurrentModeVersion(server, zcodeSid, resolution.read)
+  ) {
+    settings = resolution.read.read.settings ?? {};
+    settingsFromRead = true;
+  } else if (
+    input.complete &&
+    input.snapshot &&
+    zcodeSid !== null &&
+    isCurrentModeVersion(server, zcodeSid, input.snapshot)
+  ) {
+    settings = input.snapshot.settings;
+  } else if (zcodeSid !== null && !resolution.readAttempted) {
+    const fresh = await readTrustedSettings(server, zcodeSid);
+    settings = fresh?.read.settings ?? {};
+    settingsFromRead = fresh !== undefined;
+  }
+  if (
+    zcodeSid !== null &&
+    resolution.version &&
+    !isCurrentModeVersion(server, zcodeSid, resolution.version)
+  ) {
+    currentMode = undefined;
+  }
+  if (zcodeSid !== null && settings) {
+    const modelSet = (settings.model as Record<string, unknown>) ?? {};
+    // settings.model.current is { providerId, modelId, variant? } — read BOTH so
+    // we can disambiguate same-named models across providers. Preserve the
+    // registry identity: legacy config aliases can collapse distinct plans.
+    const cur = (modelSet.current as { providerId?: string; modelId?: string }) ?? {};
+    // Only a READ may write the identity map: a snapshot was taken earlier
+    // (a resume flight's RPC), and a model switch — the post-resume re-assert
+    // — may have landed since; the fresher identity must not be overwritten.
+    if (settingsFromRead) {
       if (
         cur.providerId &&
         cur.modelId &&
@@ -1154,39 +1378,34 @@ export async function buildConfigOptions(
           modelId: cur.modelId,
         });
       }
-      const identity = server.currentModelIdentity.get(zcodeSid);
-      if (identity) {
-        currentProviderId = identity.providerId;
-        currentModelId = identity.modelId;
-      }
-      const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
-      // `current` is absent right after session/create — fall back to the
-      // backend's defaultLevel (the level the session actually runs at).
-      currentThought =
-        (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
-      const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
-      if (tlAvail.length > 0) {
-        thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
-        // setModel can leave the runtime briefly holding the PREVIOUS model's
-        // thoughtLevel (upstream clamps its own snapshot for the same reason —
-        // session-mapper.ts: "setModel 后 runtime 可能短暂保留上一个模型的
-        // thoughtLevel"). Never advertise a current outside the new model's
-        // list: the CLI would keep displaying — and re-sending — the old
-        // model's level (observed 2026-09-28 after switches between models
-        // with different level vocabularies).
-        const values = new Set(tlAvail.map((a) => a.value));
-        if (!values.has(currentThought)) {
-          const def = typeof tlSet.defaultLevel === "string" ? tlSet.defaultLevel : undefined;
-          currentThought = def && values.has(def) ? def : (tlAvail[0]?.value ?? currentThought);
-        }
-      }
-    } catch {
-      // keep defaults
     }
-    // Same plan-flag fold as buildModes: a plan-active runtime still reports
-    // the underlying mode in settings, and the dropdown must show "plan".
-    if (server.sessionPlanActive.has(zcodeSid) && currentMode !== "plan") {
-      currentMode = "plan";
+    const identity = server.currentModelIdentity.get(zcodeSid);
+    if (identity) {
+      currentProviderId = identity.providerId;
+      currentModelId = identity.modelId;
+    } else if (cur.providerId && cur.modelId) {
+      currentProviderId = cur.providerId;
+      currentModelId = cur.modelId;
+    }
+    const tlSet = (settings.thoughtLevel as Record<string, unknown>) ?? {};
+    // `current` is absent right after session/create — fall back to the
+    // backend's defaultLevel (the level the session actually runs at).
+    currentThought = (tlSet.current as string) ?? (tlSet.defaultLevel as string) ?? currentThought;
+    const tlAvail = (tlSet.available as Array<Record<string, string>>) ?? [];
+    if (tlAvail.length > 0) {
+      thoughtOptions = tlAvail.map((a) => ({ value: a.value, name: a.label ?? a.value }));
+      // setModel can leave the runtime briefly holding the PREVIOUS model's
+      // thoughtLevel (upstream clamps its own snapshot for the same reason —
+      // session-mapper.ts: "setModel 后 runtime 可能短暂保留上一个模型的
+      // thoughtLevel"). Never advertise a current outside the new model's
+      // list: the CLI would keep displaying — and re-sending — the old
+      // model's level (observed 2026-09-28 after switches between models
+      // with different level vocabularies).
+      const values = new Set(tlAvail.map((a) => a.value));
+      if (!values.has(currentThought)) {
+        const def = typeof tlSet.defaultLevel === "string" ? tlSet.defaultLevel : undefined;
+        currentThought = def && values.has(def) ? def : (tlAvail[0]?.value ?? currentThought);
+      }
     }
   }
 
@@ -1259,28 +1478,34 @@ export async function buildConfigOptions(
       // the whole session lifetime. See docs/CONFIG-OPTIONS.md.
       _meta: { zcode: buildProviderMeta(currentProvider, localModels) },
     },
-    {
+  ];
+  // The mode item is present only when this sync CONFIRMED the effective mode
+  // (the same resolution the mode indicator publishes). An unconfirmable mode
+  // is omitted — never replaced by a guessed fallback (a missing item reads as
+  // "temporarily unavailable", a wrong value reads as the session's mode).
+  if (currentMode !== undefined) {
+    options.push({
       id: "mode",
       name: CONFIG_META.mode.name,
       category: "mode" as acp.SessionConfigOptionCategory,
       type: "select",
       currentValue: currentMode,
       options: [...CONFIG_META.mode.options],
-    },
-    {
-      id: "thought",
-      name: CONFIG_META.thought.name,
-      // Category thought_level (not "thought") so ACP clients recognise the
-      // option as the reasoning-effort selector: the shared matchers in
-      // editors and orchestrators (e.g. Multica's acpEffortOptionIDs) key on
-      // id/category "effort"/"thought_level". The id stays "thought" — it is
-      // what session/set_config_option addresses.
-      category: "thought_level" as acp.SessionConfigOptionCategory,
-      type: "select",
-      currentValue: currentThought,
-      options: thoughtOptions,
-    },
-  ];
+    });
+  }
+  options.push({
+    id: "thought",
+    name: CONFIG_META.thought.name,
+    // Category thought_level (not "thought") so ACP clients recognise the
+    // option as the reasoning-effort selector: the shared matchers in
+    // editors and orchestrators (e.g. Multica's acpEffortOptionIDs) key on
+    // id/category "effort"/"thought_level". The id stays "thought" — it is
+    // what session/set_config_option addresses.
+    category: "thought_level" as acp.SessionConfigOptionCategory,
+    type: "select",
+    currentValue: currentThought,
+    options: thoughtOptions,
+  });
 
   // Do not invent a provider/model pair when a materialized read lacks
   // identity. An UNBOUND restore (a persisted selection the registry could
@@ -1434,7 +1659,8 @@ export async function buildInitialConfigOptions(
  * Dispatch session/set_config_option. mode/thought forward to setMode/
  * setThoughtLevel; model routes through applyModelSwitch (runtime-model.ts).
  *
- * Returns `{ kind, currentValue, options }` so the caller can emit the update
+ * Returns `{ kind, currentValue }` (+ the switch's own `responseSettings`
+ * snapshot when the backend returned one) so the caller can emit the update
  * notifications, or null when the configId is unknown / model switch fails.
  */
 export async function setConfigOption(
@@ -1443,7 +1669,11 @@ export async function setConfigOption(
   configId: string,
   value: string,
   acpSid?: string,
-): Promise<{ kind: "model" | "mode" | "thought"; currentValue: string } | null> {
+): Promise<{
+  kind: "model" | "mode" | "thought";
+  currentValue: string;
+  snapshot?: TrustedSessionSettings;
+} | null> {
   if (configId === "model") {
     const { applyModelSwitch, lastSwitchedModelValue } = await import("./runtime-model.js");
     const ok = await applyModelSwitch(server, zcodeSid, value);
@@ -1459,6 +1689,7 @@ export async function setConfigOption(
   const dispatch = CONFIG_DISPATCH[configId];
   if (!dispatch) return null;
   const backend = await server.ensureBackend();
+  const version = server.modeVersionOf(zcodeSid);
   const resp = await backend.request(
     server.nextId(),
     dispatch.method,
@@ -1469,7 +1700,11 @@ export async function setConfigOption(
   if (configId === "thought") {
     rememberModelChoice(server, acpSid, zcodeSid, { thought: value });
   }
-  return { kind: configId as "mode" | "thought", currentValue: value };
+  return {
+    kind: configId as "mode" | "thought",
+    currentValue: value,
+    snapshot: { settings: settingsFromResult(resp.result) ?? {}, ...version },
+  };
 }
 
 /**
@@ -1595,72 +1830,91 @@ export async function applyDefaultThoughtLevel(
   }
 }
 
-/** Emit a config_option_update (+ current_mode_update for mode) after a change.
- *  Returns the rebuilt options (+ the advertised currentModeId for mode) so the
- *  caller can include them in the response / mirror lastMode.
- *
- *  Every payload reaches EVERY attached client (the CLI window when the switch
- *  came from the phone, and vice versa) — a settings change is per-session
- *  state, not per-connection. Two shapes: a broadcast-proxy cx fans out to all
- *  clients by itself, so the update is sent once PER SESSION ALIAS through it
- *  (clients route by payload sessionId and drop ids they don't hold — a
- *  client holding the conversation under another acpSid must still receive
- *  it); a real per-connection cx sends to the initiator and then the rest via
- *  sendSessionUpdateToOthers (which loops the aliases for the others). No
- *  "others" leg on the proxy: it has no connectionContext to exclude anyone
- *  by, so the leg would double-deliver.
- *
- *  Sends are best-effort: a dead initiator connection must not skip the
- *  broadcast or fail the handler — the switch already succeeded backend-side.
- *
- *  For model switches, also emit a usage_update with the NEW model's context
- *  window (the context-window ladder, `usageWindowSize`) so the editor's
- *  context bar refreshes immediately instead of waiting for the next turn's
- *  UsageDelta. */
+/** Options for {@link emitConfigOptionUpdate} — the one mode-switch publish. */
+export interface EmitConfigOptions {
+  /**
+   * The switch's own response snapshot (`result.settings`), when the backend
+   * returned one — a complete response decides the mode with NO re-read; an
+   * empty success response only proves the command was accepted and one
+   * messageLimit:1 read follows.
+   */
+  snapshot?: TrustedSessionSettings;
+  /**
+   * The mode an explicit switch just set. Applying its semantics ("plan"
+   * enables the runtime Plan switch, any other valid mode disables it) is part
+   * of the publish — the four switch entries (session/set_mode,
+   * session/setMode, session/set_config_option's mode branch, /mode) share
+   * this one site. Absent for model/thought syncs and event-driven refreshes.
+   */
+  switchMode?: string;
+}
+
+/**
+ * Publish a settings change to the attached clients. A mode switch updates
+ * both ACP controls from the same confirmed value. If confirmation fails,
+ * clients keep their last display and the caller still gets the switch result.
+ * Independent model and thought updates carry the settings available to them.
+ * A model switch also refreshes the context window in the usage display.
+ */
 export async function emitConfigOptionUpdate(
   server: ZcodeAcpServer,
   cx: acp.AgentContext,
   acpSid: string,
   zcodeSid: string,
   kind: "model" | "mode" | "thought",
-): Promise<{ options: acp.SessionConfigOption[]; currentModeId?: string }> {
-  const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-  const broadcastSource = isBroadcastSource(cx);
-  const send = (update: acp.SessionUpdate): Promise<void> => {
-    if (broadcastSource) {
-      return Promise.all(
-        server.sessionAliases(acpSid).map((sid) => sendSessionUpdate(cx, sid, update)),
-      ).then(() => undefined);
-    }
-    return sendSessionUpdate(cx, acpSid, update)
-      .then(() => sendSessionUpdateToOthers(server, cx, acpSid, update))
-      .catch((e: unknown) => {
-        warn(
-          `options: config update send failed (sid=${acpSid}): ${e instanceof Error ? e.message : String(e)}`,
-        );
-      });
-  };
-  const configUpdate: acp.SessionUpdate = {
-    sessionUpdate: "config_option_update",
-    configOptions: options,
-  };
-  await send(configUpdate);
-  let currentModeId: string | undefined;
-  if (kind === "mode") {
-    const modes = await buildModes(server, zcodeSid);
-    currentModeId = modes.currentModeId;
-    await send({
-      sessionUpdate: "current_mode_update",
-      currentModeId: modes.currentModeId,
-    });
+  opts: EmitConfigOptions = {},
+): Promise<{
+  options: acp.SessionConfigOption[];
+  currentModeId?: string;
+}> {
+  // The switch's Plan semantics apply BEFORE the resolution reads anything:
+  // the mode the publish advertises must already fold them.
+  const obsolete = opts.snapshot && !isCurrentModeVersion(server, zcodeSid, opts.snapshot);
+  let snapshot = obsolete ? undefined : opts.snapshot;
+  if (opts.switchMode !== undefined && !obsolete) {
+    server.notePlanState(zcodeSid, opts.switchMode === "plan");
+    if (snapshot) snapshot = { ...snapshot, ...server.modeVersionOf(zcodeSid) };
   }
-  if (kind === "model") {
+  if (obsolete && kind === "mode") {
+    // A newer event may have already published this switch. Return its confirmed
+    // value to the requester; never replay an acknowledgement from the old runtime.
+    const resolution =
+      opts.snapshot?.generation === server.backendGeneration
+        ? confirmedModeAfterEvent(server, zcodeSid)
+        : { readAttempted: true };
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+      resolution,
+    });
+    return { options };
+  }
+  const resolution = await resolveSessionMode(server, zcodeSid, { snapshot });
+  const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+    resolution,
+    snapshot,
+    complete: snapshot?.settings.model != null && snapshot.settings.thoughtLevel != null,
+  });
+  const send = configUpdateSender(server, cx, acpSid);
+  const modeUnconfirmable = kind === "mode" && !options.some((o) => o.id === "mode");
+  let currentModeId: string | undefined;
+  if (!modeUnconfirmable) {
+    currentModeId = kind === "mode" ? resolution.effective : undefined;
+    await publishConfigOptions(server, cx, acpSid, options, currentModeId);
+  } else {
+    log(
+      `options: mode unconfirmable after switch (base=${resolution.base ?? "?"} plan=${String(resolution.plan)}) — switch kept, mode refresh skipped`,
+    );
+  }
+  if (kind === "model" && (resolution.read || !resolution.readAttempted)) {
     // Refresh the context bar: the backend's projection.contextWindow lags
     // behind a model switch, so the new model's window comes from the local
-    // ladder first.
+    // ladder first. The resolution's own read already carried the projection
+    // when it performed one — reuse it instead of a second read.
     try {
-      const read = await sessionRead(server, zcodeSid);
-      const proj = (read.projection ?? {}) as { contextUsed?: number; contextWindow?: number };
+      const observation = resolution.read?.read ?? (await sessionRead(server, zcodeSid));
+      const proj = (observation.projection ?? {}) as {
+        contextUsed?: number;
+        contextWindow?: number;
+      };
       // Occupancy only (#228): totalTokenCount is lifetime consumption, never
       // a meter. This refresh exists to re-show SIZE after the switch; used
       // reads 0 until the backend reports real occupancy.
@@ -1682,7 +1936,78 @@ export async function emitConfigOptionUpdate(
       );
     }
   }
-  return { options, ...(currentModeId !== undefined ? { currentModeId } : {}) };
+  return {
+    options,
+    ...(currentModeId !== undefined ? { currentModeId } : {}),
+  };
+}
+
+/**
+ * The fan-out closure every config/mode publication shares: a broadcast-proxy
+ * cx reaches every client through one send per SESSION ALIAS; a real
+ * per-connection cx reaches the initiator plus every other client.
+ */
+function configUpdateSender(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+): (update: acp.SessionUpdate) => Promise<void> {
+  if (isBroadcastSource(cx)) {
+    return (update) =>
+      Promise.all(
+        server.sessionAliases(acpSid).map((sid) => sendSessionUpdate(cx, sid, update)),
+      ).then(() => undefined);
+  }
+  return (update) => {
+    const sent = sendSessionUpdate(cx, acpSid, update);
+    sendSessionUpdateToOthers(server, cx, acpSid, update);
+    return sent.catch((e: unknown) => {
+      warn(
+        `options: config update send failed (sid=${acpSid}): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
+  };
+}
+
+/** Queue both views together, once per alias, while this observation is current. */
+export async function publishConfigOptions(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  options: acp.SessionConfigOption[],
+  mode?: string,
+): Promise<void> {
+  const send = configUpdateSender(server, cx, acpSid);
+  const config = send({ sessionUpdate: "config_option_update", configOptions: options });
+  if (mode === undefined) return config;
+  const indicator = send({ sessionUpdate: "current_mode_update", currentModeId: mode });
+  for (const alias of server.sessionAliases(acpSid)) server.lastMode.set(alias, mode);
+  await Promise.all([config, indicator]);
+}
+
+/**
+ * An internal resume has no ACP response to carry the recovered mode.
+ * Broadcast a confirmed change to each alias of the session.
+ */
+export async function publishResolvedMode(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+  resolution: SessionModeResolution,
+): Promise<void> {
+  if (resolution.effective === undefined) return;
+  const aliases = server.sessionAliases(acpSid);
+  if (aliases.every((alias) => server.lastMode.get(alias) === resolution.effective)) return;
+  const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+    resolution,
+  });
+  if (
+    !options.some((o) => o.id === "mode") ||
+    aliases.every((alias) => server.lastMode.get(alias) === resolution.effective)
+  )
+    return;
+  await publishConfigOptions(server, cx, acpSid, options, resolution.effective);
 }
 
 // ---------- helpers ----------

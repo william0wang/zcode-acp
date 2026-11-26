@@ -45,7 +45,11 @@ import { RequestError } from "@agentclientprotocol/sdk";
 import { backendCapabilities } from "../backend/adapter.js";
 import { applyModelSwitch, lastSwitchedModelValue } from "../config/runtime-model.js";
 import { parseModelRefValue } from "../config/model-resolution.js";
-import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
+import {
+  emitConfigOptionUpdate,
+  rememberModelChoice,
+  settingsFromResult,
+} from "../config/options.js";
 import {
   formatMcpServerHealth,
   formatMcpServers,
@@ -546,9 +550,9 @@ export async function handleSlashCommand(
         if (!arg) throw new RequestError(-32602, messages().slashErrArg(cmd));
         const dispatch = CONFIG_DISPATCH[cmd];
         if (!dispatch) throw new RequestError(-32602, messages().slashErrUnknown(cmd));
-        const resp = await (
-          await server.ensureBackend()
-        ).request(
+        const backend = await server.ensureBackend();
+        const version = server.modeVersionOf(zcodeSid);
+        const resp = await backend.request(
           server.nextId(),
           dispatch.method,
           { sessionId: zcodeSid, [dispatch.paramKey]: arg },
@@ -560,18 +564,18 @@ export async function handleSlashCommand(
         // Remember a thought-level switch like the dropdown path — /thought
         // is the TUI's only level switch and must survive resumes.
         if (cmd === "thought") rememberModelChoice(server, acpSid, zcodeSid, { thought: arg });
-        // Notify the editor UI: emit config_option_update (+ current_mode_update
-        // for mode). Without this the dropdown / mode indicator never reflects
-        // the change — slash commands return end_turn and bypass the turn-
-        // completion reconciliation in prompt().
-        await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, cmd);
-        if (cmd === "mode") {
-          server.lastMode.set(acpSid, arg);
-          // Same execution-state fold as the setMode extension: "plan" enables
-          // the runtime plan flag, anything else disables it.
-          if (arg === "plan") server.sessionPlanActive.add(zcodeSid);
-          else server.sessionPlanActive.delete(zcodeSid);
-        }
+        // Notify the editor UI through the ONE mode-switch publish:
+        // emitConfigOptionUpdate applies the switch's Plan semantics, publishes
+        // config_option_update (+ current_mode_update for mode) from the same
+        // confirmed resolution, and mirrors lastMode — or publishes nothing and
+        // keeps the previous display when the mode is unconfirmable. Without
+        // this the dropdown / mode indicator never reflects the change — slash
+        // commands return end_turn and bypass the turn-completion
+        // reconciliation in prompt().
+        await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, cmd, {
+          snapshot: { settings: settingsFromResult(resp.result) ?? {}, ...version },
+          ...(cmd === "mode" ? { switchMode: arg } : {}),
+        });
         return ok(`✓ ${cmd} = ${arg}`);
       }
       case "workflow": {

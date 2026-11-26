@@ -35,7 +35,7 @@ import type {
 } from "../backend/types.js";
 import {
   applyDefaultThoughtLevel,
-  buildModes,
+  baseModeFromSettings,
   buildConfigOptions,
   buildInitialConfigOptions,
   defaultModelCandidates,
@@ -43,10 +43,18 @@ import {
   formatModelValue,
   isModelUsable,
   loadAllModels,
+  modesFromResolution,
   modelRetired,
   parseModelValue,
+  pendingModes,
+  planFromSettings,
+  publishResolvedMode,
+  readTrustedSettings,
   rememberModelChoice,
+  resolveSessionMode,
+  settingsFromResult,
   usageWindowSize,
+  type TrustedSessionSettings,
 } from "../config/options.js";
 import { currentModelCached, emitInitialUsage } from "../config/model-cache.js";
 import {
@@ -720,7 +728,7 @@ export async function newSession(
     ) {
       server.bootResumeTriggerConnection = bindRoot;
     }
-    const modes = await buildModes(server, null);
+    const modes = await pendingModes(server);
     server.lastMode.set(bindSid, modes.currentModeId);
     emitBootUsageUpdate(server, bindSid);
     scheduleQuotaDockBackstop(server);
@@ -848,7 +856,9 @@ export async function newSession(
 
   // No backend RPC yet: modes/configOptions are built from defaults (the
   // pending session's real values arrive via updates once materialized).
-  const modes = await buildModes(server, null);
+  // A pending session always resolves (the initial mode fills both
+  // representations with zero backend reads).
+  const modes = await pendingModes(server);
   server.lastMode.set(acpSid, modes.currentModeId);
   emitBootUsageUpdate(server, acpSid);
   scheduleQuotaDockBackstop(server);
@@ -1232,6 +1242,14 @@ export async function ensureRealSession(
 
     server.pendingSessions.delete(acpSid);
     server.registerSession(acpSid, sid);
+    // A create that accepted "plan" can echo its underlying "build" mode.
+    // Compatibility retries can also omit the original creation mode.
+    const settings = settingsFromResult(result);
+    const accepted = typeof sent.mode === "string" ? sent.mode : undefined;
+    const base = baseModeFromSettings(settings) ?? accepted;
+    const plan =
+      planFromSettings(settings) ?? (accepted === undefined ? undefined : accepted === "plan");
+    if (base !== undefined) server.rememberModeSettings(sid, base, plan);
     // With both ZCODE_PROVIDER and ZCODE_MODEL set, the session is pinned to
     // that pair right after create. Fail loudly: a silent fallback would run
     // the turn on whatever model the backend picked instead.
@@ -1690,6 +1708,8 @@ export async function resumeSession(
   // here; alreadyLive targets skip the resume RPC because the session is live
   // in this backend subprocess.
   const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
+  let modeSnapshot =
+    alreadyLive && origin === "placeholder" ? createdModeSnapshot(server, zcodeSid) : undefined;
   // Resolving a durable alias may restore its recorded cwd; read it afterward.
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
 
@@ -1698,6 +1718,10 @@ export async function resumeSession(
   // text only persists at its completion).
   await waitForBackgroundTurnIdle(server, zcodeSid);
 
+  // Set when THIS call performed the resume flight — its result carries the
+  // trusted settings snapshot (mode + model + thoughtLevel) the mode
+  // resolution below reuses instead of re-reading.
+  let resumeResult: unknown;
   if (!alreadyLive) {
     // No runtimeModel pinning here: the session keeps its own persisted
     // model (see resumePreservingModel — an overlay is a FALLBACK only, when
@@ -1719,10 +1743,10 @@ export async function resumeSession(
     // third-party model in its history, and the backend needs the provider
     // registered to even process the resume turn.
     await syncProviderRegistry(server, cwd);
-    let resumeResult: unknown;
     try {
       const outcome = await resumePreservingModel(server, zcParams);
       resumeResult = outcome.result;
+      modeSnapshot = outcome.modeSnapshot;
     } catch (e) {
       translateResumeFailure("session/resume", acpSid, origin, zcodeSid, e);
     }
@@ -1771,13 +1795,38 @@ export async function resumeSession(
   // Initial usage_update so the editor shows the context bar immediately for a
   // resumed session (mirrors Python _on_session_resume → _emit_initial_usage).
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
-  const modes = await buildModes(server, zcodeSid);
-  server.lastMode.set(acpSid, modes.currentModeId);
   scheduleQuotaDockBackstop(server);
+  return resumedSessionOptions(server, cx, acpSid, zcodeSid, modeSnapshot);
+}
+
+/** A placeholder materialized by this request can use its own create acknowledgement. */
+function createdModeSnapshot(
+  server: ZcodeAcpServer,
+  sid: string,
+): TrustedSessionSettings | undefined {
+  const base = server.seededBaseModeOf(sid);
+  if (base === undefined) return undefined;
   return {
-    modes,
-    configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
+    settings: { mode: { current: base, planEnabled: server.planStateOf(sid) } },
+    ...server.modeVersionOf(sid),
   };
+}
+
+/** Resume may reapply model or thought after taking the mode snapshot. */
+async function resumedSessionOptions(
+  server: ZcodeAcpServer,
+  cx: acp.AgentContext,
+  acpSid: string,
+  zcodeSid: string,
+  snapshot?: TrustedSessionSettings,
+) {
+  const resolution = await resolveSessionMode(server, zcodeSid, { snapshot });
+  const configOptions = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+    resolution,
+  });
+  const modes = configOptions.some((o) => o.id === "mode") ? modesFromResolution(resolution) : null;
+  if (modes) server.lastMode.set(acpSid, modes.currentModeId);
+  return { configOptions, ...(modes ? { modes } : {}) };
 }
 
 /**
@@ -1853,6 +1902,7 @@ export async function resumeIntoSession(
   // flight settles hydration before resolving); the read below then uses the
   // flight's snapshot instead of re-querying mid-hydration.
   let settledHistory: ZcodeMessage[] | undefined;
+  let recoveredMode: Awaited<ReturnType<typeof resolveSessionMode>> | undefined;
   try {
     // Same settle-before-read as loadSession: the resume flight's history
     // snapshot must not race an active background notification turn's tail.
@@ -1867,6 +1917,10 @@ export async function resumeIntoSession(
     server.markBackendLoaded(acpSid);
     await repairUnavailableModel(server, zcodeTarget);
     server.registerSession(acpSid, zcodeTarget);
+    // Use the adopted conversation's own snapshot for the mode announcement.
+    recoveredMode = await resolveSessionMode(server, zcodeTarget, {
+      snapshot: outcome.modeSnapshot,
+    });
     const backendWs = workspaceFromResumeResult(outcome.result);
     const finalCwd = backendWs && !server.serveMode ? backendWs : cwd;
     server.sessionCwds.set(acpSid, finalCwd);
@@ -1877,6 +1931,8 @@ export async function resumeIntoSession(
     warn(`/resume: adopting ${zcodeTarget} failed (${e instanceof Error ? e.message : String(e)})`);
     return { ok: false, error: messages().slashResumeFailed };
   }
+
+  if (recoveredMode) await publishResolvedMode(server, cx, acpSid, zcodeTarget, recoveredMode);
 
   // Name the editor thread after the adopted conversation. Zed shows the first
   // prompt's first line as a PROVISIONAL thread title until the agent pushes
@@ -2020,6 +2076,8 @@ export async function loadSession(
   // Same placeholder resolution as resumeSession; alreadyLive targets skip the
   // backend resume RPC (the session is live in this subprocess).
   const { zcodeSid, alreadyLive, origin } = await resolveResumeTarget(server, acpSid);
+  let modeSnapshot =
+    alreadyLive && origin === "placeholder" ? createdModeSnapshot(server, zcodeSid) : undefined;
   // BEFORE the resume flight and the history read: an active background
   // notification turn persists its final text only at completion, so a fetch
   // racing its tail ships an empty-shell last reply (see waitForBackgroundTurnIdle).
@@ -2028,8 +2086,11 @@ export async function loadSession(
   let cwd = server.serveMode ? process.cwd() : authoritativeSessionCwd(server, acpSid);
   // Settled history from a resume flight THIS call took part in (performer or
   // joiner — the flight settles hydration before resolving, so using its
-  // snapshot is the mid-hydration-prefix guard; undefined = alreadyLive).
+  // snapshot is the mid-hydration guard; undefined = alreadyLive).
   let settledHistory: ZcodeMessage[] | undefined;
+  // Set when THIS call performed the resume flight — its result carries the
+  // trusted settings snapshot the mode resolution below reuses.
+  let resumeResult: unknown;
 
   // Tail replay (Proposal 0001): a `_meta.zcode.limit` replays only the last
   // N messages aligned to turn boundaries — the full replay stays the default
@@ -2083,12 +2144,12 @@ export async function loadSession(
     // third-party model in its history, and the backend needs the provider
     // registered to process the resume turn.
     await syncProviderRegistry(server, cwd);
-    let resumeResult: unknown;
     try {
       const outcome = await resumePreservingModel(server, zcParams, {
         skipSettle: metadataOnly,
       });
       resumeResult = outcome.result;
+      modeSnapshot = outcome.modeSnapshot;
       settledHistory = outcome.history;
     } catch (e) {
       translateResumeFailure("session/load", acpSid, origin, zcodeSid, e);
@@ -2211,8 +2272,7 @@ export async function loadSession(
   // Initial usage_update so the editor shows the context bar immediately.
   await emitInitialUsage(server, cx, acpSid, zcodeSid, getOrCreateDiffer(server, zcodeSid));
 
-  const modes = await buildModes(server, zcodeSid);
-  server.lastMode.set(acpSid, modes.currentModeId);
+  const sessionOptions = await resumedSessionOptions(server, cx, acpSid, zcodeSid, modeSnapshot);
   // A turn from a prior client may still be in flight (the bridge runs it to
   // completion regardless of who prompted); flag it so re-attaching clients
   // restore their running state. Editor-initiated turns land here too — as do
@@ -2222,8 +2282,7 @@ export async function loadSession(
     [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid) ||
     server.foreignActiveTurns.has(zcodeSid);
   const result = {
-    modes,
-    configOptions: await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx)),
+    ...sessionOptions,
     // Additive replay metadata — the anchor for load_earlier pagination.
     replayMeta: { ...slice.meta, turnActive },
     // The auto-load retirement disclosure (see retiredForAuto above): tells
@@ -3310,12 +3369,21 @@ export async function setConfigOptionHandler(
         : `unsupported config option or switch failed: ${params.configId}`,
     );
   }
+  // The ONE mode-switch publish (shared with session/set_mode, session/setMode
+  // and /mode): the response still carries the REQUIRED configOptions array
+  // even when the mode is unconfirmable — it lists every presentable option
+  // with the mode item omitted (the switch itself stays successful, and zero
+  // mode notifications went out in that case).
   const { options } = await emitConfigOptionUpdate(
     server,
     cx,
     params.sessionId,
     zcodeSid,
     result.kind,
+    {
+      snapshot: result.snapshot,
+      ...(result.kind === "mode" ? { switchMode: params.value } : {}),
+    },
   );
   return { configOptions: options };
 }
@@ -3840,13 +3908,24 @@ export async function reloadBackendSession(
   // these made every backend respawn (sandbox allow-restart, eviction
   // recovery) deaf-fail its first sends.
   await syncProviderRegistry(server, cwd);
-  await resumePreservingModel(server, zcParams);
+  const outcome = await resumePreservingModel(server, zcParams);
   server.markBackendLoaded(acpSid);
   await repairUnavailableModel(server, zcodeSid);
+  // The rebuilt runtime owns its mode. Report confirmed changes to attached
+  // clients while keeping the successful reload usable if a notification fails.
+  try {
+    const resolution = await resolveSessionMode(server, zcodeSid, {
+      snapshot: outcome.modeSnapshot,
+    });
+    await publishResolvedMode(server, server.clients.broadcast(), acpSid, zcodeSid, resolution);
+  } catch (e) {
+    log(`reload ${acpSid}: mode broadcast skipped (${e instanceof Error ? e.message : String(e)})`);
+  }
 }
 
 /** Outcome of a (possibly shared) resume flight. */
 interface ResumeOutcome {
+  modeSnapshot?: TrustedSessionSettings;
   /** True when THIS call performed the backend RPC (joiners waited on another). */
   performed: boolean;
   /** The resume RPC result — shared with joiners (cwd adoption is uniform). */
@@ -4019,6 +4098,10 @@ async function resumePreservingModel(
     // The backend can echo the supplied workspace in its resume snapshot.
     // Verify the stored record before resume itself can load foreign history.
     if (server.serveMode) await verifyServeWorkspace(server, zcodeSid);
+    // This flight rebuilds the session even if the backend process survived.
+    // Retire in-flight reads before the RPC so new-runtime events remain authoritative.
+    server.invalidatePlanState(zcodeSid);
+    const modeVersion = server.modeVersionOf(zcodeSid);
     let result: unknown;
     try {
       result = await resumeBackendSession(server, zcParams);
@@ -4078,8 +4161,10 @@ async function resumePreservingModel(
     await reassertModelChoice(server, zcodeSid);
     if (generation !== server.backendGeneration)
       throw new Error("backend generation changed during resume");
+    const settings = settingsFromResult(result);
     return {
       performed: true,
+      modeSnapshot: settings ? { settings, ...modeVersion } : undefined,
       result,
       history,
     };
@@ -5503,8 +5588,12 @@ async function buildSnapshot(
  * value advertised to the client, emit `current_mode_update` +
  * `config_option_update`. Covers in-turn mode switches performed by internal
  * tools (EnterPlanMode/ExitPlanMode) that bypass `session/setMode` and thus
- * emit no notification of their own. Best-effort: failures are logged and
- * swallowed so they never break the turn-completion path.
+ * emit no notification of their own.
+ *
+ * Both updates use the same observation. An unknown mode leaves the client
+ * display untouched until a later event or read confirms the effective mode.
+ * Best-effort: failures are logged and swallowed so they never break the
+ * turn-completion path.
  */
 export async function emitModeIfChanged(
   server: ZcodeAcpServer,
@@ -5513,20 +5602,14 @@ export async function emitModeIfChanged(
   zcodeSid: string,
 ): Promise<void> {
   try {
-    const modes = await buildModes(server, zcodeSid);
-    const last = server.lastMode.get(acpSid);
-    if (last === modes.currentModeId) return;
-    server.lastMode.set(acpSid, modes.currentModeId);
-    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-    await sendSessionUpdate(cx, acpSid, {
-      sessionUpdate: "config_option_update",
-      configOptions: options,
-    });
-    await sendSessionUpdate(cx, acpSid, {
-      sessionUpdate: "current_mode_update",
-      currentModeId: modes.currentModeId,
-    });
-    log(`session/prompt: mode changed → ${modes.currentModeId}`);
+    // One read feeds both the mode resolution and the configOptions build.
+    const read = await readTrustedSettings(server, zcodeSid);
+    if (!read) return; // unconfirmable — end this refresh, keep the display
+    const resolution = await resolveSessionMode(server, zcodeSid, { read });
+    if (resolution.effective === undefined) return;
+    if (server.lastMode.get(acpSid) === resolution.effective) return;
+    await publishResolvedMode(server, cx, acpSid, zcodeSid, resolution);
+    log(`session/prompt: mode changed → ${resolution.effective}`);
   } catch (e) {
     warn(`emitModeIfChanged failed: ${e instanceof Error ? e.message : String(e)}`);
   }

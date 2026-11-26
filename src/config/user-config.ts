@@ -322,6 +322,10 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * dropdown no longer advertises it. */
 const SESSION_MODES = new Set(["plan", "build", "edit", "guarded", "yolo", "auto"]);
 
+export function isSessionMode(value: unknown): value is string {
+  return typeof value === "string" && SESSION_MODES.has(value);
+}
+
 /**
  * Dynamic-workflow gate override domain — mirrors upstream DYNAMIC_WORKFLOW_MODES
  * (config/workflow-gate.ts). Duplicated instead of imported: user-config must
@@ -426,7 +430,7 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     const mode = body["mode"];
     if (mode !== undefined) {
       const m = typeof mode === "string" ? mode.trim() : "";
-      if (m && SESSION_MODES.has(m)) s.mode = m;
+      if (isSessionMode(m)) s.mode = m;
       else warn(`config: ${label}.mode=${JSON.stringify(mode)} is not a session mode — ignoring`);
     }
     const showCompletionStatus = body["showCompletionStatus"];

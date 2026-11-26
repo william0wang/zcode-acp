@@ -349,12 +349,12 @@ export class EventTranslator {
       // payload (the v3 mapper has no dedicated wire type). Discriminator:
       // both `mode` and `planEnabled` present (background-task payloads carry
       // taskId instead). `mode` is the UNDERLYING session mode — the runtime's
-      // plan tools flip only `planEnabled` — so fold the effective display
-      // mode here and let the dispatcher track the flag for the read paths.
+      // plan tools flip only `planEnabled`. Both fields are needed to
+      // reconstruct the effective mode when that flag changes.
       if (typeof payload["mode"] === "string" && typeof payload["planEnabled"] === "boolean") {
         results.push({
           kind: "ConfigChanged",
-          mode: payload["planEnabled"] ? "plan" : (payload["mode"] as string),
+          mode: payload["mode"],
           planEnabled: payload["planEnabled"] === true,
         });
       }

@@ -56,7 +56,12 @@ import {
 import { credentialCipherOp } from "../backend/credential-store.js";
 import { resolveOfficialMcpAuthHeaders } from "../config/official-mcp-auth.js";
 import { ProjectTokenError, resolveOAuthProjectToken } from "../config/project-token.js";
-import { buildConfigOptions, buildModes } from "../config/options.js";
+import {
+  buildConfigOptions,
+  publishConfigOptions,
+  readTrustedSettings,
+  resolveSessionMode,
+} from "../config/options.js";
 import { interactionTimeoutMs } from "../config/settings.js";
 import { messages } from "../i18n.js";
 import {
@@ -89,9 +94,10 @@ function sleep(ms: number): Promise<void> {
  * the bridge always sends), so subsequent `current_mode_update` notifications
  * are silently ignored — only `config_option_update` drives the dropdown.
  *
- * Always emits (no dedup): when the user manually switched to plan via the
- * dropdown (session/set_mode), `lastMode` can lag the real mode and a dedup
- * check would wrongly suppress the post-exit update.
+ * Always emits (no dedup) when the mode is confirmable: when the user
+ * manually switched to plan via the dropdown (session/set_mode), `lastMode`
+ * can lag the real mode and a dedup check would wrongly suppress the
+ * post-exit update. An unconfirmed mode leaves both controls untouched.
  */
 async function emitModeViaConfigOption(
   server: ZcodeAcpServer,
@@ -100,15 +106,18 @@ async function emitModeViaConfigOption(
   zcodeSid: string,
 ): Promise<void> {
   try {
-    const modes = await buildModes(server, zcodeSid);
-    server.lastMode.set(acpSid, modes.currentModeId);
-    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-    const modeOpt = options.find((o) => o.id === "mode");
-    if (modeOpt) modeOpt.currentValue = modes.currentModeId;
-    await sendSessionUpdate(cx, acpSid, {
-      sessionUpdate: "config_option_update",
-      configOptions: options,
+    // One read feeds both the resolution and the options build.
+    const read = await readTrustedSettings(server, zcodeSid);
+    if (!read) return;
+    const resolution = await resolveSessionMode(server, zcodeSid, { read });
+    if (resolution.effective === undefined) return;
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+      resolution,
     });
+    if (!options.some((o) => o.id === "mode")) return;
+    await publishConfigOptions(server, cx, acpSid, options);
+    for (const alias of server.sessionAliases(acpSid))
+      server.lastMode.set(alias, resolution.effective);
   } catch (e) {
     warn(`emitModeViaConfigOption failed: ${e instanceof Error ? e.message : String(e)}`);
   }

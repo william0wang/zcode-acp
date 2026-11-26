@@ -121,7 +121,7 @@ describe("EventTranslator", () => {
     expect(out).toHaveLength(0);
   });
 
-  it("folds a SessionModeChanged session.updated into the effective mode (plan)", () => {
+  it("preserves the base mode and Plan flag from a SessionModeChanged event", () => {
     // EnterPlanMode flips only the runtime plan flag — the payload's `mode`
     // stays the underlying session mode; the advertised mode must be "plan".
     const t = new EventTranslator();
@@ -134,7 +134,7 @@ describe("EventTranslator", () => {
         source: "tool",
       }),
     );
-    expect(out).toEqual([{ kind: "ConfigChanged", mode: "plan", planEnabled: true }]);
+    expect(out).toEqual([{ kind: "ConfigChanged", mode: "yolo", planEnabled: true }]);
   });
 
   it("captures turn.failed error and does not treat it as resultType", () => {

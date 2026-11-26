@@ -637,7 +637,15 @@ function makeListenerServer(pendingTurns: Array<{ zcodeSid: string; holding?: bo
     terminalSentData: new Map<string, string>(),
     acpSidByZcodeSid: new Map<string, string>([["zs_held", "acp_held"]]),
     sessionMap: new Map<string, string>([["acp_held", "zs_held"]]),
-    sessionPlanActive: new Set<string>(),
+    // Mirrors ZcodeAcpServer.sessionPlanState (out-of-turn mode transitions).
+    sessionPlanState: new Map<string, { plan: boolean; generation: number }>(),
+    notePlanState: (sid: string, plan: boolean) => {
+      server.sessionPlanState.set(sid, { plan, generation: 0 });
+    },
+    planStateOf: (sid: string) => server.sessionPlanState.get(sid)?.plan,
+    noteModeConfirmation: () => {},
+    modeSeqOf: () => 0,
+    resolveAcpSid: (sid: string) => server.acpSidByZcodeSid.get(sid),
     steerEchoExclusions: () => new Set<unknown>(),
     clients: {
       size: 0,
