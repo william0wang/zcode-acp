@@ -9,9 +9,11 @@
  * `<zcode-home>` is the ZCode data root (`~/.zcode`, or `$ZCODE_HOME` when
  * set — see `zcodeHomeDir()`).
  *
- * The ZCode backend loads these automatically and exposes their tools to the
- * model. This module is purely informational — it lists what's configured so
- * users know what's available without needing the TUI.
+ * The backend loads the config.json servers by itself only for a session whose
+ * session/create·resume carries no `mcpServers` — a client-declared list
+ * displaces them, which `mergeUserConfigMcpServers` (user-mcp-servers.ts)
+ * compensates for. This module is purely informational — it lists what's
+ * configured so users know what's available without needing the TUI.
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -39,11 +41,34 @@ interface CliConfig {
   };
 }
 
-interface McpServerConfig {
+export interface McpServerConfig {
   type?: string;
   command?: string;
   args?: string[];
   url?: string;
+  // Read by the create/resume union only (user-mcp-servers.ts); the `/mcp`
+  // listing shows name/type/endpoint alone.
+  env?: Record<string, unknown>;
+  headers?: Record<string, unknown>;
+  cwd?: string;
+  timeoutMs?: number;
+  enabled?: boolean;
+}
+
+/**
+ * <zcode-home>/cli/config.json, or null when it is missing or unparseable.
+ * Shared by the `/mcp` listing and by the user-server union that rides
+ * session/create·resume (user-mcp-servers.ts).
+ */
+export function readCliConfig(): CliConfig | null {
+  try {
+    const cliConfigPath = zcodeCliConfigPath();
+    if (!existsSync(cliConfigPath)) return null;
+    return JSON.parse(readFileSync(cliConfigPath, "utf8")) as CliConfig;
+  } catch (e) {
+    log(`cli/config.json read failed (${e instanceof Error ? e.message : String(e)})`);
+    return null;
+  }
 }
 
 /**
@@ -54,16 +79,7 @@ interface McpServerConfig {
 export function loadMcpServers(): McpServerInfo[] {
   const results: McpServerInfo[] = [];
 
-  let config: CliConfig | null = null;
-  try {
-    const cliConfigPath = zcodeCliConfigPath();
-    if (existsSync(cliConfigPath)) {
-      config = JSON.parse(readFileSync(cliConfigPath, "utf8")) as CliConfig;
-    }
-  } catch (e) {
-    log(`mcp-discovery: config read failed (${e instanceof Error ? e.message : String(e)})`);
-    return results;
-  }
+  const config = readCliConfig();
 
   // 1. User-configured servers from config.json.
   const servers = config?.mcp?.servers ?? {};

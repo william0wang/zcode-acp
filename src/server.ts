@@ -227,7 +227,10 @@ export class ZcodeAcpServer {
    * survives materialization: the backend treats mcpServers as per-load
    * runtime config, NOT persisted session state, so every later backend
    * load/resume/reload (idle eviction, respawn, drain) must re-send them or
-   * the session silently loses its client MCP tools (#193).
+   * the session silently loses its client MCP tools (#193). Sent through
+   * mergeUserConfigMcpServers — the user's cli/config.json servers are unioned
+   * in at send time (never stored here, so a config edit reaches the next
+   * create/resume).
    */
   readonly sessionMcpServers = new Map<string, acp.McpServer[]>();
   /**
@@ -368,6 +371,15 @@ export class ZcodeAcpServer {
    * Reset at every spawn.
    */
   toolDenylistRejected = false;
+  /**
+   * True once this backend generation rejected the user-config MCP servers
+   * the bridge unions into a client-declared `mcpServers` list (strict-schema
+   * drift — see mergeUserConfigMcpServers). While set, the union is skipped
+   * up front instead of paying a rejected round-trip per session — the user's
+   * cli/config.json servers are then NOT available on sessions that declare
+   * their own (warned once). Reset at every spawn.
+   */
+  userMcpRejected = false;
   /**
    * `session/lifecycle/getState` availability on the CURRENT backend build:
    * null = not yet probed, true/false = the pinned verdict (app-server <
@@ -1052,6 +1064,9 @@ export class ZcodeAcpServer {
     this.observedSendBusyReject = false;
     // …and the toolDenylist schema verdict: the respawned build may accept it.
     this.toolDenylistRejected = false;
+    // …and the user-config MCP server verdict: the respawned build may
+    // accept them.
+    this.userMcpRejected = false;
     // …and the session/lifecycle/getState verdict: the respawned build may
     // predate the family (0.17.1).
     this.backendLifecycleApi = null;

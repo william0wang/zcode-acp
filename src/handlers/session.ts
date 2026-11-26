@@ -65,6 +65,7 @@ import {
   buildResumeRuntimeModel,
   lastSwitchedModelValue,
 } from "../config/runtime-model.js";
+import { clientServersOf, mergeUserConfigMcpServers } from "../config/user-mcp-servers.js";
 import {
   effectiveWorkflowGate,
   effectiveWorkflowGateNow,
@@ -348,6 +349,37 @@ function noteToolDenylistRejected(server: ZcodeAcpServer, method: string): void 
 }
 
 /**
+ * A backend rejection of the `mcpServers` param — the user-config servers
+ * merged into a client list failed its strict schema. Word-bounded like the
+ * toolDenylist sibling: an unrelated rejection (an unrecognized key
+ * elsewhere, a client entry of its own) must not trigger the drop-and-retry.
+ */
+function rejectsMcpServersParam(message: string | undefined): boolean {
+  return !!message && /\bmcpServers\b/i.test(message);
+}
+
+/**
+ * Record that rejection for this backend generation and say so ONCE — the
+ * user's config.json servers are NOT available on sessions that declare their
+ * own while the verdict stands (see mergeUserConfigMcpServers).
+ */
+function noteUserMcpRejected(
+  server: ZcodeAcpServer,
+  method: string,
+  message: string | undefined,
+): void {
+  if (!server.userMcpRejected) {
+    warn(
+      `${method}: backend rejects the user-config MCP servers (cli/config.json mcp.servers) — ` +
+        `retrying with the client-provided ones only; they stay off on client-declared sessions ` +
+        `until the backend respawns`,
+    );
+  }
+  log(`${method}: mcpServers rejected — ${message ?? ""}`);
+  server.userMcpRejected = true;
+}
+
+/**
  * Cold-bridge menu catch-up: the `/` menu snapshot sent at session/new is
  * filtered against the workflow gate, and on a COLD bridge (lazy session/new,
  * no backend yet) that snapshot was taken while the gate was still
@@ -373,7 +405,8 @@ export function resendMenuAfterGateSettled(server: ZcodeAcpServer, acpSid: strin
  * session-lifetime mcpServers + the conditional dynamic-workflow flag + the
  * per-session tool denylist. Every resume construction site (session/resume,
  * /resume adoption, session/load, eviction/respawn reload) goes through here
- * so the param shape cannot drift.
+ * so the param shape cannot drift. A non-empty mcpServers list rides with the
+ * user's config servers unioned in (mergeUserConfigMcpServers).
  */
 async function resumeParams(
   server: ZcodeAcpServer,
@@ -387,7 +420,16 @@ async function resumeParams(
     ...(await workflowFlag(server)),
     ...toolDenylistParam(server),
   };
-  if (mcpServers) params.mcpServers = mcpServers;
+  const mergedMcp = mergeUserConfigMcpServers(mcpServers, server.userMcpRejected);
+  if (mergedMcp) {
+    params.mcpServers = mergedMcp;
+    if (mergedMcp !== mcpServers) {
+      log(
+        `session/resume carrying ${mergedMcp.length} MCP server(s) ` +
+          `(${mergedMcp.length - (mcpServers?.length ?? 0)} from user config)`,
+      );
+    }
+  }
   return params;
 }
 
@@ -1162,9 +1204,14 @@ export async function ensureRealSession(
     await syncProviderRegistry(server, pending.cwd);
     // Client-provided MCP servers (ACP session/new mcpServers) ride along
     // when the lazy session materializes. The backend accepts the ACP array
-    // shape verbatim; the verified merge behaviour is additive (client
-    // entries appear next to the runtime's own local config). Same-name
-    // clash behaviour is the backend's own and unasserted here.
+    // shape verbatim. They are the session's WHOLE user-level MCP set though:
+    // the backend reads the user's cli/config.json servers only when the
+    // param is empty (desktop 4.0.0 — a non-empty list becomes the runtime's
+    // mcpConfig outright; observed 2026-11-26: an empty param connected the
+    // user's servers, a one-entry param connected none of them), so a client
+    // that declares its own server (paseo) silently dropped every
+    // user-configured one. The union below adds them back; a same-name clash
+    // goes to the client entry.
     const createParams: Record<string, unknown> = {
       workspace: workspaceFor(pending.cwd),
       // The initial mode comes from the user config (session.mode) or
@@ -1188,6 +1235,15 @@ export async function ensureRealSession(
         log(`session/create carrying ${remembered.length} remembered client MCP server(s)`);
       }
     }
+    const clientMcp = createParams.mcpServers as acp.McpServer[] | undefined;
+    const mergedMcp = mergeUserConfigMcpServers(clientMcp, server.userMcpRejected);
+    if (mergedMcp && mergedMcp !== clientMcp) {
+      createParams.mcpServers = mergedMcp;
+      log(
+        `session/create carrying ${mergedMcp.length} MCP server(s) ` +
+          `(${mergedMcp.length - (clientMcp?.length ?? 0)} from user config)`,
+      );
+    }
     // Compat retries build on the params ACTUALLY sent last, so a second
     // rejection does not resurrect a key the first retry already dropped.
     let sent = createParams;
@@ -1208,6 +1264,14 @@ export async function ensureRealSession(
       noteToolDenylistRejected(server, "session/create");
       sent = { ...sent };
       delete sent.toolDenylist;
+      resp = await backend.request(server.nextId(), "session/create", sent, 15000);
+    }
+    const userMcpClientOnly = clientServersOf(sent.mcpServers);
+    if (resp.error && userMcpClientOnly !== null && rejectsMcpServersParam(resp.error.message)) {
+      // Schema-compat retry, bounded by construction: the client list alone
+      // can no longer match this guard.
+      noteUserMcpRejected(server, "session/create", resp.error.message);
+      sent = { ...sent, mcpServers: userMcpClientOnly };
       resp = await backend.request(server.nextId(), "session/create", sent, 15000);
     }
     if (resp.error) {
@@ -3795,6 +3859,13 @@ async function resumeBackendSession(
       const rest = { ...zcParams };
       delete rest.toolDenylist;
       return resumeBackendSession(server, rest);
+    }
+    const userMcpClientOnly = clientServersOf(zcParams.mcpServers);
+    if (userMcpClientOnly !== null && rejectsMcpServersParam(resp.error.message)) {
+      // Same schema-compat retry for the user-config servers merged into the
+      // list, bounded the same way.
+      noteUserMcpRejected(server, "session/resume", resp.error.message);
+      return resumeBackendSession(server, { ...zcParams, mcpServers: userMcpClientOnly });
     }
     const isTimeout = resp.error.message === "timeout";
     if (!isTimeout || attempt === MAX_ATTEMPTS) {
