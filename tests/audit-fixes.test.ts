@@ -5,17 +5,16 @@
  *    zcode (decline) and cache the result — an unanswered request makes the
  *    backend reannounce forever, refreshing the turn loop's no-progress timer
  *    until the turn hangs.
- * 2. Todo push recheck: when the todos signature is unchanged at tool-result
- *    time (the backend writes the projection asynchronously after the result
- *    event), one delayed re-check must still push the PlanUpdate.
  *
  * (The batch's waitForTurnIdle grace-window cases were folded into
  * tests/wait-turn-idle.test.ts, which covers the same three branches plus
- * the lock-seen and timeout-false edges.)
+ * the lock-seen and timeout-false edges. The todo push recheck suite was
+ * removed with dispatchPlanIfChanged itself — ADR-0035 turned every
+ * per-tool-result session/read into a turn-end-only read.)
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ServerRequest, ZcodeBackend } from "../src/backend/client.js";
 import type { ZcodeAcpServer } from "../src/server.js";
@@ -29,8 +28,6 @@ vi.mock("../src/handlers/io.js", () => ({
 }));
 
 import { handleServerRequests } from "../src/handlers/server-requests.js";
-import { dispatchPlanIfChanged } from "../src/handlers/session.js";
-import { ProjectionDiffer } from "../src/translators/projection-differ.js";
 
 // ---------- 1. settle-once ----------
 
@@ -92,60 +89,3 @@ describe("settle-once: forward throw still replies to zcode", () => {
 });
 
 // ---------- waitForTurnIdle grace: see tests/wait-turn-idle.test.ts ----------
-
-// ---------- 3. todo push recheck ----------
-
-describe("dispatchPlanIfChanged delayed re-check", () => {
-  beforeEach(() => {
-    ioMocks.sendSessionUpdate.mockClear();
-    vi.useFakeTimers();
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("pushes the PlanUpdate when the todos appear only on the re-check", async () => {
-    const oldTodos = [{ content: "a", status: "pending" }];
-    const newTodos = [
-      { content: "a", status: "completed" },
-      { content: "b", status: "in_progress" },
-    ];
-    let readCount = 0;
-    const backend = {
-      request: vi.fn(() => {
-        readCount++;
-        return Promise.resolve({ result: { todos: readCount === 1 ? oldTodos : newTodos } });
-      }),
-    };
-    const server = {
-      ensureBackend: () => backend,
-      nextId: () => 1,
-      sessionAliases: (sid: string) => [sid],
-    } as unknown as ZcodeAcpServer;
-    const cx = { notify: vi.fn().mockResolvedValue(undefined) } as unknown as acp.AgentContext;
-
-    const differ = new ProjectionDiffer();
-    differ.diffPlan(oldTodos); // prime the signature: first read sees no change
-
-    void dispatchPlanIfChanged(server, cx, "s1", "zs1", differ, "m1");
-    await vi.advanceTimersByTimeAsync(0);
-    // Signature unchanged at result-time: no push yet, one re-check scheduled.
-    expect(ioMocks.sendSessionUpdate).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(600);
-    expect(ioMocks.sendSessionUpdate).toHaveBeenCalledTimes(1);
-    const [, sid, update] = ioMocks.sendSessionUpdate.mock.calls[0] as unknown as [
-      acp.AgentContext,
-      string,
-      { sessionUpdate: string; entries: Array<{ content: string; status: string }> },
-    ];
-    expect(sid).toBe("s1");
-    expect(update.sessionUpdate).toBe("plan");
-    expect(update.entries).toEqual([
-      expect.objectContaining({ content: "a", status: "completed" }),
-      expect.objectContaining({ content: "b", status: "in_progress" }),
-    ]);
-    // Exactly two reads: the result-time one plus one re-check (no loops).
-    expect(backend.request).toHaveBeenCalledTimes(2);
-  });
-});

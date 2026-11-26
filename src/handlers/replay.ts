@@ -326,11 +326,10 @@ export const TURN_READ: FetchMessagesOptions = { timeoutMs: 8000, retry: false }
 
 /**
  * Peek-read caps for turn-internal lookups whose target is always the
- * NEWEST message (the just-completed edit's tool part, the just-finished
- * reply). The anchor scopes the read; the cap only bounds the
- * cursor-not-found fallback, which answers with the whole store.
+ * NEWEST message (the just-finished reply). The anchor scopes the read; the
+ * cap only bounds the cursor-not-found fallback, which answers with the
+ * whole store.
  */
-export const EDIT_DIFF_READ_LIMIT = 60;
 export const REPLY_READ_LIMIT = 60;
 /**
  * Tail window for the goal loop's cursor-less reads (verdict / ticket

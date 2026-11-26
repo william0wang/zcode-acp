@@ -38,6 +38,15 @@ import { makePlanEntry } from "./types.js";
 export class ProjectionDiffer {
   private readonly seenToolIds = new Set<string>();
   private readonly lastToolStatus = new Map<string, string>();
+  /**
+   * Tool ids whose COMPLETED transition is withheld from markToolSeen (see
+   * deferToolPayload): the live result event dispatched status + text output
+   * without the structured diff/locations, and the turn-completion snapshot
+   * diff is the one place that still delivers the rich payload. The completed
+   * transition kept "unseen" here makes diffToolPart take the new-tool branch
+   * and attach the payload (ADR-0035).
+   */
+  private readonly deferredToolIds = new Set<string>();
   private lastUsage: number | null = null;
   private readonly seenMessageIds = new Set<string>();
   private lastPlanSig = "__none__";
@@ -114,6 +123,21 @@ export class ProjectionDiffer {
   markToolSeen(callId: string): void {
     this.seenToolIds.add(callId);
     this.lastToolStatus.set(callId, "completed");
+    this.deferredToolIds.delete(callId);
+  }
+
+  /**
+   * Withhold a live-dispatched tool's COMPLETED transition (markToolSeen still
+   * records the id as seen): the turn loop calls this instead for tools whose
+   * result event carried no structured diff (Edit/Write/ApplyPatch), so the
+   * turn-completion diffToolPart takes the new-tool branch and delivers the
+   * rich payload from the snapshot. Only the status map is held back — the id
+   * stays seen, so a failed read still suppresses re-emission as usual.
+   */
+  deferToolPayload(callId: string): void {
+    if (!this.seenToolIds.has(callId)) return;
+    this.lastToolStatus.set(callId, "in_progress");
+    this.deferredToolIds.add(callId);
   }
 
   /** Reset per-turn flags (does NOT reset seenMessageIds). */
@@ -251,6 +275,7 @@ export class ProjectionDiffer {
       // payload (output / diff / content / locations) like the new-tool branch,
       // so snapshot-path transitions aren't content-less.
       this.lastToolStatus.set(callId, status);
+      this.deferredToolIds.delete(callId);
       const display = (state["metadata"] as Record<string, unknown> | undefined)?.["display"];
       const update: InternalEvent = {
         kind: "ToolCallUpdate",

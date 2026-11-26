@@ -82,9 +82,7 @@ import {
 import { refreshTerminalTabTitle } from "../terminal-title.js";
 import { isClosedSessionId } from "../closed-sessions.js";
 import {
-  buildDiffContent,
   EventTranslator,
-  extractLocations,
   formatTurnError,
   isBackendLostError,
   isContentLiveDelivered,
@@ -92,7 +90,6 @@ import {
   isTransientTurnError,
   ProjectionDiffer,
 } from "../translators/index.js";
-import type { InternalEvent } from "../translators/index.js";
 import { clientConnectionRoot, log, warn, zcodeHomeDir } from "../utils.js";
 import type { PendingTurn, ZcodeAcpServer } from "../server.js";
 import { dispatchEvent } from "./dispatch.js";
@@ -107,7 +104,6 @@ import {
 } from "./io.js";
 import type { FetchMessagesOptions, ReplaySlice } from "./replay.js";
 import {
-  EDIT_DIFF_READ_LIMIT,
   fetchMessages,
   fetchMessagesSinceAnchor,
   fullSlice,
@@ -5195,51 +5191,40 @@ export async function runEventTurn(
       }
     }
 
-    // Edit/Write diff eager dispatch: on tool.updated result, grab the
-    // structured patch from session/messages immediately (don't wait for turn
-    // completion — model rate-limiting could delay it indefinitely).
+    // Per-tool-result backend reads are gone (ADR-0035): every read here is a
+    // whole-store scan on the backend, so edit diffs and todos ride the
+    // turn-completion diff instead of being fetched per completed tool. The
+    // live result event already closes the card (status + text output); only
+    // the rich payload (diff/locations) waits for completion.
     //
-    // Newer ZCode backends omit toolName on "result" events (only "scheduled"
-    // and "started" carry it), so we no longer filter by tool name here —
-    // dispatchEditDiff itself checks the tool part's display and skips
-    // non-file-diff tools harmlessly.
+    // Kept: EnterPlanMode switches the session mode mid-turn without a
+    // session/setMode notification; reconcile immediately so the editor's
+    // mode indicator flips without waiting for turn completion. Rare enough
+    // (once per planning turn) to justify its read.
     if (ev.type === "tool.updated") {
       const payload = ev.payload as { kind?: string; toolCallId?: string };
       if (payload.kind === "result" && payload.toolCallId) {
-        // Fire edit-diff and plan-sync in parallel — they hit independent
-        // backend methods (session/messages vs session/read) so there's no
-        // ordering dependency between them.
-        const sideTasks: Promise<void>[] = [
-          dispatchEditDiff(
-            server,
-            cx,
-            acpSid,
-            turn.zcodeSid,
-            payload.toolCallId,
-            differ,
-            chunkMsgId,
-          ),
-          // Push plan (TODO list) updates immediately on tool completion so the
-          // editor doesn't lag behind — without this, TODO changes only surface at
-          // turn completion, which can be delayed by the model's remaining output.
-          dispatchPlanIfChanged(server, cx, acpSid, turn.zcodeSid, differ, chunkMsgId),
-        ];
-        // EnterPlanMode switches the session mode mid-turn without a
-        // session/setMode notification; reconcile immediately so the editor's
-        // mode indicator flips without waiting for turn completion.
         if (translator.toolNames.get(payload.toolCallId) === "EnterPlanMode") {
-          sideTasks.push(emitModeIfChanged(server, cx, acpSid, turn.zcodeSid));
+          await emitModeIfChanged(server, cx, acpSid, turn.zcodeSid);
         }
-        await Promise.all(sideTasks);
       }
     }
 
     // Sync translator → differ seen-tool-ids so the turn-completion differ.diff
-    // doesn't re-emit tools the event path already sent (which would clear
+    // doesn't re-emit tools the event path already dispatched (which would clear
     // Bash terminal output via a content-less ToolCallNew through the terminal
     // path). Without this, Bash output is wiped on the next turn.
+    //
+    // Diff-carrying tools withhold the completed transition instead: their
+    // live result event carries no structured diff, and marking completed
+    // would suppress the very transition that delivers it from the completion
+    // snapshot (see deferToolPayload).
     for (const seenId of translator.seenToolIds) {
-      differ.markToolSeen(seenId);
+      if (DIFF_TOOL_NAMES.has((translator.toolNames.get(seenId) ?? "").toLowerCase())) {
+        differ.deferToolPayload(seenId);
+      } else {
+        differ.markToolSeen(seenId);
+      }
     }
 
     if (translator.turnDone) {
@@ -5533,119 +5518,13 @@ export async function emitModeIfChanged(
 }
 
 /**
- * Edit/Write result → grab the structured patch from session/messages and emit
- * a ToolCallUpdate with diff content immediately (don't wait for turn
- * completion — model rate-limiting could delay it indefinitely). Always marks
- * the tool seen in the differ so turn-completion diff won't re-emit it.
- *
- * Scoped to the differ's anchor plus a tail cap: the tool message that just
- * completed is the newest one in the store, so the native cursor reaches it
- * without transferring the session's whole history on every edit of a long
- * refactoring turn. The cap only bounds the cursor-not-found fallback.
+ * Tools whose live result event carries no structured diff/locations: the
+ * differ withholds their completed transition (deferToolPayload) so the
+ * turn-completion snapshot diff delivers the rich payload instead (ADR-0035 —
+ * no per-tool-result whole-store reads mid-turn). Keys lowercase; matching is
+ * case-insensitive.
  */
-async function dispatchEditDiff(
-  server: ZcodeAcpServer,
-  cx: acp.AgentContext,
-  acpSid: string,
-  zcodeSid: string,
-  callId: string,
-  differ: ProjectionDiffer,
-  chunkMsgId: string,
-): Promise<void> {
-  const messages = await fetchMessages(server, zcodeSid, {
-    ...TURN_READ,
-    afterMessageId: differ.historyAnchor,
-    limit: EDIT_DIFF_READ_LIMIT,
-  });
-  for (const m of messages) {
-    for (const p of m.parts ?? []) {
-      if (!p || typeof p !== "object") continue;
-      const part = p as Record<string, unknown>;
-      const partCallId = String(part["callID"] ?? part["callId"] ?? "");
-      if (partCallId !== callId) continue;
-      const state = (part["state"] as Record<string, unknown>) ?? {};
-      const display = (state["metadata"] as Record<string, unknown> | undefined)?.["display"];
-      const diffContent = buildDiffContent(display);
-      const locations = extractLocations(String(part["tool"] ?? ""), state["input"], display);
-      const ev: InternalEvent = {
-        kind: "ToolCallUpdate",
-        callId,
-        tool: String(part["tool"] ?? ""),
-        status: "completed",
-        diffContent: diffContent.length > 0 ? diffContent : undefined,
-        locations: locations.length > 0 ? locations : undefined,
-      };
-      if (diffContent.length > 0 || locations.length > 0) {
-        await dispatchEvent(server, cx, acpSid, ev, chunkMsgId);
-      }
-      differ.markToolSeen(callId);
-      return;
-    }
-  }
-  differ.markToolSeen(callId);
-}
-
-/**
- * Read the authoritative todos from `session/read` and push a PlanUpdate if the
- * signature changed since the last check. Called mid-turn (right after each
- * tool completes) so the editor sees TODO updates immediately instead of
- * waiting for turn completion — the turn-completion diff would otherwise lag
- * behind by the rest of the model's output.
- *
- * The backend writes the projection's todos asynchronously AFTER the
- * tool-result event, so a single read at result-time races that write and
- * intermittently sees the stale list (the editor's todo panel then lags until
- * the next tool completes). When the signature is unchanged, re-check once
- * after a short delay before giving up.
- *
- * Uses a lightweight `session/read` (no session/messages fetch). Failures are
- * logged and swallowed: plan staleness is cosmetic, not worth crashing the turn.
- */
-const PLAN_RECHECK_DELAY_MS = 600;
-
-// Exported for unit tests (plan recheck timing).
-export async function dispatchPlanIfChanged(
-  server: ZcodeAcpServer,
-  cx: acp.AgentContext,
-  acpSid: string,
-  zcodeSid: string,
-  differ: ProjectionDiffer,
-  chunkMsgId: string,
-  recheck = true,
-): Promise<void> {
-  try {
-    const backend = await server.ensureBackend();
-    const readResp = await backend.request(
-      server.nextId(),
-      "session/read",
-      { sessionId: zcodeSid },
-      8000,
-    );
-    const read = (readResp.result ?? {}) as {
-      todos?: unknown[];
-      todoGroups?: Array<{ entries?: unknown[]; todos?: unknown[] }>;
-    };
-    const todos = flattenTodos(read.todos, read.todoGroups);
-    const events = differ.diffPlan(todos);
-    if (events.length === 0) {
-      if (!recheck) return;
-      const timer = setTimeout(() => {
-        void dispatchPlanIfChanged(server, cx, acpSid, zcodeSid, differ, chunkMsgId, false).catch(
-          () => {
-            /* best-effort: cosmetic staleness only */
-          },
-        );
-      }, PLAN_RECHECK_DELAY_MS);
-      timer.unref?.();
-      return;
-    }
-    for (const iev of events) {
-      await dispatchEvent(server, cx, acpSid, iev, chunkMsgId);
-    }
-  } catch (e) {
-    log(`dispatchPlanIfChanged: skipped (${e instanceof Error ? e.message : String(e)})`);
-  }
-}
+const DIFF_TOOL_NAMES = new Set(["edit", "write", "applypatch"]);
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
