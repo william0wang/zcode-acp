@@ -48,13 +48,37 @@ let fakeConfig: unknown = collidingPlansConfig();
 
 vi.mock("../src/backend/resolve.js", async (importOriginal) => ({
   ...(await importOriginal<object>()),
+  // Hermetic table lookup (importOriginal keeps the rest): the REAL
+  // builtinProviderEnv discovers the live desktop bundle and derives its
+  // table path, which on a bridge-attached host exists and unions live
+  // catalog models (GLM-5.4) into every fixed-list expectation below. An
+  // empty derivation makes builtinTablePath() fall through to the ambient
+  // env / real-bundle probes, both killed below.
   builtinProviderEnv: () => ({}),
 }));
 
+// Same direct-assignment rule as tests/setup/hermetic-home.ts: vi.stubEnv
+// would be undone by this file's own afterEach (vi.unstubAllEnvs), resurrecting
+// the bridge-injected ZCODE_BUILTIN_PROVIDER_CONFIG_FILE (a revision-48
+// runtime table with GLM-5.4) after the first test. A delete cannot be
+// un-stubbed back.
+delete process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE;
+
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  // Hermetic bundle probe: builtinTablePath()'s last resort checks the real
+  // desktop bundle path (/Applications/ZCode.app/.../zcode-builtin.json) via
+  // existsSync — on a machine with the app installed that file exists and
+  // leaks the live catalog into fixed-list expectations. Only tables the
+  // tests themselves write (temp "zcode-builtin-table-" dirs) may resolve.
   return {
     ...actual,
+    existsSync: (p: string) => {
+      if (typeof p === "string" && p.includes("zcode-builtin.json")) {
+        return actual.existsSync(p) && p.includes("zcode-builtin-table-");
+      }
+      return actual.existsSync(p);
+    },
     readFileSync: (p: string) => {
       if (p === ZCODE_CREDS_PATH) return JSON.stringify(fakeConfig);
       return actual.readFileSync(p);
