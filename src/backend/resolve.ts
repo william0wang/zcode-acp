@@ -16,6 +16,7 @@ import {
   readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   statSync,
   type Stats,
 } from "node:fs";
@@ -64,6 +65,18 @@ function whichSync(bin: string): string | null {
     return out || null;
   } catch {
     return null;
+  }
+}
+
+/** Whether a resolved bin is a JS entry — by its own name or, for a symlink
+ * like npm's extension-less bin link, by its target's. Anything else is a
+ * native launcher or wrapper that runs on its own shebang. */
+function isJsEntry(bin: string): boolean {
+  if (/\.(cjs|mjs|js)$/.test(bin)) return true;
+  try {
+    return /\.(cjs|mjs|js)$/.test(realpathSync(bin));
+  } catch {
+    return false;
   }
 }
 
@@ -212,8 +225,10 @@ export function windowsRegistryZcodeLocations(): string[] {
 
 /**
  * Well-known desktop-app bundle locations of the shipped `zcode.cjs`
- * (mirrors the per-platform table in README). The app never adds the CLI to
- * PATH, so a bare terminal launch of the REPL/editor bridge finds it here.
+ * (mirrors the per-platform table in README). The app never adds the CLI
+ * itself to PATH — on Linux its packages put the DESKTOP LAUNCHER there
+ * under the same name, which `discoverZcodeBin` skips — so a bare terminal
+ * launch of the REPL/editor bridge finds the CLI here.
  */
 export function bundledZcodeCandidates(): string[] {
   const home = os.homedir();
@@ -238,8 +253,11 @@ export function bundledZcodeCandidates(): string[] {
   return [
     "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs",
     path.join(home, "Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"),
+    // Linux, in the bundle gate's order (desktopBundleEntryPaths): the version
+    // the gates read is the bundle this resolver launches.
     "/opt/ZCode/resources/glm/zcode.cjs",
     "/usr/share/zcode/resources/glm/zcode.cjs",
+    "/usr/lib/zcode/glm/zcode.cjs",
   ];
 }
 
@@ -248,14 +266,24 @@ export function bundledZcodeCandidates(): string[] {
  * (absolute path so the spawn no longer depends on the child's PATH), then
  * the desktop-app bundle locations. `null` when nothing is found — the caller
  * falls back to the bare name and lets spawn surface the failure.
+ *
+ * Linux is the exception to PATH-first. Its packages put the DESKTOP launcher
+ * on PATH as `zcode` — an after-install symlink (`/usr/bin/zcode` →
+ * `/opt/ZCode/zcode`, the Electron binary) in the official deb/pacman/rpm
+ * packages, a shell wrapper that execs Electron in Arch's zcode-bin. Spawning
+ * that with `app-server --stdio` starts the GUI (the desktop main handles only
+ * deep links and `--open-workspace`), and it is no JS entry, so no provider
+ * table is injected either. Only a JS entry on PATH is a CLI install; anything
+ * else yields to the bundled zcode.cjs and is used as-is only when no bundle
+ * exists (the native CLI case).
  */
 function discoverZcodeBin(): string | null {
   const onPath = whichSync("zcode");
-  if (onPath) return onPath;
+  if (onPath && (process.platform !== "linux" || isJsEntry(onPath))) return onPath;
   for (const c of bundledZcodeCandidates()) {
     if (existsSync(c)) return c;
   }
-  return null;
+  return onPath;
 }
 
 // ---------- provider-runtime env injection (3.12.3+ desktop bundles) ----------
