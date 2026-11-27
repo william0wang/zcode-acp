@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.1](https://github.com/william0wang/zcode-acp/compare/v0.96.0...v0.96.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* read the desktop bundle on Linux ([#435](https://github.com/william0wang/zcode-acp/issues/435)) ([0a2282d](https://github.com/william0wang/zcode-acp/commit/0a2282deba48593216d518417c154506144074c5))
+
 ## [0.96.0](https://github.com/william0wang/zcode-acp/compare/v0.95.1...v0.96.0) (2026-11-27)
 
 
