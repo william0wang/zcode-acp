@@ -225,8 +225,10 @@ export function windowsRegistryZcodeLocations(): string[] {
 
 /**
  * Well-known desktop-app bundle locations of the shipped `zcode.cjs`
- * (mirrors the per-platform table in README). The app never adds the CLI to
- * PATH, so a bare terminal launch of the REPL/editor bridge finds it here.
+ * (mirrors the per-platform table in README). The app never adds the CLI
+ * itself to PATH — on Linux its packages put the DESKTOP LAUNCHER there
+ * under the same name, which `discoverZcodeBin` skips — so a bare terminal
+ * launch of the REPL/editor bridge finds the CLI here.
  */
 export function bundledZcodeCandidates(): string[] {
   const home = os.homedir();

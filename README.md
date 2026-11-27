@@ -134,7 +134,7 @@ to the bundled `zcode.cjs`, and is used only when no bundle is found:
 | **Linux**   | `/opt/ZCode/resources/glm/zcode.cjs` (deb, pacman, rpm) · `/usr/lib/zcode/glm/zcode.cjs` (Arch `zcode-bin`) |
 
 An AppImage has no fixed path — mount it (`--appimage-mount`) and point
-`<mount>/resources/glm/zcode.cjs`.
+`ZCODE_BIN` at `<mount>/resources/glm/zcode.cjs`.
 
 > If the path doesn't match your install, locate it with:
 >
