@@ -4,7 +4,15 @@
  * backend respawn run against a stubbed AgentContext / server.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -22,8 +30,10 @@ import {
   UNATTENDED_PIN,
 } from "../src/handlers/sandbox-allow.js";
 import {
+  appendGlobalSandboxDeny,
   globalSandboxConfigDir,
   globalSandboxConfigPath,
+  projectSandboxConfigPath,
   readGlobalSandboxConfig,
   resetSandboxDecisionForTest,
   resolveReal,
@@ -265,6 +275,210 @@ describe("handleSandboxDenial", () => {
     expect(server.sandboxOnceAllows.has("/opt/data")).toBe(true);
     // The user's (broken) bytes were NOT clobbered by the grant.
     expect(readFileSync(file, "utf8")).toBe("{not json");
+  });
+
+  // 2026-11-27: a denial INSIDE a live workspace retargets the ask to the
+  // workspace ROOT — one ask per repo, not one per parent directory — and
+  // "始终允许" persists there, into that workspace's project config.
+  it("in-workspace denial asks once for the ROOT and persists it to the project config", async () => {
+    const { server, cx, request, batchFlush } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: path.join(wsRoot, "src", "lib", "a.ts"), isMkdir: false },
+      "tc_root",
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    // The popup names the file the "always" choices will persist to.
+    expect(JSON.stringify(request.mock.calls[0]?.[1])).toContain(projectSandboxConfigPath(wsRoot));
+    // The grant landed in the PROJECT file, scoped to the workspace root —
+    // the global file stays untouched.
+    const project = JSON.parse(
+      readFileSync(path.join(wsRoot, ".zcode", "acp", "sandbox.json"), "utf8")!,
+    ) as { allow: string[]; deny: string[] };
+    expect(project.allow).toEqual([wsRoot]);
+    expect(project.deny).toEqual([]);
+    expect(readGlobalSandboxConfig().allow).toEqual([]);
+    // The batched restart carries the root (the widened-profile continuation).
+    vi.advanceTimersByTime(SANDBOX_RESTART_BATCH_MS);
+    const batch = batchFlush.mock.calls[0]?.[0] as Map<string, string[]>;
+    expect(batch.get("acp_a")).toEqual([wsRoot]);
+  });
+
+  it("reject_always under a workspace persists the denied PATH to the project deny, never the root", async () => {
+    const { server, cx, request, notify } = makeStubs("sandbox_reject_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    const denied = path.join(wsRoot, "src", "secret.env");
+
+    await handleSandboxDenial(server, cx, "acp_a", { path: denied, isMkdir: false }, "tc_rej");
+
+    expect(request).toHaveBeenCalledTimes(1);
+    const project = JSON.parse(
+      readFileSync(path.join(wsRoot, ".zcode", "acp", "sandbox.json"), "utf8")!,
+    ) as { allow: string[]; deny: string[] };
+    // Fine-grained refusal: the asked ROOT is NOT deny-listed (declining a
+    // root-wide grant must not kill the whole workspace's writes).
+    expect(project.deny).toEqual([path.dirname(denied)]);
+    expect(project.allow).toEqual([]);
+
+    // SAME session: the settled root ask is pinned, so any later in-workspace
+    // denial is silent — one ask per repo per session, whatever the answer.
+    notify.mockClear();
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: path.join(wsRoot, "docs", "b.md"), isMkdir: false },
+      "tc_rej3",
+    );
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(notify).not.toHaveBeenCalled();
+
+    // FRESH session: a path inside the deny-listed dir gets the hint — no
+    // popup — and the hint names the PROJECT file that holds the entry.
+    const hinted = makeStubs("sandbox_allow_always");
+    hinted.server.sessionCwds.set("acp_a", wsRoot);
+    await handleSandboxDenial(
+      hinted.server,
+      hinted.cx,
+      "acp_a",
+      { path: path.join(wsRoot, "src", "other.env"), isMkdir: false },
+      "tc_rej2",
+    );
+    expect(hinted.request).not.toHaveBeenCalled();
+    expect(hinted.notify).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(hinted.notify.mock.calls[0]?.[1])).toContain(
+      projectSandboxConfigPath(wsRoot),
+    );
+    // …while a directory outside that deny entry still asks: the root itself
+    // was never denied.
+    const siblingAsk = makeStubs("sandbox_allow_always");
+    siblingAsk.server.sessionCwds.set("acp_a", wsRoot);
+    await handleSandboxDenial(
+      siblingAsk.server,
+      siblingAsk.cx,
+      "acp_a",
+      { path: path.join(wsRoot, "docs", "b.md"), isMkdir: false },
+      "tc_rej4",
+    );
+    expect(siblingAsk.request).toHaveBeenCalledTimes(1);
+  });
+
+  it("reject_always on a root-level path goes to the global deny list, never a root-wide project deny", async () => {
+    const { server, cx, request } = makeStubs("sandbox_reject_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: path.join(wsRoot, "out.log"), isMkdir: false },
+      "tc_rootrej",
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    // A project deny is a real SBPL deny in the last-match tail: an entry
+    // equal to the live root would lock EVERY write in the workspace after
+    // the next respawn. The global deny list only silences the popup.
+    expect(existsSync(projectSandboxConfigPath(wsRoot))).toBe(false);
+    expect(readGlobalSandboxConfig().deny).toEqual([wsRoot]);
+    expect(readGlobalSandboxConfig().allow).toEqual([]);
+  });
+
+  it("the workspace's config island is hinted once per session, never asked", async () => {
+    const { server, cx, request, notify } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+
+    // A write to the project config itself…
+    const file = { path: path.join(wsRoot, ".zcode", "acp", "sandbox.json"), isMkdir: false };
+    await handleSandboxDenial(server, cx, "acp_a", file, "tc_island1");
+    await handleSandboxDenial(server, cx, "acp_a", file, "tc_island2");
+    expect(request).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    // …and an operation reported at the island DIR (its parent is the ask
+    // target) — the denied path itself is vetted too.
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: path.join(wsRoot, ".zcode", "acp"), isMkdir: false },
+      "tc_island3",
+    );
+    expect(request).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it("a PROJECT-only strictGit makes .git denials protected (hint, no doomed root popup)", async () => {
+    const { server, cx, request, notify } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
+    writeFileSync(projectSandboxConfigPath(wsRoot), JSON.stringify({ strictGit: true }));
+
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: path.join(wsRoot, ".git", "index.lock"), isMkdir: false },
+      "tc_git",
+    );
+
+    expect(request).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("a deny-listed path is hinted once per session", async () => {
+    const { server, cx, request, notify } = makeStubs("sandbox_allow_always");
+    server.sessionCwds.set("acp_a", wsRoot);
+    appendGlobalSandboxDeny("/opt/data");
+
+    const denial = { path: "/opt/data/f.txt", isMkdir: false };
+    await handleSandboxDenial(server, cx, "acp_a", denial, "tc_d1");
+    await handleSandboxDenial(server, cx, "acp_a", denial, "tc_d2");
+    await handleSandboxDenial(
+      server,
+      cx,
+      "acp_a",
+      { path: "/opt/data/g.txt", isMkdir: false },
+      "tc_d3",
+    );
+
+    expect(request).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("a project deny entry is honored across every live workspace (the profile unions them)", async () => {
+    const { server, cx, request, notify } = makeStubs("sandbox_allow_always");
+    const rootB = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-allow-b-")));
+    try {
+      server.sessionCwds.set("acp_a", wsRoot);
+      server.sessionCwds.set("acp_b", rootB);
+      // Workspace A's project file deny-lists a path under workspace B.
+      mkdirSync(path.join(wsRoot, ".zcode", "acp"), { recursive: true });
+      writeFileSync(
+        projectSandboxConfigPath(wsRoot),
+        JSON.stringify({ deny: [path.join(rootB, "secret")] }),
+      );
+
+      await handleSandboxDenial(
+        server,
+        cx,
+        "acp_b",
+        { path: path.join(rootB, "secret", "k.txt"), isMkdir: false },
+        "tc_x",
+      );
+
+      // A popup could never lift that deny (it is emitted in the profile's
+      // last-match tail) — the hint names A's file instead.
+      expect(request).not.toHaveBeenCalled();
+      expect(notify).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(notify.mock.calls[0]?.[1])).toContain(projectSandboxConfigPath(wsRoot));
+    } finally {
+      rmSync(rootB, { recursive: true, force: true });
+    }
   });
 
   it("freezes the turn before the ask; a rejection settles it into a continuation", async () => {

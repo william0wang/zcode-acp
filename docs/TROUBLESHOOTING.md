@@ -599,7 +599,8 @@ child as a bare `EPERM`, which tools may misreport as their own bug. When the
 backend runs sandboxed, the bridge logs a one-shot warning the first time a
 tool output contains `Operation not permitted` — that warning is your signal
 to suspect the sandbox. Path grants for legitimate writes go in
-`~/.config/zcode-acp/sandbox.json`.
+`~/.config/zcode-acp/sandbox.json` (machine-global) or in the workspace's
+own `.zcode/acp/sandbox.json` (project-scoped).
 
 ### UNRESOLVED: CLI (martty) freezes at an old state while the mobile app keeps updating
 
