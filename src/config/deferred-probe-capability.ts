@@ -7,20 +7,47 @@ import { warn } from "../utils.js";
 // Only these desktop bundle version/hash pairs are audited; the CLI version
 // is unrelated. Unknown versions, other platforms, paths and builds fail closed.
 // The entry bytes are pinned, not the Node interpreter or dynamically loaded resources.
+// The pins are shared across platforms: the official Linux x64 and arm64
+// packages ship a byte-identical zcode.cjs for 3.18.0, 3.18.2 and 4.0.0 (hashed
+// out of the published deb archives, 2026-11-27; 4.0.0 also matches in the
+// pacman, rpm and AppImage packages).
 const MACOS_ENTRY = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+/** Linux: the official deb/pacman/rpm packages install under /opt, Arch's
+ * zcode-bin relocates the same tree to /usr/lib without the resources/
+ * level. Every layout keeps app.asar at dirname(dirname(entry)). */
+const LINUX_ENTRIES = [
+  "/opt/ZCode/resources/glm/zcode.cjs",
+  "/usr/share/zcode/resources/glm/zcode.cjs",
+  "/usr/lib/zcode/glm/zcode.cjs",
+] as const;
 const AUDITED: Readonly<Record<string, string>> = {
   "3.18.0": "26785f28ab8fb9f8b0f3821f2bf71d294f4d0b8bf28108785292f86c7e14090d",
   "3.18.2": "08726b5ef69e1e9072828baa4656713cb3aac93bb096938681278c5600312b2c",
   "4.0.0": "0de95ddd65d7712a3beeccc8ee6de53ea0ce96338eb427e52b2717ba2f3afe19",
 };
 
-/** Desktop-bundled zcode.cjs path for the active platform. */
-export function desktopBundleEntryPath(): string {
+/** Every audited desktop-bundled zcode.cjs path for the active platform. */
+export function desktopBundleEntryPaths(): string[] {
   if (process.platform === "win32") {
     const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local");
-    return path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs");
+    return [path.join(localAppData, "Programs", "ZCode", "resources", "glm", "zcode.cjs")];
   }
-  return MACOS_ENTRY;
+  if (process.platform === "linux") return [...LINUX_ENTRIES];
+  return [MACOS_ENTRY];
+}
+
+/**
+ * The desktop-bundled zcode.cjs the bundle gates read, for the active platform.
+ * Linux has more than one install location: an explicit ZCODE_BIN that is one
+ * of them is the bundle the bridge launches, otherwise the first one on disk
+ * wins; none found answers the first, whose read then fails closed.
+ */
+export function desktopBundleEntryPath(): string {
+  const entries = desktopBundleEntryPaths();
+  if (entries.length === 1) return entries[0]!;
+  const explicit = process.env.ZCODE_BIN;
+  if (explicit && entries.includes(explicit)) return explicit;
+  return entries.find((candidate) => existsSync(candidate)) ?? entries[0]!;
 }
 
 export function auditedBundleMatches(version: string, digest: string): boolean {
@@ -72,7 +99,9 @@ export function readAsarPackageVersion(asarPath: string): string | undefined {
 }
 
 function readDesktopBundleVersion(entry: string): string | undefined {
-  if (process.platform === "win32") {
+  // Windows and Linux bundles carry no Info.plist: the desktop version is the
+  // package.json inside resources/app.asar (or an unpacked resources/app).
+  if (process.platform !== "darwin") {
     const resourcesDir = path.dirname(path.dirname(entry));
     const unpackedPkg = path.join(resourcesDir, "app", "package.json");
     if (existsSync(unpackedPkg)) {
