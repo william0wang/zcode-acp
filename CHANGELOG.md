@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.2](https://github.com/william0wang/zcode-acp/compare/v0.96.1...v0.96.2) (2026-11-27)
+
+
+### Bug Fixes
+
+* yield to the bundled zcode.cjs over the Linux desktop launcher ([#440](https://github.com/william0wang/zcode-acp/issues/440)) ([a8e1045](https://github.com/william0wang/zcode-acp/commit/a8e10457f5c639b0f661dccff1f6834c727f270d))
+
 ## [0.96.1](https://github.com/william0wang/zcode-acp/compare/v0.96.0...v0.96.1) (2026-11-27)
 
 
