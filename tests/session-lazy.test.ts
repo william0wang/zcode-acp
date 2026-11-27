@@ -469,6 +469,11 @@ describe("loadSession with lazy placeholders", () => {
 
     const resume = calls.find((c) => c.method === "session/resume");
     expect(resume?.params).toMatchObject({ sessionId: "sess_real" });
+    // #420: a raw backend id this bridge never recorded must not present the
+    // bridge's process cwd as the session's workspace — upstream's lineage
+    // validation rejects that with project.session-lineage-invalid. Omitted,
+    // the backend rebuilds the ref from the session's own persisted record.
+    expect(resume?.params).not.toHaveProperty("workspace");
     // Same as resumeSession: the client cwd is NOT recorded as the root.
     expect(server.sessionCwds.get("sess_real")).toBe(process.cwd());
   });
@@ -519,8 +524,10 @@ describe("cold recovery workspace ordering", () => {
           : saved;
         expect(resume[0]!.params).toMatchObject({
           sessionId: scenario === "unknown" ? "alias" : "backend-id",
-          workspace: { workspacePath: expected, workspaceKey: expected },
         });
+        // Non-serve resumes carry NO workspace (#420): the backend rebuilds
+        // it from the session's own persisted record.
+        expect(resume[0]!.params).not.toHaveProperty("workspace");
         expect(server.sessionCwds.get("alias")).toBe(expected);
       });
     }
@@ -788,6 +795,28 @@ describe("serve mode cwd pinning (ADR-0014 hardening)", () => {
     expect(server.resolveSid("sess_real_1")).toBeUndefined();
     expect(server.sessionCwds.get("sess_real_1")).toBeUndefined();
   });
+
+  it("serve-mode resume still sends the pinned workspace to the backend", async () => {
+    const server = new ZcodeAcpServer({ serveMode: true });
+    mockStore.set("alias", { cwd: process.cwd(), zcodeSid: "sess_own", createdAt: 1 });
+    const { backend, calls } = fakeBackend();
+    server.backend = backend;
+
+    await resumeSession(
+      server,
+      { sessionId: "alias" } as acp.ResumeSessionRequest,
+      {} as acp.AgentContext,
+    );
+
+    const resume = calls.filter((c) => c.method === "session/resume");
+    expect(resume).toHaveLength(1);
+    // Serve mode keeps the explicit workspace: its pre/post-resume guards
+    // (verifyServeWorkspace) compare against the pinned project (#420).
+    expect(resume[0]!.params).toMatchObject({
+      sessionId: "sess_own",
+      workspace: { workspacePath: process.cwd(), workspaceKey: process.cwd() },
+    });
+  });
 });
 
 describe("serve foreign durable target rejection", () => {
@@ -895,12 +924,10 @@ describe("store-recovered sessions (bridge restart)", () => {
 
     const resumes = calls.filter((c) => c.method === "session/resume");
     expect(resumes).toHaveLength(1);
-    // The resume workspace comes from the record's cwd, seeded for a process
-    // that never saw the session/new which recorded it.
-    expect(resumes[0]!.params).toMatchObject({
-      sessionId: "sess_restart",
-      workspace: { workspacePath: "/tmp/ws", workspaceKey: "/tmp/ws" },
-    });
+    // The resume carries NO workspace (#420) — the backend rebuilds it from
+    // the record this store recovered, in the session's own directory.
+    expect(resumes[0]!.params).toMatchObject({ sessionId: "sess_restart" });
+    expect(resumes[0]!.params).not.toHaveProperty("workspace");
     expect(server.isBackendSessionLive("acp_restart")).toBe(true);
   });
 

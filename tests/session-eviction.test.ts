@@ -132,7 +132,10 @@ describe("prompt() eviction recovery", () => {
 
     expect(result).toEqual({ stopReason: "end_turn" });
     const resume = calls.find((c) => c.method === "session/resume");
-    expect(resume?.params).toMatchObject({ sessionId: "zs_ts", workspace: {} });
+    expect(resume?.params).toMatchObject({ sessionId: "zs_ts" });
+    // No workspace outside serve mode (#420): the backend rebuilds it from
+    // the session's own persisted record.
+    expect(resume?.params).not.toHaveProperty("workspace");
     expect(count(calls, "session/subscribe")).toBe(2);
     // Baseline fetch ran once against the evicted session and again after the
     // reload (differ re-baseline) — turn completion must not replay history.
