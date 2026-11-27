@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.95.0](https://github.com/william0wang/zcode-acp/compare/v0.94.1...v0.95.0) (2026-11-27)
+
+
+### Features
+
+* opt-in switch for ZCode Project Memory ([#431](https://github.com/william0wang/zcode-acp/issues/431)) ([84e0f80](https://github.com/william0wang/zcode-acp/commit/84e0f80e64ed28a3b03c7c48badeaac4cb1f4679))
+
+
+### Bug Fixes
+
+* merge user MCP servers into client-declared lists ([#428](https://github.com/william0wang/zcode-acp/issues/428)) ([59a36bb](https://github.com/william0wang/zcode-acp/commit/59a36bbd968bf11f7e9da8296f1bdc91f6cce171)), closes [#427](https://github.com/william0wang/zcode-acp/issues/427)
+* omit the resume workspace outside serve mode ([#430](https://github.com/william0wang/zcode-acp/issues/430)) ([9f988f7](https://github.com/william0wang/zcode-acp/commit/9f988f7b3363a1737934045afc386ea21174db64))
+* report confirmed session modes consistently to ACP clients ([#425](https://github.com/william0wang/zcode-acp/issues/425)) ([0f1f619](https://github.com/william0wang/zcode-acp/commit/0f1f619001765e4999b8a5bdc01288ada3787bd0))
+
 ## [0.94.1](https://github.com/william0wang/zcode-acp/compare/v0.94.0...v0.94.1) (2026-11-26)
 
 
