@@ -1116,7 +1116,8 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   forever — the App/editor mode indicator could never follow an auto plan entry
   ("mode 不跟随", reported twice). Upstream's own display fold is
   `planEnabled ?? mode === "plan"` (product-projection.ts:3785-3797); the bridge
-  mirrors it: `server.sessionPlanActive` (zcodeSid set) is fed from
+  mirrors it: `server.sessionPlanState` (tri-state since #425 — `planStateOf`
+  answers the runtime-confirmed switch, or undefined = unknown) is fed from
   SessionModeChanged events — which ride the v3 wire as a GENERIC
   `session.updated` with the RAW `{mode, planEnabled, source, toolCallId}`
   payload (the mapper has no dedicated type; payload passthrough) — in the
@@ -1126,11 +1127,21 @@ permitted` (#127); the slave allow is extension-gated (`require-all` +
   every advertised mode; `setMode`//`/mode` mirror the runtime's own
   execution-state fold (`"plan"` enables the flag, anything else disables it —
   resolveExecutionState) so their emissions aren't racing the event. Known
-  hole: a COLD resume of a plan-active session starts with an empty set (the
-  backend restores planEnabled from its store but replays no event) — the
+  hole: a COLD resume of a plan-active session starts with NO Plan record
+  (`invalidatePlanState` runs on every performed resume flight; the backend
+  restores planEnabled from its store but replays no event) — the
   display shows the underlying mode until the first transition event/setMode;
   do NOT "fix" the fold away, and do not read the mode from settings expecting
-  "plan".
+  "plan". **An UNKNOWN Plan switch must stay DISPLAYABLE as the base mode**
+  (2026-11-27, the 0.95.0 regression): the settings schema's `mode` is
+  `strict()` with `current` ALONE (`zcodeSessionSettingsStateSchema`,
+  zcode-protocol/index.ts:1356-1360) — no create/resume/read result ever
+  carries `planEnabled` — so unknown is the NORMAL state after every restart,
+  and #425's withhold-on-unknown (plus tests that assumed a `mode.planEnabled`
+  the wire never emits) removed the mode from every loaded session until the
+  user switched by hand. Only an unconfirmable BASE withholds
+  (`effectiveModeFor`); when reviewing a wire-shape assumption in a test,
+  check it against the upstream schema, not against the mock.
 - **Start Plan providers use only the official host credential path — never an
   unofficial provider client**: on 0.17.x backends (the request-security
   edition disables per-request verification outright — `requiresRequestVerification()`

@@ -53,6 +53,8 @@ interface FakeBackendSpec {
   resumeGate?: Promise<unknown>;
   /** Result payload for session/resume when no gate is set (default: {}). */
   resumeResult?: unknown;
+  /** session/read settings (default: {} — no confirmable mode). */
+  readSettings?: Record<string, unknown>;
 }
 
 /** Fake backend with per-method call counts. */
@@ -72,7 +74,9 @@ function makeBackend(spec: FakeBackendSpec): {
         case "workspace/updateProviderRegistry":
           return { result: {} };
         case "session/read":
-          return { result: { projection: { contextUsed: 0 }, settings: {} } };
+          return {
+            result: { projection: { contextUsed: 0 }, settings: spec.readSettings ?? {} },
+          };
         case "session/messages":
           return {
             result: { messages: spec.messagesQueue[Math.min(mi++, spec.messagesQueue.length - 1)] },
@@ -610,6 +614,60 @@ describe("mode recovery on load/resume", () => {
     expect(chunks(updates)).toHaveLength(4);
     // No mode notification was broadcast either.
     expect(updates.some((u) => u.sessionUpdate === "current_mode_update")).toBe(false);
+  });
+
+  it("a cold load publishes the base mode although no wire result carries planEnabled (0.95.0 regression)", async () => {
+    // The REAL wire shape after a bridge restart: upstream's settings schema is
+    // strict with `mode: { current }` alone (zcodeSessionSettingsStateSchema),
+    // so neither the resume result nor session/read ever confirms the Plan
+    // switch. 0.95.0 treated that unknown as unconfirmable and every loaded
+    // session lost its mode until the user switched by hand.
+    const { backend } = makeBackend({
+      messagesQueue: [hist(2)],
+      resumeResult: {
+        session: { sessionId: "sess_race" },
+        settings: { mode: { current: "build" } },
+      },
+      readSettings: { mode: { current: "build" } },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx, updates } = collectCx();
+
+    const r = (await loadSession(server, loadParams(), cx)) as {
+      modes?: { currentModeId?: string };
+      configOptions?: Array<{ id: string; currentValue?: string }>;
+    };
+
+    // Both representations carry the base mode, and they agree.
+    expect(r.modes?.currentModeId).toBe("build");
+    expect(r.configOptions?.find((o) => o.id === "mode")?.currentValue).toBe("build");
+    expect(server.lastMode.get("sess_race")).toBe("build");
+    // The Plan switch is still UNKNOWN — nothing claimed plan, and a later
+    // SessionModeChanged event folds it in.
+    expect(server.planStateOf("sess_race")).toBeUndefined();
+    expect(
+      updates.some((u) => u.sessionUpdate === "current_mode_update" && u.currentModeId === "plan"),
+    ).toBe(false);
+  });
+
+  it("a resume result without settings confirms the base mode through session/read alone", async () => {
+    const { backend } = makeBackend({
+      messagesQueue: [hist(2)],
+      readSettings: { mode: { current: "edit" } },
+    });
+    const server = new ZcodeAcpServer();
+    server.backend = backend;
+    const { cx } = collectCx();
+
+    const r = (await loadSession(server, loadParams(), cx)) as {
+      modes?: { currentModeId?: string };
+      configOptions?: Array<{ id: string; currentValue?: string }>;
+    };
+
+    expect(r.modes?.currentModeId).toBe("edit");
+    expect(r.configOptions?.find((o) => o.id === "mode")?.currentValue).toBe("edit");
+    expect(server.lastMode.get("sess_race")).toBe("edit");
   });
 
   it("a resume snapshot carrying mode + planEnabled publishes modes with zero extra reads", async () => {

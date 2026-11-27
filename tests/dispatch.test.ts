@@ -254,8 +254,9 @@ describe("cross-alias fan-out", () => {
 });
 
 /**
- * A confirmed mode event restores both controls for all session aliases.
- * Model and thought changes can arrive while the mode remains unknown.
+ * A mode event publishes both controls for all session aliases whenever the
+ * base mode is confirmable. Model and thought changes can arrive while the
+ * base mode is unknown.
  */
 describe("ConfigChanged mode recovery", () => {
   /** Server whose session/read answers the given settings (empty when omitted). */
@@ -271,22 +272,36 @@ describe("ConfigChanged mode recovery", () => {
     return s;
   }
 
-  it("a base-only event with unknown Plan state leaves both controls untouched", async () => {
-    const { cx, sent } = mockContext();
-    const server = serverWithRead({});
-    await dispatchEvent(server, cx, "acp_a", { kind: "ConfigChanged", mode: "build" }, CHUNK);
-    expect(sent).toEqual([]);
-    // The display mirror keeps its previous value — the client still shows
-    // whatever it last confirmed.
-    expect(server.lastMode.has("acp_a")).toBe(false);
-  });
-
-  it("a later trusted event (mode + planEnabled) restores the display for every alias consistently", async () => {
+  it("a base-only event with unknown Plan state advertises the base to every alias", async () => {
+    // The state after every cold recovery: no v3 read carries the Plan flag,
+    // so a base-only settings patch must not withhold the display (the 0.95.0
+    // regression removed the mode from every loaded session).
     const { cx, calls } = recordingContext();
     const server = serverWithRead({});
-    // First: a withheld sync (Plan unknown).
     await dispatchEvent(server, cx, "acp_a", { kind: "ConfigChanged", mode: "build" }, CHUNK);
-    expect(calls.filter((c) => c.update.sessionUpdate === "current_mode_update")).toHaveLength(0);
+    const modeUpdates = calls.filter((c) => c.update.sessionUpdate === "current_mode_update");
+    expect(modeUpdates.map((c) => c.sessionId).sort()).toEqual(["acp_a", "acp_b"]);
+    for (const c of modeUpdates) {
+      expect(c.update).toEqual({ sessionUpdate: "current_mode_update", currentModeId: "build" });
+    }
+    // The dropdown agrees with the indicator.
+    for (const c of calls.filter((c) => c.update.sessionUpdate === "config_option_update")) {
+      const { configOptions } = c.update as {
+        configOptions: Array<{ id: string; currentValue?: string }>;
+      };
+      expect(configOptions.find((o) => o.id === "mode")?.currentValue).toBe("build");
+    }
+    expect(server.lastMode.get("acp_a")).toBe("build");
+    // The Plan switch itself stays unconfirmed — only "plan" needs a confirmation.
+    expect(server.planStateOf("zc_1")).toBeUndefined();
+  });
+
+  it("a later trusted event (mode + planEnabled) refines the display for every alias consistently", async () => {
+    const { cx, calls } = recordingContext();
+    const server = serverWithRead({});
+    // First: a base-only sync (Plan unknown) already shows build.
+    await dispatchEvent(server, cx, "acp_a", { kind: "ConfigChanged", mode: "build" }, CHUNK);
+    calls.length = 0;
     // Then: the runtime confirms base build + Plan off (SessionModeChanged).
     await dispatchEvent(
       server,

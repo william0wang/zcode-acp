@@ -129,10 +129,10 @@ export async function dispatchEvent(
  * untouched field — most visibly the model dropdown jumping back to the
  * default model mid-conversation). A mode-bearing event confirms the base
  * mode; a SessionModeChanged event (mode + planEnabled) confirms the Plan
- * switch too. The mode item and current_mode_update publish only when the
- * effective mode is confirmable (base + Plan state both known) — an unknown
- * Plan switch after a cold resume withholds the display until the new
- * runtime confirms, and a later trusted event restores it.
+ * switch too. The mode item and current_mode_update publish whenever the base
+ * mode is confirmable — an unknown Plan switch (the normal state after a cold
+ * resume: no v3 read carries the Plan flag) advertises the base as-is, and a
+ * later SessionModeChanged event folds Plan in.
  * Best-effort: failures are logged and swallowed, never thrown into the loop.
  */
 async function dispatchConfigChanged(
