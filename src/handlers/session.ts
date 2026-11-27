@@ -409,12 +409,22 @@ export function resendMenuAfterGateSettled(server: ZcodeAcpServer, acpSid: strin
 }
 
 /**
- * Shared `session/resume` params builder: {sessionId, workspace} + optional
+ * Shared `session/resume` params builder: {sessionId} + optional
  * session-lifetime mcpServers + the conditional dynamic-workflow flag + the
  * per-session tool denylist. Every resume construction site (session/resume,
  * /resume adoption, session/load, eviction/respawn reload) goes through here
  * so the param shape cannot drift. A non-empty mcpServers list rides with the
  * user's config servers unioned in (mergeUserConfigMcpServers).
+ *
+ * The workspace is sent ONLY in serve mode: there the bridge owns the one
+ * workspace it was incubated for and its pre/post-resume guards
+ * (verifyServeWorkspace) compare against it. Everywhere else the bridge
+ * serves arbitrary workspaces, and a session the bridge never recorded (a
+ * desktop-created session loaded by its raw backend id) must not present the
+ * bridge's process cwd as the session's workspace — upstream's lineage
+ * validation rejects the mismatch with project.session-lineage-invalid
+ * (#420). Omitted, the backend rebuilds the ref from the session's own
+ * persisted record and the load succeeds in the session's real directory.
  */
 async function resumeParams(
   server: ZcodeAcpServer,
@@ -424,7 +434,7 @@ async function resumeParams(
 ): Promise<Record<string, unknown>> {
   const params: Record<string, unknown> = {
     sessionId: zcodeSid,
-    workspace: workspaceFor(cwd),
+    ...(server.serveMode ? { workspace: workspaceFor(cwd) } : {}),
     ...(await workflowFlag(server)),
     ...toolDenylistParam(server),
   };
@@ -3950,8 +3960,8 @@ async function resumeBackendSession(
 /**
  * Reload a session into the backend subprocess via `session/resume` — the
  * recovery path after the backend evicted the resident runtime (idle timeout
- * / LRU). Same param shape as session/load·resume (workspace from the
- * recorded session cwd, default-model overlay only if a faithful resume
+ * / LRU). Same param shape as session/load·resume (workspace only in serve
+ * mode — see resumeParams; default-model overlay only if a faithful resume
  * fails). Marks the session backend-loaded on success.
  */
 export async function reloadBackendSession(
