@@ -66,7 +66,9 @@ describe("deferred capability identity", () => {
     reads.count = 0;
     const argv = [process.execPath, entry, "app-server", "--stdio"];
     expect(deferredProbeCapabilityVerified(argv)).toBe(true);
-    const expectedReads = process.platform === "win32" ? 1 : 2;
+    // The entry bytes are read once. macOS adds one readFileSync for
+    // Info.plist; Windows and Linux read the asar header through openSync.
+    const expectedReads = process.platform === "darwin" ? 2 : 1;
     expect(reads.count).toBe(expectedReads);
     expect(deferredProbeCapabilityVerified(argv)).toBe(true);
     expect(boundDeferredProbeCommand(argv)).not.toBeNull();
