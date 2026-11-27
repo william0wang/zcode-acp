@@ -121,15 +121,17 @@ ZCode tracks the base permission mode and an independent Plan flag. With a base 
 | --- | --- | --- |
 | `session/new` for a pending session | The configured creation mode is `build`. | `modes.currentModeId` and the mode option's `currentValue` are both `build`. This takes zero session reads. |
 | Successful switch to `edit` | The switch response or a confirming read establishes `edit`. | `config_option_update` carries the mode option with `currentValue: "edit"`. The corresponding `current_mode_update` carries `currentModeId: "edit"`. |
-| Successful `session/load` or `session/resume` | The cold runtime returns only the base `build` and its Plan flag is unknown. | The response omits `modes` and the `mode` option. History and the remaining options are delivered normally. |
+| Successful `session/load` or `session/resume` | The cold runtime returns only the base `build`; its Plan flag is unknown (no v3 read carries it). | `modes.currentModeId` and the mode option's `currentValue` are both `build`. A plan-active session shows its underlying mode until its first mode event or an explicit switch. |
+| Successful `session/load` or `session/resume` | Neither the resume response nor `session/read` returns `settings.mode.current`. | The response omits `modes` and the `mode` option. History and the remaining options are delivered normally. |
 | Successful `session/set_config_option` for mode | The switch acknowledgement is empty and the subsequent read times out. | The success response includes the required `configOptions` array, with the available options such as `model` and `thought`. Its `mode` item is absent. |
 
-If a mode-only refresh cannot establish the effective mode, the bridge skips both
+If a mode-only refresh cannot establish the base mode, the bridge skips both
 notifications. Clients can retain their last displayed value until the runtime confirms
 another observation. An independent change to a model or thought level still produces a
 `config_option_update` with those settings. A later mode confirmation restores the
 `mode` item.
 
-Mode confirmations belong to a specific backend process and session runtime. When a
-session is rebuilt, the bridge waits for the new runtime's Plan flag or an explicit
-mode switch before interpreting a base-only value like `build`.
+An unknown Plan flag never withholds the mode: the base mode is advertised as-is, and a
+later mode event or explicit switch folds Plan in. Mode confirmations belong to a specific
+backend process and session runtime, so a session rebuild retires the previous Plan
+record — the retired value never answers for the new runtime.

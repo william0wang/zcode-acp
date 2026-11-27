@@ -611,8 +611,12 @@ export class ZcodeAcpServer {
    *
    * The record belongs to a RUNTIME INSTANCE, not to the session forever: a
    * resume/reload rebuilds the runtime, so `invalidatePlanState` runs on every
-   * performed resume flight and the display withholds the effective mode
-   * until the new runtime confirms Plan or the user switches modes.
+   * performed resume flight and the retired record never answers for the new
+   * runtime. Unknown is NOT a reason to withhold the display: Plan is
+   * invisible to every v3 read (the settings schema's `mode` is strict with
+   * `current` alone), so unknown is the normal state after every cold
+   * recovery — the base mode is advertised as-is until the new runtime
+   * confirms Plan or the user switches modes.
    */
   readonly sessionPlanState = new Map<string, SessionPlanRecord>();
   /** Base mode observed in this runtime. A create acknowledgement or an event
@@ -1183,7 +1187,8 @@ export class ZcodeAcpServer {
   /**
    * The runtime-confirmed Plan switch, or undefined when UNKNOWN — no record,
    * or a record confirmed on an older backend generation. Callers must treat
-   * undefined as "cannot display an effective mode", never as "off".
+   * undefined as "the base mode is advertised as-is" — never as a confirmed
+   * "off", and never as "plan".
    */
   planStateOf(zcodeSid: string): boolean | undefined {
     const record = this.sessionPlanState.get(zcodeSid);

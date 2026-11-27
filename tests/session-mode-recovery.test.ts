@@ -209,6 +209,26 @@ describe("reloadBackendSession (runtime-rebuild recovery)", () => {
     // lastMode keeps the client's existing display.
     expect(server.lastMode.get("sess_acp")).toBe("build");
   });
+
+  it("a base-only resume snapshot (no planEnabled on the wire) publishes the base mode", async () => {
+    // Real wire shape: settings.mode carries `current` alone, so the Plan
+    // switch is unknown after every runtime rebuild. The retired "plan" must
+    // not answer, but the base is published — not withheld (0.95.0 regression).
+    const { server, calls } = makeServer({
+      resumeResult: { settings: { mode: { current: "build" } } },
+      readResult: { settings: { mode: { current: "build" } } },
+    });
+    server.lastMode.set("sess_acp", "plan"); // what the client saw before the reload
+    await reloadBackendSession(server, "sess_acp", "sess_race");
+    const modeUpdates = calls.filter((c) => c.update.sessionUpdate === "current_mode_update");
+    expect(modeUpdates).toHaveLength(1);
+    expect(modeUpdates[0]!.update).toEqual({
+      sessionUpdate: "current_mode_update",
+      currentModeId: "build",
+    });
+    expect(server.lastMode.get("sess_acp")).toBe("build");
+    expect(server.planStateOf("sess_race")).toBeUndefined();
+  });
 });
 
 describe("emitModeIfChanged (turn-end refresh)", () => {

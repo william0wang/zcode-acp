@@ -398,21 +398,23 @@ describe("plan-mode display fold", () => {
     expect(mode?.currentValue).toBe("plan");
   });
 
-  it("an UNKNOWN Plan switch withholds the effective mode (base build, plan never confirmed)", async () => {
-    // A cold-resumed runtime may have restored Plan independently — the
-    // bridge must not answer for it with the bare base mode.
+  it("an UNKNOWN Plan switch advertises the base mode (the state after every cold recovery)", async () => {
+    // No v3 read carries planEnabled (the settings schema's `mode` is strict
+    // with `current` alone), so "never confirmed" is the NORMAL state after a
+    // restart — withholding here removed the mode from every loaded session
+    // (the 0.95.0 regression).
     const server = planServer("build");
-    expect(await buildModes(server, "zc-plan-4")).toBeNull();
+    expect((await buildModes(server, "zc-plan-4"))?.currentModeId).toBe("build");
     const options = await buildConfigOptions(server, "zc-plan-4");
-    expect(options.find((option) => option.id === "mode")).toBeUndefined();
+    expect(options.find((option) => option.id === "mode")?.currentValue).toBe("build");
     // The rest of the options stay presentable.
     expect(options.some((option) => option.id === "model")).toBe(true);
     expect(options.some((option) => option.id === "thought")).toBe(true);
   });
 
-  it("a later runtime confirmation restores the display — off shows build, on shows plan", async () => {
+  it("a later runtime confirmation folds Plan in — off keeps build, on shows plan", async () => {
     const server = planServer("build");
-    expect(await buildModes(server, "zc-plan-5")).toBeNull(); // unknown → withheld
+    expect((await buildModes(server, "zc-plan-5"))?.currentModeId).toBe("build"); // unknown → base
     server.notePlanState("zc-plan-5", false);
     expect((await buildModes(server, "zc-plan-5"))?.currentModeId).toBe("build");
     server.notePlanState("zc-plan-5", true);
@@ -575,8 +577,9 @@ describe("unified mode resolution", () => {
     // resumePreservingModel does on every performed resume).
     server.invalidatePlanState("zc-uni-7");
     expect(server.planStateOf("zc-uni-7")).toBeUndefined();
-    // Base mode still readable, but Plan unknown → withheld.
-    expect(await buildModes(server, "zc-uni-7")).toBeNull();
+    // Plan unknown → the base mode; the retired "plan" never answers for the
+    // rebuilt runtime, and the display is not withheld.
+    expect((await buildModes(server, "zc-uni-7"))?.currentModeId).toBe("build");
   });
 
   it("a backend generation change invalidates the Plan record", async () => {

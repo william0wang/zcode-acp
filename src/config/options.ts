@@ -972,16 +972,25 @@ export interface TrustedSessionRead extends ModeVersion {
 /**
  * The mode state ONE sync resolves. `effective` is the display mode the two
  * ACP representations (mode indicator + configOptions mode item) share;
- * undefined means UNCONFIRMABLE — the sync skips mode publication instead of
- * advertising a guess (build/yolo fallbacks must never disagree again).
+ * undefined means UNCONFIRMABLE — no trusted source established the BASE mode
+ * (every read failed, or the observation went stale mid-flight), so the sync
+ * skips mode publication instead of advertising a guess (build/yolo fallbacks
+ * must never disagree again). An unknown Plan switch alone never withholds.
  */
 export interface SessionModeResolution {
   version?: ModeVersion;
-  /** Effective display mode ("plan" when Plan is confirmed on). Undefined = unconfirmable. */
+  /**
+   * Effective display mode ("plan" when Plan is confirmed on, else the base).
+   * Undefined = base unconfirmable.
+   */
   effective?: string;
   /** Base permission mode (settings.mode.current) when known. */
   base?: string;
-  /** Runtime-confirmed Plan switch; undefined = unknown. */
+  /**
+   * Runtime-confirmed Plan switch; undefined = unknown — the base mode is
+   * advertised as-is. Unknown is the NORMAL state after a cold recovery (see
+   * resolveSessionMode), not a reason to withhold.
+   */
   plan?: boolean;
   /** The settings read this resolution performed (undefined when a caller snapshot decided). */
   read?: TrustedSessionRead;
@@ -1070,10 +1079,16 @@ export async function readTrustedSettings(
  *   - Materialized: the caller's trusted snapshot decides when it carries a
  *     valid `settings.mode.current`; otherwise one messageLimit:1 read.
  *   - Effective = "plan" when Plan is runtime-confirmed on, else the base
- *     mode when Plan is runtime-confirmed off, else the base mode only when
- *     it names plan itself — an UNKNOWN Plan switch withholds the effective
- *     mode (a cold-resumed runtime may have restored Plan independently; the
- *     bridge must not answer for it until the new runtime confirms).
+ *     mode. An UNKNOWN Plan switch advertises the base as-is: Plan is
+ *     invisible to every v3 read (the settings schema's `mode` is strict with
+ *     `current` alone, `zcodeSessionSettingsStateSchema`) and a resumed
+ *     runtime replays no transition event, so unknown is the NORMAL state
+ *     after every cold recovery — withholding on it removed the mode from
+ *     every loaded session (the 0.95.0 regression). A plan-active session
+ *     therefore shows its underlying mode until its first transition event or
+ *     an explicit switch (the long-standing cold-resume hole, AGENTS.md
+ *     "Plan mode is INVISIBLE"); the retired Plan record never answers for a
+ *     rebuilt runtime.
  */
 export async function resolveSessionMode(
   server: ZcodeAcpServer,
@@ -1124,15 +1139,15 @@ function confirmedModeAfterEvent(server: ZcodeAcpServer, sid: string): SessionMo
 }
 
 /** Fold the runtime-confirmed Plan switch over the base mode (upstream's own
- * display fold: `planEnabled ?? mode === "plan"`). Undefined when the base is
- * known but the Plan switch is not — the caller withholds. */
-export function effectiveModeFor(base: string, plan: boolean | undefined): string | undefined {
+ * display fold: `planEnabled ?? mode === "plan"`). An unknown Plan switch
+ * yields the base mode — only a confirmed-on switch overrides it. */
+export function effectiveModeFor(base: string, plan: boolean | undefined): string {
   if (plan === true) return "plan";
-  if (plan === false) return base;
-  return base === "plan" ? "plan" : undefined;
+  return base;
 }
 
-/** The ACP SessionModeState a resolution advertises, or null when unconfirmable. */
+/** The ACP SessionModeState a resolution advertises, or null when the base mode
+ *  is unconfirmable (an unknown Plan switch still advertises the base). */
 export function modesFromResolution(
   resolution: SessionModeResolution,
 ): acp.SessionModeState | null {
@@ -1155,8 +1170,10 @@ export function modesFromResolution(
 /** Build the ACP SessionModeState ({currentModeId, availableModes}).
  *  zcodeSid null = pending session (session/new not yet materialized) — zero
  *  backend reads, the configured initial mode fills both representations.
- *  Returns null when the session's mode is unconfirmable — the caller omits
- *  the optional `modes` field (and the mode refresh) instead of guessing. */
+ *  Returns null when the session's BASE mode is unconfirmable (no trusted
+ *  `settings.mode.current`) — the caller omits the optional `modes` field (and
+ *  the mode refresh) instead of guessing. An unknown Plan switch does not
+ *  withhold: the base mode is advertised. */
 export async function buildModes(
   server: ZcodeAcpServer,
   zcodeSid: string | null,
@@ -1278,9 +1295,10 @@ export function pendingThoughtProjection(): {
  *  — ONE confirmed result shared with the mode indicator (buildModes /
  *  emitConfigOptionUpdate pass the same input or resolution). When the mode
  *  is unconfirmable (read failure, backend replaced mid-read, Plan switch
- *  unknown after a runtime rebuild) the `mode` item is OMITTED from the array
- *  instead of advertising a guessed fallback — the other options still carry
- *  everything they can present.
+ *  unknown after a cold recovery — the normal state, since no v3 read carries
+ *  the Plan flag) the base mode is advertised; only an unconfirmable BASE omits
+ *  the `mode` item instead of advertising a guessed fallback — the other
+ *  options still carry everything they can present.
  *
  *  `receiverRoot` is the clientConnectionRoot of the client the array is
  *  delivered to — the quota pseudo-option is appended only for martty
@@ -1479,10 +1497,11 @@ export async function buildConfigOptions(
       _meta: { zcode: buildProviderMeta(currentProvider, localModels) },
     },
   ];
-  // The mode item is present only when this sync CONFIRMED the effective mode
-  // (the same resolution the mode indicator publishes). An unconfirmable mode
-  // is omitted — never replaced by a guessed fallback (a missing item reads as
-  // "temporarily unavailable", a wrong value reads as the session's mode).
+  // The mode item is present only when this sync CONFIRMED the base mode (the
+  // same resolution the mode indicator publishes; an unknown Plan switch
+  // advertises the base). An unconfirmable base is omitted — never replaced by
+  // a guessed fallback (a missing item reads as "temporarily unavailable", a
+  // wrong value reads as the session's mode).
   if (currentMode !== undefined) {
     options.push({
       id: "mode",
