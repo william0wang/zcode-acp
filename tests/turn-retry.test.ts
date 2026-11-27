@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isBackendLostError,
+  isContentBlockedTurnError,
   isGatewayBlipTurnError,
   isTransientTurnError,
 } from "../src/translators/tool-helpers.js";
@@ -91,6 +92,75 @@ describe("isGatewayBlipTurnError", () => {
     // re-derived from message keywords, so quota/business wording that merely
     // resembles a network failure cannot sneak into the bounded resend.
     expect(isGatewayBlipTurnError({ cause: { message: "network connection failed" } })).toBe(false);
+  });
+});
+
+describe("isContentBlockedTurnError", () => {
+  it("matches the observed bigmodel 1301 refusal (flat 4.0.0 wire shape)", () => {
+    // 2026-11-27: `turn.failed` carries a FLAT error — the business code IS
+    // the top-level `code` (no `cause`), the provider text repeats it in a
+    // leading bracket.
+    const err = {
+      type: "unknown_error",
+      code: "1301",
+      message:
+        "[1301][系统检测到输入或生成内容可能包含不安全或敏感内容，请您避免输入易产生敏感内容的提示语，感谢您的配合。][20261128000121d284ce8ca5c24e45]",
+      attribution: {
+        reason: "unknown",
+        providerId: "account:bigmodel-individual-coding-plan",
+        modelId: "GLM-5.4",
+        providerKind: "anthropic",
+        providerErrorCode: "1301",
+        retryable: false,
+      },
+    };
+    expect(isContentBlockedTurnError(err)).toBe(true);
+  });
+
+  it("matches upstream's own content_filter marker", () => {
+    // A stream the provider ends on its safety filter (model-errors.ts
+    // createContentFilteredModelResultError).
+    expect(
+      isContentBlockedTurnError({
+        type: "model_error",
+        message: "Model output was blocked by the provider's content safety filter.",
+        attribution: { reason: "content_filter", source: "provider" },
+      }),
+    ).toBe(true);
+    expect(isContentBlockedTurnError({ cause: { context: { reason: "content_filter" } } })).toBe(
+      true,
+    );
+  });
+
+  it("finds the code behind a generic wrapper and a gateway-blip cause", () => {
+    expect(
+      isContentBlockedTurnError({
+        code: "UNKNOWN_ERROR",
+        message: "Turn execution failed",
+        cause: { code: "UNKNOWN_ERROR", message: "[1301][系统检测到…][id]" },
+      }),
+    ).toBe(true);
+    // The shape isGatewayBlipTurnError would otherwise resend.
+    expect(
+      isContentBlockedTurnError({
+        code: "UNKNOWN_ERROR",
+        message: "Turn execution failed",
+        cause: {
+          code: "invalid_model_request",
+          message: "Upstream request failed: [1301][…]",
+          context: { providerCode: "1301", retryable: false },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("does not match other business codes or safety wording without a code", () => {
+    // Quota keeps its own wait machinery; wording alone is not a verdict.
+    expect(isContentBlockedTurnError({ code: "1308", message: "[1308][quota]" })).toBe(false);
+    expect(isContentBlockedTurnError({ code: "model_not_found" })).toBe(false);
+    expect(isContentBlockedTurnError({ message: "the request mentioned sensitive content" })).toBe(
+      false,
+    );
   });
 });
 

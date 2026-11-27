@@ -12,6 +12,7 @@ export {
   extractLocations,
   formatTurnError,
   isBackendLostError,
+  isContentBlockedTurnError,
   isGatewayBlipTurnError,
   isTransientTurnError,
 } from "./tool-helpers.js";

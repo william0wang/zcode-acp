@@ -94,6 +94,7 @@ import {
   EventTranslator,
   formatTurnError,
   isBackendLostError,
+  isContentBlockedTurnError,
   isContentLiveDelivered,
   isGatewayBlipTurnError,
   isTransientTurnError,
@@ -2586,10 +2587,12 @@ export async function runOneTurn(
     // Transient turn failures (e.g. provider network blips surfaced as
     // turn.failed with cause code model_request_failed) are retried by
     // re-sending the prompt and re-running the event loop, instead of
-    // surfacing a hard error that stops the session. Non-transient failures
-    // (send rejected, non-transient turn error) propagate immediately. After
-    // exhausting retries on a transient error we degrade gracefully: emit a
-    // user-visible message and return end_turn so the session stays usable.
+    // surfacing a hard error that stops the session. A rejected SEND
+    // propagates immediately (the prompt never ran). A non-transient TURN
+    // failure and a transient one that exhausted its retries degrade
+    // gracefully instead: emit a user-visible message and return end_turn so
+    // the session stays usable (see settleFailedTurn for why the error alone
+    // is not enough).
     // 1 initial attempt + 5 retries. Backoff grows exponentially then caps so
     // later retries don't keep stretching: 1s, 2s, 4s, 4s, 4s.
     const MAX_TURN_ATTEMPTS = 6;
@@ -2925,14 +2928,30 @@ export async function runOneTurn(
               e.turnError,
             )}); keeping the session usable`,
           );
-          await sendTextChunk(cx, acpSid, messages().heldFollowUpFailed, randomUUID());
+          // A refused follow-up is not continued by sending a message — the
+          // refusal answers the next one just the same.
+          const heldDetail = turnFailureDetail(e);
+          await sendTextChunk(
+            cx,
+            acpSid,
+            isContentBlockedTurnError(e.turnError)
+              ? messages().contentBlocked(heldDetail)
+              : messages().heldFollowUpFailed,
+            randomUUID(),
+          );
           return { stopReason: "end_turn" };
         }
         // Backend lost (process died / storage closed mid-turn): recover by
         // respawning the backend and reloading the session, then retry the
         // turn. The session file is intact — only the process is gone.
         if (e instanceof TurnFailedError && !turn.cancelled && isBackendLostError(e.turnError)) {
-          if (backendLostRetries >= MAX_BACKEND_LOST_RETRIES) throw turnFailureRequestError(e);
+          if (backendLostRetries >= MAX_BACKEND_LOST_RETRIES) {
+            const detail = turnFailureDetail(e);
+            if (await settleFailedTurn(cx, acpSid, turn, opts, e, "backendLost")) {
+              return degradedEndTurn(detail);
+            }
+            throw turnFailureRequestError(e);
+          }
           backendLostRetries++;
           const lostDetail = formatTurnError(e.turnError);
           log(
@@ -2975,6 +2994,10 @@ export async function runOneTurn(
             warn(
               `recover: backend respawn/reload failed: ${recoverErr instanceof Error ? recoverErr.message : String(recoverErr)}`,
             );
+            const detail = turnFailureDetail(e);
+            if (await settleFailedTurn(cx, acpSid, turn, opts, e, "backendLost")) {
+              return degradedEndTurn(detail);
+            }
             throw turnFailureRequestError(e);
           }
           differ.markSeen(await fetchMessagesSinceAnchor(server, zcodeSid, differ.historyAnchor));
@@ -2989,23 +3012,45 @@ export async function runOneTurn(
           suppressRetryNotice = true;
           continue;
         }
-        // Transient failures and one-shot gateway blips are retried; everything
-        // else (send failures, terminal turn errors, cancellation) propagates
+        // Transient failures and one-shot gateway blips are retried; a
+        // terminal turn error degrades on an ordinary prompt (settleFailedTurn)
+        // and propagates for the rounds whose owner handles it (goal loop,
+        // sandbox continuation) or a cancelled turn. Send failures propagate
         // to the caller.
         if (e instanceof TurnFailedError) {
-          const transient = isTransientTurnError(e.turnError);
+          // A content-safety refusal judges the CONTENT, so it is terminal
+          // even when a transient-looking wrapper or a gateway-blip cause
+          // code says otherwise: a resend re-submits the refused request
+          // verbatim and can only be refused again.
+          const contentBlocked = isContentBlockedTurnError(e.turnError);
+          const transient = !contentBlocked && isTransientTurnError(e.turnError);
           // A relay gateway's transient fault arrives as a request-failure
           // cause code the upstream classifier marked non-retryable — its
           // verdict judges the request shape, not the gateway's health
           // (observed 2026-10-28: intermittent 400 invalid_request_error from
           // a forwarding gateway, resend succeeded). Give those a bounded
           // resend too; quota/context-exceeded/model-not-found stay terminal.
-          const gatewayBlip = !transient && isGatewayBlipTurnError(e.turnError);
+          const gatewayBlip = !transient && !contentBlocked && isGatewayBlipTurnError(e.turnError);
           if (attempt < MAX_TURN_ATTEMPTS && !turn.cancelled && (transient || gatewayBlip)) {
             lastTurnError = e.turnError;
             continue;
           }
-          if (!transient && !gatewayBlip) throw turnFailureRequestError(e);
+          if (!transient && !gatewayBlip) {
+            const detail = turnFailureDetail(e);
+            if (
+              await settleFailedTurn(
+                cx,
+                acpSid,
+                turn,
+                opts,
+                e,
+                contentBlocked ? "contentBlocked" : "failed",
+              )
+            ) {
+              return degradedEndTurn(detail);
+            }
+            throw turnFailureRequestError(e);
+          }
           // Retries exhausted on a transient/gateway-blip failure: degrade
           // gracefully below (user-visible notice + end_turn, goal-loop
           // pauses via its structured throw) instead of a hard error that
@@ -3030,7 +3075,7 @@ export async function runOneTurn(
     }
     const errMsg = formatTurnError(lastTurnError) || "turn failed after retries";
     await sendTextChunk(cx, acpSid, messages().requestFailed(errMsg), randomUUID());
-    return { stopReason: "end_turn" };
+    return degradedEndTurn(errMsg);
   } finally {
     backend.unregisterEventListener(zcodeSid, listener);
     server.pendingTurns.delete(requestId);
@@ -3387,11 +3432,18 @@ async function runPrompt(
       attachments,
       continuationRound,
     });
+    // A turn that ended by degrading after a failure resolves end_turn too —
+    // report it as the failure it was (see DEGRADED_AFTER_FAILURE).
+    const degradedDetail = (result as DegradedPromptResponse)[DEGRADED_AFTER_FAILURE];
     pushSettled(server, {
       kind: "turn",
       label: pushSourceLabel(server, params.sessionId),
-      title:
-        result.stopReason === "end_turn" ? "turn completed" : `turn ended (${result.stopReason})`,
+      title: degradedDetail
+        ? "turn failed"
+        : result.stopReason === "end_turn"
+          ? "turn completed"
+          : `turn ended (${result.stopReason})`,
+      ...(degradedDetail ? { body: degradedDetail } : {}),
     });
     return result;
   } catch (e) {
@@ -3614,14 +3666,82 @@ function acpTurnFailureData(turnError: Record<string, unknown>): AcpTurnFailureD
   return data;
 }
 
-function turnFailureRequestError(error: TurnFailedError): RequestError {
+/** The readable cause of a turn failure: the nested cause when the wire
+ *  carries one, else the top-level error (the flat 4.0.0 shape). */
+function turnFailureDetail(error: TurnFailedError): string {
   const cause = asRecord(error.turnError["cause"]);
-  const detail = formatTurnError(cause ?? error.turnError) || error.message;
+  return formatTurnError(cause ?? error.turnError) || error.message;
+}
+
+function turnFailureRequestError(error: TurnFailedError): RequestError {
   return new RequestError(
     -32603,
-    `ZCode turn failed: ${detail}`,
+    `ZCode turn failed: ${turnFailureDetail(error)}`,
     acpTurnFailureData(error.turnError),
   );
+}
+
+/**
+ * Marks a PromptResponse whose turn ENDED by degrading after a failure
+ * (notice sent, no attempt left) rather than by completing. `prompt()` reads
+ * it so the settled push still says "turn failed" with the reason — an
+ * unattended user must not be told "turn completed" about a reply that
+ * never arrived. Non-enumerable on purpose: never serialized to the client,
+ * invisible to the goal-loop driver's `_meta` reads.
+ */
+const DEGRADED_AFTER_FAILURE: unique symbol = Symbol("zcodeDegradedAfterFailure");
+type DegradedPromptResponse = acp.PromptResponse & { [DEGRADED_AFTER_FAILURE]?: string };
+
+function degradedEndTurn(detail: string): acp.PromptResponse {
+  return Object.defineProperty({ stopReason: "end_turn" }, DEGRADED_AFTER_FAILURE, {
+    value: detail,
+  }) as acp.PromptResponse;
+}
+
+/**
+ * A terminal backend turn failure on an ORDINARY prompt: tell the user in
+ * the conversation and END the turn — the same graceful degrade the
+ * exhausted-retries path takes — instead of failing the request. A client
+ * that discards request errors would show nothing at all: the desktop app
+ * only retracts the prompt bubble and re-queues the draft, silently, and
+ * re-sends that draft on every later attach (zcode-acp-app session.rs
+ * `on_prompt_failed` → `flush_pending`) — a refused conversation read as
+ * "the session suddenly stopped and nothing recovers it" and was re-refused
+ * on every wake (observed 2026-11-27: six prompts in a row refused by the
+ * provider's content-safety check, code 1301).
+ *
+ * Returns false — nothing sent — for the rounds whose OWNER handles the
+ * failure and must not be told to resend: goal-loop rounds (the driver
+ * pauses or recovers on the thrown RequestError) and sandbox continuation
+ * rounds (their caller's catch owns the notice and the cleanup). A
+ * cancelled turn stays quiet as well: the error still propagates, but
+ * nobody is waiting on that reply.
+ */
+async function settleFailedTurn(
+  cx: acp.AgentContext,
+  acpSid: string,
+  turn: PendingTurn,
+  opts: RunOneTurnOptions,
+  error: TurnFailedError,
+  kind: "contentBlocked" | "backendLost" | "failed",
+): Promise<boolean> {
+  if (turn.goalLoop || opts.continuationRound || turn.cancelled) return false;
+  const detail = turnFailureDetail(error);
+  const m = messages();
+  const notice =
+    kind === "contentBlocked"
+      ? m.contentBlocked(detail)
+      : kind === "backendLost"
+        ? m.requestFailed(detail)
+        : m.turnFailed(detail);
+  try {
+    await sendTextChunk(cx, acpSid, notice, randomUUID());
+  } catch (err) {
+    // The turn already failed; a dead client must not turn that into a
+    // different error.
+    warn(`turn failure notice not delivered: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return true;
 }
 
 /**
