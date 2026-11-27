@@ -120,19 +120,27 @@ runtime of the bridge/hub only, and Node >= 22 remains a requirement.
 The CLI is resolved in this order: `ZCODE_BIN` → a `zcode` found on `PATH` →
 the `zcode.cjs` bundled inside the ZCode desktop app (the app does not add it
 to `PATH`). The auto-discovery covers the standard install locations below, so
-most setups need no `ZCODE_BIN` at all — set it only for custom installs:
+most setups need no `ZCODE_BIN` at all — set it only for custom installs.
 
-| Platform    | bundled `zcode.cjs` path                                                    |
-| ----------- | --------------------------------------------------------------------------- |
-| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`                  |
-| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`                     |
-| **Linux**   | Inside the extracted app directory: `<install-dir>/resources/glm/zcode.cjs` |
+On Linux the `PATH` step only matches a JS entry (an npm-style CLI install).
+The deb, pacman and rpm packages register the desktop launcher as `zcode` on
+`PATH`, and starting it runs the GUI instead of the CLI. It therefore yields
+to the bundled `zcode.cjs`, and is used only when no bundle is found:
+
+| Platform    | bundled `zcode.cjs` path                                                                                    |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`                                                  |
+| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`                                                     |
+| **Linux**   | `/opt/ZCode/resources/glm/zcode.cjs` (deb, pacman, rpm) · `/usr/lib/zcode/glm/zcode.cjs` (Arch `zcode-bin`) |
+
+An AppImage has no fixed path — mount it (`--appimage-mount`) and point
+`<mount>/resources/glm/zcode.cjs`.
 
 > If the path doesn't match your install, locate it with:
 >
 > ```bash
 > # macOS / Linux
-> find / -name zcode.cjs -path '*resources/glm*' 2>/dev/null
+> find / -name zcode.cjs 2>/dev/null
 > # Windows (PowerShell)
 > Get-ChildItem -Path $env:LOCALAPPDATA,$env:APPDATA,'C:\Program Files' -Recurse -Filter zcode.cjs -ErrorAction SilentlyContinue
 > ```

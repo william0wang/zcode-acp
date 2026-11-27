@@ -80,19 +80,25 @@ pnpm build
 ### 各平台的 `ZCODE_BIN` 路径
 
 ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN` 指向内置的
-`zcode.cjs`：
+`zcode.cjs`。
 
-| 平台        | `ZCODE_BIN` 路径                                           |
-| ----------- | ---------------------------------------------------------- |
-| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` |
-| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`    |
-| **Linux**   | 解压后的应用目录内：`<安装目录>/resources/glm/zcode.cjs`   |
+Linux 上 `PATH` 这一步只匹配 JS 入口（npm 方式安装的 CLI）。deb、pacman 和 rpm
+包会把桌面启动器注册为 `PATH` 上的 `zcode`，运行它打开的是 GUI 而不是 CLI，
+因此它让位于内置的 `zcode.cjs`，只有在找不到内置入口时才会被使用：
+
+| 平台        | `ZCODE_BIN` 路径                                                                                             |
+| ----------- | ------------------------------------------------------------------------------------------------------------ |
+| **macOS**   | `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`                                                   |
+| **Windows** | `%LOCALAPPDATA%\Programs\ZCode\resources\glm\zcode.cjs`                                                      |
+| **Linux**   | `/opt/ZCode/resources/glm/zcode.cjs`（deb、pacman、rpm）· `/usr/lib/zcode/glm/zcode.cjs`（Arch `zcode-bin`） |
+
+AppImage 没有固定路径——挂载（`--appimage-mount`）后把 `ZCODE_BIN` 指向 `<挂载点>/resources/glm/zcode.cjs`。
 
 > 如果路径与实际安装不符，可用以下命令定位：
 >
 > ```bash
 > # macOS / Linux
-> find / -name zcode.cjs -path '*resources/glm*' 2>/dev/null
+> find / -name zcode.cjs 2>/dev/null
 > # Windows (PowerShell)
 > Get-ChildItem -Path $env:LOCALAPPDATA,$env:APPDATA,'C:\Program Files' -Recurse -Filter zcode.cjs -ErrorAction SilentlyContinue
 > ```
