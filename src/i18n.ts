@@ -126,6 +126,14 @@ export interface Messages {
   fsPermDeniedHint: (path: string) => string;
   networkRetry: (attempt: number, total: number) => string;
   requestFailed: (err: string) => string;
+  /** The provider's content-safety check refused the request — the same
+   *  content is refused again on a resend, so the way out is a model from
+   *  another provider or a new conversation. */
+  contentBlocked: (err: string) => string;
+  /** The backend turn failed for a reason a plain resend cannot fix (model
+   *  not found, malformed request, …) — unlike requestFailed, which is for
+   *  failures a resend CAN get past. */
+  turnFailed: (err: string) => string;
   /** Backend process lost mid-turn; recovered by respawn + session reload. */
   backendRecovered: (attempt: number, total: number) => string;
   /** Goal-loop level: the round failed on a lost backend but is being retried. */
@@ -321,6 +329,9 @@ const zh: Messages = {
     `[命令被文件系统权限拒绝(Permission denied):${p}。这不是沙箱拦截,弹窗无法放行——请检查该目录的权限(chmod/chown)或 macOS 隐私设置,或让 Agent 改用有权限的路径。(同一路径仅提示一次。)]`,
   networkRetry: (attempt, total) => `[网络异常，正在重试 (${attempt}/${total})…]`,
   requestFailed: (err) => `[请求失败：${err}。会话仍可用，请重新发送消息重试。]`,
+  contentBlocked: (err) =>
+    `[请求被模型服务商的内容安全检查拦截：${err}。同类内容原样重发仍会被拦截；若本会话连续出现，说明会话上下文本身触发了拦截——请改用其他服务商的模型，或新开会话继续。]`,
+  turnFailed: (err) => `[回合失败：${err}。本次回复未完成——请先处理上述问题，再重新发送。]`,
   backendRecovered: (attempt, total) =>
     `[后端进程异常中断，已重启并恢复会话，自动继续刚才的任务 (${attempt}/${total})…]`,
   goalBackendRecovered: "[后端进程异常中断，auto 任务已自动恢复并继续…]",
@@ -491,6 +502,10 @@ const en: Messages = {
     `[A command was denied by filesystem permissions (Permission denied): ${p}. This is not a sandbox block and cannot be granted via popup — check the directory's permissions (chmod/chown) or macOS privacy settings, or steer the agent to a path it may access. (One-time notice per path.)]`,
   networkRetry: (attempt, total) => `[Network error, retrying (${attempt}/${total})…]`,
   requestFailed: (err) => `[Request failed: ${err}. The session is still usable — please resend.]`,
+  contentBlocked: (err) =>
+    `[Request blocked by the provider's content-safety check: ${err}. Resending the same content will be blocked again — if this keeps happening in this conversation, the conversation context itself trips the check: switch to a model from another provider, or continue in a new conversation.]`,
+  turnFailed: (err) =>
+    `[Turn failed: ${err}. This reply was not completed — resolve the cause above, then resend.]`,
   backendRecovered: (attempt, total) =>
     `[Backend process was interrupted; it has been restarted and the session restored — continuing the task (${attempt}/${total})…]`,
   goalBackendRecovered:

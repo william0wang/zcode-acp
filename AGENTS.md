@@ -433,6 +433,42 @@ required for`); any other error aborts. Display side, `buildConfigOptions`
   RequestError its quota classifier reads. Do not "tighten" the classifier
   back to retryable-only, and do not widen it by message keywords — the
   code-only match is what keeps quota wording out.
+- **A provider content-safety refusal is TERMINAL and must be VISIBLE — a
+  resend re-submits the refused request verbatim** (2026-11-27): bigmodel's
+  1301 ("系统检测到输入或生成内容可能包含不安全或敏感内容") is absent from
+  upstream's business-code table, so it reaches the wire as a FLAT
+  `turn.failed` error — `type: "unknown_error"`, `code: "1301"` IS the
+  business code (error-payload.ts `selectErrorCode` promotes `providerCode`),
+  the provider text repeating it in a leading bracket; a stream ended by the
+  provider's filter carries upstream's own content-filter reason instead
+  (`attribution.reason: "content_filter"`, model-errors.ts
+  `createContentFilteredModelResultError` — "同一上下文重发会被同样拦截").
+  `isContentBlockedTurnError` (src/translators/tool-helpers.ts) reads both by
+  shape and OUTRANKS the transient and gateway-blip classifiers: every later
+  turn re-sends the same conversation context, so a resend can only be refused
+  again (observed: an 80-minute turn died on it mid-flight and the next five
+  prompts of that conversation failed the same way within seconds each —
+  shorter prompts, a re-selected model and a lower reasoning level changed
+  nothing). Every TERMINAL turn failure on an ordinary prompt now ENDS the
+  turn (`settleFailedTurn`, the same degrade as exhausted retries) with its
+  reason sent as a LIVE notice — not persisted, not replayed on a cold
+  re-attach; the settled push is what reaches an unattended user — instead
+  of failing the request: the desktop app discards `session/prompt` errors —
+  it only retracts the bubble, re-queues the draft and re-sends it on every
+  later attach (zcode-acp-app session.rs `on_prompt_failed` →
+  `flush_pending`) — so the error alone read as "the session suddenly
+  stopped and nothing recovers it", and a notice PLUS the error would
+  re-refuse the draft on every wake. On a TERMINAL failure, goal-loop and
+  sandbox-continuation rounds keep the structured RequestError: their owner
+  handles the failure and must not be told to resend. A degraded turn
+  resolves `end_turn` carrying a non-enumerable marker
+  (`DEGRADED_AFTER_FAILURE`) so `prompt()`'s settled push still says
+  "turn failed" with the reason. Wordings: `contentBlocked` (a model from
+  another provider, or a new conversation), `turnFailed` (neutral — a plain
+  resend cannot fix it), `requestFailed` only where a resend is the way out.
+  The bridge cannot and must not work the refusal around — it is the
+  provider's verdict on the content; compaction is no way out either (its
+  request carries the same context).
 - **Auto-compact runs DETACHED from the turn that armed it — do not re-couple
   them**: `runOneTurn` arms it on end_turn; the `finally` starts it only AFTER
   `pendingTurns` cleanup + `running:false` (`runAutoCompactDetached`). The old

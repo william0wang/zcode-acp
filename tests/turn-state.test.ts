@@ -368,7 +368,12 @@ describe("backend-loaded stamp after backend-lost turns", () => {
     server.markBackendLoaded("sess_ts");
     const { cx } = collectCx();
 
-    await expect(prompt(server, promptParams(), cx, 7)).rejects.toThrow();
+    // An ordinary prompt degrades instead of rejecting (2026-11-27): the
+    // notice tells the user to resend — a request error is invisible on
+    // clients that discard prompt errors. The stamp assertions below are
+    // what this test is about.
+    const result = await prompt(server, promptParams(), cx, 7);
+    expect(result).toEqual({ stopReason: "end_turn" });
 
     expect(flipped).toBe(true);
     // No ghost stamp: the load path must re-resume instead of replaying empty.

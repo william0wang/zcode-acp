@@ -493,6 +493,58 @@ function matchesGatewayBlip(node: unknown): boolean {
   return code !== "" && GATEWAY_BLIP_CAUSE_CODES.has(code);
 }
 
+/**
+ * Provider business codes that mean the request was refused by the provider's
+ * content-safety check (bigmodel 1301, "系统检测到输入或生成内容可能包含不安全或
+ * 敏感内容"). Upstream leaves 1301 out of its business-code table, so it
+ * reaches the wire as an `unknown_error` whose `code` IS the business code
+ * (error-payload.ts `selectErrorCode` promotes `providerCode`); a stream the
+ * provider ends on its filter carries upstream's own `reason:
+ * "content_filter"` marker instead (model-errors.ts
+ * `createContentFilteredModelResultError`).
+ *
+ * Both are a verdict about the CONTENT, not the transport: every later turn
+ * of the conversation re-sends the same context, so a resend can only be
+ * refused again (observed 2026-11-27: an 80-minute turn died on 1301
+ * mid-flight and the next five prompts of that conversation failed the same
+ * way within seconds each).
+ */
+const CONTENT_BLOCKED_PROVIDER_CODES = new Set(["1301"]);
+const CONTENT_FILTER_REASON = "content_filter";
+/** Explicit `[<business code>]` bracket the provider text carries itself. */
+const CONTENT_BLOCKED_CODE_BRACKET = /^\s*\[1301\]/;
+
+/**
+ * Whether a `turn.failed` error object is a provider content-safety refusal.
+ * Read by shape across the flat wire form and the nested `cause`/`context`
+ * spellings other failure paths use — never by class identity.
+ */
+export function isContentBlockedTurnError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || Array.isArray(error)) return false;
+  const nodes: Record<string, unknown>[] = [];
+  const visit = (value: unknown, depth: number): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value) || depth > 3) return;
+    const node = value as Record<string, unknown>;
+    nodes.push(node);
+    visit(node["cause"], depth + 1);
+    visit(node["context"], depth + 1);
+    visit(node["attribution"], depth + 1);
+    visit(node["data"], depth + 1);
+  };
+  visit(error, 0);
+  for (const node of nodes) {
+    for (const key of ["code", "providerCode", "providerErrorCode"]) {
+      const value = node[key];
+      if (typeof value === "string" && CONTENT_BLOCKED_PROVIDER_CODES.has(value.trim()))
+        return true;
+    }
+    if (node["reason"] === CONTENT_FILTER_REASON) return true;
+    const message = node["message"];
+    if (typeof message === "string" && CONTENT_BLOCKED_CODE_BRACKET.test(message)) return true;
+  }
+  return false;
+}
+
 function matchesTransient(node: unknown): boolean {
   if (!node || typeof node !== "object" || Array.isArray(node)) return false;
   const n = node as Record<string, unknown>;
