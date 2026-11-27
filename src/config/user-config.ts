@@ -288,6 +288,18 @@ export interface DeleteUserConfig {
   purge?: boolean;
 }
 
+/** The `memory` section: ZCode Project Memory (auto MEMORY.md recall/save). */
+export interface MemoryUserConfig {
+  /**
+   * true = tell the backend `memoryEnabled: true` in the runtime-preferences
+   * handshake, so sessions load the auto-memory (MEMORY.md + the memory
+   * directory) the way desktop-app sessions do. Default false — the desktop
+   * host's own answer gates this feature, and an editor bridge opting in
+   * uninvited would change every session's prompt shape.
+   */
+  enabled?: boolean;
+}
+
 export interface UserConfig {
   remote?: RemoteUserConfig;
   quota?: QuotaUserConfig;
@@ -305,6 +317,7 @@ export interface UserConfig {
   workflow?: WorkflowUserConfig;
   subagents?: SubagentsUserConfig;
   delete?: DeleteUserConfig;
+  memory?: MemoryUserConfig;
 }
 
 /** Resolve the config file path: $XDG_CONFIG_HOME/zcode-acp or ~/.config/zcode-acp. */
@@ -552,6 +565,16 @@ export function loadUserConfig(env: NodeJS.ProcessEnv = process.env): UserConfig
     return d;
   });
 
+  result.memory = parseSection(parsed, "memory", file, (body, label) => {
+    const m: MemoryUserConfig = {};
+    const enabled = body["enabled"];
+    if (enabled !== undefined) {
+      if (typeof enabled === "boolean") m.enabled = enabled;
+      else warn(`config: ${label}.enabled=${JSON.stringify(enabled)} is not a boolean — ignoring`);
+    }
+    return m;
+  });
+
   result.push = parseSection(parsed, "push", file, (body, label) => {
     const p: PushUserConfig = {};
     if (body["enabled"] === undefined) {
@@ -649,6 +672,20 @@ export function hardDeleteArmed(env: NodeJS.ProcessEnv = process.env): boolean {
   const fromFile = loadUserConfig(env).delete?.purge;
   if (fromFile !== undefined) return fromFile;
   const v = (env.ZCODE_ACP_DELETE_PURGE ?? "").trim().toLowerCase();
+  return v === "1" || v === "true";
+}
+
+/**
+ * Whether ZCode Project Memory (the auto MEMORY.md recall/save the desktop
+ * enables) is OPTED IN for bridge sessions: config-file `memory.enabled` >
+ * env `ZCODE_ACP_MEMORY_ENABLED` > default false (#423). Read LIVE per
+ * backend spawn — the preferences answer is fixed per runtime, but a fresh
+ * spawn (sandbox restart, eviction recovery) picks up a config edit.
+ */
+export function projectMemoryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const fromFile = loadUserConfig(env).memory?.enabled;
+  if (fromFile !== undefined) return fromFile;
+  const v = (env.ZCODE_ACP_MEMORY_ENABLED ?? "").trim().toLowerCase();
   return v === "1" || v === "true";
 }
 
