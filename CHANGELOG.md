@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.3](https://github.com/william0wang/zcode-acp/compare/v0.96.2...v0.96.3) (2026-11-27)
+
+
+### Bug Fixes
+
+* surface terminal turn failures and never resend a content-safety refusal ([#442](https://github.com/william0wang/zcode-acp/issues/442)) ([6fa8c5d](https://github.com/william0wang/zcode-acp/commit/6fa8c5d2b4ea8c4416ea51d60689c8fd5c59ce51))
+
 ## [0.96.2](https://github.com/william0wang/zcode-acp/compare/v0.96.1...v0.96.2) (2026-11-27)
 
 
