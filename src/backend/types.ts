@@ -90,6 +90,61 @@ export interface ZcodeLifecycleSnapshot {
   lastError?: { operation: string; code: string; message: string } | null;
 }
 
+// ---------- mcp ----------
+
+/**
+ * One entry of the `mcpServers` array on session/create·resume, in the shape
+ * the bridge emits for servers it derives itself (the user's cli/config.json
+ * — see config/user-mcp-servers.ts). The backend's schema is strict zod: only
+ * the keys below are sent, and `env`/`headers` are REQUIRED pair arrays (they
+ * may be empty). Client (ACP) entries keep their own shape and are not
+ * converted.
+ */
+/** Fields both transports accept; all optional. */
+export interface ZcodeMcpServerOptions {
+  isolation?: "session" | "workspace";
+  protocolVersion?: "auto" | "legacy" | "2026-07-28";
+  alwaysLoad?: boolean;
+  /** Whole milliseconds, positive. */
+  timeoutMs?: number;
+}
+
+/** An http/sse entry's `oauth` block: either grant the wire schema accepts. */
+export type ZcodeMcpOAuth =
+  | {
+      type: "client_credentials";
+      clientId: string;
+      clientSecret: string;
+      clientName?: string;
+      scope?: string;
+    }
+  | {
+      type: "authorization_code";
+      clientId?: string;
+      clientSecret?: string;
+      clientName?: string;
+      redirectPath?: string;
+      scope?: string;
+    };
+
+export interface ZcodeMcpStdioServer extends ZcodeMcpServerOptions {
+  name: string;
+  command: string;
+  args: string[];
+  env: { name: string; value: string }[];
+  cwd?: string;
+}
+
+export interface ZcodeMcpHttpServer extends ZcodeMcpServerOptions {
+  name: string;
+  type: "http" | "sse";
+  url: string;
+  headers: { name: string; value: string }[];
+  oauth?: ZcodeMcpOAuth;
+}
+
+export type ZcodeMcpServer = ZcodeMcpStdioServer | ZcodeMcpHttpServer;
+
 // ---------- event stream ----------
 
 export type ZcodeEventType =
