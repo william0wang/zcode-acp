@@ -67,6 +67,16 @@ export interface ClientCapabilities {
 }
 
 /**
+ * One runtime-confirmed Plan record: the switch itself plus the backend
+ * generation it was confirmed on (records from an older generation read as
+ * unknown — see planStateOf).
+ */
+export interface SessionPlanRecord {
+  plan: boolean;
+  generation: number;
+}
+
+/**
  * Desktop bundle floor for the rewind extensions (`_meta.zcode.rewind`): the
  * v4 conversation commands editUserQuery/retryTurn and the rowsRange read
  * have existed since the earliest visible upstream tag (3.14.3) and were
@@ -578,17 +588,33 @@ export class ZcodeAcpServer {
   /** Last mode id advertised to the client (acp_sid → modeId), for change detection. */
   readonly lastMode = new Map<string, string>();
   /**
-   * Backend sessions (zcodeSid) whose runtime plan flag is ON. EnterPlanMode/
-   * ExitPlanMode flip the execution state's `planEnabled` WITHOUT touching
-   * `runtime.config.mode`, so every v3 read (session/read settings, state
-   * patches) keeps reporting the underlying mode — plan is invisible there
-   * (verified in upstream source: session-mode-port.ts sets only the flag;
-   * mapSessionSettings reads app.getMode()). Tracked here from the
-   * SessionModeChanged events (v3 wire: generic `session.updated` with a raw
-   * {mode, planEnabled} payload) and folded into every mode the bridge
-   * displays or advertises.
+   * Runtime-confirmed Plan switch per backend session (zcodeSid), TRI-STATE:
+   * an entry means explicitly on/off AS CONFIRMED BY THE CURRENT RUNTIME (a
+   * mode event carrying planEnabled, an explicit switch, or the accepted
+   * creation mode); NO entry means UNKNOWN — the bridge must not guess. A
+   * record carries the backend generation it was confirmed on, so a respawn
+   * (which clears the map) and any later generation bump both invalidate it,
+   * and a per-session mode-update sequence (`sessionModeSeq`) lets an async
+   * read detect that a newer mode event landed while it was in flight.
+   *
+   * The record belongs to a RUNTIME INSTANCE, not to the session forever: a
+   * resume/reload rebuilds the runtime, so `invalidatePlanState` runs on every
+   * performed resume flight and the display withholds the effective mode
+   * until the new runtime confirms Plan or the user switches modes.
    */
-  readonly sessionPlanActive = new Set<string>();
+  readonly sessionPlanState = new Map<string, SessionPlanRecord>();
+  /** Base mode observed in this runtime. A create acknowledgement or an event
+   * during a switch can supply the current operation's missing base. */
+  readonly sessionModeBase = new Map<string, { mode: string; generation: number; seq: number }>();
+  /**
+   * Monotonic per-session counter of runtime-confirmed mode updates (mode
+   * events, switches, base-mode patches). Read paths capture the value before
+   * an async `session/read` and compare after: a change means a newer mode
+   * event superseded the read, which is then discarded (stale reads must not
+   * override the current display). Also consulted as the revision proxy when
+   * the backend offers no revision number of its own.
+   */
+  readonly sessionModeSeq = new Map<string, number>();
   /**
    * Timestamp of the last cancel (user stop or preempt), keyed by zcodeSid.
    * Set in cancel() and preemptInFlightTurn(); read in runEventTurn's stall
@@ -1058,6 +1084,12 @@ export class ZcodeAcpServer {
     // …and the session/list sessionIds-key verdict: the respawned build may
     // accept the batch query.
     this.sessionIdsQueryRejected = null;
+    // …and the runtime-confirmed Plan records: they were confirmed by a
+    // process that no longer exists — a new runtime must re-confirm before
+    // the mode display may name "plan" again.
+    this.sessionPlanState.clear();
+    this.sessionModeBase.clear();
+    this.sessionModeSeq.clear();
     // …and the backend-loaded stamps: they vouch for residents of a process
     // that no longer exists. A surviving stamp kept isBackendSessionLive true
     // across a respawn, so session/load skipped the resume RPC and read a
@@ -1082,6 +1114,88 @@ export class ZcodeAcpServer {
         this.foreignActiveTurns.has(zcodeSid);
       void emitSessionTurnState(this, acpSid, stillBusy);
     }
+  }
+
+  /** A mode event changes the revision and confirms the new base. */
+  noteBaseMode(zcodeSid: string, mode: string): void {
+    this.noteModeConfirmation(zcodeSid);
+    this.rememberModeSettings(zcodeSid, mode);
+  }
+
+  /** A read confirms state at the current revision; it does not itself change the runtime. */
+  rememberModeSettings(zcodeSid: string, mode: string, plan?: boolean): void {
+    this.sessionModeBase.set(zcodeSid, {
+      mode,
+      generation: this.backendGeneration,
+      seq: this.modeSeqOf(zcodeSid),
+    });
+    if (plan !== undefined) {
+      this.sessionPlanState.set(zcodeSid, { plan, generation: this.backendGeneration });
+    }
+  }
+
+  /**
+   * The last runtime-confirmed base mode, or undefined when the seed is
+   * absent, stale (older backend generation), or superseded by a later mode
+   * update (a switch without a confirming read) — callers withhold instead
+   * of displaying a possibly-overridden value.
+   */
+  seededBaseModeOf(zcodeSid: string): string | undefined {
+    const record = this.sessionModeBase.get(zcodeSid);
+    if (!record || record.generation !== this.backendGeneration) return undefined;
+    if (this.modeSeqOf(zcodeSid) !== record.seq) return undefined;
+    return record.mode;
+  }
+
+  /**
+   * Record a runtime-confirmed Plan switch (a mode event carrying planEnabled,
+   * an explicit switch, or the accepted creation mode) and bump the session's
+   * mode-update sequence — both the flag and the sequence are freshness
+   * evidence the read paths consult.
+   */
+  notePlanState(zcodeSid: string, plan: boolean): void {
+    this.sessionPlanState.set(zcodeSid, { plan, generation: this.backendGeneration });
+    this.noteModeConfirmation(zcodeSid);
+  }
+
+  /**
+   * The runtime-confirmed Plan switch, or undefined when UNKNOWN — no record,
+   * or a record confirmed on an older backend generation. Callers must treat
+   * undefined as "cannot display an effective mode", never as "off".
+   */
+  planStateOf(zcodeSid: string): boolean | undefined {
+    const record = this.sessionPlanState.get(zcodeSid);
+    if (!record || record.generation !== this.backendGeneration) return undefined;
+    return record.plan;
+  }
+
+  /**
+   * Drop the runtime-confirmed Plan record: the runtime instance it belongs to
+   * is gone (resume/reload rebuilt it, or the backend generation moved on).
+   * The next confirmed mode event / switch re-seeds it.
+   */
+  invalidatePlanState(zcodeSid: string): void {
+    this.sessionPlanState.delete(zcodeSid);
+    this.sessionModeBase.delete(zcodeSid);
+    this.noteModeConfirmation(zcodeSid);
+  }
+
+  /**
+   * Bump the per-session mode-update sequence — every runtime-confirmed mode
+   * update (mode event, base-mode patch, switch) counts, so an async read can
+   * detect it was superseded mid-flight.
+   */
+  noteModeConfirmation(zcodeSid: string): void {
+    this.sessionModeSeq.set(zcodeSid, (this.sessionModeSeq.get(zcodeSid) ?? 0) + 1);
+  }
+
+  /** The session's current mode-update sequence (0 before the first update). */
+  modeSeqOf(zcodeSid: string): number {
+    return this.sessionModeSeq.get(zcodeSid) ?? 0;
+  }
+
+  modeVersionOf(zcodeSid: string): { generation: number; seq: number } {
+    return { generation: this.backendGeneration, seq: this.modeSeqOf(zcodeSid) };
   }
 
   /**

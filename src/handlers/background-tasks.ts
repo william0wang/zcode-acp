@@ -51,6 +51,7 @@ import type { ZcodeAcpServer } from "../server.js";
 import { armWorkflowRunPoller, stopWorkflowRunPoller } from "../workflow/poller.js";
 import { pushSettled, pushSourceLabel } from "../push/push.js";
 import { echoSteeredInputs, emitSessionTurnState } from "./io.js";
+import { dispatchEvent } from "./dispatch.js";
 
 /** Shape of a `session.updated` payload that reports a background task state. */
 interface TaskStatusPayload {
@@ -316,16 +317,38 @@ export class BackgroundTaskListener implements EventListener {
           return;
         }
         // Out-of-turn mode transitions (SessionModeChanged rides this generic
-        // wire type with a raw {mode, planEnabled} payload): keep the tracked
-        // plan flag truthful for the read paths. No broadcast from here — the
-        // turn-path dispatcher owns client notification; this only feeds
-        // buildModes/buildConfigOptions.
+        // wire type with a raw {mode, planEnabled} payload): record the
+        // runtime-confirmed Plan state for the read paths, and — when NO
+        // bridge prompt turn is registered — refresh the clients' mode
+        // display through the same ConfigChanged dispatch the turn-path
+        // translator feeds. During a turn the turn loop's own translator
+        // publishes the transition; dispatching here too would double-send.
         const p = (raw ?? {}) as Record<string, unknown>;
         if (typeof p["mode"] === "string" && typeof p["planEnabled"] === "boolean") {
           const planEnabled = p["planEnabled"] === true;
-          if (planEnabled) this.server.sessionPlanActive.add(this.zcodeSid);
-          else this.server.sessionPlanActive.delete(this.zcodeSid);
+          this.server.notePlanState(this.zcodeSid, planEnabled);
+          this.server.noteBaseMode(this.zcodeSid, p["mode"]);
           log(`  [bg] mode transition: ${p["mode"]} plan=${planEnabled}`);
+          const turnLoopActive = [...this.server.pendingTurns.values()].some(
+            (t) => t.zcodeSid === this.zcodeSid,
+          );
+          if (!turnLoopActive) {
+            const acpSid = this.server.resolveAcpSid(this.zcodeSid);
+            if (acpSid) {
+              void dispatchEvent(
+                this.server,
+                this.server.clients.broadcast(),
+                acpSid,
+                { kind: "ConfigChanged", mode: p["mode"], planEnabled },
+                `bgmode_${Date.now()}`,
+              ).catch((e: unknown) =>
+                log(
+                  `  [bg] mode transition display refresh failed: ` +
+                    `${e instanceof Error ? e.message : String(e)}`,
+                ),
+              );
+            }
+          }
         }
         return;
       }

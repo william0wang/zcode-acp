@@ -14,8 +14,11 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { currentModelCached } from "../config/model-cache.js";
 import {
   buildConfigOptions,
+  effectiveModeFor,
   formatModelValue,
   parseModelValue,
+  publishConfigOptions,
+  resolveSessionMode,
   usageWindowSize,
 } from "../config/options.js";
 import { showCompletionStatus } from "../config/settings.js";
@@ -28,7 +31,7 @@ import { messages } from "../i18n.js";
 import type { InternalEvent } from "../translators/types.js";
 import type { ZcodeAcpServer } from "../server.js";
 import { clientConnectionRoot, warn } from "../utils.js";
-import { isBroadcastSource, sendSessionUpdate, sendSessionUpdateToOthers } from "./io.js";
+import { sendSessionUpdate } from "./io.js";
 
 /** True once the EPERM hint fired for this process — throttled to one shot. */
 let sandboxEpermHinted = false;
@@ -68,6 +71,7 @@ export async function dispatchEvent(
   chunkMsgId: string,
 ): Promise<void> {
   hintSandboxEperm(server, ev);
+  if (ev.kind === "ConfigChanged") return dispatchConfigChanged(server, cx, acpSid, ev);
   // One conversation can be attached under several ACP ids (see
   // server.sessionAliases): emit once per alias with that alias as the
   // payload sessionId, or every client but the prompter starves silently.
@@ -109,24 +113,26 @@ export async function dispatchEvent(
       case "FilesChanged":
         await dispatchFilesChanged(cx, sid, ev);
         break;
-      case "ConfigChanged":
-        await dispatchConfigChanged(server, cx, sid, ev);
-        break;
     }
   }
 }
 
 /**
- * Session settings changed (model/mode/thoughtLevel switch). Push the rebuilt
- * configOptions (+ current_mode_update for mode) so the editor UI follows the
- * switch immediately — even mid-turn, without waiting for turn completion.
+ * Session settings changed (model/mode/thoughtLevel switch, or a
+ * SessionModeChanged transition). Push the rebuilt configOptions (+ the mode
+ * indicator for a confirmed mode) so the editor UI follows immediately — even
+ * mid-turn, without waiting for turn completion.
  *
- * Builds the option structures from the session's authoritative settings
- * (`session/read` via buildConfigOptions), then overlays the values from the
- * event patch. A state.updated patch only carries the fields that actually
- * changed, so building from the null defaults instead would reset every
+ * The event values are the runtime's OWN confirmation: a patch only carries
+ * the fields that actually changed, so they are overlaid onto the built
+ * options (building from the null defaults instead would reset every
  * untouched field — most visibly the model dropdown jumping back to the
- * default model mid-conversation.
+ * default model mid-conversation). A mode-bearing event confirms the base
+ * mode; a SessionModeChanged event (mode + planEnabled) confirms the Plan
+ * switch too. The mode item and current_mode_update publish only when the
+ * effective mode is confirmable (base + Plan state both known) — an unknown
+ * Plan switch after a cold resume withholds the display until the new
+ * runtime confirms, and a later trusted event restores it.
  * Best-effort: failures are logged and swallowed, never thrown into the loop.
  */
 async function dispatchConfigChanged(
@@ -136,53 +142,41 @@ async function dispatchConfigChanged(
   ev: Extract<InternalEvent, { kind: "ConfigChanged" }>,
 ): Promise<void> {
   try {
-    // Fall back to null (defaults) only if the session mapping isn't live yet —
-    // events routed through a registered turn loop always have it.
     const zcodeSid = server.resolveSid(acpSid) ?? null;
-    // Track the runtime plan flag FIRST — read paths (buildModes/
-    // buildConfigOptions) fold it, and a later plan-blind state.updated patch
-    // must not regress the display while the flag is on.
-    if (ev.planEnabled !== undefined && zcodeSid !== null) {
-      if (ev.planEnabled) server.sessionPlanActive.add(zcodeSid);
-      else server.sessionPlanActive.delete(zcodeSid);
+    let resolution;
+    if (ev.mode !== undefined) {
+      if (zcodeSid === null) {
+        resolution = { effective: effectiveModeFor(ev.mode, ev.planEnabled) };
+      } else {
+        server.noteModeConfirmation(zcodeSid);
+        resolution = await resolveSessionMode(server, zcodeSid, {
+          snapshot: {
+            settings: { mode: { current: ev.mode, planEnabled: ev.planEnabled } },
+            ...server.modeVersionOf(zcodeSid),
+          },
+        });
+      }
     }
-    const planActive = zcodeSid !== null && server.sessionPlanActive.has(zcodeSid);
-    const mode =
-      ev.mode === undefined ? undefined : planActive && ev.mode !== "plan" ? "plan" : ev.mode;
-    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx));
-    // Find by id — the array order buildConfigOptions returns is not a
-    // contract; index-based writes would silently hit the wrong option if
-    // that order ever changed (emitModeViaConfigOption already does this).
-    const setById = (id: string, value: string) => {
-      const opt = options.find((o) => o.id === id);
-      if (opt) opt.currentValue = value;
-    };
-    if (ev.model) {
-      setById("model", formatModelValue(ev.model.providerId, ev.model.modelId));
-    }
-    if (mode !== undefined) setById("mode", mode);
-    if (ev.thought !== undefined) setById("thought", ev.thought);
-    const configUpdate: acp.SessionUpdate = {
-      sessionUpdate: "config_option_update",
-      configOptions: options,
-    };
-    await sendSessionUpdate(cx, acpSid, configUpdate);
-    // Settings are per-session: the CLI's /model or the phone's dropdown must
-    // reach every OTHER attached client too. The broadcast proxy already
-    // reached everyone with the send above — an "others" leg on it would
-    // double-deliver (it has no connectionContext to exclude anyone by).
-    if (!isBroadcastSource(cx)) sendSessionUpdateToOthers(server, cx, acpSid, configUpdate);
-    if (mode !== undefined) {
-      // Mirror the advertised mode so turn-completion reconciliation
-      // (emitModeIfChanged) doesn't re-emit the same value.
-      server.lastMode.set(acpSid, mode);
-      const modeUpdate: acp.SessionUpdate = {
-        sessionUpdate: "current_mode_update",
-        currentModeId: mode,
-      };
-      await sendSessionUpdate(cx, acpSid, modeUpdate);
-      if (!isBroadcastSource(cx)) sendSessionUpdateToOthers(server, cx, acpSid, modeUpdate);
-    }
+    const options = await buildConfigOptions(server, zcodeSid, clientConnectionRoot(cx), {
+      resolution,
+    });
+    const mode = options.find((o) => o.id === "mode")?.currentValue;
+    if (ev.mode !== undefined && mode === undefined && !ev.model && ev.thought === undefined)
+      return;
+
+    const model = options.find((o) => o.id === "model");
+    if (model && ev.model)
+      model.currentValue = formatModelValue(ev.model.providerId, ev.model.modelId);
+    const thought = options.find((o) => o.id === "thought");
+    if (thought && ev.thought !== undefined) thought.currentValue = ev.thought;
+
+    await publishConfigOptions(
+      server,
+      cx,
+      acpSid,
+      options,
+      ev.mode !== undefined && typeof mode === "string" ? mode : undefined,
+    );
   } catch (e) {
     warn(`dispatch: ConfigChanged failed (${e instanceof Error ? e.message : String(e)})`);
   }

@@ -57,8 +57,15 @@ function makeServer(): TestServer {
     foreignActiveTurns: new Map<string, string>(),
     pendingTurns: new Map<number, { zcodeSid: string }>(),
     acpSidByZcodeSid,
-    // Mirrors ZcodeAcpServer.sessionPlanActive (out-of-turn mode transitions).
-    sessionPlanActive: new Set<string>(),
+    // Mirrors ZcodeAcpServer.sessionPlanState (out-of-turn mode transitions).
+    sessionPlanState: new Map<string, { plan: boolean; generation: number }>(),
+    notePlanState: (sid: string, plan: boolean) => {
+      server.sessionPlanState.set(sid, { plan, generation: 0 });
+    },
+    planStateOf: (sid: string) => server.sessionPlanState.get(sid)?.plan,
+    noteModeConfirmation: () => {},
+    modeSeqOf: () => 0,
+    resolveAcpSid: (sid: string) => server.acpSidByZcodeSid.get(sid),
     // Mirrors ZcodeAcpServer.sessionMap + steer-echo exclusion (echoSteeredInputs).
     sessionMap: new Map<string, string>([["acp_test", "sess_test"]]),
     steerEchoExclusions: () => new Set<unknown>(),

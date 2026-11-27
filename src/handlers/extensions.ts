@@ -26,7 +26,11 @@ import type * as acp from "@agentclientprotocol/sdk";
 
 import { emitInitialUsage } from "../config/model-cache.js";
 import { applyModelSwitch, lastSwitchedModelValue } from "../config/runtime-model.js";
-import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
+import {
+  emitConfigOptionUpdate,
+  rememberModelChoice,
+  settingsFromResult,
+} from "../config/options.js";
 import { ProjectionDiffer } from "../translators/projection-differ.js";
 import { log, warn } from "../utils.js";
 import type { ZcodeAcpServer } from "../server.js";
@@ -321,7 +325,8 @@ export async function setModel(
   return {};
 }
 
-/** session/setMode → zcode session/setMode + emit config_option/current_mode updates. */
+/** session/setMode → zcode session/setMode + the ONE mode-switch publish
+ *  (emitConfigOptionUpdate with the switch semantics — see options.ts). */
 export async function setMode(
   server: ZcodeAcpServer,
   params: ExtensionParams,
@@ -335,24 +340,27 @@ export async function setMode(
   // -32601 when it wasn't routed, so both normalize here.
   const mode = params.mode ?? params.modeId;
   if (!mode) throw new Error("setMode requires mode");
-  const resp = await (
-    await server.ensureBackend()
-  ).request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
+  const backend = await server.ensureBackend();
+  const version = server.modeVersionOf(zcodeSid);
+  const resp = await backend.request(
+    server.nextId(),
+    "session/setMode",
+    { sessionId: zcodeSid, mode },
+    15000,
+  );
   if (resp.error) throw new Error(`setMode failed: ${resp.error.message}`);
   log(`session/setMode → ${mode}`);
-  // Mirror the runtime's own execution-state fold NOW (mode "plan" enables
-  // the plan flag, any other mode disables it — resolveExecutionState): the
-  // SessionModeChanged event may arrive after this RPC response, and the
-  // emission below must not advertise the pre-transition value.
-  if (mode === "plan") server.sessionPlanActive.add(zcodeSid);
-  else server.sessionPlanActive.delete(zcodeSid);
-  // Re-build configOptions (settings.mode.current is now updated) and emit
-  // config_option_update + current_mode_update to EVERY attached client, so
-  // the editor UI reflects it no matter which connection switched.
-  const { currentModeId } = await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "mode");
-  // Record the advertised mode so the turn-completion reconciliation knows the
-  // client has already been told about this value.
-  if (currentModeId !== undefined) server.lastMode.set(acpSid, currentModeId);
+  // Re-build configOptions from the switch's own snapshot (settings.mode is
+  // now updated) and emit config_option_update + current_mode_update to EVERY
+  // attached client, so the editor UI reflects it no matter which connection
+  // switched. An unconfirmable mode publishes nothing and keeps the previous
+  // lastMode — the switch itself stays successful (the unified publish in
+  // emitConfigOptionUpdate also applies the plan semantics: "plan" enables
+  // the runtime Plan switch, any other mode disables it).
+  await emitConfigOptionUpdate(server, cx, acpSid, zcodeSid, "mode", {
+    snapshot: { settings: settingsFromResult(resp.result) ?? {}, ...version },
+    switchMode: String(mode),
+  });
   return (resp.result ?? {}) as Result;
 }
 
