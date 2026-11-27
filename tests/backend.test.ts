@@ -328,6 +328,21 @@ describe("ZcodeBackend reader routing (unit)", () => {
     b.close();
   });
 
+  it("reports memoryEnabled true in the preferences reply when opted in (#423)", async () => {
+    const b = makeRoutingSubject();
+    b.memoryEnabled = true;
+    const writes = captureWrites(b);
+    b.route({
+      id: "server-4",
+      method: "session/requestRuntimePreferences",
+      params: { sessionId: "sess_x" },
+    });
+    const reply = writes.frames().find((f) => f["id"] === "server-4");
+    // Default (unset) stays false — covered by the default-reply test above.
+    expect(reply?.["result"]).toMatchObject({ memoryEnabled: true });
+    b.close();
+  });
+
   it("still queues other server→client requests untouched", () => {
     const b = makeRoutingSubject();
     b.route({

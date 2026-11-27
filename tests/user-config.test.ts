@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { hardDeleteArmed, loadUserConfig } from "../src/config/user-config.js";
+import { hardDeleteArmed, loadUserConfig, projectMemoryEnabled } from "../src/config/user-config.js";
 
 let scratch: string;
 
@@ -82,6 +82,15 @@ describe("loadUserConfig", () => {
     writeConfig(JSON.stringify({ subagents: { alwaysBackground: "true" } }));
     expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
   });
+
+  it("validates the memory opt-in (boolean only)", () => {
+    writeConfig(JSON.stringify({ memory: { enabled: true } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({
+      memory: { enabled: true },
+    });
+    writeConfig(JSON.stringify({ memory: { enabled: "yes" } }));
+    expect(loadUserConfig({ XDG_CONFIG_HOME: scratch })).toEqual({});
+  });
 });
 
 describe("hardDeleteArmed", () => {
@@ -101,5 +110,34 @@ describe("hardDeleteArmed", () => {
     expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "0" })).toBe(true);
     writeConfig(JSON.stringify({ delete: { purge: false } }));
     expect(hardDeleteArmed({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_DELETE_PURGE: "1" })).toBe(false);
+  });
+});
+
+describe("projectMemoryEnabled", () => {
+  it("config file wins, env is the fallback, default false (#423)", () => {
+    // No file, no env — off (the desktop's own posture decides nothing here;
+    // an editor bridge must not change every session's prompt uninvited).
+    expect(projectMemoryEnabled({ XDG_CONFIG_HOME: scratch })).toBe(false);
+
+    // Env opts in (file absent).
+    expect(projectMemoryEnabled({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_MEMORY_ENABLED: "1" })).toBe(
+      true,
+    );
+    expect(
+      projectMemoryEnabled({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_MEMORY_ENABLED: "true" }),
+    ).toBe(true);
+    expect(projectMemoryEnabled({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_MEMORY_ENABLED: "0" })).toBe(
+      false,
+    );
+
+    // The file outranks the env in BOTH directions.
+    writeConfig(JSON.stringify({ memory: { enabled: true } }));
+    expect(projectMemoryEnabled({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_MEMORY_ENABLED: "0" })).toBe(
+      true,
+    );
+    writeConfig(JSON.stringify({ memory: { enabled: false } }));
+    expect(projectMemoryEnabled({ XDG_CONFIG_HOME: scratch, ZCODE_ACP_MEMORY_ENABLED: "1" })).toBe(
+      false,
+    );
   });
 });

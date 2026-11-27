@@ -28,7 +28,7 @@ import {
 import { clearClosedSessionIds } from "./closed-sessions.js";
 import { desktopBundleAtLeast } from "./config/deferred-probe-capability.js";
 import { resolveOfficialZCodeBaseUrl } from "./config/official-mcp-auth.js";
-import { loadUserConfig } from "./config/user-config.js";
+import { loadUserConfig, projectMemoryEnabled } from "./config/user-config.js";
 import {
   captureGate,
   ensureWorkflowPolicyPushed,
@@ -938,6 +938,13 @@ export class ZcodeAcpServer {
     backend.agentAlwaysBackgroundEnabled = desktopBundleAtLeast("4.0.0")
       ? (configuredAlwaysBackground ?? true)
       : undefined;
+    // Project Memory is an explicit opt-in (#423): the desktop host answers
+    // `memoryEnabled` from its own settings, and the bridge mirrors the OFF
+    // posture until the user opts in (`memory.enabled` in the user config, or
+    // ZCODE_ACP_MEMORY_ENABLED). Read at spawn — the preferences answer is
+    // fixed per runtime; the next respawn (sandbox restart, eviction) picks
+    // up a config edit. The key predates 4.0 — no version gate needed.
+    backend.memoryEnabled = projectMemoryEnabled();
     // Answer the provider runtime-headers handshake the moment it ARRIVES:
     // the backend asks before every model request on a zhipu-account provider,
     // and outside a turn loop (compact's internal turn, session/goal set) the

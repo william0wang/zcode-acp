@@ -77,6 +77,15 @@ export class ZcodeBackend extends JsonRpcChild {
    */
   agentAlwaysBackgroundEnabled?: boolean;
 
+  /**
+   * Value for `memoryEnabled` in the runtime-preferences reply; undefined =
+   * false (the long-standing default — the desktop host gates this feature
+   * itself, so a bridge must opt in uninvited). true hands the session the
+   * auto-memory (MEMORY.md recall/save) desktop sessions get (#423). The key
+   * itself predates 4.0 — every schema the bridge serves accepts it.
+   */
+  memoryEnabled?: boolean;
+
   constructor(argv: string[], env: NodeJS.ProcessEnv, sanitizeWatchdog = false) {
     super({
       argv,
@@ -141,7 +150,7 @@ export class ZcodeBackend extends JsonRpcChild {
       log(`backend: auto-replying ${req.method} (id=${String(req.id)}) with default preferences`);
       this.sendReply(req.id, {
         nativeSearchEnhancementsEnabled: false,
-        memoryEnabled: false,
+        memoryEnabled: this.memoryEnabled === true,
         askUserQuestionAutoResolutionEnabled: false,
         ...(this.agentAlwaysBackgroundEnabled !== undefined
           ? { agentAlwaysBackgroundEnabled: this.agentAlwaysBackgroundEnabled }
