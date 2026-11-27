@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -151,6 +152,7 @@ export function resetResolveMemosForTests(): void {
   probeResolutionMemo = null;
   releaseStamps.clear();
   newestTablePick = null;
+  asarVersionMemo = null;
 }
 
 /** Exported for testing. */
@@ -306,14 +308,54 @@ export const PERSONAL_PROVIDER_ENV = "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE";
 export const APP_VERSION_ENV = "ZCODE_APP_VERSION";
 
 /**
+ * Memo for the version read from an `app.asar` header, keyed by the opened
+ * archive's identity (device, inode, size, mtime, ctime).
+ *
+ * `builtinProviderEnv` reads the version on every call, and the provider-table
+ * readers call it in loops, so an unmemoized read put the whole header parse
+ * on each of them. That header is large: about 16 ms per lookup on the Linux
+ * desktop 4.0.0 bundle, 2392 lookups in one test file (observed 2026-11-28).
+ * The identity rather than the path alone is the key, so a desktop update that
+ * replaces the archive is read as the new version on the next lookup.
+ */
+let asarVersionMemo: { key: string; version: string | null } | null = null;
+
+/**
  * Read `package.json#version` from an Electron `app.asar` archive header
  * without unpacking it (cross-platform fallback for Linux/Windows bundles that
- * carry no macOS `Info.plist`).
+ * carry no macOS `Info.plist`). The header is parsed once per archive
+ * identity; a later call only opens the file and stats it.
+ *
+ * The identity comes from the opened descriptor, not a `statSync` on the
+ * path: tests stand in for a bundle through `openSync` alone
+ * (`linux-resolve.test.ts`), so a stat on the path would miss the stand-in.
  */
 function readAsarPackageVersion(asarPath: string): string | null {
   let fd: number | undefined;
   try {
     fd = openSync(asarPath, "r");
+    const { dev, ino, size, mtimeMs, ctimeMs } = fstatSync(fd);
+    const key = `${dev}\0${ino}\0${size}\0${mtimeMs}\0${ctimeMs}`;
+    if (asarVersionMemo?.key === key) return asarVersionMemo.version;
+    const version = readAsarHeaderPackageVersion(fd);
+    asarVersionMemo = { key, version };
+    return version;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // ignore close error
+      }
+    }
+  }
+}
+
+/** The header parse itself, on an already open archive descriptor. */
+function readAsarHeaderPackageVersion(fd: number): string | null {
+  try {
     const pre = Buffer.alloc(16);
     if (readSync(fd, pre, 0, 16, 0) < 16) return null;
     const headerPickleSize = pre.readUInt32LE(4);
@@ -337,14 +379,6 @@ function readAsarPackageVersion(asarPath: string): string | null {
     return typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : null;
   } catch {
     return null;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {
-        // ignore close error
-      }
-    }
   }
 }
 
