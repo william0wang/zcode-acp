@@ -222,11 +222,12 @@ field (see [User config file](#user-config-file)); the file value wins.
 
 Optional macOS Seatbelt confinement for everything the agent writes: one
 global switch (`ZCODE_ACP_SANDBOX=1` or `"sandbox": {"enabled": true}` in
-`~/.config/zcode-acp/config.json`), a machine-global allowlist in
+`~/.config/zcode-acp/config.json`), path grants in a machine-global allowlist
 `~/.config/zcode-acp/sandbox.json` (auto-created with a pre-granted toolchain
-template — `~/go`, `~/.gradle`, `~/.m2`, and friends; workspaces are never
-written to), allow/reject popups for out-of-whitelist writes persisted
-visibly in that file, and automatic backend restart + task continuation
+template — `~/go`, `~/.gradle`, `~/.m2`, and friends) unioned with each
+workspace's own `.zcode/acp/sandbox.json`, allow/reject popups for
+out-of-whitelist writes persisted visibly in the matching file, and
+automatic backend restart + task continuation
 after an allow. Full manual: [docs/SANDBOX.md](docs/SANDBOX.md).
 
 ## Remote Access

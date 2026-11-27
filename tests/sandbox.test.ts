@@ -12,11 +12,14 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -30,12 +33,17 @@ import {
   SANDBOX_ENV,
   appendGlobalSandboxAllow,
   appendGlobalSandboxDeny,
+  appendProjectSandboxAllow,
+  appendProjectSandboxDeny,
   armSandboxArgv,
   buildSandboxProfile,
   ensureGlobalSandboxConfig,
   globalSandboxConfigDir,
   globalSandboxConfigPath,
+  projectSandboxConfigPath,
+  projectSandboxIslandPaths,
   readGlobalSandboxConfig,
+  readProjectSandboxConfig,
   resetSandboxDecisionForTest,
   sandboxActive,
   sandboxConfigPath,
@@ -276,8 +284,13 @@ describe("buildSandboxProfile", () => {
     expect(lines[0]).toBe("(version 1)");
     expect(lines).toContain("(deny file-write*)");
     expect(lines).toContain(`(allow file-write* (subpath "${tmpRoot}"))`);
-    // The per-project deny island is GONE with the per-project config.
-    expect(profile).not.toContain(".zcode/acp");
+    // The workspace's own config dir is a deny island again (restored with
+    // the per-project config 2026-11-27) — after every allow.
+    const islandDeny = `(deny file-write* (subpath "${path.join(tmpRoot, ".zcode", "acp")}"))`;
+    expect(lines).toContain(islandDeny);
+    expect(lines.indexOf(islandDeny)).toBeGreaterThan(
+      lines.lastIndexOf(`(allow file-write* (subpath "${tmpRoot}"))`),
+    );
     // The global config dir is denied — after every allow (SBPL last-match).
     const configDirDeny = `(deny file-write* (subpath "${globalSandboxConfigDir()}"))`;
     expect(lines).toContain(configDirDeny);
@@ -355,6 +368,162 @@ describe("buildSandboxProfile", () => {
     });
     expect(profile).toContain(`(allow file-write* (subpath "${outside}"))`);
     expect(profile).toContain(`(allow file-write* (subpath "${path.join(tmpRoot, "elsewhere")}"))`);
+  });
+
+  // 2026-11-27 restore: per-project grants join the profile. allow → allow
+  // section; deny → the deny TAIL (SBPL last-match — a project "永不放行"
+  // must beat the implicit workspace-root allow and every other allow);
+  // strictGit is OR-ed with the global flag.
+  it("unions per-project configs: allow section, deny tail after every allow, strictGit OR", () => {
+    const projectAllow = path.join(tmpRoot, "vendor");
+    const projectDeny = path.join(tmpRoot, "secrets");
+    const profile = buildSandboxProfile({
+      workspaceRoots: [tmpRoot],
+      config: { allow: [], deny: [], strictGit: false },
+      projectConfigs: [{ allow: [projectAllow], deny: [projectDeny], strictGit: true }],
+      onceAllows: [],
+    });
+    const lines = profile.split("\n");
+    expect(lines).toContain(`(allow file-write* (subpath "${projectAllow}"))`);
+    const denyLine = `(deny file-write* (subpath "${projectDeny}"))`;
+    expect(lines).toContain(denyLine);
+    // strictGit carried by the PROJECT config alone
+    expect(lines).toContain(`(deny file-write* (subpath "${path.join(tmpRoot, ".git")}"))`);
+    const wsAllowIdx = lines.indexOf(`(allow file-write* (subpath "${tmpRoot}"))`);
+    const projAllowIdx = lines.indexOf(`(allow file-write* (subpath "${projectAllow}"))`);
+    const projDenyIdx = lines.indexOf(denyLine);
+    expect(projDenyIdx).toBeGreaterThan(wsAllowIdx);
+    expect(projDenyIdx).toBeGreaterThan(projAllowIdx);
+    // It is the profile's LAST deny — nothing after it can re-permit.
+    const lastDenyIdx = lines
+      .map((l, i) => (l.startsWith("(deny") ? i : -1))
+      .reduce((a, b) => Math.max(a, b), -1);
+    expect(lastDenyIdx).toBe(projDenyIdx);
+  });
+
+  // The project config lives INSIDE its write-allowed root: without the
+  // carve-out the agent could edit the allowlist it runs under.
+  it("keeps each workspace's config dir a deny island after every allow", () => {
+    const island = path.join(tmpRoot, ".zcode", "acp");
+    const profile = buildSandboxProfile({
+      workspaceRoots: [tmpRoot],
+      // Allows naming the island (or an ancestor of it) from every layer…
+      config: { allow: [island], deny: [], strictGit: false },
+      projectConfigs: [{ allow: [tmpRoot], deny: [], strictGit: false }],
+      onceAllows: [island],
+    });
+    const lines = profile.split("\n");
+    const deny = `(deny file-write* (subpath "${island}"))`;
+    expect(lines).toContain(deny);
+    // …re-permit nothing: the island deny sits after the LAST allow
+    // (SBPL last-match).
+    const lastAllowIdx = lines
+      .map((l, i) => (l.startsWith("(allow") ? i : -1))
+      .reduce((a, b) => Math.max(a, b), -1);
+    expect(lines.indexOf(deny)).toBeGreaterThan(lastAllowIdx);
+  });
+
+  it("resolves a symlinked .zcode/acp island onto its real target", () => {
+    const target = realpathSync(mkdtempSync(path.join(os.tmpdir(), "sb-island-")));
+    try {
+      mkdirSync(path.join(tmpRoot, ".zcode"));
+      symlinkSync(target, path.join(tmpRoot, ".zcode", "acp"));
+      // Both spellings: writes THROUGH the link land on the target, while
+      // replacing the link itself lands on the lexical path.
+      expect(projectSandboxIslandPaths(tmpRoot)).toEqual([
+        path.join(tmpRoot, ".zcode", "acp"),
+        target,
+      ]);
+      const profile = buildSandboxProfile({
+        workspaceRoots: [tmpRoot],
+        config: { allow: [], deny: [], strictGit: false },
+        onceAllows: [],
+      });
+      expect(profile).toContain(`(deny file-write* (subpath "${target}"))`);
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+});
+
+// 2026-11-27 restore: `<workspace>/.zcode/acp/sandbox.json` is live config
+// again. Presence = in effect (enabled ignored); popup persistence writes it
+// for in-workspace paths.
+describe("per-project sandbox config", () => {
+  it("absent file reads as no grants", () => {
+    expect(readProjectSandboxConfig(tmpRoot)).toBeNull();
+  });
+
+  it("reads allow/deny/strictGit and IGNORES the legacy enabled key", () => {
+    mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
+    writeFileSync(
+      projectSandboxConfigPath(tmpRoot),
+      JSON.stringify({
+        enabled: true,
+        allow: ["~/go", `${tmpRoot}/vendor`],
+        deny: [`${tmpRoot}/secrets`],
+        strictGit: true,
+      }),
+    );
+    const cfg = readProjectSandboxConfig(tmpRoot);
+    expect(cfg?.allow).toEqual(["~/go", `${tmpRoot}/vendor`]);
+    expect(cfg?.deny).toEqual([`${tmpRoot}/secrets`]);
+    expect(cfg?.strictGit).toBe(true);
+  });
+
+  it("malformed file reads as null and the appenders refuse to overwrite it", () => {
+    mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
+    const file = projectSandboxConfigPath(tmpRoot);
+    writeFileSync(file, "{not json");
+    expect(readProjectSandboxConfig(tmpRoot)).toBeNull();
+    expect(appendProjectSandboxAllow(tmpRoot, `${tmpRoot}/x`)).toBe(false);
+    expect(appendProjectSandboxDeny(tmpRoot, `${tmpRoot}/x`)).toBe(false);
+    expect(readFileSync(file, "utf8")).toBe("{not json");
+  });
+
+  it("appendProjectSandboxAllow/Deny create the file and extend it, preserving other fields", () => {
+    expect(appendProjectSandboxAllow(tmpRoot, `${tmpRoot}/a`)).toBe(true);
+    expect(appendProjectSandboxAllow(tmpRoot, `${tmpRoot}/a`)).toBe(true); // no dup
+    expect(appendProjectSandboxDeny(tmpRoot, `${tmpRoot}/b`)).toBe(true);
+    const cfg = readProjectSandboxConfig(tmpRoot);
+    expect(cfg?.allow).toEqual([`${tmpRoot}/a`]);
+    expect(cfg?.deny).toEqual([`${tmpRoot}/b`]);
+    expect(cfg?.strictGit).toBe(false);
+  });
+
+  // A linked config pierces the deny island: the agent would edit the link
+  // target inside the allowed workspace, or the bridge — following the link
+  // — would read-modify-write some other JSON file as a deputy.
+  it("a symlinked config reads as null and the appenders refuse to touch it", () => {
+    const elsewhere = path.join(tmpRoot, "elsewhere.json");
+    writeFileSync(elsewhere, JSON.stringify({ allow: ["/"], deny: [], strictGit: false }));
+    mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
+    const file = projectSandboxConfigPath(tmpRoot);
+    symlinkSync(elsewhere, file);
+
+    expect(readProjectSandboxConfig(tmpRoot)).toBeNull();
+    expect(appendProjectSandboxAllow(tmpRoot, `${tmpRoot}/x`)).toBe(false);
+    expect(appendProjectSandboxDeny(tmpRoot, `${tmpRoot}/x`)).toBe(false);
+    // The link target — what a deputy write would have widened — is untouched,
+    // and the link itself is not silently replaced by a regular file.
+    expect(JSON.parse(readFileSync(elsewhere, "utf8"))).toEqual({
+      allow: ["/"],
+      deny: [],
+      strictGit: false,
+    });
+    expect(lstatSync(file).isSymbolicLink()).toBe(true);
+  });
+
+  it("a hardlinked config reads as null", () => {
+    const elsewhere = path.join(tmpRoot, "elsewhere.json");
+    mkdirSync(path.join(tmpRoot, ".zcode", "acp"), { recursive: true });
+    writeFileSync(
+      elsewhere,
+      JSON.stringify({ allow: [`${tmpRoot}/x`], deny: [], strictGit: false }),
+    );
+    linkSync(elsewhere, projectSandboxConfigPath(tmpRoot));
+
+    expect(readProjectSandboxConfig(tmpRoot)).toBeNull();
   });
 });
 

@@ -22,7 +22,9 @@ import {
 import {
   armSandboxArgv,
   ensureGlobalSandboxConfig,
+  type GlobalSandboxConfig,
   readGlobalSandboxConfig,
+  readProjectSandboxConfig,
   sandboxActive,
 } from "./backend/sandbox.js";
 import { clearClosedSessionIds } from "./closed-sessions.js";
@@ -888,9 +890,16 @@ export class ZcodeAcpServer {
     await ensureGlobalSandboxConfig(this.sandboxRoots());
     this.backendSandboxed = sandboxActive();
     if (this.backendSandboxed) {
+      // Per-project grants (ADR-0011, 2026-11-27 restore): one live read per
+      // workspace root per arm — a file present under a workspace feeds its
+      // allow/deny/strictGit into the profile alongside the global config.
+      const projectConfigs = [...this.sandboxRoots()]
+        .map((root) => readProjectSandboxConfig(root))
+        .filter((c): c is GlobalSandboxConfig => c !== null);
       argv = armSandboxArgv(argv, {
         workspaceRoots: this.sandboxRoots(),
         config: readGlobalSandboxConfig(),
+        projectConfigs,
         onceAllows: this.sandboxOnceAllows,
       });
       // Birth-mark the wrapped process: the marker is inherited down any

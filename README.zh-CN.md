@@ -158,10 +158,11 @@ ZCode CLI 内置于桌面应用中，默认不会加到 `PATH`。用 `ZCODE_BIN`
 
 可选的 macOS Seatbelt 写入隔离：单一全局开关（`ZCODE_ACP_SANDBOX=1`，或
 `~/.config/zcode-acp/config.json` 里 `"sandbox": {"enabled": true}`），路径
-放行统一在 `~/.config/zcode-acp/sandbox.json`（首次启动自动创建，预置
-`~/go`、`~/.gradle`、`~/.m2` 等工具链目录模板；不再向工作区写任何配置），
-白名单之外的写入会弹放行/拒绝确认，"始终"决定可见地持久化在该文件里；放行
-后后端自动以加宽的 profile 重启并续接被中断的任务。完整手册（英文）：
+放行是两层的并集——机器全局的 `~/.config/zcode-acp/sandbox.json`（首次启动
+自动创建，预置 `~/go`、`~/.gradle`、`~/.m2` 等工具链目录模板）与各工作区
+自己的 `.zcode/acp/sandbox.json`；白名单之外的写入会弹放行/拒绝确认，"始终"
+决定可见地持久化到对应的那一层；放行后后端自动以加宽的 profile 重启并续接
+被中断的任务。完整手册（英文）：
 [docs/SANDBOX.md](docs/SANDBOX.md)。
 
 ## 远程访问

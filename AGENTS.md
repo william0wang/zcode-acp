@@ -987,31 +987,56 @@ payload}` for years and the translator read `payload["turnId"]`, which on
   deny-priority** — an `allow` emitted after a `deny` re-permits the write
   (verified via scripts/verify-sandbox.sh; the deny-island test failed until
   the denies were moved to the end). `buildSandboxProfile` therefore emits
-  base deny-all → all allows → config-dir/strictGit denies LAST. Also:
+  base deny-all → all allows → the deny tail LAST (strictGit `.git`, global
+  config dir, each root's `.zcode/acp` island, profile self-deny, project
+  denies — order inside the tail is immaterial, no deny ever re-permits).
+  Also:
   subpath filters match REAL paths — every path (roots, allows, $TMPDIR)
   must go through `resolveReal`, or a symlinked prefix (/tmp →
   /private/tmp, $TMPDIR under /var/folders) silently fails to match. The
   sandbox design lives in ADR-0011 (`.zcode/docs/adr/`; see its 2026-11-17
-  amendment): writes-only model, ONE machine-global config at
+  and 2026-11-27 amendments): writes-only model, TWO live config layers
+  unioned into the profile at every arm — the machine-global
   `~/.config/zcode-acp/sandbox.json` (XDG aware; auto-created on first
   backend spawn with a pre-granted toolchain template — `~/go`,
   `~/.gradle`, `~/.m2`, `~/.cargo`, `~/.rustup`, `~/.cocoapods`,
   `~/.pub-cache`, `~/.nuget`, `~/.pnpm-store`, `~/.bun`, `~/.android`,
   `~/Library/Android/sdk`; deleting the file = empty grants, NOT
-  re-created), `{allow, deny, strictGit}` — the per-project
-  `.zcode/acp/sandbox.json` and its deny island were REMOVED, and its last
-  state is migrated ONCE (live roots' allow/deny/strictGit unioned into the
-  global file; a legacy `enabled:true` carries onto the GLOBAL switch —
-  config.json `sandbox.enabled` via `writeJsonAtomic`, an explicit `false`
-  wins — so an upgrade never silently disarms; migration runs even unarmed
-  from `ensureGlobalSandboxConfig` at every ensureBackend, once per
-  process, `wx`-create so a sibling bridge's file wins the race). The
-  global config DIR is denied in every profile, after every allow — the
-  agent cannot edit its own allowlist or the config.json/hub credentials
-  beside it, and the deny holds even when a workspace root covers the dir
-  (workspace rooted at $HOME). Popup persistence goes through
-  `persistGlobalSandboxConfig` (sync temp+rename merge-at-write; REFUSES to
-  overwrite unparseable bytes — the caller downgrades to a once-allow).
+  re-created) and each live workspace's own `.zcode/acp/sandbox.json`
+  (`readProjectSandboxConfig`, live-read per arm; same `{allow, deny,
+strictGit}` shape, a legacy `enabled` key IGNORED; allow joins the allow
+  section, deny joins the deny tail LAST, strictGit is OR-ed; absent or
+  malformed = no project grants). History: 2026-11-17 REPLACED the
+  per-project file with the global one; its one-shot migration
+  (`ensureGlobalSandboxConfig`, still run at every ensureBackend — even
+  unarmed, once per process, `wx`-create so a sibling bridge's file wins
+  the race; a legacy `enabled:true` carries onto the GLOBAL switch, an
+  explicit `sandbox.enabled:false` wins) only ever
+  ran where no global file existed yet — machines that already had one
+  silently lost every per-project grant (observed 2026-11-27: a sibling
+  repo's whole-root allow never reached the global file, and every session
+  re-asked per directory). The 2026-11-27 restore makes legacy files live
+  config again instead of patching that hole; the committed-`sandbox.json`
+  pre-grant boundary is back with it (treat a committed config like
+  committed code). The agent can edit NEITHER layer: the global config DIR
+  and every workspace's `<root>/.zcode/acp/` deny island are denied after
+  every allow (`projectSandboxIslandPaths`, real paths — a symlinked
+  `.zcode`/`acp` must land on its target), which also guards the
+  config.json/hub credentials beside the global file and holds even when a
+  workspace root covers the dir (workspace rooted at $HOME). Popup
+  persistence goes through `persistSandboxConfigFile` (sync temp+rename
+  merge-at-write; REFUSES to overwrite unparseable bytes — the caller
+  downgrades to a once-allow). Ask target (2026-11-27): a denial INSIDE a
+  live workspace root asks once for the WORKSPACE ROOT — one ask per repo,
+  not one per parent directory — and persists there ("always allow" writes
+  the root to the project file; "always reject" writes the ORIGINALLY
+  denied path, never the root — and goes to the GLOBAL deny list when that
+  path IS the root, because a project deny is a real SBPL deny and a
+  root-wide entry would lock the repo); outside every root the parent-dir
+  target and the global file stay. Protected paths (the global config dir, each
+  root's deny island, `.git` under strictGit — a PROJECT `strictGit` counts)
+  and deny-listed paths are vetted on the RAW path BEFORE the retarget and
+  get a structural hint, never a popup.
   Dynamic allow = ask → persist → BATCHED backend
   restart (3s window: grants collect, then one cancel-wave + continuation
   - close — a per-approval restart killed sibling popups still pending on
@@ -1061,8 +1086,8 @@ payload}` for years and the translator read `payload["turnId"]`, which on
     them back into popup storms (verify-sandbox.sh fixtures moved to HOME for
     the same reason). Arming is the GLOBAL switch only
     (`ZCODE_ACP_SANDBOX=1` or `sandbox.enabled` in the user config;
-    `sandboxActive()` takes no roots anymore — the project opt-in is gone
-    with the file). `server.backendSandboxed` is the process
+    `sandboxActive()` takes no roots — a project file's `enabled` key is
+    ignored). `server.backendSandboxed` is the process
     fact the EPERM flow gates on — not `sandboxActive()`, which is the config
     wish re-checked per call (a mid-run flip to `true` is applied by
     `applySandboxFlip()` at prompt entry; flipping back only drops the wrap on

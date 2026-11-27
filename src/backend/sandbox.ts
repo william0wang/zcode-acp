@@ -13,16 +13,25 @@
  * not done).
  *
  * Arming is the GLOBAL switch only (`sandbox.enabled` in the user config
- * file, or ZCODE_ACP_SANDBOX=1). The per-project switch
- * (`<workspace>/.zcode/acp/sandbox.json`) was REMOVED (2026-11-17): all
- * path grants now live in one machine-global file next to the user config
- * (`~/.config/zcode-acp/sandbox.json`, XDG aware), auto-created on first
- * backend spawn with a pre-granted toolchain template (~/go, ~/.gradle,
- * ~/.m2, ...). A legacy per-project file still lying around is migrated
- * once — its allow/deny/strictGit merged into the global file, and its
- * `enabled: true` carried onto the global switch so an upgrade never
- * silently disarms a machine that had the sandbox on. Workspaces stay
- * untouched (#332): nothing is ever written into the project tree.
+ * file, or ZCODE_ACP_SANDBOX=1). Path grants are TWO layers, live-read on
+ * every arm and unioned into the profile (2026-11-27 restores the
+ * per-project face the 2026-11-17 revision had removed):
+ * - the machine-global file next to the user config
+ *   (`~/.config/zcode-acp/sandbox.json`, XDG aware), auto-created on first
+ *   backend spawn with a pre-granted toolchain template (~/go, ~/.gradle,
+ *   ~/.m2, ...);
+ * - each live workspace's `.zcode/acp/sandbox.json` — present = in effect
+ *   (its `enabled` key is ignored; the global switch is the only arm).
+ *   allow lists join the profile's allow section, deny lists join the deny
+ *   tail (SBPL last-match: a project deny beats every allow), strictGit is
+ *   OR-ed. The dynamic allow popup persists "始终允许"/"始终拒绝" into the
+ *   project file when the path sits under a workspace root, else into the
+ *   global one — grants live where they apply.
+ * A legacy per-project file on a machine whose global file predates the
+ * 2026-11-17 revision NEVER migrated (ensureGlobalSandboxConfig early-
+ * returns on an existing file) — with the per-project face restored that
+ * file is live config again, so the one-shot migration stays first-create
+ * only (the then-live roots' union is already in the file).
  *
  * Whitelist (frozen at spawn, rebuilt on backend restart):
  * - workspace roots of all live sessions (union of server.sessionCwds)
@@ -30,8 +39,9 @@
  *   denying it breaks session/create itself)
  * - system temp + regenerable cache dirs (zero-value targets, constant
  *   toolchain traffic)
- * - the global config's `allow` list + bridge-lifetime once-allows granted
- *   via the dynamic allow flow
+ * - the global config's `allow` list + each live workspace's per-project
+ *   `.zcode/acp/sandbox.json` allow list + bridge-lifetime once-allows
+ *   granted via the dynamic allow flow
  *
  * The global config directory (`~/.config/zcode-acp/`) is DENIED in every
  * profile: the bridge — outside the sandbox — persists popup grants there on
@@ -39,7 +49,10 @@
  * allowlist or the hub credentials that live beside it. The base write-deny
  * already covers it; the explicit deny also holds in the
  * workspace-root-is-its-ancestor edge (a workspace rooted at $HOME would
- * otherwise re-permit it).
+ * otherwise re-permit it). Each live workspace's own `.zcode/acp/` gets the
+ * same treatment (the deny island, `projectSandboxIslandPaths`): it sits
+ * INSIDE its write-allowed root, so without the carve-out the project
+ * allowlist would be agent-editable again.
  *
  * macOS-only: Seatbelt is a macOS facility. Setting the env elsewhere warns
  * once and runs unsandboxed (see sandboxActive()).
@@ -47,6 +60,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -221,10 +235,10 @@ export function readGlobalSandboxConfig(): GlobalSandboxConfig {
  * lost update between two concurrent bridges costs one re-asked popup, never
  * a torn file. REFUSES to write over unparseable bytes.
  */
-function persistGlobalSandboxConfig(
+function persistSandboxConfigFile(
+  file: string,
   mutate: (cfg: GlobalSandboxConfig) => GlobalSandboxConfig,
 ): boolean {
-  const file = globalSandboxConfigPath();
   let cfg: GlobalSandboxConfig;
   let raw: string;
   try {
@@ -262,13 +276,21 @@ function persistGlobalSandboxConfig(
       path.dirname(file),
       `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`,
     );
-    writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n");
+    // O_EXCL: a project file's dir used to be agent-writable, so a planted
+    // temp name must fail the write instead of being followed.
+    writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n", { flag: "wx" });
     renameSync(tmp, file);
     return true;
   } catch (e) {
     warn(`sandbox: could not persist ${file}: ${e instanceof Error ? e.message : String(e)}`);
     return false;
   }
+}
+
+function persistGlobalSandboxConfig(
+  mutate: (cfg: GlobalSandboxConfig) => GlobalSandboxConfig,
+): boolean {
+  return persistSandboxConfigFile(globalSandboxConfigPath(), mutate);
 }
 
 /**
@@ -299,6 +321,132 @@ export function appendGlobalSandboxDeny(deniedPath: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Per-project config (restored 2026-11-27): each live workspace's
+// `.zcode/acp/sandbox.json` is live config again. Presence = in effect —
+// the `enabled` key is ignored (the global switch is the only arm) — and
+// popup persistence writes HERE for paths under a workspace root, so grants
+// live where they apply. The file was dead between 2026-11-17 and this
+// restore; the one-shot migration never re-reads it (ensureGlobalSandbox-
+// Config early-returns on an existing global file), which is exactly why
+// the face had to come back instead of "fixing" the migration.
+// ---------------------------------------------------------------------------
+
+/** Path of a workspace's per-project sandbox config. */
+export function projectSandboxConfigPath(workspaceRoot: string): string {
+  return path.join(resolveReal(workspaceRoot), ".zcode", "acp", "sandbox.json");
+}
+
+/**
+ * Real paths of a workspace's deny island — its project config dir. The
+ * project config lives INSIDE its write-allowed root, so the profile must
+ * carve the dir out or the agent could edit its own allowlist (the guarantee
+ * the global config dir deny gives the global file). Seatbelt matches real
+ * paths: when `.zcode`/`acp` is a symlink (dotfiles layouts), writes through
+ * the link land on the target while replacing the link itself lands on the
+ * lexical path — deny both.
+ */
+export function projectSandboxIslandPaths(workspaceRoot: string): string[] {
+  const lexical = path.join(resolveReal(workspaceRoot), ".zcode", "acp");
+  const real = resolveReal(lexical);
+  return real === lexical ? [lexical] : [lexical, real];
+}
+
+/**
+ * A project config must be a REGULAR file at exactly its own path. A
+ * symlinked or hardlinked-away config pierces the deny island: the agent
+ * writes the link target inside the allowed workspace, or the bridge —
+ * following the link — read-modify-writes some other JSON file as a deputy.
+ * Such a config reads as absent and is never persisted through. A missing
+ * file is fine: that is the "no project grants" state.
+ */
+function projectConfigIntegrityOk(file: string): boolean {
+  try {
+    const st = lstatSync(file);
+    return st.isFile() && st.nlink === 1 && realpathSync(file) === file;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Live-read one workspace's per-project grants. Absent, malformed or
+ * symlinked/hardlinked → null (no grants; a corrupt or linked file warns once
+ * and is skipped, never overwritten — persistSandboxConfigFile refuses it
+ * separately).
+ */
+export function readProjectSandboxConfig(workspaceRoot: string): GlobalSandboxConfig | null {
+  const file = projectSandboxConfigPath(workspaceRoot);
+  if (!projectConfigIntegrityOk(file)) {
+    if (!warnedGlobalIssues.has(`${file}:link`)) {
+      warnedGlobalIssues.add(`${file}:link`);
+      warn(
+        `sandbox: ${file} is a symlink or has multiple links — ignoring it ` +
+          `(a project config must be a regular file at exactly this path)`,
+      );
+    }
+    return null;
+  }
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  if (
+    parsed === undefined ||
+    parsed === null ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed)
+  ) {
+    if (!warnedGlobalIssues.has(`${file}:malformed`)) {
+      warnedGlobalIssues.add(`${file}:malformed`);
+      warn(`sandbox: ${file} is not valid JSON — ignoring it`);
+    }
+    return null;
+  }
+  const cfg = sanitizeGlobalSandboxConfig(parsed as Partial<GlobalSandboxConfig>);
+  return {
+    allow: sanitizePathList(cfg.allow, file, "allow"),
+    deny: sanitizePathList(cfg.deny, file, "deny"),
+    strictGit: cfg.strictGit,
+  };
+}
+
+/** Popup "始终允许" for a path under a workspace root (see readProjectSandboxConfig). */
+export function appendProjectSandboxAllow(workspaceRoot: string, allowedPath: string): boolean {
+  const file = projectSandboxConfigPath(workspaceRoot);
+  if (!projectConfigIntegrityOk(file)) {
+    warn(`sandbox: refusing to persist through a symlinked/hardlinked ${file}`);
+    return false;
+  }
+  const ok = persistSandboxConfigFile(file, (cfg) =>
+    cfg.allow.includes(allowedPath) ? cfg : { ...cfg, allow: [...cfg.allow, allowedPath] },
+  );
+  if (ok) log(`sandbox: allowlisted ${allowedPath} in ${file}`);
+  return ok;
+}
+
+/** Popup "始终拒绝" for a path under a workspace root. */
+export function appendProjectSandboxDeny(workspaceRoot: string, deniedPath: string): boolean {
+  const file = projectSandboxConfigPath(workspaceRoot);
+  if (!projectConfigIntegrityOk(file)) {
+    warn(`sandbox: refusing to persist through a symlinked/hardlinked ${file}`);
+    return false;
+  }
+  const ok = persistSandboxConfigFile(file, (cfg) =>
+    cfg.deny.includes(deniedPath) ? cfg : { ...cfg, deny: [...cfg.deny, deniedPath] },
+  );
+  if (ok) log(`sandbox: denylisted ${deniedPath} in ${file}`);
+  return ok;
+}
+
+// ---------------------------------------------------------------------------
 // Legacy per-project config (REMOVED as a config source 2026-11-17; read
 // exactly once, during migration into the global file).
 // ---------------------------------------------------------------------------
@@ -322,9 +470,13 @@ export function sandboxConfigPath(workspaceRoot: string): string {
  * entries dropped (same rule the file always had).
  */
 function readLegacySandboxConfig(workspaceRoot: string): LegacySandboxConfig | null {
+  const file = projectSandboxConfigPath(workspaceRoot);
+  // Same integrity rule as the live read — never follow a link into the
+  // machine-global config.
+  if (!projectConfigIntegrityOk(file)) return null;
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(sandboxConfigPath(workspaceRoot), "utf8"));
+    parsed = JSON.parse(readFileSync(file, "utf8"));
   } catch {
     return null;
   }
@@ -352,7 +504,8 @@ let globalConfigSettled = false;
  * legacy per-project configs of the live roots. A legacy `enabled: true`
  * arms the GLOBAL switch (never silently disarm an upgraded machine); an
  * explicit `sandbox.enabled: false` in the user config wins over the
- * migration. Never writes into workspaces (#332).
+ * migration. Never writes into workspaces (#332) — only an explicit
+ * in-workspace popup decision creates a project file.
  */
 export async function ensureGlobalSandboxConfig(cwdRoots: Iterable<string>): Promise<void> {
   if (globalConfigSettled) return;
@@ -483,6 +636,13 @@ export interface SandboxArmInput {
   workspaceRoots: Iterable<string>;
   /** Machine-global grants: allow list + strictGit flag. */
   config: GlobalSandboxConfig;
+  /**
+   * Per-workspace `.zcode/acp/sandbox.json` grants (2026-11-27 restore):
+   * the caller live-reads one per workspace root at every arm. Allow lists
+   * join the allow section, deny lists join the deny tail (they must beat
+   * the implicit workspace-root allow), strictGit is OR-ed.
+   */
+  projectConfigs?: Iterable<GlobalSandboxConfig>;
   /** Bridge-lifetime once-allows granted via the dynamic allow flow. */
   onceAllows?: Iterable<string>;
   /**
@@ -505,12 +665,14 @@ export interface SandboxArmInput {
  * Build the SBPL profile text. SBPL resolves overlapping rules by LAST
  * match (verified empirically: an allow emitted after a deny re-permits the
  * write), so the layout is: base deny-all, then every allow, then the deny
- * carve-outs (global config dir, strictGit, profile dirs) LAST so nothing
- * can override them.
+ * carve-outs (global config dir, per-root config islands, strictGit, profile
+ * dirs, project denies) LAST so nothing can override them.
  */
 export function buildSandboxProfile(input: SandboxArmInput): string {
   const allows: string[] = [];
   const denies: string[] = [];
+  const projectConfigs = [...(input.projectConfigs ?? [])];
+  const strictGit = input.config.strictGit || projectConfigs.some((pc) => pc.strictGit);
   const seenRoots = new Set<string>();
   for (const root of input.workspaceRoots) {
     // Resolve here too (idempotent): direct callers may pass symlinked
@@ -519,12 +681,17 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
     if (seenRoots.has(real)) continue;
     seenRoots.add(real);
     allows.push(`(allow file-write* (subpath ${sb(real)}))`);
-    if (input.config.strictGit) {
+    if (strictGit) {
       denies.push(`(deny file-write* (subpath ${sb(path.join(real, ".git"))}))`);
     }
   }
   for (const allowed of input.config.allow) {
     allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
+  }
+  for (const pc of projectConfigs) {
+    for (const allowed of pc.allow) {
+      allows.push(`(allow file-write* (subpath ${sb(resolveReal(allowed))}))`);
+    }
   }
   for (const p of [...ZCODE_STATE_DIRS, ...DEFAULT_CACHE_DIRS, ...DEFAULT_TEMP_DIRS]) {
     allows.push(`(allow file-write* (subpath ${sb(resolveReal(p))}))`);
@@ -558,11 +725,26 @@ export function buildSandboxProfile(input: SandboxArmInput): string {
   // OUTSIDE the sandbox. Emitted in the deny tail so a workspace allow that
   // covers it (a workspace rooted at $HOME) can never re-permit it.
   denies.push(`(deny file-write* (subpath ${sb(globalSandboxConfigDir())}))`);
+  // Same guarantee for each workspace's project config, which lives inside
+  // its own write-allowed root: without this carve-out the agent could edit
+  // the project allowlist it is about to run under (ADR-0011 deny island).
+  for (const real of seenRoots) {
+    for (const island of projectSandboxIslandPaths(real)) {
+      denies.push(`(deny file-write* (subpath ${sb(island)}))`);
+    }
+  }
   if (input.profileDir) {
     denies.push(`(deny file-write* (subpath ${sb(input.profileDir)}))`);
   }
   if (input.profilesRoot) {
     denies.push(`(deny file-write* (subpath ${sb(resolveReal(input.profilesRoot))}))`);
+  }
+  // Project denies LAST of all: SBPL resolves overlaps by last match, so a
+  // project "永不放行" must beat the implicit workspace-root allow above.
+  for (const pc of projectConfigs) {
+    for (const p of pc.deny) {
+      denies.push(`(deny file-write* (subpath ${sb(resolveReal(p))}))`);
+    }
   }
   return (
     ["(version 1)", "(allow default)", "(deny file-write*)", ...allows, ...denies].join("\n") + "\n"

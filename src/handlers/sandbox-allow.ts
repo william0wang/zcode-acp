@@ -9,7 +9,12 @@
  * continuation inside the original session/prompt request (see session.ts) so
  * the model resumes the interrupted task — per-command seamless escalation is impossible (the
  * executor lives inside the sandbox; profiles are immutable per process),
- * directory-granularity with a restart is the closest achievable form.
+ * restart-batched granularity is the closest achievable form. Since
+ * 2026-11-27 the ask target is the WORKSPACE ROOT for denials under a live
+ * workspace (one ask per repo, not one per parent directory); the "始终"
+ * choices persist there too — into that workspace's project config, else
+ * into the machine-global file. Rejection stays fine-grained: declining a
+ * root ask persists the originally denied PATH, never the root.
  */
 
 import os from "node:os";
@@ -20,8 +25,14 @@ import { randomUUID } from "node:crypto";
 import {
   appendGlobalSandboxAllow,
   appendGlobalSandboxDeny,
+  appendProjectSandboxAllow,
+  appendProjectSandboxDeny,
   globalSandboxConfigDir,
+  globalSandboxConfigPath,
+  projectSandboxConfigPath,
+  projectSandboxIslandPaths,
   readGlobalSandboxConfig,
+  readProjectSandboxConfig,
   resolveReal,
 } from "../backend/sandbox.js";
 import { sandboxUnattendedAskTimeoutMs } from "../config/settings.js";
@@ -326,16 +337,24 @@ export function extractPermDeniedPath(text: string): string | null {
 }
 
 /**
- * Paths that no popup can ever allow: the global config dir (config
- * self-edit = self-escalation) and strictGit's .git — their denies are
- * emitted LAST in the profile (SBPL last-match), so an allow line can never
- * override them. Offering the popup there would just white-flash and
- * dead-end.
+ * Paths that no popup can ever allow: the global config dir and every
+ * workspace's `.zcode/acp/` island (config self-edit = self-escalation) and
+ * strictGit's .git — their denies are emitted LAST in the profile (SBPL
+ * last-match), so an allow line can never override them. Offering the popup
+ * there would just white-flash and dead-end.
  */
 export function protectedSandboxPaths(cwdRoots: Iterable<string>): string[] {
+  const roots = [...cwdRoots];
   const out = [globalSandboxConfigDir()];
-  if (readGlobalSandboxConfig().strictGit) {
-    for (const root of cwdRoots) out.push(path.join(resolveReal(root), ".git"));
+  for (const root of roots) out.push(...projectSandboxIslandPaths(root));
+  // The profile ORs strictGit across both config layers and then denies
+  // EVERY root's .git — mirror that here, or a project-only strictGit would
+  // raise a popup no grant can ever satisfy.
+  const strictGit =
+    readGlobalSandboxConfig().strictGit ||
+    roots.some((root) => readProjectSandboxConfig(root)?.strictGit === true);
+  if (strictGit) {
+    for (const root of roots) out.push(path.join(resolveReal(root), ".git"));
   }
   return out;
 }
@@ -382,20 +401,78 @@ export async function handleSandboxDenial(
   // that, not the bridge's own cwd (they differ for remote/hub clients).
   const raw = denial.isMkdir ? denial.path : path.dirname(denial.path);
   const cwd = server.sessionCwds.get(acpSid);
-  const targetReal = resolveReal(
-    path.isAbsolute(raw) ? raw : path.resolve(cwd ?? process.cwd(), raw),
-  );
+  const toReal = (p: string): string =>
+    resolveReal(path.isAbsolute(p) ? p : path.resolve(cwd ?? process.cwd(), p));
+  const rawTargetReal = toReal(raw);
+  const deniedReal = toReal(denial.path);
+  // Retarget (2026-11-27): a denial INSIDE a live workspace asks once for
+  // the workspace root — the per-parent-dir target re-asked for every
+  // sibling directory of one repo. Outside any root the parent-dir target
+  // stays (toolchain/cache grants keep their tight granularity). Longest
+  // root first, so nested live workspaces resolve to the inner one.
+  const roots = [...server.sandboxRoots()].map(resolveReal).sort((a, b) => b.length - a.length);
+  let targetReal = rawTargetReal;
+  const rootReal =
+    roots.find((r) => rawTargetReal === r || rawTargetReal.startsWith(r + path.sep)) ?? null;
+  // The config file an "always" decision about this workspace persists to.
+  const configFile = rootReal ? projectSandboxConfigPath(rootReal) : globalSandboxConfigPath();
 
-  // Debounce: one ask per path per session. The mark carries the ask
+  // Debounce marks: one ask per path per session. The mark carries the ask
   // timestamp — a USER decision pins it forever (Infinity); an ask that died
   // of the environment merely cools down for SANDBOX_ASK_RETRY_MS and may
   // re-ask afterwards; an unattended timeout pins for the REST of its
-  // unattended context (lazily re-checked — see UNATTENDED_PIN).
+  // unattended context (lazily re-checked — see UNATTENDED_PIN). Keyed on
+  // the (possibly retargeted) ask target.
   let asked = server.sandboxAskedPaths.get(acpSid);
   if (!asked) {
     asked = new Map();
     server.sandboxAskedPaths.set(acpSid, asked);
   }
+
+  // Unallowable by construction (their denies win the last-match): the
+  // global config dir, each root's config island, strictGit's .git. Vetted on
+  // the DENIED PATH and on its ask target, before any retarget — tell the
+  // USER why instead of a doomed popup; the model only ever sees the bare
+  // EPERM in its tool output. Structural: hinted once per session, then
+  // silent (the pin below is what makes repeats quiet).
+  const protectedPaths = protectedSandboxPaths(server.sandboxRoots());
+  if (underAny(deniedReal, protectedPaths) || underAny(rawTargetReal, protectedPaths)) {
+    if (asked.get(rawTargetReal) === Number.POSITIVE_INFINITY) return;
+    asked.set(rawTargetReal, Number.POSITIVE_INFINITY);
+    await sendTextChunk(cx, acpSid, m.sandboxProtectedHint, randomUUID());
+    return;
+  }
+
+  // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
+  // memory: no popup, and the asked-mark keeps later repeats silent. Checked
+  // in BOTH layers — the global file and EVERY live workspace's project
+  // file, exactly the union the profile denies — at the raw path, so a
+  // deny-listed path is never smuggled into a root-wide ask. The hint names
+  // the file that actually holds the entry.
+  const denyListedInRoot =
+    roots.find((r) =>
+      underAny(rawTargetReal, (readProjectSandboxConfig(r)?.deny ?? []).map(resolveReal)),
+    ) ?? null;
+  if (
+    denyListedInRoot ||
+    underAny(rawTargetReal, readGlobalSandboxConfig().deny.map(resolveReal))
+  ) {
+    if (asked.get(rawTargetReal) === Number.POSITIVE_INFINITY) return;
+    asked.set(rawTargetReal, Number.POSITIVE_INFINITY);
+    await sendTextChunk(
+      cx,
+      acpSid,
+      m.sandboxDenyListedHint(
+        rawTargetReal,
+        denyListedInRoot ? projectSandboxConfigPath(denyListedInRoot) : globalSandboxConfigPath(),
+      ),
+      randomUUID(),
+    );
+    return;
+  }
+
+  if (rootReal) targetReal = rootReal;
+
   const prior = asked.get(targetReal);
   if (prior === Number.POSITIVE_INFINITY) {
     return;
@@ -408,32 +485,16 @@ export async function handleSandboxDenial(
   }
   asked.set(targetReal, Date.now());
 
-  // Global-config-dir / strictGit denials are unallowable by construction
-  // (their denies win the last-match). Tell the USER why instead of a doomed
-  // popup — the model only ever sees the bare EPERM in its tool output.
-  // Structural: hinted once, pinned forever.
-  if (underAny(targetReal, protectedSandboxPaths(server.sandboxRoots()))) {
-    asked.set(targetReal, Number.POSITIVE_INFINITY);
-    await sendTextChunk(cx, acpSid, m.sandboxProtectedHint, randomUUID());
-    return;
-  }
-
   // Phantom-ask guard: echoed EPERM text can also extract a path no syscall
   // ever tried to write — and a grant for $HOME (or any of its ancestors)
-  // would effectively gut the sandbox. Such asks are refused; hand-editing
-  // the config is the only way to grant something this broad.
+  // would effectively gut the sandbox. Applied to the FINAL grant target (a
+  // workspace rooted at $HOME retargets to exactly that). Such asks are
+  // refused; hand-editing the config is the only way to grant something this
+  // broad.
   const home = resolveReal(os.homedir());
   if (targetReal === "/" || targetReal === home || home.startsWith(targetReal + path.sep)) {
     asked.set(targetReal, Number.POSITIVE_INFINITY);
     await sendTextChunk(cx, acpSid, m.sandboxOverBroadHint(targetReal), randomUUID());
-    return;
-  }
-
-  // A persisted "永不放行" decision — VISIBLE config, never hidden bridge
-  // memory: no popup, and the asked-mark above keeps later repeats silent.
-  if (underAny(targetReal, readGlobalSandboxConfig().deny.map(resolveReal))) {
-    asked.set(targetReal, Number.POSITIVE_INFINITY);
-    await sendTextChunk(cx, acpSid, m.sandboxDenyListedHint(targetReal), randomUUID());
     return;
   }
 
@@ -506,7 +567,7 @@ export async function handleSandboxDenial(
             type: "content",
             content: {
               type: "text",
-              text: m.sandboxPopupDetails(targetReal),
+              text: m.sandboxPopupDetails(targetReal, configFile),
             },
           },
         ],
@@ -563,10 +624,20 @@ export async function handleSandboxDenial(
   asked.set(targetReal, Number.POSITIVE_INFINITY);
 
   if (decision === "reject_always") {
-    // The user's denial is persisted VISIBLY into the global config — never
-    // silently remembered in bridge memory. If the config can't be written,
+    // The user's denial is persisted VISIBLY into config — never silently
+    // remembered in bridge memory. Under a workspace root it lands in THAT
+    // workspace's project file; the PATH persisted is the originally denied
+    // one (rawTargetReal), never the retargeted root. And when that path IS
+    // the root (a denial sitting directly under it, or a mkdir-style one on
+    // the root itself), it goes to the GLOBAL deny list instead: a project
+    // deny is a real SBPL deny in the last-match tail, so a root-wide entry
+    // would lock every write in the repo after the next respawn, while the
+    // global list only silences the popup. If the config can't be written,
     // nothing is stored: the ask simply resurfaces next time.
-    const persisted = appendGlobalSandboxDeny(targetReal);
+    const toProjectFile = rootReal !== null && rawTargetReal !== rootReal;
+    const persisted = toProjectFile
+      ? appendProjectSandboxDeny(rootReal, rawTargetReal)
+      : appendGlobalSandboxDeny(rawTargetReal);
     // The turn was frozen for this ask — resume it with the denial context
     // (the model only saw a bare EPERM; without this it free-runs into
     // retrying the same path).
@@ -575,7 +646,10 @@ export async function handleSandboxDenial(
       cx,
       acpSid,
       persisted
-        ? m.sandboxRejectAlwaysPersisted(targetReal)
+        ? m.sandboxRejectAlwaysPersisted(
+            rawTargetReal,
+            toProjectFile ? configFile : globalSandboxConfigPath(),
+          )
         : m.sandboxRejectAlwaysUnpersisted(targetReal),
       randomUUID(),
     );
@@ -589,11 +663,16 @@ export async function handleSandboxDenial(
   }
 
   if (decision === "always") {
-    // Persist into the machine-global config — the bridge writes this file
-    // from OUTSIDE the sandbox (the config dir is denied in every profile, so
-    // the agent cannot edit its own allowlist). An unparseable or unwritable
-    // file downgrades to a bridge-lifetime once-allow.
-    if (!appendGlobalSandboxAllow(targetReal)) server.sandboxOnceAllows.add(targetReal);
+    // Persist where the grant applies (2026-11-27): under a workspace root
+    // into THAT workspace's project config (targetReal IS the root after the
+    // retarget), else into the machine-global file. The bridge writes these
+    // files from OUTSIDE the sandbox (the config dir is denied in every
+    // profile, so the agent cannot edit its own allowlist). An unparseable
+    // or unwritable file downgrades to a bridge-lifetime once-allow.
+    const persisted = rootReal
+      ? appendProjectSandboxAllow(rootReal, targetReal)
+      : appendGlobalSandboxAllow(targetReal);
+    if (!persisted) server.sandboxOnceAllows.add(targetReal);
   } else {
     server.sandboxOnceAllows.add(targetReal);
   }

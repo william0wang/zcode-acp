@@ -85,14 +85,17 @@ export interface Messages {
    *  the backend's own session-always option — interaction/adapter.ts). */
   permissionAlwaysSession: string;
   sandboxPopupTitle: (path: string) => string;
-  sandboxPopupDetails: (path: string) => string;
-  /** Island/strictGit denies can never be overridden by an allow. */
+  /** `configFile` is where this ask's "always" choices persist: the
+   *  workspace's project file for an in-workspace ask, else the global one. */
+  sandboxPopupDetails: (path: string, configFile: string) => string;
+  /** Global config dir / project config island / strictGit denies can never
+   *  be overridden by an allow. */
   sandboxProtectedHint: string;
   /** A grant for $HOME (or an ancestor) would gut the sandbox. */
   sandboxOverBroadHint: (path: string) => string;
-  /** Path already in the config's deny list (earlier "always reject"). */
-  sandboxDenyListedHint: (path: string) => string;
-  sandboxRejectAlwaysPersisted: (path: string) => string;
+  /** Path already in a config's deny list (earlier "always reject"). */
+  sandboxDenyListedHint: (path: string, configFile: string) => string;
+  sandboxRejectAlwaysPersisted: (path: string, configFile: string) => string;
   sandboxRejectAlwaysUnpersisted: (path: string) => string;
   sandboxRejectOnceHint: (path: string) => string;
   /** Continuation prompt sent to the model after a user REJECTION (once or
@@ -282,16 +285,16 @@ const zh: Messages = {
   sandboxOptionRejectAlways: "始终拒绝",
   permissionAlwaysSession: "本会话始终允许",
   sandboxPopupTitle: (p) => `沙箱写入放行:${p}`,
-  sandboxPopupDetails: (p) =>
-    `沙箱拒绝了工作区外的写入:${p}\n“始终允许”写入配置的 allow 列表,“始终拒绝”写入 deny 列表(~/.config/zcode-acp/sandbox.json,全局生效,可编辑撤销)。`,
+  sandboxPopupDetails: (p, configFile) =>
+    `沙箱拒绝了白名单外的写入:${p}\n“始终允许”写入 ${configFile} 的 allow 列表,“始终拒绝”写入 deny 列表(可编辑撤销)。`,
   sandboxProtectedHint:
-    "[该路径受沙箱保护(全局配置目录 ~/.config/zcode-acp/ 或 strictGit 的 .git),不能通过弹窗放行。strictGit 可在 ~/.config/zcode-acp/sandbox.json 中关闭。]",
+    "[该路径受沙箱保护(全局配置目录 ~/.config/zcode-acp/、工作区自身的配置目录 .zcode/acp/ 或 strictGit 的 .git),不能通过弹窗放行。strictGit 可在 ~/.config/zcode-acp/sandbox.json 中关闭。]",
   sandboxOverBroadHint: (p) =>
     `[${p} 范围过宽($HOME 或其上级),沙箱不会弹窗放行;确需放行请手动编辑 ~/.config/zcode-acp/sandbox.json 的 allow 列表。]`,
-  sandboxDenyListedHint: (p) =>
-    `[${p} 已在 ~/.config/zcode-acp/sandbox.json 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
-  sandboxRejectAlwaysPersisted: (p) =>
-    `[已记入始终拒绝 ${p}(~/.config/zcode-acp/sandbox.json 的 deny 列表,可编辑撤销)。]`,
+  sandboxDenyListedHint: (p, configFile) =>
+    `[${p} 已在 ${configFile} 的 deny 列表中(你之前选择过始终拒绝)。要撤销,编辑该文件的 deny 数组即可。]`,
+  sandboxRejectAlwaysPersisted: (p, configFile) =>
+    `[已记入始终拒绝 ${p}(${configFile} 的 deny 列表,可编辑撤销)。]`,
   sandboxRejectAlwaysUnpersisted: (p) =>
     `[已拒绝 ${p}(配置不可写,未持久化,同类写入下次仍会询问。)]`,
   sandboxRejectOnceHint: (p) =>
@@ -451,16 +454,16 @@ const en: Messages = {
   sandboxOptionRejectAlways: "Always reject",
   permissionAlwaysSession: "Always allow in this session",
   sandboxPopupTitle: (p) => `Sandbox write request: ${p}`,
-  sandboxPopupDetails: (p) =>
-    `The sandbox denied a write outside the workspace: ${p}\n"Always allow" persists to the config's allow list, "Always reject" to its deny list (~/.config/zcode-acp/sandbox.json, machine-global, editable to undo).`,
+  sandboxPopupDetails: (p, configFile) =>
+    `The sandbox denied a write outside the whitelist: ${p}\n"Always allow" persists to the allow list of ${configFile}, "Always reject" to a deny list (editable to undo).`,
   sandboxProtectedHint:
-    "[This path is sandbox-protected (the global config dir ~/.config/zcode-acp/, or .git under strictGit) and cannot be granted via popup. strictGit can be disabled in ~/.config/zcode-acp/sandbox.json.]",
+    "[This path is sandbox-protected (the global config dir ~/.config/zcode-acp/, a workspace's own .zcode/acp/ config dir, or .git under strictGit) and cannot be granted via popup. strictGit can be disabled in ~/.config/zcode-acp/sandbox.json.]",
   sandboxOverBroadHint: (p) =>
     `[${p} is too broad ($HOME or an ancestor) for a popup grant; to allow it, edit the allow list in ~/.config/zcode-acp/sandbox.json by hand.]`,
-  sandboxDenyListedHint: (p) =>
-    `[${p} is in the deny list of ~/.config/zcode-acp/sandbox.json (you chose "Always reject" earlier). Edit that file's deny array to undo.]`,
-  sandboxRejectAlwaysPersisted: (p) =>
-    `[Recorded as always-rejected: ${p} (deny list in ~/.config/zcode-acp/sandbox.json, editable to undo).]`,
+  sandboxDenyListedHint: (p, configFile) =>
+    `[${p} is in the deny list of ${configFile} (you chose "Always reject" earlier). Edit that file's deny array to undo.]`,
+  sandboxRejectAlwaysPersisted: (p, configFile) =>
+    `[Recorded as always-rejected: ${p} (deny list in ${configFile}, editable to undo).]`,
   sandboxRejectAlwaysUnpersisted: (p) =>
     `[Rejected ${p} (config not writable, nothing persisted; the same write will ask again.)]`,
   sandboxRejectOnceHint: (p) =>
