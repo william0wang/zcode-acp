@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.95.1](https://github.com/william0wang/zcode-acp/compare/v0.95.0...v0.95.1) (2026-11-27)
+
+
+### Bug Fixes
+
+* advertise the base mode when the Plan switch is unknown after a cold recovery ([#432](https://github.com/william0wang/zcode-acp/issues/432)) ([c0ec8a1](https://github.com/william0wang/zcode-acp/commit/c0ec8a127a480bcd6728be33d7ac8197fef51c45))
+
 ## [0.95.0](https://github.com/william0wang/zcode-acp/compare/v0.94.1...v0.95.0) (2026-11-27)
 
 
