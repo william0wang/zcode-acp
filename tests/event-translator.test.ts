@@ -4,7 +4,7 @@
  * event dicts. No backend or ACP client required.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { EventTranslator } from "../src/translators/event-translator.js";
 import type { InternalEvent } from "../src/translators/types.js";
@@ -177,6 +177,174 @@ describe("EventTranslator", () => {
     // comes from the reconciliation diff; consumption from PromptResponse.
     expect(t.turnUsage).toEqual(usage);
     expect(out).toEqual([{ kind: "TurnInfo", resultType: "success" }]);
+  });
+});
+
+/**
+ * The LLM-only turn clock (ADR-0037): wall time from OUR turn.started arrival
+ * to turn.completed arrival minus the UNION of tool-execution windows.
+ * Driven under vitest fake timers so every Date.now() hop is deterministic.
+ */
+describe("EventTranslator llm clock (llmMs)", () => {
+  beforeAll(() => {
+    vi.useFakeTimers();
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+  });
+
+  const scheduled = (id: string) =>
+    ev("tool.updated", { kind: "scheduled", toolCallId: id, toolName: "Bash" });
+  const result = (id: string) =>
+    ev("tool.updated", { kind: "result", toolCallId: id, result: { content: "x" } });
+
+  it("publishes wall − tool-window union; overlapping (parallel) tools are merged, not summed", () => {
+    const t = new EventTranslator();
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(2_000);
+    t.translate(scheduled("a"));
+    // b starts while a still runs: shared wall time, must not double-subtract.
+    vi.setSystemTime(2_500);
+    t.translate(scheduled("b"));
+    vi.setSystemTime(3_500);
+    t.translate(result("a"));
+    t.translate(result("b"));
+    vi.setSystemTime(5_000);
+    t.translate(ev("turn.completed", { resultType: "success", usage: { outputTokens: 100 } }));
+    // wall 4000; a=[2000,3500] b=[2500,3500] → union 1500 (a naive sum is 2500).
+    expect(t.turnUsage?.["llmMs"]).toBe(2_500);
+    // ACP-facing token fields stay untouched by the clock.
+    expect(t.turnUsage?.["outputTokens"]).toBe(100);
+  });
+
+  it("clamps windows never closed by a terminal tool update at turn.completed", () => {
+    const t = new EventTranslator();
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(2_000);
+    t.translate(scheduled("stuck"));
+    vi.setSystemTime(6_000);
+    t.translate(ev("turn.completed", { resultType: "success", usage: { outputTokens: 10 } }));
+    // wall 5000; stuck clamped to [2000,6000] → llm 1000.
+    expect(t.turnUsage?.["llmMs"]).toBe(1_000);
+  });
+
+  it("does not synthesize usage (or llmMs) when turn.completed carries none", () => {
+    const t = new EventTranslator();
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(3_000);
+    t.translate(ev("turn.completed", { resultType: "success" }));
+    expect(t.turnUsage).toBeNull();
+  });
+
+  it("publishes nothing on turn.failed and stops the clock", () => {
+    const t = new EventTranslator();
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(1_500);
+    t.translate(scheduled("a"));
+    vi.setSystemTime(2_000);
+    t.translate(ev("turn.failed", { error: { code: "1308" } }));
+    expect(t.turnUsage).toBeNull();
+  });
+
+  it("sums llmMs across a held-prompt chain; a late bg-card result does not pollute the next turn", () => {
+    const t = new EventTranslator();
+    // Chain turn 1: launches a background card that will outlive the turn.
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(2_000);
+    t.translate(ev("tool.updated", { kind: "scheduled", toolCallId: "bg1", toolName: "Agent" }));
+    vi.setSystemTime(4_000);
+    t.translate(ev("turn.completed", { resultType: "success", usage: { outputTokens: 10 } }));
+    // bg1 window clamped to the turn end: llm = 3000 − 2000 = 1000.
+    expect(t.turnUsage?.["llmMs"]).toBe(1_000);
+
+    t.beginChainedTurn();
+    // Chain turn 2: no new tools; the bg1 result lands mid-turn.
+    vi.setSystemTime(5_000);
+    t.translate(ev("turn.started", {}, "turn2"));
+    vi.setSystemTime(5_500);
+    t.translate(result("bg1"));
+    vi.setSystemTime(7_000);
+    t.translate(ev("turn.completed", { resultType: "success", usage: { outputTokens: 20 } }));
+    // llm 2000 (bg1 is not a window of this turn) + chain 1000 = 3000.
+    expect(t.turnUsage?.["llmMs"]).toBe(3_000);
+    expect(t.turnUsage?.["outputTokens"]).toBe(30); // token fields still sum
+  });
+
+  it("skips tools of a foreign internal turn and clock events outside our turn", () => {
+    const t = new EventTranslator();
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    // A backend-internal (goal/compact) turn starts mid-turn: its tool events
+    // belong to THAT turn and are dropped until it completes.
+    vi.setSystemTime(2_000);
+    t.translate(ev("turn.started", {}, "internal"));
+    vi.setSystemTime(2_500);
+    t.translate(scheduled("foreign-tool"));
+    vi.setSystemTime(3_000);
+    t.translate(ev("turn.completed", { resultType: "success" }, "internal"));
+    vi.setSystemTime(4_000);
+    t.translate(
+      ev("turn.completed", { resultType: "success", usage: { outputTokens: 5 } }, "turn1"),
+    );
+    // wall 3000; foreign tool never opened a window → llm = 3000.
+    expect(t.turnUsage?.["llmMs"]).toBe(3_000);
+  });
+
+  it("tool events of ANOTHER turn open no clock window (mirrored subagent tools)", () => {
+    const t = new EventTranslator();
+    // Chain turn 1 launches background subagents (4.0: always in the
+    // background) and ends.
+    vi.setSystemTime(1_000);
+    t.translate(ev("turn.started", {}, "turn1"));
+    vi.setSystemTime(2_000);
+    t.translate(
+      ev("turn.completed", { resultType: "success", usage: { outputTokens: 10 } }, "turn1"),
+    );
+    // Chain turn 2 (the adopted follow-up). The siblings' tool calls are
+    // mirrored onto the parent stream under the LAUNCHING turn's id — they
+    // still render as tool cards, but they are not this turn's work.
+    t.beginChainedTurn();
+    vi.setSystemTime(3_000);
+    t.translate(ev("turn.started", {}, "turn2"));
+    vi.setSystemTime(3_500);
+    const mirrored = t.translate(
+      ev(
+        "tool.updated",
+        { kind: "scheduled", toolCallId: "tool_subagent_a_1", toolName: "Bash" },
+        "turn1",
+      ),
+    );
+    expect(mirrored.some((r) => r.kind === "ToolCallNew")).toBe(true);
+    vi.setSystemTime(6_000);
+    t.translate(
+      ev(
+        "tool.updated",
+        { kind: "result", toolCallId: "tool_subagent_a_1", result: { content: "x" } },
+        "turn1",
+      ),
+    );
+    // This turn's OWN tool still counts.
+    vi.setSystemTime(6_500);
+    t.translate(
+      ev("tool.updated", { kind: "scheduled", toolCallId: "own", toolName: "Bash" }, "turn2"),
+    );
+    vi.setSystemTime(7_000);
+    t.translate(
+      ev("tool.updated", { kind: "result", toolCallId: "own", result: { content: "x" } }, "turn2"),
+    );
+    vi.setSystemTime(8_000);
+    t.translate(
+      ev("turn.completed", { resultType: "success", usage: { outputTokens: 20 } }, "turn2"),
+    );
+    // turn2: wall 5000, own window [6500,7000] → 4500; the mirrored
+    // [3500,6000] is ignored (without the gate it would leave 2000). Chain:
+    // 1000 + 4500.
+    expect(t.turnUsage?.["llmMs"]).toBe(5_500);
   });
 });
 

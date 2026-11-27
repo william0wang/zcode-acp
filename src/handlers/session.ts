@@ -2502,10 +2502,15 @@ export async function runOneTurn(
   // not fail the turn. The END transition carries the turn's usage + wall
   // time (see emitSessionTurnState) so attach-only clients can paint their
   // cache/speed readouts for turns driven from elsewhere.
-  const emitTurnState = (running: boolean, extras?: { usage?: acp.Usage; turnMs?: number }) =>
-    emitSessionTurnState(server, acpSid, running, undefined, extras);
+  const emitTurnState = (
+    running: boolean,
+    extras?: { usage?: acp.Usage; turnMs?: number; llmMs?: number },
+  ) => emitSessionTurnState(server, acpSid, running, undefined, extras);
   const turnStartedAt = Date.now();
   let lastUsage: acp.Usage | undefined;
+  // The turn's LLM-only clock (generation rate denominator), lifted from the
+  // published `_meta.zcode.usage.llmMs` — same value every consumer sees.
+  let lastLlmMs: number | undefined;
 
   let listener = new EventStreamListener(backend, zcodeSid);
   let monitor = new TurnMonitor(backend, zcodeSid, () => server.nextId());
@@ -2898,6 +2903,10 @@ export async function runOneTurn(
         autoCompactDue =
           opts.autoCompact !== false && result.stopReason === "end_turn" && !turn.stallRecovered;
         lastUsage = result.usage ?? undefined;
+        const metaUsage = (
+          result._meta as { zcode?: { usage?: Record<string, unknown> } } | undefined
+        )?.zcode?.usage;
+        lastLlmMs = typeof metaUsage?.llmMs === "number" ? metaUsage.llmMs : undefined;
 
         return result;
       } catch (e) {
@@ -3060,7 +3069,13 @@ export async function runOneTurn(
       server.foreignActiveTurns.has(zcodeSid);
     await emitTurnState(
       stillBusy,
-      lastUsage ? { usage: lastUsage, turnMs: Date.now() - turnStartedAt } : undefined,
+      lastUsage
+        ? {
+            usage: lastUsage,
+            turnMs: Date.now() - turnStartedAt,
+            ...(lastLlmMs != null ? { llmMs: lastLlmMs } : {}),
+          }
+        : undefined,
     );
     // Start the armed auto-compact ONLY now, after deregistration and the
     // running:false turnState: from here on a cancel or follow-up prompt finds
@@ -4554,7 +4569,10 @@ export function toAcpTurnUsage(u: Record<string, unknown> | null): acp.Usage | u
  * zeros). Spec fields carry the standard counters; backend extras (source,
  * modelRequestCount, web request counts) ride in `_meta.zcode.usage` per the
  * bridge's extension policy, plus `rawInputTokens` whenever normalization
- * changed it (reconciliation/diagnostics).
+ * changed it (reconciliation/diagnostics) and `llmMs` — the bridge-measured
+ * LLM-only turn clock (wall time minus the union of tool-execution windows,
+ * summed across a held-prompt chain) that clients divide outputTokens by for
+ * a generation rate (ADR-0037).
  */
 export function turnResult(
   translator: EventTranslator,
@@ -4564,7 +4582,13 @@ export function turnResult(
   const usage = toAcpTurnUsage(raw);
   if (!usage || !raw) return { stopReason };
   const extras: Record<string, unknown> = {};
-  for (const k of ["source", "modelRequestCount", "webFetchRequests", "webSearchRequests"]) {
+  for (const k of [
+    "source",
+    "modelRequestCount",
+    "webFetchRequests",
+    "webSearchRequests",
+    "llmMs",
+  ]) {
     if (raw[k] !== undefined) extras[k] = raw[k];
   }
   if (typeof raw["inputTokens"] === "number" && raw["inputTokens"] !== usage.inputTokens) {

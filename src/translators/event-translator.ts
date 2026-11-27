@@ -148,6 +148,69 @@ export class EventTranslator {
    */
   private chainUsage: Record<string, unknown> | null = null;
   /**
+   * LLM-only turn clock (published as `llmMs`): wall time from OUR
+   * turn.started event arrival to turn.completed arrival, MINUS the union of
+   * tool-execution windows (first `tool.updated` sight → terminal). Clients
+   * divide the turn's outputTokens by it for a generation rate that tool
+   * calls do not dilute. Measured per chain turn; the turn.completed write
+   * adds it ON TOP of turnUsage.llmMs, which beginChainedTurn's
+   * mergeChainUsage fold carries across the chain (llmMs is deliberately NOT
+   * in USAGE_TOKEN_FIELDS — the backend usage payload never carries it, and
+   * listing a chain-summed value as a summing field would double-count).
+   */
+  private turnLlmStartedAt: number | null = null;
+  private toolWindows = new Map<string, { start: number; end: number | null }>();
+
+  /** Open the tool-execution window for a call on its first tool.updated. */
+  private openToolWindow(callId: string): void {
+    if (!callId || this.turnLlmStartedAt == null || this.toolWindows.has(callId)) return;
+    this.toolWindows.set(callId, { start: Date.now(), end: null });
+  }
+
+  /** Close a call's window (its terminal tool.updated); no-op when unopened. */
+  private closeToolWindow(callId: string): void {
+    const w = this.toolWindows.get(callId);
+    if (w && w.end == null) w.end = Date.now();
+  }
+
+  /**
+   * Stop the clock at turn.completed: clamp every open window to now (a
+   * background launch card may outlive the turn), merge the windows into
+   * their wall-clock union (parallel/concurrent tools share real time and
+   * must not double-subtract), and return wall − union. Null when this
+   * translator never saw its own turn.started — nothing to publish.
+   */
+  private finishLlmClock(): number | null {
+    if (this.turnLlmStartedAt == null) return null;
+    const end = Date.now();
+    for (const w of this.toolWindows.values()) {
+      if (w.end == null || w.end > end) w.end = end;
+    }
+    const spans = [...this.toolWindows.values()]
+      .map((w) => [w.start, w.end as number] as const)
+      .sort((a, b) => a[0] - b[0]);
+    let busy = 0;
+    let curStart = Number.NaN;
+    let curEnd = Number.NaN;
+    for (const [s, e] of spans) {
+      if (Number.isNaN(curStart) || s > curEnd) {
+        if (!Number.isNaN(curStart)) busy += curEnd - curStart;
+        curStart = s;
+        curEnd = e;
+      } else if (e > curEnd) {
+        curEnd = e;
+      }
+    }
+    if (!Number.isNaN(curStart)) busy += curEnd - curStart;
+    return Math.max(0, end - this.turnLlmStartedAt - busy);
+  }
+
+  /** Stop the clock without publishing (turn.failed / between chain turns). */
+  private dropLlmClock(): void {
+    this.turnLlmStartedAt = null;
+    this.toolWindows.clear();
+  }
+  /**
    * turnId of the user turn this translator owns (from its `turn.started`).
    * Backend-internal turns (`session/goal` set, `session/compact`) emit their
    * own turn.started/turn.completed on the SAME session mid-turn: without
@@ -224,6 +287,7 @@ export class EventTranslator {
     this.skippingBackgroundTurn = false;
     this.skippingForeignTurn = false;
     this.activeTurnId = null;
+    this.dropLlmClock();
     this.adoptNextTurn = true;
     log("  [event] chained-turn adopt armed (held prompt waiting for subagent work)");
   }
@@ -275,6 +339,8 @@ export class EventTranslator {
         return results;
       }
       this.turnStarted = true;
+      this.turnLlmStartedAt = Date.now();
+      this.toolWindows.clear();
       log("  [event] turn.started");
     } else if (this.skippingBackgroundTurn) {
       // Inside a deferred background_task turn: drop everything (the bg
@@ -310,6 +376,17 @@ export class EventTranslator {
           (payload["usage"] as Record<string, unknown>) ?? null,
         );
         this.turnCacheStats = parseCacheStats(payload["cacheStats"]);
+        // LLM-only clock for THIS chain turn, added on top of the chain's
+        // already-summed llmMs (see the field docs). Only when usage exists:
+        // synthesizing a usage object from the clock alone would publish
+        // zero-filled ACP counters from turnResult.
+        const llmMs = this.finishLlmClock();
+        if (llmMs != null && this.turnUsage) {
+          const prev =
+            typeof this.turnUsage["llmMs"] === "number" ? (this.turnUsage["llmMs"] as number) : 0;
+          this.turnUsage = { ...this.turnUsage, llmMs: prev + llmMs };
+        }
+        this.dropLlmClock();
         results.push(...this.translateTurnDone());
         log(`  [event] turn.completed (resultType=${this.turnResultType})`);
       } else {
@@ -317,6 +394,7 @@ export class EventTranslator {
         this.turnFailed = true;
         this.turnError = (payload["error"] as Record<string, unknown>) ?? {};
         this.turnResultType = (payload["resultType"] as string) ?? "error";
+        this.dropLlmClock();
         const err = this.turnError;
         warn(`  [event] turn.failed (code=${err["code"] ?? err["type"] ?? "?"})`);
       }
@@ -337,7 +415,10 @@ export class EventTranslator {
       }
       results.push(...this.translateStreaming(payload));
     } else if (etype === "tool.updated") {
-      results.push(...this.translateTool(payload));
+      // The envelope turnId rides along for the clock only (see translateTool).
+      results.push(
+        ...this.translateTool(payload, event.turnId ?? (payload["turnId"] as string) ?? null),
+      );
     } else if (etype === "session.updated") {
       const usage = (payload["usage"] as Record<string, unknown>) ?? {};
       const used = usage["inputTokens"];
@@ -448,11 +529,28 @@ export class EventTranslator {
     return results;
   }
 
-  private translateTool(payload: Record<string, unknown>): InternalEvent[] {
+  private translateTool(
+    payload: Record<string, unknown>,
+    toolTurnId: string | null,
+  ): InternalEvent[] {
     const results: InternalEvent[] = [];
     const tkind = (payload["kind"] as string) ?? "";
     const callId = (payload["toolCallId"] as string) ?? "";
     const toolName = (payload["toolName"] as string) ?? "";
+
+    // First sight of this call in OUR turn: its execution window opens here.
+    // Tool events whose envelope names ANOTHER turn are not this turn's work:
+    // 4.0 mirrors sibling background subagents' tool calls onto the parent
+    // stream under the LAUNCHING turn's id, and a background notification
+    // turn already in flight at subscribe time leaks in the same way (#393
+    // filters model.streaming for it). They still render as tool cards; only
+    // the clock ignores them — their windows would otherwise be clamped to
+    // our turn end and eat the LLM time of a multi-subagent chain.
+    const foreignTurn =
+      toolTurnId !== null && this.activeTurnId !== null && toolTurnId !== this.activeTurnId;
+    if (callId && !foreignTurn && !this.seenToolIds.has(callId)) {
+      this.openToolWindow(callId);
+    }
 
     if (tkind === "scheduled") {
       const newEv = this.createToolCall(callId, toolName, payload["input"], "pending");
@@ -503,6 +601,7 @@ export class EventTranslator {
         }
         results.push(ev);
         this.finalToolIds.add(callId);
+        this.closeToolWindow(callId);
       }
     } else if (tkind === "error") {
       if (callId) {
@@ -522,6 +621,7 @@ export class EventTranslator {
         if (content.length > 0) (ev as { content?: typeof content }).content = content;
         results.push(ev);
         this.finalToolIds.add(callId);
+        this.closeToolWindow(callId);
       }
     } else if (tkind === "batch") {
       // Multi-tool completion. Only backfill unseen or non-final ids, else a
@@ -533,6 +633,7 @@ export class EventTranslator {
         if (this.seenToolIds.has(bid) && !this.finalToolIds.has(bid)) {
           results.push({ kind: "ToolCallUpdate", callId: bid, status: finalStatus });
           this.finalToolIds.add(bid);
+          this.closeToolWindow(bid);
         }
       }
     }

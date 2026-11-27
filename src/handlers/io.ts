@@ -429,23 +429,25 @@ export const TURN_STATE_METHODS = ["$/zcode/turnState", "_zcode/turnState"] as c
  * never thrown.
  *
  * The END transition (running:false) may carry the turn's ACP usage block
- * (`usage`, plus `turnMs` wall time): PromptResponse.usage reaches only the
- * client that SENT the prompt, so an attach-only client (zcode-acp-remote
- * watching a turn driven from the TUI or the editor) would never see cache /
- * speed readouts without this. Additive fields — clients that read only
- * `running` are unaffected.
+ * (`usage`, plus `turnMs` wall time and `llmMs` — the LLM-only clock, wall
+ * time minus the union of tool-execution windows, ADR-0037):
+ * PromptResponse.usage reaches only the client that SENT the prompt, so an
+ * attach-only client (zcode-acp-remote watching a turn driven from the TUI
+ * or the editor) would never see cache / speed readouts without this.
+ * Additive fields — clients that read only `running` are unaffected.
  */
 export async function emitSessionTurnState(
   server: ZcodeAcpServer,
   acpSid: string,
   running: boolean,
   cx?: acp.AgentContext,
-  extras?: { usage?: acp.Usage; turnMs?: number },
+  extras?: { usage?: acp.Usage; turnMs?: number; llmMs?: number },
 ): Promise<void> {
   const targetCx = cx ?? server.clients.broadcast();
   const params: Record<string, unknown> = { sessionId: acpSid, running };
   if (!running && extras?.usage) params.usage = extras.usage;
   if (!running && typeof extras?.turnMs === "number") params.turnMs = extras.turnMs;
+  if (!running && typeof extras?.llmMs === "number") params.llmMs = extras.llmMs;
   const results = await Promise.allSettled(
     server
       .sessionAliases(acpSid)

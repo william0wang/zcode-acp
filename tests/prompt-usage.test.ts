@@ -13,7 +13,7 @@
  * absent-when-absent contract (no synthetic zeros).
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { toAcpTurnUsage, turnResult } from "../src/handlers/session.js";
 import { EventTranslator } from "../src/translators/event-translator.js";
@@ -189,5 +189,32 @@ describe("turnResult", () => {
         },
       },
     });
+  });
+
+  it("publishes the bridge-measured llmMs in _meta.zcode.usage (ADR-0037)", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      const t = new EventTranslator();
+      t.translate({ type: "turn.started", payload: {} });
+      vi.setSystemTime(4_000);
+      t.translate({
+        type: "turn.completed",
+        payload: { resultType: "success", usage: { inputTokens: 50, outputTokens: 10 } },
+      });
+      const res = turnResult(t, "end_turn");
+      // llmMs rides the extras, NOT the ACP usage shape.
+      expect(res._meta).toEqual({ zcode: { usage: { llmMs: 3_000 } } });
+      expect(res.usage).toEqual({
+        totalTokens: 0, // absent on the raw block → 0-filled, never invented
+        inputTokens: 50,
+        outputTokens: 10,
+        thoughtTokens: null,
+        cachedReadTokens: null,
+        cachedWriteTokens: null,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
