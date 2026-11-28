@@ -153,6 +153,7 @@ export function resetResolveMemosForTests(): void {
   releaseStamps.clear();
   newestTablePick = null;
   asarVersionMemo = null;
+  discoveredBinMemo = null;
 }
 
 /** Exported for testing. */
@@ -263,6 +264,9 @@ export function bundledZcodeCandidates(): string[] {
   ];
 }
 
+/** The CLI `discoverZcodeBin` found, kept for this process (see its doc). */
+let discoveredBinMemo: { key: string; bin: string } | null = null;
+
 /**
  * Resolution chain for the zcode CLI when ZCODE_BIN is unset: PATH first
  * (absolute path so the spawn no longer depends on the child's PATH), then
@@ -278,8 +282,24 @@ export function bundledZcodeCandidates(): string[] {
  * table is injected either. Only a JS entry on PATH is a CLI install; anything
  * else yields to the bundled zcode.cjs and is used as-is only when no bundle
  * exists (the native CLI case).
+ *
+ * Memoized per process once something is FOUND: `builtinProviderEnv` reaches
+ * this on every provider-table lookup (hundreds per session/new), and each
+ * lookup spawned `which`: about 0.56 ms, three quarters of the lookup once
+ * the app.asar read is memoized (observed 2026-11-28). A miss is NOT
+ * memoized, so a machine that had no zcode still notices its first install; a
+ * different zcode appearing after a find is served by the next bridge
+ * restart, the same trade as the catalog-probe memo in `resolveZcodeCommand`.
  */
 function discoverZcodeBin(): string | null {
+  const key = `${process.platform}\0${process.env.PATH ?? ""}`;
+  if (discoveredBinMemo?.key === key) return discoveredBinMemo.bin;
+  const bin = discoverZcodeBinOnce();
+  if (bin) discoveredBinMemo = { key, bin };
+  return bin;
+}
+
+function discoverZcodeBinOnce(): string | null {
   const onPath = whichSync("zcode");
   if (onPath && (process.platform !== "linux" || isJsEntry(onPath))) return onPath;
   for (const c of bundledZcodeCandidates()) {
