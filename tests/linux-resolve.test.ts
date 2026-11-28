@@ -249,6 +249,50 @@ describe("discoverZcodeBin on Linux", () => {
   });
 });
 
+describe("discoverZcodeBin memo", () => {
+  const whichLookups = () =>
+    execFileSyncMock.mock.calls.filter(([file, args]) => file === "which" && args[0] === "zcode")
+      .length;
+
+  it("asks `which` once for a CLI it found, however often the env is built", () => {
+    installDesktop("arch");
+    execFileSyncMock.mockClear();
+    onPlatform("linux", () => {
+      for (let i = 0; i < 5; i++) {
+        const env = builtinProviderEnv();
+        expect(env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toContain("/usr/lib/zcode");
+      }
+    });
+    expect(whichLookups()).toBe(1);
+  });
+
+  it("keeps looking while nothing is found, so a first install is still noticed", () => {
+    fake.onPath = null;
+    execFileSyncMock.mockClear();
+    onPlatform("linux", () => {
+      for (let i = 0; i < 3; i++) expect(builtinProviderEnv()).toEqual({});
+      expect(whichLookups()).toBe(3);
+      installDesktop("arch");
+      expect(builtinProviderEnv().ZCODE_BUILTIN_PROVIDER_CONFIG_FILE).toContain("/usr/lib/zcode");
+    });
+    expect(whichLookups()).toBe(4);
+  });
+
+  it("looks again once PATH changes", () => {
+    fake.onPath = "/usr/local/bin/zcode.js";
+    try {
+      onPlatform("linux", () => {
+        expect(resolveZcodeCommand()).toContain("/usr/local/bin/zcode.js");
+        vi.stubEnv("PATH", "/opt/tools/bin");
+        fake.onPath = "/opt/tools/bin/zcode.cjs";
+        expect(resolveZcodeCommand()).toContain("/opt/tools/bin/zcode.cjs");
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("builtinProviderEnv on Linux", () => {
   it("injects the provider table and app version next to the deb bundle", () => {
     installDesktop("deb");
