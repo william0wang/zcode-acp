@@ -5,6 +5,13 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.4](https://github.com/william0wang/zcode-acp/compare/v0.96.3...v0.96.4) (2026-11-28)
+
+
+### Bug Fixes
+
+* document the opt-in Project Memory switch ([#444](https://github.com/william0wang/zcode-acp/issues/444)) ([6cd8dc8](https://github.com/william0wang/zcode-acp/commit/6cd8dc803cfd4fd6c3d1238f733a1710217b4276))
+
 ## [0.96.3](https://github.com/william0wang/zcode-acp/compare/v0.96.2...v0.96.3) (2026-11-27)
 
 
