@@ -124,6 +124,7 @@ AppImage 没有固定路径——挂载（`--appimage-mount`）后把 `ZCODE_BIN
   },
   "interaction": { "timeoutMs": 0 }, // 权限请求等待上限,毫秒(0 = 一直等)
   "sandbox": { "enabled": false }, // 全局 Seatbelt 开关(路径放行: sandbox.json)
+  "memory": { "enabled": false }, // ZCode 项目记忆：桥接会话像桌面端会话一样加载并保存 MEMORY.md（默认关闭）
   "remote": {/* 见远程访问 */},
   "quota": {/* quota 卡片凭据 */},
 }
@@ -158,6 +159,7 @@ AppImage 没有固定路径——挂载（`--appimage-mount`）后把 `ZCODE_BIN
 | `ZCODE_ACP_HUB_HOST`               | `127.0.0.1`      | hub 绑定地址。`0.0.0.0` 会暴露仅 token 保护的明文面——只用于容器化隧道 agent 所在的私网接口（见[远程访问](#远程访问)）。                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `ZCODE_ACP_REMOTE_PORT`            | `8378`           | bridge ACP 端点的起始回环端口。每个 bridge（每个编辑器窗口）自动递增取下一个空闲端口。                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `ZCODE_ACP_SANDBOX`                | _（未设置）_     | 设为 `1` 全局启用 macOS Seatbelt 沙箱限制 Agent 的文件写入（与用户配置 `sandbox.enabled` 等效）；路径放行统一配置在 `~/.config/zcode-acp/sandbox.json`（见[沙箱](#沙箱)）。                                                                                                                                                                                                                                                                                                                                                                  |
+| `ZCODE_ACP_MEMORY_ENABLED`         | _（未设置）_     | 设为 `1` 为桥接会话启用 ZCode 项目记忆：后端的 runtime-preferences 握手按 `memoryEnabled: true` 应答，会话像桌面端会话一样加载并保存 `MEMORY.md`。默认关闭——该功能由桌面端宿主自行把关，桥接层未经同意就开启会改变每个会话的 prompt 结构。与用户配置里的 `memory.enabled` 等效（两者都设时文件优先）；每次后端进程启动时读取，已在运行的后端要等它重启才生效。                                                                                                                                                                               |
 | `ZCODE_ACP_LANG`                   | _（继承）_       | 桥的用户可见文案（弹窗、状态/提示行、命令菜单描述）语言：`zh` 或 `en`。未设置时继承 ZCode APP 的语言设置（`~/.zcode/v2/setting.json` 的 `localePreference`/`locale`），再退回 `LC_ALL`/`LC_MESSAGES`/`LANG` 区域设置，默认英文。                                                                                                                                                                                                                                                                                                             |
 
 ## 沙箱
